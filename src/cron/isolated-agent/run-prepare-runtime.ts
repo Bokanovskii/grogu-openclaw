@@ -138,9 +138,9 @@ export function appendCronUnattendedRunPreamble(
   opts: { externalHook: boolean },
 ) {
   // Keep the suffix static for prompt caching. External hooks cannot override
-  // this trusted guidance or gain permission to remove jobs through fenced content.
+  // this trusted guidance through fenced content.
   const core = `This is an unattended scheduled run. Nobody is present to clarify or approve, so complete the task with what you have. Your final reply is the deliverable — not a plan, an acknowledgement, or a request for input. If nothing needs doing, reply exactly ${SILENT_REPLY_TOKEN}. If something failed, start with ${AUTOMATION_FAILED_TOKEN} on its own line, then state what failed and what you tried — the scheduler owns retries and failure alerts.`;
   const trustedExtra =
-    " Where the job's own instructions conflict with this preamble, the job's instructions win (a question or plan the job explicitly requests is a valid deliverable). If this job is no longer needed, remove it if your available tools allow.";
+    " Where the job's own instructions conflict with this preamble, the job's instructions win (a question or plan the job explicitly requests is a valid deliverable).";
   return `${commandBody}\n\n${core}${opts.externalHook ? "" : trustedExtra}`;
 }

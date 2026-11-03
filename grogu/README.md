@@ -20,6 +20,16 @@ verified cutover.
 Upstream GitHub workflows are kept for reference under
 `.github/upstream-workflows/`; only `grogu-ci.yml` and `grogu-upstream.yml` run.
 
+## Repository history
+
+`main` carries the real upstream history (about 7 GiB packed at `v2026.10.7`),
+so each stable release merges with a true merge base and keeps its canonical
+commit ID. On a new machine, clone with `git clone --filter=blob:none` to skip
+historical file contents. GitHub rejects single pushes over 2 GB, so seeding a
+new private origin means pushing `main` in first-parent steps that each stay
+under that limit (`git rev-list --objects --disk-usage <next> ^<previous>`
+sizes a step), then pushing the Grogu branches.
+
 ## Private profile
 
 Copy `profile.example.json` to an owner-only file outside every repository

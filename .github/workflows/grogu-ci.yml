@@ -1,0 +1,77 @@
+name: Grogu offline source gate
+
+on:
+  push:
+    branches: [main, grogu/baseline]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact private candidate commit to check
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+concurrency:
+  group: grogu-offline-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Admit exact dispatch target
+        if: github.event_name == 'workflow_dispatch' && inputs.target_sha != ''
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be an exact lowercase 40-character commit SHA"
+            exit 1
+          fi
+          if [[ "$TARGET_SHA" != "$EVENT_SHA" ]]; then
+            echo "::error::target_sha must match the workflow event commit"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.target_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "26.12.1"
+      - name: Install the source-pinned package manager and dependencies
+        run: |
+          npm install --global "pnpm@$(node -p "require('./grogu/toolchain.json').pnpm")"
+          pnpm install --frozen-lockfile
+      - name: Require isolated workflows and explicit maintenance types
+        run: |
+          node --import ./scripts/tsx.mjs --input-type=module -e "import { assertWorkflowIsolation } from './grogu/workflows.ts'; await assertWorkflowIsolation(process.cwd());"
+          node scripts/run-tsgo.mjs -p grogu/tsconfig.json --noEmit
+      - name: Run the repository's offline source checks
+        run: pnpm check --base "$(node -p "require('./grogu/upstream.json').commit")"
+      - name: Prove the downstream boundaries without providers or live services
+        run: >-
+          pnpm test test/scripts/grogu-upstream.test.ts test/scripts/grogu-upstream-pr.test.ts
+          test/scripts/grogu-bootstrap.test.ts test/scripts/grogu-policy.test.ts
+          test/scripts/grogu-operator.test.ts test/scripts/grogu-release.test.ts test/scripts/grogu-workflows.test.ts
+          packages/ai/src/transports/sparky-policy.test.ts packages/ai/src/transports/openai-completions-transport.test.ts
+          src/agents/grogu-private-profile.test.ts src/agents/sparky-request-queue.test.ts
+          src/agents/model-request-telemetry.test.ts src/agents/research-checkpoint-guard.test.ts
+          src/agents/tools/web-fetch-workspace-artifacts.test.ts src/agents/provider-transport-fetch.test.ts
+          src/chat/canvas-render.test.ts src/gateway/session-utils-row.materialize.test.ts
+          test/scripts/vitest-worker-artifacts.test.ts ui/src/pages/chat/chat-thread.test.ts
+          ui/src/pages/chat/chat-thread-grouping.test.ts ui/src/pages/chat/chat-widget-projection.node.test.ts
+          ui/src/pages/chat/stream-causal-boundary.node.test.ts ui/src/pages/chat/components/chat-message.test.ts
+          ui/src/pages/chat/chat-state.test.ts ui/src/pages/chat/chat-thread-reply-attribution.test.ts
+          ui/src/pages/chat/components/chat-position-projection.test.ts
+          ui/src/pages/chat/components/chat-transcript-message-index.test.ts
+          ui/src/pages/chat/components/chat-transcript-replies.test.ts
+          ui/src/e2e/chat-reasoning-visibility.e2e.test.ts

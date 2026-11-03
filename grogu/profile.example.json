@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "operator": {
+    "runtime": {
+      "node": "/path/to/pinned/node",
+      "cli": "/path/to/immutable/openclaw/openclaw.mjs"
+    },
+    "stateDir": "/path/to/private/openclaw-state",
+    "configFile": "/path/to/private/openclaw-state/openclaw.json",
+    "oauthDir": "/path/to/private/openclaw-state/credentials",
+    "recoveryDir": "/path/to/private/recovery",
+    "releasesDir": "/path/to/immutable/releases",
+    "gatewayPort": 18789,
+    "gatewayUrl": "ws://127.0.0.1:18789"
+  },
+  "bindings": {
+    "modelPolicy": {
+      "automaticModel": "example-provider/example-model",
+      "ownerOverrides": { "configPaths": [], "jobIds": [] }
+    },
+    "researchCheckpoint": {
+      "workspace": "/path/to/private/research-workspace",
+      "tracks": ["example-track"],
+      "artifactPrefix": "research/example/"
+    }
+  },
+  "native": {
+    "jobs": []
+  }
+}

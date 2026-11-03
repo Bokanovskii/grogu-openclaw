@@ -74,6 +74,8 @@ export type GatewaySessionRow = Omit<SessionRow, "archivedBy" | "updatedAt" | "w
   verboseLevel?: string;
   traceLevel?: string;
   reasoningLevel?: string;
+  /** Configured agent/default reasoning level inherited when reasoningLevel is unset. */
+  reasoningDefault?: string;
   elevatedLevel?: string;
   sendPolicy?: "allow" | "deny";
   goal?: SessionGoal;

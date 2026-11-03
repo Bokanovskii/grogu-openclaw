@@ -12,7 +12,11 @@ suite.define(() => {
     { reasoningLevel: "off", withTools: true },
     { reasoningLevel: "on", withTools: true },
     { reasoningLevel: "stream", withTools: true },
-  ])("keeps reasoning in work: %o", async ({ reasoningLevel, withTools }) => {
+    { reasoningDefault: "on", withTools: true },
+    { reasoningDefault: "off", withTools: true },
+    { reasoningLevel: "off", reasoningDefault: "on", withTools: true },
+  ])("keeps reasoning in work: %o", async ({ reasoningLevel, reasoningDefault, withTools }) => {
+    const effectiveReasoningLevel = reasoningLevel ?? reasoningDefault;
     const context = await suite.newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
@@ -27,8 +31,10 @@ suite.define(() => {
       const finalText = "The answer is ready.";
       const gateway = await installMockGateway(page, {
         sessionKey,
-        sessionInfo: { reasoningLevel },
-        sessions: [{ key: sessionKey, kind: "direct", reasoningLevel, updatedAt: 4_000 }],
+        sessionInfo: { reasoningLevel, reasoningDefault },
+        sessions: [
+          { key: sessionKey, kind: "direct", reasoningLevel, reasoningDefault, updatedAt: 4_000 },
+        ],
         historyMessages: [
           { role: "user", content: "Check the evidence.", timestamp: 1_000 },
           {
@@ -81,8 +87,12 @@ suite.define(() => {
         await expect.poll(() => reasoning.isVisible()).toBe(false);
         await worked.click();
         await expect.poll(() => worked.getAttribute("aria-expanded")).toBe("true");
-        await expect.poll(() => reasoning.isVisible()).toBe(reasoningLevel === "on");
-        if (reasoningLevel === "on") {
+        await expect.poll(() => reasoning.isVisible()).toBe(effectiveReasoningLevel === "on");
+        if (effectiveReasoningLevel === "on") {
+          expect(await reasoning.getAttribute("open")).toBeNull();
+          expect(await reasoning.locator("pre code").isVisible()).toBe(false);
+          await reasoning.locator("summary").click();
+          expect(await reasoning.locator("pre code").isVisible()).toBe(true);
           expect(await reasoning.locator("pre code").allTextContents()).toEqual([code]);
           expect(await reasoning.locator("p").allTextContents()).toEqual([
             "Reasoning:",
@@ -106,7 +116,7 @@ suite.define(() => {
         await menuTrigger.click();
         await expect
           .poll(() => reasoning.isVisible())
-          .toBe(showReasoning && reasoningLevel === "on");
+          .toBe(showReasoning && effectiveReasoningLevel === "on");
         expect(await answer.isVisible()).toBe(true);
       }
       expect(await gateway.getRequests("sessions.patch")).toHaveLength(0);

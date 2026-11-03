@@ -6,6 +6,7 @@ import {
 import { dirname } from "node:path";
 import { isMissingPathError } from "../../../infra/errors.js";
 import { captureAgentToolSourceExecutionGuard } from "../../agent-tool-source-execution-guard.js";
+import { assertResearchCheckpointCandidate } from "../../research-checkpoint-guard.js";
 import type { AgentTool } from "../../runtime/index.js";
 import { textResult } from "../../tools/tool-results.js";
 import { WRITE_DIFF_MAX_BYTES } from "./file-diff.js";
@@ -211,6 +212,14 @@ export function createWriteTool(
       const queueKey = resolveFileMutationQueueKey(absolutePath, ops.resolveQueueKey, signal);
       return withFileMutationQueueKeyResolution(queueKey, async () => {
         const precheck = await readOriginalWriteState(absolutePath, content, ops);
+        assertFileToolNotAborted(signal);
+        assertCurrent();
+        await assertResearchCheckpointCandidate({
+          filePath: absolutePath,
+          mutationKey: await queueKey,
+          content,
+          signal,
+        });
         assertFileToolNotAborted(signal);
         assertCurrent();
         // No-op: file already has identical content. Not terminal — the model

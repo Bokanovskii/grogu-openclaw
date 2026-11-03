@@ -317,6 +317,8 @@ export function createOpenClawTools(
   options?.recordToolPrepStage?.("openclaw-tools:web-search-tool");
   const webFetchTool = createWebFetchTool({
     ...options,
+    workspaceDir,
+    artifactAgentId: sessionAgentId,
     runtimeWebFetch: runtimeWebTools?.fetch,
     lateBindRuntimeConfig: true,
     hostnameAllowlistRef: options?.webFetchHostnameAllowlistRef,

@@ -561,13 +561,16 @@ export function renderGroupedMessage(
     ${isStandaloneToolMessage ? assistantViewContent : nothing}
     ${
       reasoningMarkdown
-        ? html`<div class="chat-thinking">
-            ${unsafeHTML(
-              toSanitizedMarkdownHtml(reasoningMarkdown, {
-                codeBlockInteraction: "interactive",
-              }),
-            )}
-          </div>`
+        ? html`<details class="chat-thinking">
+            <summary>${t("chat.view.reasoning")}</summary>
+            <div>
+              ${unsafeHTML(
+                toSanitizedMarkdownHtml(reasoningMarkdown, {
+                  codeBlockInteraction: "interactive",
+                }),
+              )}
+            </div>
+          </details>`
         : nothing
     }
     ${isStandaloneToolMessage ? nothing : assistantViewContent}

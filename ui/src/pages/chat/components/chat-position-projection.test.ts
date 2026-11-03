@@ -89,7 +89,9 @@ describe("chat position projection", () => {
       runWorking: false,
     };
     withPositionIndex(props, (read) => {
-      expect(read().markers.map((marker) => marker.message)).toEqual([messages[0], messages[1]]);
+      // Visible commentary updates the run preview; the anchor stays on the final answer.
+      expect(read().markers.map((marker) => marker.message)).toEqual([messages[0], messages[3]]);
+      expect(read().markers[1]?.anchorId).toBe("final");
     });
   });
   it.each([

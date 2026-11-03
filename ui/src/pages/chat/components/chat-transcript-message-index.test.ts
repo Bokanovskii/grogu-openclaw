@@ -304,9 +304,8 @@ describe("completed reply frame ownership", () => {
       expect(work).toBeDefined();
       if (forwarded) {
         expect(messagesIn(frames(chain))).not.toContain(inserted);
-        const standalone = phase
-          ? chain.transcriptItems.filter((item) => item.kind === "group")
-          : [work!];
+        // Grogu keeps forwarded prose visible whether or not it carries a phase.
+        const standalone = chain.transcriptItems.filter((item) => item.kind === "group");
         expect(messagesIn(standalone)).toContain(inserted);
       } else {
         expect(

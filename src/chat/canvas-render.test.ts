@@ -86,6 +86,21 @@ describe("extractCanvasFromText", () => {
 });
 
 describe("extractCanvasShortcodes", () => {
+  it("selectively removes a duplicate shortcode without extracting or rewriting other embeds", () => {
+    const first = '[embed ref="first" /]';
+    const second = '[embed ref="second" /]';
+    const input = `Before ${first}\n\n${second} after.`;
+    expect(extractCanvasShortcodes(input, (preview) => preview.viewId !== "first")).toEqual({
+      text: `Before \n\n${second} after.`,
+      previews: [],
+    });
+    const literal = `\`${first}\` [embed invalid="yes" /]`;
+    expect(extractCanvasShortcodes(literal, () => false)).toEqual({
+      text: literal,
+      previews: [],
+    });
+  });
+
   it("does not let a self-closing embed start a greedy block match", () => {
     // Regression: the block regex used to greedily swallow the span from a
     // self-closing "[embed ... /]" open tag up to a later stray "[/embed]",

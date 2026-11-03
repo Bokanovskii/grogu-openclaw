@@ -154,6 +154,24 @@ function renderMarkdownAssistant(content: unknown) {
   );
 }
 
+it("keeps native reasoning closed and independently expandable beside visible answer prose", () => {
+  const message = createAssistantMessage([
+    { type: "thinking", thinking: "Checking the evidence." },
+    { type: "text", text: "The answer stays visible." },
+  ]);
+  renderAssistantMessage(message);
+  const reasoning = expectElement(view, "details.chat-thinking", HTMLDetailsElement);
+  expect(reasoning.open).toBe(false);
+  expect(reasoning.querySelector("summary")?.textContent).toBe("Reasoning");
+  expect(reasoning.textContent).toContain("Checking the evidence.");
+  expect(view.querySelector(".chat-text")?.textContent).toContain("The answer stays visible.");
+  reasoning.open = true;
+  expect(reasoning.open).toBe(true);
+  renderAssistantMessage(message, { showReasoning: false });
+  expect(view.querySelector(".chat-thinking")).toBeNull();
+  expect(view.querySelector(".chat-text")?.textContent).toContain("The answer stays visible.");
+});
+
 function renderReactiveAssistant(
   message: () => unknown,
   options: Partial<RenderMessageGroupOptions>,

@@ -24,7 +24,7 @@ import {
   reconcileChatRunFromSessionRow,
   setChatRunError,
 } from "./run-lifecycle.ts";
-import { replaceChatStream } from "./stream-causal-boundary.ts";
+import { replaceChatStreamFromHistorySnapshot } from "./stream-causal-boundary.ts";
 import { materializeVisibleStreamState } from "./stream-reconciliation.ts";
 import { handleAgentEvent } from "./tool-stream.ts";
 
@@ -266,7 +266,7 @@ export function applyHistoryRun(params: {
       extractText(runProjectionsBeforeApply[inFlightRunId]?.message),
     );
   } else {
-    replaceChatStream(state, resolveInFlightAssistantText(run.text));
+    replaceChatStreamFromHistorySnapshot(state, resolveInFlightAssistantText(run.text));
   }
   state.chatStreamStartedAt = snapshotStartedAt ?? state.chatStreamStartedAt ?? Date.now();
   const startup = run.events?.findLast(

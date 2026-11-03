@@ -314,7 +314,7 @@ describe("content classification", () => {
     }
   });
 
-  it("keeps media visible and folds commentary after replacement", () => {
+  it("keeps media and ordinary prose visible after replacement", () => {
     const preview = message(
       "assistant",
       [{ type: "image", url: "https://example.com/diagram.png" }],
@@ -339,8 +339,9 @@ describe("content classification", () => {
       { kind: "group", role: "user" },
       {
         kind: "work-group",
-        groups: [{ role: "assistant", messages: [{ message: replacement }] }, { role: "tool" }],
+        groups: [{ role: "tool" }],
       },
+      { kind: "group", role: "assistant", messages: [{ message: replacement }] },
       { kind: "group", role: "assistant" },
     ]);
   });
@@ -388,17 +389,18 @@ describe("answer visibility across continuations", () => {
 
   const terminalCases = [
     { name: "settled terminal", terminal: true, preserved: true },
-    { name: "intermediate text", terminal: false, preserved: false },
-    { name: "explicit commentary", terminal: true, phase: "commentary", preserved: false },
-    { name: "interrupted text", terminal: true, aborted: true, preserved: false },
-    { name: "legacy unphased reply", terminal: true, legacy: true, preserved: false },
-  ].map(({ name, terminal, phase, aborted, legacy, preserved }) => {
+    { name: "intermediate text", terminal: false, preserved: true },
+    { name: "explicit commentary", terminal: true, phase: "commentary", preserved: true },
+    { name: "interrupted text", terminal: true, aborted: true, preserved: true },
+    { name: "legacy unphased reply", terminal: true, legacy: true, preserved: true },
+    { name: "superseded errored attempt", terminal: true, errored: true, preserved: false },
+  ].map(({ name, terminal, phase, aborted, errored, legacy, preserved }) => {
     const run = { runId: "completed-run" };
     const messages = [
       message("user", "Inspect the file", 1, { __openclaw: run }),
       tool("read-file", 2, { __openclaw: run }),
       message("assistant", "File verified — café 雪 🦞", 3, {
-        stopReason: "stop",
+        stopReason: errored ? "error" : "stop",
         ...(phase ? { phase } : {}),
         ...(aborted ? { openclawAbort: { aborted: true } } : {}),
         __openclaw: {
@@ -443,8 +445,8 @@ describe("answer visibility across continuations", () => {
     return {
       name: `${mixed ? "mixed" : "signed"} answer before ${phase}, tool=${withTool}`,
       messages: [first, answer, ...evidence, later],
-      shown: [first, answer, ...(phase === "final_answer" ? [later] : [])],
-      folded: [...evidence, ...(phase === "commentary" ? [later] : [])],
+      shown: [first, answer, later],
+      folded: evidence,
     };
   });
   it.each([...terminalCases, ...signedCases])(
@@ -503,14 +505,12 @@ describe("answer visibility across continuations", () => {
         const independent = ownership === "independent-run";
         expect(items.map((item) => item.kind)).toEqual(
           independent
-            ? ["group", "work-group", "group", "activity-run"]
-            : ["group", "work-group", "group"],
+            ? ["group", "group", "group", "activity-run"]
+            : ["group", "work-group", "group", "group"],
         );
-        expect(work(items)).toEqual(
-          independent ? [messages[1]] : [messages[1], ...messages.slice(3)],
-        );
+        expect(work(items)).toEqual(independent ? [] : messages.slice(3));
         if (independent) {
-          expect(items.find((item) => item.kind === "work-group")?.durationMs).toBeNull();
+          expect(items.some((item) => item.kind === "work-group")).toBe(false);
         }
         expect(
           items
@@ -544,7 +544,9 @@ describe("answer visibility across continuations", () => {
       "group",
       "group",
       "group",
-      "work-group",
+      "group",
+      "group",
+      "group",
       "group",
     ]);
     const folded = items.filter((item) => item.kind === "work-group");
@@ -552,13 +554,16 @@ describe("answer visibility across continuations", () => {
       folded.map((item) =>
         item.groups.flatMap((group) => group.messages.map((source) => source.message)),
       ),
-    ).toEqual([[messages[1], messages[3], messages[5], messages[6]], [messages[8]]]);
+    ).toEqual([[messages[3], messages[6]]]);
     expect(folded[0]?.durationMs).toBeNull();
     expect(visible(items)).toEqual([
       messages[0],
+      messages[1],
       messages[2],
       messages[4],
+      messages[5],
       messages[7],
+      messages[8],
       messages[9],
     ]);
     expect(messages).toEqual(snapshot);

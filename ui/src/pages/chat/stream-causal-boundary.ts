@@ -5,6 +5,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { streamSegmentHasItemId, type ChatStreamSegment } from "../../lib/chat/chat-types.ts";
+import { stripHeartbeatTokenForDisplay } from "../../lib/chat/heartbeat-display.ts";
 import { userTurnRunId } from "./chat-thread-items.ts";
 
 export type StreamCausalBoundaryState = {
@@ -31,6 +32,31 @@ export function replaceChatStream(
       !state.chatRunId || segment.runId !== state.chatRunId || streamSegmentHasItemId(segment),
   );
   state.chatStream = text;
+}
+
+/** A blank history snapshot is status-only; it cannot erase answer text history has not saved. */
+export function replaceChatStreamFromHistorySnapshot(
+  state: Pick<StreamRolloverState, "chatRunId" | "chatStream" | "chatStreamSegments">,
+  text: string | null,
+): void {
+  if (
+    typeof text === "string" &&
+    !text.trim() &&
+    ((typeof state.chatStream === "string" &&
+      state.chatStream.trim() &&
+      !stripHeartbeatTokenForDisplay(state.chatStream).shouldSkip) ||
+      (state.chatRunId &&
+        state.chatStreamSegments?.some(
+          (segment) =>
+            segment.runId === state.chatRunId &&
+            segment.persisted !== true &&
+            segment.text.trim() &&
+            !stripHeartbeatTokenForDisplay(segment.text).shouldSkip,
+        )))
+  ) {
+    return;
+  }
+  replaceChatStream(state, text);
 }
 
 export function lastUserMessageIndex(messages: unknown[], beforeIndex = messages.length): number {

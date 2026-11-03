@@ -251,6 +251,7 @@ export function findCanvasInsertionIndex(
   toolTimestamp: number | null,
   minimumIndex: number,
   maximumIndex: number,
+  beforeFollowingAssistant = false,
 ): number {
   if (toolTimestamp == null) {
     return maximumIndex;
@@ -261,9 +262,10 @@ export function findCanvasInsertionIndex(
       continue;
     }
     const normalized = safeNormalizeMessage(item.message);
+    const role = normalized && normalizeRoleForGrouping(normalized.role).toLowerCase();
     if (
       normalized &&
-      normalizeRoleForGrouping(normalized.role).toLowerCase() === "user" &&
+      (role === "user" || (beforeFollowingAssistant && role === "assistant")) &&
       normalized.timestamp != null &&
       normalized.timestamp > toolTimestamp
     ) {

@@ -37,6 +37,7 @@ import {
   looksLikeProviderContextOverflowCandidate,
 } from "./context-overflow-tables.js";
 import {
+  INCOMPLETE_ASSISTANT_STREAM_RE,
   isAuthErrorMessage,
   isAuthPermanentErrorMessage,
   isBillingErrorMessage,
@@ -87,6 +88,7 @@ const GENERAL_MESSAGE_CLASSIFIERS: ReadonlyArray<
 > = [
   [isRateLimitErrorMessage, "rate_limit"],
   [isOverloadedErrorMessage, "overloaded"],
+  [(raw) => INCOMPLETE_ASSISTANT_STREAM_RE.test(raw), "server_error"],
   // A provider-completed error is not a hang; preserve server-error copy and failover.
   [isProviderCompletedErrorFinishReasonMessage, "server_error"],
   [

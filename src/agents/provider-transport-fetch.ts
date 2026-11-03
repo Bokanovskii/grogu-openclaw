@@ -32,6 +32,9 @@ import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
 import { isRetryableProviderHttpStatus } from "./failover/retry-evidence.js";
+import { loadGroguPrivateProfile } from "./grogu-private-profile.js";
+import { observeModelHttpResponse } from "./model-request-telemetry-wire.js";
+import { instrumentModelFetch } from "./model-request-telemetry.js";
 import {
   ProviderHttpError,
   readResponseTextLimited,
@@ -56,6 +59,7 @@ import {
   isProviderJsonContentType,
   prepareOpenAISdkSseResponse,
 } from "./provider-transport-sse.js";
+import { queueSparkyFetch } from "./sparky-request-queue.js";
 
 const DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS = 60;
 const SLOW_MODEL_FETCH_MS = 1_000;
@@ -390,7 +394,8 @@ export function buildGuardedModelFetch(
   const requestConfig = resolveModelRequestPolicy(model);
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
   const requestTimeoutMs = resolveModelRequestTimeoutMs(model, timeoutMs);
-  return async (input, init) => {
+  const groguProfile = loadGroguPrivateProfile();
+  const guardedFetch: typeof fetch = async (input, init) => {
     let localServiceLease: ProviderLocalServiceLease | undefined;
     const request = input instanceof Request ? new Request(input, init) : undefined;
     const rawUrl =
@@ -493,7 +498,7 @@ export function buildGuardedModelFetch(
       localServiceLease?.release();
       throw remediatedError;
     }
-    let response = result.response;
+    let response = observeModelHttpResponse(result.response, result.dispatcherReused);
     const elapsedMs = Date.now() - fetchStartedAt;
     const responseMessage =
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +
@@ -505,7 +510,7 @@ export function buildGuardedModelFetch(
     } else {
       emitModelTransportDebug(log, responseMessage);
     }
-    if (shouldBypassLongSdkRetry(response)) {
+    if (!(groguProfile && model.provider === "sparky") && shouldBypassLongSdkRetry(response)) {
       const headers = new Headers(response.headers);
       headers.set("x-should-retry", "false");
       response = new Response(response.body, {
@@ -534,8 +539,18 @@ export function buildGuardedModelFetch(
     );
     return prepareOpenAISdkSseResponse(response, {
       sanitize: options?.sanitizeSse !== false && shouldSanitizeOpenAISdkSseResponse(model),
+      recoverUnframedErrors: Boolean(groguProfile && model.provider === "sparky"),
       synthesizeJsonAsSse,
       onSseComment: options?.onSseComment,
     });
   };
+  return groguProfile
+    ? instrumentModelFetch(
+        model,
+        queueSparkyFetch(model, guardedFetch, {
+          timeoutMs: requestTimeoutMs,
+        }),
+        { timeoutMs: requestTimeoutMs },
+      )
+    : guardedFetch;
 }

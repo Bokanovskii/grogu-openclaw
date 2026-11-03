@@ -69,6 +69,7 @@ import {
   resolveProviderTransportTurnState,
 } from "./provider-transport-turn-state.js";
 import { resolveOpencodeSessionHeaders } from "./session-affinity.js";
+import { projectSparkyImageHistory, retrySparkyAdmission } from "./sparky-policy.js";
 import {
   createWritableTransportEventStream,
   failTransportStream,
@@ -312,6 +313,7 @@ export function streamOpenAICompletionsRequest(
     const provisionalCommentaryTags: PendingCommentaryTags = new Map();
     let firstEventAbort: ReturnType<typeof createFirstStreamEventAbortController> | undefined;
     try {
+      context = projectSparkyImageHistory(model, context);
       const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
       const directEmitReasoning = Boolean(
         mode === "direct" &&
@@ -370,7 +372,6 @@ export function streamOpenAICompletionsRequest(
       const requestOptions =
         mode === "direct"
           ? {
-              ...(await encodeBody(params)),
               signal: firstEventAbort.signal,
               ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
               maxRetries: 0,
@@ -379,13 +380,23 @@ export function streamOpenAICompletionsRequest(
               ...buildOpenAISdkRequestOptions(model, firstEventAbort.signal, {
                 timeoutMs: options?.timeoutMs,
               }),
-              ...(await encodeBody(params)),
             };
-      const request = client.chat.completions.create(
-        params as OpenAI.Chat.Completions.ChatCompletionCreateParams,
-        requestOptions,
+      const { request, response } = await retrySparkyAdmission(
+        model,
+        async () => {
+          // Re-encode each rejected attempt: an SDK-owned request body may be consumed.
+          const request = client.chat.completions.create(
+            params as OpenAI.Chat.Completions.ChatCompletionCreateParams,
+            { ...requestOptions, ...(await encodeBody(params)) },
+          );
+          const response = await request.asResponse();
+          return { request, response };
+        },
+        {
+          signal: firstEventAbort.signal,
+          timeoutMs: requestOptions?.timeout,
+        },
       );
-      const response = await request.asResponse();
       const responseStream = {
         async *[Symbol.asyncIterator]() {
           // Parse only after provider acceptance; JSON bodies are consumed here too.

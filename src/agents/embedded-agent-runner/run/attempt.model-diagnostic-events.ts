@@ -142,6 +142,7 @@ function createSharedResultObserver(
         .then(() => resultFn.call(stream))
         .then(
           (resolved) => {
+            lifecycle.telemetry.observe({ message: resolved });
             lifecycle.observer.observeFinalResult(
               lifecycle.eventBase,
               lifecycle.startedAt,
@@ -228,7 +229,9 @@ export function wrapStreamFnWithDiagnosticModelCallEvents(
     });
 
     try {
-      const result = streamFn(model, streamContext, lifecycle.propagatedOptions);
+      const result = lifecycle.telemetry.run(() =>
+        streamFn(model, streamContext, lifecycle.propagatedOptions),
+      );
       if (isPromiseLike(result)) {
         return result.then(
           (resolved) => observeModelCallResult(resolved, lifecycle),

@@ -1,5 +1,9 @@
 import type { FailoverReason } from "../agents/failover/signal.js";
-import type { CronFailureNotificationDetail, CronTriggerFailureCode } from "./types.js";
+import type {
+  CronFailureNotificationDetail,
+  CronTriggerFailureCode,
+  CronTriggerSourceFailureKind,
+} from "./types.js";
 
 const GENERIC_FAILURE_DETAIL = "Check automation history for details.";
 
@@ -13,6 +17,21 @@ const SCRIPT_FAILURE_COPY = {
   internal_error: "failed internally",
   tool_budget_exceeded: "exceeded its tool budget",
 } satisfies Record<Exclude<CronTriggerFailureCode, "plugin_reload_failed">, string>;
+
+type CronSourceAccessFailureKind = Extract<CronTriggerSourceFailureKind, "auth" | "permission">;
+
+/** Renders actionable, model-free guidance without exposing source identifiers. */
+export function cronSourceAccessFailureLines(kind: CronSourceAccessFailureKind): string[] {
+  return kind === "auth"
+    ? [
+        "Cause: source authorization was revoked or expired.",
+        "Re-authorize the source, then verify the automation is enabled; it will retry on a later scheduled check.",
+      ]
+    : [
+        "Cause: the source is missing its required read-only scope.",
+        "Grant the source's required read-only scope, then verify the automation is enabled; it will retry on a later scheduled check.",
+      ];
+}
 
 /** Renders only classified reasons or closed producer-authored failure facts. */
 export function cronFailureDetailLines(

@@ -159,8 +159,14 @@ export type CronFailureNotificationDetail =
   | { kind: "command-timeout"; mode: "wall-clock" | "no-output" }
   | {
       kind: "script-failure";
-      source: "payload" | "trigger";
+      source: "payload";
       code: CronTriggerFailureCode;
+    }
+  | {
+      kind: "script-failure";
+      source: "trigger";
+      code: CronTriggerFailureCode;
+      sourceFailureKind?: CronTriggerSourceFailureKind;
     };
 
 /** Execution result used to author persisted state, run logs, and isolated turn results. */
@@ -322,11 +328,19 @@ export type CronTriggerFailureCode =
   | "plugin_reload_failed"
   | "tool_budget_exceeded";
 
+/** Source failures that share invalid-input retry policy but need distinct operator guidance. */
+export type CronTriggerSourceFailureKind = "auth" | "permission" | "config" | "schema";
+
 /** Result union returned by the cron trigger-script evaluator. */
 export type CronTriggerEvaluationResult =
   | { kind: "evaluated"; fire: boolean; message?: string; state?: unknown }
   | { kind: "busy" }
-  | { kind: "error"; code: CronTriggerFailureCode; error: string };
+  | {
+      kind: "error";
+      code: CronTriggerFailureCode;
+      error: string;
+      sourceFailureKind?: CronTriggerSourceFailureKind;
+    };
 
 /** Public cron job contract with spec fields and mutable run state. */
 export type CronJob = CronJobBase<

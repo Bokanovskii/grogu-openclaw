@@ -15,7 +15,8 @@ import { createCronServiceState, type CronServiceDeps } from "./service/state.js
 import { loadCronStore } from "./store.js";
 import { cronStoreKey } from "./store/key.js";
 import { inspectActiveCronRunReceipt } from "./store/run-receipt-store.test-support.js";
-import type { CronJobCreate } from "./types.js";
+import { scriptFailure } from "./trigger-script-result.js";
+import type { CronJobCreate, CronTriggerSourceFailureKind } from "./types.js";
 
 const { logger, makeStorePath } = setupCronServiceSuite({ prefix: "cron-trigger-eval-" });
 
@@ -37,10 +38,29 @@ function watcher(overrides: Partial<CronJobCreate> = {}): CronJobCreate {
   };
 }
 
+type AccessFailureKind = Extract<CronTriggerSourceFailureKind, "auth" | "permission">;
+const accessOwner = { agentId: "main", sessionKey: "agent:main:telegram:direct:owner" } as const;
+const accessDelivery = {
+  mode: "announce",
+  channel: "telegram",
+  to: "19098680",
+  accountId: "owner-bot",
+} as const;
+const accessText = {
+  auth: 'Automation "watcher" source access failed\nCause: source authorization was revoked or expired.\nRe-authorize the source, then verify the automation is enabled; it will retry on a later scheduled check.',
+  permission:
+    'Automation "watcher" source access failed\nCause: the source is missing its required read-only scope.\nGrant the source\'s required read-only scope, then verify the automation is enabled; it will retry on a later scheduled check.',
+} satisfies Record<AccessFailureKind, string>;
+
+const triggerSourceFailure = (kind: CronTriggerSourceFailureKind) =>
+  scriptFailure(`worker source ${kind} failure`, "invalid_input", kind);
+
 async function createHarness(params: {
+  cronFailureAlert?: NonNullable<CronServiceDeps["cronConfig"]>["failureAlert"];
   evaluateCronTrigger?: Evaluator;
   runIsolatedAgentJob?: IsolatedRunner;
   runScriptJob?: ScriptRunner;
+  sendCronFailureAlert?: CronServiceDeps["sendCronFailureAlert"];
   sendCronWebhook?: CronServiceDeps["sendCronWebhook"];
 }) {
   const { storePath } = await makeStorePath();
@@ -54,13 +74,17 @@ async function createHarness(params: {
     nowMs: () => Date.now(),
     storePath,
     cronEnabled: true,
-    cronConfig: { triggers: { enabled: true } },
+    cronConfig: {
+      triggers: { enabled: true },
+      ...(params.cronFailureAlert ? { failureAlert: params.cronFailureAlert } : {}),
+    },
     log: logger,
     enqueueSystemEvent,
     requestHeartbeat: vi.fn(),
     runIsolatedAgentJob,
     ...(params.evaluateCronTrigger ? { evaluateCronTrigger: params.evaluateCronTrigger } : {}),
     ...(params.runScriptJob ? { runScriptJob: params.runScriptJob } : {}),
+    ...(params.sendCronFailureAlert ? { sendCronFailureAlert: params.sendCronFailureAlert } : {}),
     ...(params.sendCronWebhook ? { sendCronWebhook: params.sendCronWebhook } : {}),
     onEvent: (event, context) => {
       events.push(structuredClone(event));
@@ -466,6 +490,147 @@ describe("cron trigger evaluation", () => {
         nextRunAtMs: persisted?.state.nextRunAtMs,
         job: { state: { nextRunAtMs: persisted?.state.nextRunAtMs } },
       });
+    } finally {
+      harness.cron.stop();
+    }
+  });
+
+  it("dedupes access incidents across repeats and restart, then re-alerts after recovery", async () => {
+    let outcome: AccessFailureKind | "recovered" = "auth";
+    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const harness = await createHarness({
+      evaluateCronTrigger: async () =>
+        outcome === "recovered"
+          ? { kind: "evaluated", fire: false }
+          : triggerSourceFailure(outcome),
+      sendCronFailureAlert,
+    });
+    try {
+      const job = await harness.cron.add(
+        watcher({ failureAlert: false, delivery: accessDelivery, owner: accessOwner }),
+      );
+      await runWhenDue(harness.cron, job.id);
+      expect(sendCronFailureAlert).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          ...accessDelivery,
+          job: expect.objectContaining(accessOwner),
+          payload: expect.objectContaining({ text: accessText.auth }),
+        }),
+      );
+      await runWhenDue(harness.cron, job.id);
+      harness.cron.stop();
+      harness.cron = new CronService({ ...harness.deps, scheduler: createTestGatewayScheduler() });
+      await harness.cron.start();
+      await runWhenDue(harness.cron, job.id);
+      expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+      outcome = "recovered";
+      await runWhenDue(harness.cron, job.id);
+      expect(harness.cron.getJob(job.id)?.state.failureAlertIncident).toBeUndefined();
+      outcome = "permission";
+      await runWhenDue(harness.cron, job.id);
+      await runWhenDue(harness.cron, job.id);
+      expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
+      expect(sendCronFailureAlert.mock.calls[1]?.[0].payload.text).toBe(accessText.permission);
+    } finally {
+      harness.cron.stop();
+    }
+  });
+
+  it("alerts beside auto-disable and overrides generic threshold and cooldown policy", async () => {
+    let sourceFailureKind: CronTriggerSourceFailureKind = "auth";
+    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const harness = await createHarness({
+      cronFailureAlert: { enabled: true, after: 3, cooldownMs: 24 * 60 * 60_000 },
+      evaluateCronTrigger: async () => triggerSourceFailure(sourceFailureKind),
+      sendCronFailureAlert,
+    });
+    const addJob = (state?: CronJobCreate["state"]) =>
+      harness.cron.add(
+        watcher({ failureAlert: false, delivery: accessDelivery, owner: accessOwner, state }),
+      );
+    try {
+      const access = await addJob({ consecutiveErrors: 9 });
+      await runWhenDue(harness.cron, access.id);
+      sourceFailureKind = "config";
+      const config = await addJob({ consecutiveErrors: 9 });
+      await runWhenDue(harness.cron, config.id);
+      expect(harness.enqueueSystemEvent.mock.calls.map((call) => call[1]?.contextKey)).toEqual([
+        `cron:${access.id}:auto-disabled`,
+        `cron:${config.id}:auto-disabled`,
+      ]);
+      sourceFailureKind = "auth";
+      const policy = await addJob();
+      await runWhenDue(harness.cron, policy.id);
+      sourceFailureKind = "permission";
+      await runWhenDue(harness.cron, policy.id);
+      await runWhenDue(harness.cron, policy.id);
+      expect(sendCronFailureAlert).toHaveBeenCalledTimes(3);
+      expect(sendCronFailureAlert.mock.calls[1]?.[0].payload.text).toBe(accessText.auth);
+      expect(sendCronFailureAlert.mock.calls[2]?.[0].payload.text).toBe(accessText.permission);
+    } finally {
+      harness.cron.stop();
+    }
+  });
+
+  it("reuses resolved routes and keeps other failure kinds quiet", async () => {
+    let outcome: "auth" | "transient" | "untyped" = "auth";
+    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const sendCronWebhook = vi.fn(async () => ({ status: "delivered" as const }));
+    const harness = await createHarness({
+      evaluateCronTrigger: async () =>
+        outcome === "auth"
+          ? triggerSourceFailure("auth")
+          : {
+              kind: "error",
+              code: outcome === "transient" ? "timeout" : "invalid_input",
+              error: "source failed",
+            },
+      sendCronFailureAlert,
+      sendCronWebhook,
+    });
+    try {
+      const run = async (delivery?: CronJobCreate["delivery"]) => {
+        const job = await harness.cron.add(
+          watcher({ failureAlert: false, delivery, owner: accessOwner }),
+        );
+        await runWhenDue(harness.cron, job.id);
+      };
+      await run({ mode: "none" });
+      expect(sendCronFailureAlert).not.toHaveBeenCalled();
+      await run();
+      expect(sendCronFailureAlert).toHaveBeenCalledWith(
+        expect.objectContaining({ channel: "last", to: undefined, accountId: undefined }),
+      );
+      await run({ mode: "webhook", to: "https://example.invalid/automation" });
+      expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+      await run({
+        mode: "none",
+        failureDestination: {
+          mode: "announce",
+          channel: "telegram",
+          to: "alerts-room",
+          accountId: "alerts-bot",
+        },
+      });
+      expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
+      expect(sendCronFailureAlert).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          channel: "telegram",
+          to: "alerts-room",
+          accountId: "alerts-bot",
+          inheritSessionThread: false,
+        }),
+      );
+      await run({
+        mode: "none",
+        failureDestination: { mode: "webhook", to: "https://example.invalid/failure" },
+      });
+      expect(sendCronWebhook).not.toHaveBeenCalled();
+      outcome = "transient";
+      await run();
+      outcome = "untyped";
+      await run();
+      expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
     } finally {
       harness.cron.stop();
     }

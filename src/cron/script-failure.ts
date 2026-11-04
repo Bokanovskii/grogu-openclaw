@@ -2,6 +2,7 @@ import type {
   CronFailureNotificationDetail,
   CronRunErrorClassification,
   CronTriggerFailureCode,
+  CronTriggerSourceFailureKind,
 } from "./types.js";
 
 function classifyCronScriptFailure(code: CronTriggerFailureCode): CronRunErrorClassification {
@@ -18,9 +19,14 @@ function classifyCronScriptFailure(code: CronTriggerFailureCode): CronRunErrorCl
 export function cronScriptFailureMetadata(
   source: Extract<CronFailureNotificationDetail, { kind: "script-failure" }>["source"],
   code: CronTriggerFailureCode,
+  sourceFailureKind?: CronTriggerSourceFailureKind,
 ) {
+  const failureNotificationDetail: CronFailureNotificationDetail =
+    source === "trigger" && sourceFailureKind
+      ? { kind: "script-failure", source, code, sourceFailureKind }
+      : { kind: "script-failure", source, code };
   return {
     errorClassification: classifyCronScriptFailure(code),
-    failureNotificationDetail: { kind: "script-failure" as const, source, code },
+    failureNotificationDetail,
   };
 }

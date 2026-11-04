@@ -207,7 +207,7 @@ function toolSection(tools) {
     return "tools:\n- none\n";
   }
   const lines = [...tools.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .toSorted(([left], [right]) => left.localeCompare(right))
     .map(
       ([name, counts]) =>
         `- ${JSON.stringify(name)} called=${counts.called} ok=${counts.ok} error=${counts.error} unknown=${counts.unknown}`,

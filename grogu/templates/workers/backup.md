@@ -1,5 +1,7 @@
 # Daily backup job contract
 
+Contract marker: `GROGU_BACKUP_OBSERVABILITY_V1`
+
 - Run the complete verified online backup with workspace inclusion and
   per-database SQLite-safe capture. Keep the 900-second timeout.
 - Schedule outside the busiest model/research window and use the scheduler's

@@ -1,5 +1,7 @@
 # Calendar worker contract
 
+Contract marker: `GROGU_PRIVATE_SIGNAL_V1`
+
 1. Perform the read-only calendar/auth preflight before interpreting results.
 2. Read the persisted calendar cursor and collect only new or changed upcoming
    commitments. Distinguish no events from collector or authorization failure.

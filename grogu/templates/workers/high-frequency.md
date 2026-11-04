@@ -1,5 +1,7 @@
 # High-frequency worker contract
 
+Contract marker: `GROGU_DETERMINISTIC_POLL_V1`
+
 - The frequent tick performs only a deterministic source/cursor check.
 - No change means an intentional non-outcome: no model request and no owner
   message.

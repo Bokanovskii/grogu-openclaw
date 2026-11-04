@@ -16,7 +16,8 @@
   "bindings": {
     "modelPolicy": {
       "automaticModel": "example-provider/example-model",
-      "ownerOverrides": { "configPaths": [], "jobIds": [] }
+      "ownerOverrides": { "configPaths": [], "jobIds": [] },
+      "workerContracts": []
     },
     "researchCheckpoint": {
       "workspace": "/path/to/private/research-workspace",

@@ -93,4 +93,31 @@ describe("automatic routing and queue policy", () => {
       },
     ]);
   });
+
+  it("requires declared private-signal and deterministic-poll worker contracts", () => {
+    const privateSignal = agentJob("private-signal", automatic);
+    privateSignal.payload.message = "GROGU_PRIVATE_SIGNAL_V1";
+    const polling = agentJob("polling", automatic);
+    const violations = evaluatePolicy(compliantConfig(), [privateSignal, polling], {
+      ...policy,
+      workerContracts: [
+        { jobId: "private-signal", markers: ["GROGU_PRIVATE_SIGNAL_V1"] },
+        { jobId: "polling", markers: ["GROGU_DETERMINISTIC_POLL_V1"] },
+        { jobId: "missing", markers: ["GROGU_GMAIL_AUTH_HEALTH_V1"] },
+      ],
+    });
+
+    expect(violations).toEqual([
+      {
+        where: "job:polling:contract",
+        found: { missing: ["GROGU_DETERMINISTIC_POLL_V1"] },
+        expected: ["GROGU_DETERMINISTIC_POLL_V1"],
+      },
+      {
+        where: "job:missing:contract",
+        found: null,
+        expected: ["GROGU_GMAIL_AUTH_HEALTH_V1"],
+      },
+    ]);
+  });
 });

@@ -13,6 +13,12 @@ export const REQUIRED_CHANNEL_QUEUE_MODES: Readonly<Record<string, string>> = Ob
 });
 
 const modelRef = z.string().regex(/^[^/\s]+\/\S+$/, "Expected provider/model");
+const workerContractMarker = z.enum([
+  "GROGU_PRIVATE_SIGNAL_V1",
+  "GROGU_DETERMINISTIC_POLL_V1",
+  "GROGU_GMAIL_AUTH_HEALTH_V1",
+  "GROGU_BACKUP_OBSERVABILITY_V1",
+]);
 const modelPolicySchema = z
   .object({
     automaticModel: modelRef,
@@ -23,6 +29,16 @@ const modelPolicySchema = z
       })
       .strict()
       .default({ configPaths: [], jobIds: [] }),
+    workerContracts: z
+      .array(
+        z
+          .object({
+            jobId: z.string().min(1),
+            markers: z.array(workerContractMarker).min(1),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
 
@@ -36,6 +52,7 @@ const policyJobSchema = z
     payload: z
       .object({
         kind: z.string().min(1),
+        message: z.string().optional(),
         model: z.string().optional(),
         fallbacks: z.array(z.string()).optional(),
       })
@@ -130,6 +147,26 @@ export function evaluatePolicy(
       if (route !== undefined && route !== expected) {
         violations.push({ where: `job:${job.id}`, found: route, expected });
       }
+    }
+  }
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
+  for (const contract of policy.workerContracts ?? []) {
+    const job = jobsById.get(contract.jobId);
+    if (!job) {
+      violations.push({
+        where: `job:${contract.jobId}:contract`,
+        found: null,
+        expected: contract.markers,
+      });
+      continue;
+    }
+    const missing = contract.markers.filter((marker) => !job.payload.message?.includes(marker));
+    if (missing.length > 0) {
+      violations.push({
+        where: `job:${contract.jobId}:contract`,
+        found: { missing },
+        expected: contract.markers,
+      });
     }
   }
   return violations;

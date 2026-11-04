@@ -3,7 +3,7 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { cronFailureDetailLines } from "../failure-notification-text.js";
 import { resolveCronExecutionRetryHint } from "../retry-hint.js";
 import { isSystemMonitorDeclaration } from "../system-owned-declaration.js";
-import type { CronJob, CronJobState } from "../types.js";
+import type { CronJob, CronJobState, CronRunErrorClassification } from "../types.js";
 import { cronNotificationJob } from "./notification-intents.js";
 import type { DeferredCronNotifications } from "./state.js";
 
@@ -64,16 +64,24 @@ export function autoDisableCronJob(params: {
 export function maybeAutoDisableCronJobAfterRunFailure(params: {
   job: CronJob;
   atMs: number;
+  errorClassification?: CronRunErrorClassification;
   deferredNotifications: DeferredCronNotifications;
 }): boolean {
   const consecutiveErrors = params.job.state.consecutiveErrors ?? 0;
+  const retryable =
+    params.errorClassification?.kind === "permanent"
+      ? false
+      : resolveCronExecutionRetryHint({
+          error: params.job.state.lastError,
+          classifiedReason:
+            params.errorClassification?.kind === "reason"
+              ? params.errorClassification.reason
+              : params.job.state.lastErrorReason,
+        }).retryable;
   if (
     (params.job.schedule.kind !== "cron" && params.job.schedule.kind !== "every") ||
     consecutiveErrors < MAX_CONSECUTIVE_RUN_FAILURES ||
-    resolveCronExecutionRetryHint({
-      error: params.job.state.lastError,
-      classifiedReason: params.job.state.lastErrorReason,
-    }).retryable
+    retryable
   ) {
     return false;
   }

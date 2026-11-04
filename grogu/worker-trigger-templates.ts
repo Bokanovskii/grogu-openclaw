@@ -194,6 +194,11 @@ const identities = {
   gmail: (item) => String(nonempty(item.id, "gmail.id")),
   messages: (item) => String(nonempty(item.conversationId, "messages.conversation")) + ":" + String(nonempty(item.id, "messages.id")),
 };
+// The identity keys a v2 writer can emit; a stored v2 prior holding anything else is corrupt.
+const usableKeys = {
+  gmail: (key) => typeof key === "string" && key.trim() !== "",
+  messages: (key) => typeof key === "string" && /^[1-9][0-9]*:[1-9][0-9]*$/.test(key),
+};
 // Item timestamps in the unit of the stored floor (epoch ms for Gmail, epoch seconds for Messages); NaN when unreadable.
 const stamps = {
   gmail: (item) => typeof item.timestamp === "string" ? Date.parse(item.timestamp) : NaN,
@@ -209,16 +214,20 @@ const headFailure = (rows, stamp) => {
   if (!times.every(Number.isFinite)) return failure("schema");
   return times.every((time, index) => index === 0 || time <= times[index - 1]) ? null : failure("incomplete");
 };
+// v1 (first deployed runtime) stored whole items; v2 stores only their identity keys and the truncated head's floor.
 const priorHead = (fingerprint, source) => {
   try {
     const stored = record(JSON.parse(fingerprint));
-    // v1 (first deployed runtime) stored whole items; v2 stores only their identity keys and the truncated head's floor.
-    const legacy = stored && stored.v === undefined && Array.isArray(stored.items) ? stored.items : null;
-    const ids = stored?.v === 2 ? stored.ids : legacy?.map((item) => identities[source](item));
-    if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string")) return null;
+    if (stored?.v === 2) {
+      // Anything the writer cannot emit is corrupt state, which is rebaselined rather than compared against.
+      const truncated = record(stored.coverage)?.truncated;
+      const floorUsable = stored.floor === null || (truncated === true && Number.isFinite(stored.floor));
+      if (!Array.isArray(stored.ids) || !stored.ids.every(usableKeys[source]) || typeof truncated !== "boolean" || !floorUsable) return null;
+      return { ids: new Set(stored.ids), floor: stored.floor };
+    }
+    if (!stored || stored.v !== undefined || !Array.isArray(stored.items)) return null;
     const truncated = record(stored.coverage)?.truncated === true;
-    const floor = !truncated ? null : legacy ? floorOf(legacy, stamps[source]) : Number.isFinite(stored.floor) ? stored.floor : null;
-    return { ids: new Set(ids), floor };
+    return { ids: new Set(stored.items.map((item) => identities[source](item))), floor: truncated ? floorOf(stored.items, stamps[source]) : null };
   } catch {
     return null;
   }
@@ -293,7 +302,9 @@ const decodeGmail = (observation, maxItems) => {
     if (unordered) return unordered;
     const items = canonicalize(rows, identities.gmail);
     return {
+      rows,
       items,
+      floor: truncated ? floorOf(rows, stamps.gmail) : null,
       cursor: null,
       coverage: {
         kind: "bounded_head",
@@ -345,7 +356,9 @@ const decodeMessages = (observation, maxItems) => {
     if (unordered) return unordered;
     const items = canonicalize(rows, identities.messages);
     return {
+      rows,
       items,
+      floor: value.has_more ? floorOf(rows, stamps.messages) : null,
       cursor: { sinceTs: value.since_ts, beforeTs: value.before_ts, nextOffset: value.next_offset },
       coverage: {
         kind: "bounded_recent_window",
@@ -365,15 +378,16 @@ const evaluate = (template, observation, previousState, nowMs) => {
   if (decoded.error) return decoded;
   const identity = identities[source];
   const stamp = stamps[source];
-  const floor = decoded.coverage.truncated ? floorOf(decoded.items, stamp) : null;
-  const fingerprint = JSON.stringify({ v: 2, ids: decoded.items.map((item) => identity(item)), coverage: decoded.coverage, floor });
+  const fingerprint = JSON.stringify({ v: 2, ids: decoded.items.map((item) => identity(item)), coverage: decoded.coverage, floor: decoded.floor });
   if (utf8Bytes(fingerprint) > maxStateBytes / 2) return failure("schema");
   const prior = record(state.sources[source]);
   const known = prior ? priorHead(prior.fingerprint, source) : null;
-  // Only an unseen item positively older than a truncated prior head's floor was exposed by a removal.
-  // Unreadable timestamps are never exposed, and equal timestamps count as inside, so both fire.
-  const exposed = (item) => known.floor !== null && Number.isFinite(stamp(item)) && stamp(item) < known.floor;
-  const added = known ? decoded.items.filter((item) => !known.ids.has(identity(item)) && !exposed(item)) : [];
+  // Deduping keeps one arbitrary row per identity, so the floor and exposure read the raw rows instead.
+  // An unseen identity is exposed by a removal only when its row is positively older than a truncated prior head's floor.
+  // Unreadable timestamps are never exposed and equal timestamps count as inside, so both fire.
+  const exposed = (row) => known.floor !== null && Number.isFinite(stamp(row)) && stamp(row) < known.floor;
+  const fresh = known ? new Set(decoded.rows.filter((row) => !known.ids.has(identity(row)) && !exposed(row)).map((row) => identity(row))) : new Set();
+  const added = decoded.items.filter((item) => fresh.has(identity(item)));
   const changed = added.length > 0;
   state.sources = { ...state.sources, [source]: { fingerprint, cursor: decoded.cursor, lastSuccessAt: nowMs } };
   if (changed) {

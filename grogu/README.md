@@ -123,9 +123,10 @@ configured wrapper's `structuredContent.stdout`; the Messages adapter parses
 the single JSON text block in `content`. Gmail has no page-token input, so
 `has_more` or `nextPageToken` records valid truncated bounded-head coverage
 with the configured limit and discards the token; Messages `has_more` is
-truncated coverage only for an offset-0 page. A truncated page must be
-newest-first with readable timestamps (and offset 0 for Messages), otherwise
-the observation is a typed `incomplete` or `schema` failure. Messages ids are
+truncated coverage only for an offset-0 page. Only a truncated page must be
+newest-first with readable numeric timestamps (and offset 0 for Messages),
+otherwise the observation is a typed `incomplete` or `schema` failure; complete
+pages keep the earlier generic non-empty timestamp check. Messages ids are
 positive safe integers and timestamps may be fractional. Only a successful
 non-truncated zero result is authoritative empty coverage. Both adapters reject
 write/body options, malformed wrappers, and structured source failures rather
@@ -133,10 +134,13 @@ than fabricating an empty source. Run `workers-bootstrap` in preview mode
 before activation.
 The rendered trigger owns source polling and `fire: false` for unchanged data.
 It stores a bounded identity list plus the oldest timestamp of a truncated head
-(its floor) and fires only for an unseen identity that is not older than that
-floor, so removals and older items exposed below the floor do not fire (except
-an exact equal-timestamp tie). Earlier full-item state is still read. Only
-`fire: true` admits the existing agent-turn payload for bounded research.
+(its floor, taken over every observed row) and fires for an unseen identity
+unless it is positively older than that floor, so removals and older items
+exposed below the floor do not fire (except an exact equal-timestamp tie, and
+an identity whose timestamp cannot be read always fires). Earlier full-item
+state is still read; stored state the trigger could not have written is
+silently rebaselined. Only `fire: true` admits the existing agent-turn payload
+for bounded research.
 `policy-check` compares each collector contract's pinned `triggerSha256` with
 the installed script, so a renderer change needs that pin updated together with
 `workers-bootstrap --apply`.

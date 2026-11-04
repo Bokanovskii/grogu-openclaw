@@ -815,6 +815,69 @@ describe("private worker trigger templates", () => {
     },
   );
 
+  it.each(["messages", "gmail"] as const)(
+    "%s: takes the floor from the raw rows when duplicate rows conflict",
+    async (source) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const { head, run } = driver(source);
+      // Deduping keeps the lexicographically smaller item, which here is the NEWER row
+      // ("10" sorts before "9", thread "a" before "z"), so a floor taken after it would be too high.
+      const rows =
+        source === "messages"
+          ? {
+              newer: { message_id: 1, chat_id: 7, ts: 10 },
+              older: { message_id: 1, chat_id: 7, ts: 9 },
+              inside: { message_id: 2, chat_id: 7, ts: 9.5 },
+              below: { message_id: 3, chat_id: 7, ts: 8.5 },
+              insideItem: { id: 2, conversationId: 7, timestamp: 9.5 },
+              floor: 9,
+            }
+          : {
+              newer: { ...gmailRow(1, 20), threadId: "a" },
+              older: { ...gmailRow(1, 10), threadId: "z" },
+              inside: gmailRow(2, 15),
+              below: gmailRow(3, 5),
+              insideItem: head.item(2, 15),
+              floor: head.at(10),
+            };
+
+      const seed = await run(head.mcp([rows.newer, rows.older], true), {});
+      expect(seed).toMatchObject({ fire: false });
+      expect(storedHead(seed, source)).toMatchObject({ floor: rows.floor });
+      expect(storedHead(seed, source).ids).toHaveLength(1);
+
+      // Between the duplicate timestamps, so it is inside the observed range and must fire.
+      const late = await run(head.mcp([rows.newer, rows.inside], true), { state: seed.state });
+      expect(late).toMatchObject({ fire: true });
+      expect(deltaItems(late)).toEqual([rows.insideItem]);
+
+      // Positively older than the raw minimum is still an exposed item.
+      await expect(
+        run(head.mcp([rows.newer, rows.below], true), { state: seed.state }),
+      ).resolves.toMatchObject({ fire: false });
+    },
+  );
+
+  it.each(["messages", "gmail"] as const)(
+    "%s: fires for an unseen identity unless every row carrying it is older than the floor",
+    async (source) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const { head, observe } = driver(source);
+      const baseline = await observe(base);
+      const refilled = base.filter(([n]) => n !== 40 && n !== 41);
+
+      // One row inside the observed range is enough, though deduping keeps the older, exposed row.
+      const mixed = await observe([...refilled, [300, 500], [300, 5]], { state: baseline.state });
+      expect(mixed).toMatchObject({ fire: true });
+      expect(deltaItems(mixed)).toEqual([head.item(300, 5)]);
+
+      const exposed = await observe([...refilled, [301, 6], [301, 5]], { state: baseline.state });
+      expect(exposed).toMatchObject({ fire: false });
+    },
+  );
+
   it("accepts float Messages windows and rejects rows and truncated pages it cannot trust", async () => {
     const run = compile(messagesTemplate(100));
     const live = { ...liveWindow, hasMore: true };
@@ -866,11 +929,11 @@ describe("private worker trigger templates", () => {
     // A legacy prior that stored the same ids as strings still maps to the same identity key.
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
-    const stringIdPrior = {
+    const legacyPrior = (items: unknown[]) => ({
       sources: {
         messages: {
           fingerprint: JSON.stringify({
-            items: [{ id: "1", conversationId: "7", timestamp: 10 }],
+            items,
             coverage: { kind: "bounded_recent_window", limit: 100, truncated: false, empty: false },
           }),
           lastSuccessAt: 1,
@@ -878,7 +941,8 @@ describe("private worker trigger templates", () => {
       },
       continuations: [],
       nextNativeSweepAt: 10_000_000,
-    };
+    });
+    const stringIdPrior = legacyPrior([{ id: "1", conversationId: "7", timestamp: 10 }]);
     const known = { message_id: 1, chat_id: 7, ts: 10 };
     await expect(
       run(messagesMcp([known], liveWindow), { state: stringIdPrior }),
@@ -889,6 +953,11 @@ describe("private worker trigger templates", () => {
     );
     expect(added).toMatchObject({ fire: true });
     expect(deltaItems(added)).toEqual([{ id: 2, conversationId: 7, timestamp: 11 }]);
+
+    // Legacy items keep the lenient identity rule of the runtime that wrote them, unlike v2 keys.
+    const looseKeyPrior = legacyPrior([{ id: "x", conversationId: "abc", timestamp: 10 }]);
+    const unseen = await run(messagesMcp([known], liveWindow), { state: looseKeyPrior });
+    expect(deltaItems(unseen)).toEqual([{ id: 1, conversationId: 7, timestamp: 10 }]);
   });
 
   it("needs readable Gmail timestamps only to prove a truncated head and fails closed on oversized state", async () => {
@@ -971,6 +1040,79 @@ describe("private worker trigger templates", () => {
         expect(rebaselined).toMatchObject({ fire: false });
         expect(storedHead(rebaselined, source).v).toBe(2);
       }
+    },
+  );
+
+  it.each(["messages", "gmail"] as const)(
+    "%s: rebaselines silently when a v2 prior holds anything the writer cannot emit",
+    async (source) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const { head, observe } = driver(source);
+      const coverage = (truncated: unknown) => ({
+        kind: head.coverageKind,
+        limit: 100,
+        truncated,
+        empty: false,
+      });
+      // A usable complete prior holding item 0; an `undefined` field is dropped by JSON, i.e. missing.
+      const prior = (fields: Record<string, unknown>) =>
+        JSON.stringify({
+          v: 2,
+          ids: [head.key(0)],
+          coverage: coverage(false),
+          floor: null,
+          ...fields,
+        });
+      const ids = (...keys: unknown[]) => prior({ ids: keys });
+      const observeComplete = (fingerprint: string, entries: readonly Entry[] = [[1, 500]]) =>
+        observe(entries, {
+          state: { sources: { [source]: { fingerprint, lastSuccessAt: 1 } } },
+          hasMore: false,
+        });
+      // JSON cannot write a non-finite number, but it can read one back from an overflowing literal.
+      const overflowFloor = prior({ coverage: coverage(true), floor: 0 }).replace(
+        '"floor":0',
+        '"floor":1e999',
+      );
+      const unusable = [
+        ids(""),
+        ids("   "),
+        ids(head.key(0), ""),
+        ...(source === "messages"
+          ? ["a:b", "0:1", "1:0", "1:2:3", "01:2", "12"].map((key) => ids(key))
+          : []),
+        prior({ floor: head.at(10) }),
+        prior({ coverage: coverage(true), floor: "5" }),
+        prior({ coverage: coverage(true), floor: "NaN" }),
+        prior({ coverage: coverage(true), floor: [] }),
+        prior({ coverage: coverage(true), floor: undefined }),
+        overflowFloor,
+        prior({ coverage: undefined }),
+        prior({ coverage: [] }),
+        prior({ coverage: coverage("true") }),
+        prior({ coverage: coverage(1) }),
+        prior({ coverage: coverage(null) }),
+      ];
+      for (const fingerprint of unusable) {
+        const result = await observeComplete(fingerprint);
+        expect(result, fingerprint).toMatchObject({ fire: false });
+        expect(storedHead(result, source).ids, fingerprint).toEqual([head.key(1)]);
+      }
+
+      // Usable priors are still compared, so the cases above are not quiet for another reason.
+      expect(deltaItems(await observeComplete(prior({})))).toEqual([head.item(1, 500)]);
+      // A truncated head without a floor (an empty truncated page) treats every unseen item as added.
+      const noFloor = await observeComplete(prior({ coverage: coverage(true) }));
+      expect(deltaItems(noFloor)).toEqual([head.item(1, 500)]);
+      const floored = await observeComplete(
+        prior({ coverage: coverage(true), floor: head.at(600) }),
+        [
+          [1, 700],
+          [2, 500],
+        ],
+      );
+      expect(deltaItems(floored)).toEqual([head.item(1, 700)]);
     },
   );
 });

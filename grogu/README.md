@@ -89,12 +89,16 @@ Every command writes owner-only receipts to a new directory under the profile's
      `.github/workflows`.
    - Install scripts are skipped and Git hooks are disabled, so no
      upstream-controlled code runs while that token is present.
+   - Checkout and the named upstream remote use `blob:none` partial clones.
+     Merge analysis retains full commit/tree ancestry and fetches only blobs
+     needed for the candidate tree. Disk and Git object-size checkpoints make
+     runner pressure visible without printing repository content.
 2. It dispatches `grogu-ci.yml` for the exact prepared commit, so the CI
    evidence is pinned to that SHA.
 3. If the merge conflicts, the run fails, lists the conflicting files in the
    job summary, and leaves the remote branch unchanged. Resolve it locally on a
    branch from `main` with the same base:
-   `git merge-tree --write-tree --merge-base=<pinned commit> main <release commit>`
+   `git merge-tree --write-tree --name-only -z --merge-base=<pinned commit> main <release commit>`
    shows the conflicts; resolve them, record the release as the second parent,
    update `upstream.json`, and open the PR by hand.
 4. Review the PR and CI. Merge only when green.

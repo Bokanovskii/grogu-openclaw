@@ -130,7 +130,7 @@ export type ModelRequestRecord = Record<string, MetadataValue> & {
 };
 
 const numericFields = new Set(
-  `version pid startedAtMs updatedAtMs finishedAtMs timeoutMs requestBytes responseBytes inputImageCount queueWaitMs queuedAhead queueTimeoutMs queuePriority admittedAtMs headersAtMs firstByteAtMs firstOutputAtMs firstTextAtMs firstReasoningAtMs firstToolAtMs lastOutputAtMs lastByteAtMs maxByteGapMs httpStatus outputDeltas textDeltas reasoningDeltas toolDeltas inputTokens outputTokens cacheReadTokens cacheWriteTokens reasoningTokens httpAttempts wallDurationMs monotonicDurationMs timeToHeadersMs timeToFirstByteMs timeToFirstOutputMs timeToFirstTextMs timeToFirstReasoningMs idleAtEndMs outputTokensPerSecond hostGapCount maxHostSchedulingGapMs unparsedWireEvents wallElapsedMs monotonicElapsedMs schedulingGapMs possibleSuspensionMs`.split(
+  `version pid startedAtMs updatedAtMs finishedAtMs timeoutMs requestBytes responseBytes inputImageCount queueWaitMs queuedAhead queueTimeoutMs queuePriority queueActiveInteractive queueActiveUtility queueActiveScheduled admittedAtMs headersAtMs firstByteAtMs firstOutputAtMs firstTextAtMs firstReasoningAtMs firstToolAtMs lastOutputAtMs lastByteAtMs maxByteGapMs httpStatus outputDeltas textDeltas reasoningDeltas toolDeltas inputTokens outputTokens cacheReadTokens cacheWriteTokens reasoningTokens httpAttempts wallDurationMs monotonicDurationMs timeToHeadersMs timeToFirstByteMs timeToFirstOutputMs timeToFirstTextMs timeToFirstReasoningMs idleAtEndMs outputTokensPerSecond hostGapCount maxHostSchedulingGapMs unparsedWireEvents wallElapsedMs monotonicElapsedMs schedulingGapMs possibleSuspensionMs`.split(
     " ",
   ),
 );
@@ -145,6 +145,10 @@ const booleanFields = new Set([
   "callerSignalAborted",
   "wireParserTruncated",
   "clockChanged",
+  "queueInteractiveReserveAvailable",
+  "queueInteractiveReserveOccupied",
+  "queueInteractiveCooldownActive",
+  "queueNonInteractiveCooldownActive",
 ]);
 
 /** Enforce the metadata-only contract again at persistence; never serialize arbitrary caller fields. */

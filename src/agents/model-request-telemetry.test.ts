@@ -37,9 +37,31 @@ describe("metadata-only request telemetry", () => {
         gaps: [{ startedAtMs: 0, updatedAtMs: 5_000, schedulingGapMs: 4_000 }],
       },
     );
-    tracker.queue({ queuedAhead: 4 }, 100, 1);
+    tracker.queue(
+      {
+        queuedAhead: 4,
+        queueActiveInteractive: 1,
+        queueActiveUtility: 1,
+        queueActiveScheduled: 2,
+        queueInteractiveReserveAvailable: false,
+        queueInteractiveReserveOccupied: true,
+        queueInteractiveCooldownActive: false,
+        queueNonInteractiveCooldownActive: true,
+      },
+      100,
+      1,
+    );
     now = 10;
-    tracker.admitted();
+    tracker.admitted({
+      queuedAhead: 2,
+      queueActiveInteractive: 2,
+      queueActiveUtility: 0,
+      queueActiveScheduled: 2,
+      queueInteractiveReserveAvailable: false,
+      queueInteractiveReserveOccupied: true,
+      queueInteractiveCooldownActive: false,
+      queueNonInteractiveCooldownActive: false,
+    });
     now = 20;
     tracker.headers(new Response(null, { headers: { "cf-ray": "abcdef123456-SJC" } }), true);
     const observer = createWireTelemetryObserver(tracker, "text/event-stream");
@@ -56,6 +78,13 @@ describe("metadata-only request telemetry", () => {
     const record = records.at(-1)!;
     expect(record).toMatchObject({
       queueWaitMs: 10,
+      queueActiveInteractive: 2,
+      queueActiveUtility: 0,
+      queueActiveScheduled: 2,
+      queueInteractiveReserveAvailable: false,
+      queueInteractiveReserveOccupied: true,
+      queueInteractiveCooldownActive: false,
+      queueNonInteractiveCooldownActive: false,
       timeToHeadersMs: 10,
       inputTokens: 10,
       cacheReadTokens: 5,

@@ -3,9 +3,12 @@ import type { Model } from "../llm/types.js";
 import { currentHttpRequestTelemetry } from "./model-request-telemetry.js";
 
 type Priority = -1 | 0 | 1;
+type SparkyWorkClass = "interactive" | "utility" | "scheduled";
+type CooldownScope = "all" | "non-interactive";
 type AdmissionEntry = {
   signal?: AbortSignal;
   priority: Priority;
+  workClass: SparkyWorkClass;
   queuedAt: number;
   resolve: (release: () => void) => void;
   reject: (reason: unknown) => void;
@@ -13,7 +16,12 @@ type AdmissionEntry = {
 };
 const abortReason = (signal?: AbortSignal) =>
   signal?.reason ?? new DOMException("Sparky request cancelled", "AbortError");
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+const priorityForWorkClass = (workClass: SparkyWorkClass): Priority =>
+  workClass === "interactive" ? 1 : workClass === "scheduled" ? -1 : 0;
 
 export function sparkyUtilityBounds(modelRef: string | undefined) {
   return modelRef?.startsWith("sparky/")
@@ -25,26 +33,74 @@ export function createSparkyAdmission(
   options: {
     maxWaiting?: number;
     maxActive?: number;
+    interactiveReserve?: number;
     now?: () => number;
     agingMs?: number;
   } = {},
 ) {
-  const { maxWaiting = 32, maxActive = 4, now = Date.now, agingMs = 120_000 } = options;
+  const {
+    maxWaiting = 32,
+    maxActive = 4,
+    interactiveReserve = Math.min(1, maxActive),
+    now = Date.now,
+    agingMs = 120_000,
+  } = options;
+  if (
+    !Number.isSafeInteger(maxActive) ||
+    maxActive < 1 ||
+    !Number.isSafeInteger(interactiveReserve) ||
+    interactiveReserve < 0 ||
+    interactiveReserve > maxActive
+  ) {
+    throw new RangeError("Invalid Sparky admission capacity");
+  }
+  const maxNonInteractive = maxActive - interactiveReserve;
   let active = 0;
-  let pauses = 0;
+  const activeByWorkClass: Record<SparkyWorkClass, number> = {
+    interactive: 0,
+    utility: 0,
+    scheduled: 0,
+  };
+  let allPauses = 0;
+  let nonInteractivePauses = 0;
+  let interactiveCooldownBypassUsed = false;
   let lastPriority: Priority = 0;
   const waiting: AdmissionEntry[] = [];
+  const canAdmit = (entry: AdmissionEntry) => {
+    if (allPauses > 0 || active >= maxActive) {
+      return false;
+    }
+    if (entry.workClass === "interactive") {
+      return (
+        nonInteractivePauses === 0 ||
+        (!interactiveCooldownBypassUsed &&
+          interactiveReserve > 0 &&
+          activeByWorkClass.interactive < interactiveReserve)
+      );
+    }
+    return (
+      nonInteractivePauses === 0 &&
+      activeByWorkClass.utility + activeByWorkClass.scheduled < maxNonInteractive
+    );
+  };
   function pump() {
-    while (!pauses && active < maxActive && waiting.length) {
+    while (active < maxActive && waiting.length) {
+      const eligible = waiting
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => canAdmit(entry));
+      if (eligible.length === 0) {
+        return;
+      }
       const aged =
-        lastPriority >= 0 ? waiting.findIndex((entry) => now() - entry.queuedAt >= agingMs) : -1;
+        lastPriority >= 0
+          ? eligible.find(({ entry }) => now() - entry.queuedAt >= agingMs)?.index
+          : undefined;
       const index =
-        aged >= 0
+        aged !== undefined
           ? aged
-          : waiting.reduce(
-              (best, entry, current) => (entry.priority > waiting[best]!.priority ? current : best),
-              0,
-            );
+          : eligible.reduce((best, current) =>
+              current.entry.priority > best.entry.priority ? current : best,
+            ).index;
       const next = waiting.splice(index, 1)[0]!;
       next.detach();
       if (next.signal?.aborted) {
@@ -52,33 +108,68 @@ export function createSparkyAdmission(
         continue;
       }
       lastPriority = next.priority;
+      if (next.workClass === "interactive" && nonInteractivePauses > 0) {
+        interactiveCooldownBypassUsed = true;
+      }
       active++;
+      activeByWorkClass[next.workClass]++;
       let released = false;
       next.resolve(() => {
         if (!released) {
           released = true;
           active--;
+          activeByWorkClass[next.workClass]--;
           pump();
         }
       });
     }
   }
+  const telemetrySnapshot = () => ({
+    queuedAhead: waiting.length + (active >= maxActive ? active : 0),
+    queueActiveInteractive: activeByWorkClass.interactive,
+    queueActiveUtility: activeByWorkClass.utility,
+    queueActiveScheduled: activeByWorkClass.scheduled,
+    queueInteractiveReserveAvailable:
+      active < maxActive &&
+      allPauses === 0 &&
+      (nonInteractivePauses === 0 ||
+        (!interactiveCooldownBypassUsed &&
+          interactiveReserve > 0 &&
+          activeByWorkClass.interactive < interactiveReserve)),
+    queueInteractiveReserveOccupied: active > maxNonInteractive,
+    queueInteractiveCooldownActive: allPauses > 0,
+    queueNonInteractiveCooldownActive: allPauses > 0 || nonInteractivePauses > 0,
+  });
   return {
-    async pauseFor(ms: number, delay = sleep) {
-      pauses++;
+    async pauseFor(ms: number, scope: CooldownScope, delay = sleep) {
+      if (scope === "all") {
+        allPauses++;
+      } else {
+        if (nonInteractivePauses === 0) {
+          interactiveCooldownBypassUsed = activeByWorkClass.interactive > 0;
+        }
+        nonInteractivePauses++;
+      }
       try {
         await delay(ms);
       } finally {
-        pauses--;
+        if (scope === "all") {
+          allPauses--;
+        } else {
+          nonInteractivePauses--;
+          if (nonInteractivePauses === 0) {
+            interactiveCooldownBypassUsed = false;
+          }
+        }
         pump();
       }
     },
-    acquire(signal?: AbortSignal, priority: Priority = 0): Promise<() => void> {
+    acquire(signal?: AbortSignal, workClass: SparkyWorkClass = "utility"): Promise<() => void> {
       if (signal?.aborted) {
         return Promise.reject(abortReason(signal));
       }
-      if (![-1, 0, 1].includes(priority)) {
-        return Promise.reject(new RangeError("Invalid request queue priority"));
+      if (!["interactive", "utility", "scheduled"].includes(workClass)) {
+        return Promise.reject(new RangeError("Invalid request work class"));
       }
       if (waiting.length >= maxWaiting) {
         return Promise.reject(
@@ -90,7 +181,8 @@ export function createSparkyAdmission(
           resolve,
           reject,
           signal,
-          priority,
+          priority: priorityForWorkClass(workClass),
+          workClass,
           queuedAt: now(),
           detach: () => signal?.removeEventListener("abort", cancel),
         };
@@ -114,11 +206,17 @@ export function createSparkyAdmission(
     get activeCount() {
       return active;
     },
+    get activeByWorkClass() {
+      return { ...activeByWorkClass };
+    },
     get waiting() {
       return waiting.length;
     },
     get queuedAhead() {
-      return waiting.length + (active >= maxActive ? active : 0);
+      return telemetrySnapshot().queuedAhead;
+    },
+    get telemetry() {
+      return telemetrySnapshot();
     },
   };
 }
@@ -188,16 +286,15 @@ export function queueSparkyFetch(
       ? AbortSignal.any([callerSignal, deadline.signal])
       : deadline.signal;
     const telemetry = currentHttpRequestTelemetry();
-    const priority =
-      telemetry?.record.workClass === "interactive"
-        ? 1
-        : telemetry?.record.workClass === "scheduled"
-          ? -1
-          : 0;
-    telemetry?.queue(pool, waitMs, priority);
+    const workClass: SparkyWorkClass =
+      telemetry?.record.workClass === "interactive" || telemetry?.record.workClass === "scheduled"
+        ? telemetry.record.workClass
+        : "utility";
+    const priority = priorityForWorkClass(workClass);
+    telemetry?.queue(pool.telemetry, waitMs, priority);
     let release: () => void;
     try {
-      release = await pool.acquire(waitingSignal, priority);
+      release = await pool.acquire(waitingSignal, workClass);
     } finally {
       clearTimeout(timer);
     }
@@ -210,7 +307,7 @@ export function queueSparkyFetch(
             "TimeoutError",
           );
     }
-    telemetry?.admitted();
+    telemetry?.admitted(pool.telemetry);
     let settled = false;
     let detach = () => {};
     const finish = (cooldown = false) => {
@@ -234,7 +331,9 @@ export function queueSparkyFetch(
           retryAfter !== undefined && Number.isFinite(retryAfter) && retryAfter >= 0
             ? Math.min(retryAfter * 1_000, 120_000)
             : 15_000;
-        void pool.pauseFor(delayMs, options.sleep).catch(() => undefined);
+        void pool
+          .pauseFor(delayMs, workClass === "interactive" ? "all" : "non-interactive", options.sleep)
+          .catch(() => undefined);
       }
       if (!response.body) {
         finish();

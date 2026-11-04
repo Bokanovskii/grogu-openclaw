@@ -48,9 +48,9 @@ export function cronNotificationJob(job: CronJob): CronNotificationJob {
   return {
     id: job.id,
     name: job.name,
-    agentId: job.agentId,
+    agentId: job.agentId ?? job.owner?.agentId,
     sessionTarget: job.sessionTarget,
-    sessionKey: job.sessionKey,
+    sessionKey: job.sessionKey ?? job.owner?.sessionKey,
     wakeMode: job.wakeMode,
     state: {
       lastRunAtMs: job.state.lastRunAtMs,
@@ -82,6 +82,8 @@ type CronFailureAlertRoute = {
 
 export type ResolvedFailureAlert = CronFailureAlertRoute & {
   after: number;
+  /** True when job or global config sets `after`; the default threshold yields to transient retries. */
+  afterConfigured?: boolean;
   cooldownMs: number;
   includeSkipped: boolean;
 };
@@ -96,11 +98,5 @@ type CronFailureAlertNotification = {
 
 export type CronNotificationIntent = { routing?: CronNotificationRouting } & (
   | { kind: "auto-disabled"; job: CronNotificationJob; text: string }
-  | {
-      kind: "failure-repair";
-      job: CronNotificationJob;
-      text: string;
-      fallback?: CronFailureAlertNotification;
-    }
   | CronFailureAlertNotification
 );

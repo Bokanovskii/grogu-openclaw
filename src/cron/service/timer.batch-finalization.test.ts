@@ -359,7 +359,11 @@ describe("cron batch outcome finalization", () => {
       resolveOriginDeliveryContext,
       requestHeartbeat,
     });
-    await finalizeError(state, job, "cron: job execution timed out at /private/agent/work");
+    await finalizeError(
+      state,
+      job,
+      "402 payment required: insufficient credits at /private/agent/work",
+    );
     expect(order).toEqual(["notify", "heartbeat"]);
     expect(enqueueSystemEvent).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining(`openclaw automations enable ${job.id}`),
@@ -374,7 +378,7 @@ describe("cron batch outcome finalization", () => {
     expect(text).toContain("Recurring report");
     expect(text).toContain(job.id);
     expect(text).toContain("10 consecutive run failures");
-    expect(text).toContain("Cause: timeout");
+    expect(text).toContain("Cause: billing");
     expect(text).not.toContain("/private/agent/work");
     expect(resolveOriginDeliveryContext).toHaveBeenCalledWith({
       agentId: "main",
@@ -392,7 +396,7 @@ describe("cron batch outcome finalization", () => {
       enabled: false,
       state: {
         consecutiveErrors: 10,
-        lastError: "cron: job execution timed out at /private/agent/work",
+        lastError: "402 payment required: insufficient credits at /private/agent/work",
         autoDisabled: { reason: "consecutive-failures", atMs: DUE_AT + 10, consecutiveErrors: 10 },
       },
     });

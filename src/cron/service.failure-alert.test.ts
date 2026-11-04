@@ -25,7 +25,7 @@ function withAlerts(run: AlertParams[1], options: Omit<AlertParams[0], "schedule
 }
 
 describe("CronService failure alerts", () => {
-  it("alerts once for blocked local-provider runs and recovers without repair or backoff", async () => {
+  it("alerts once for blocked local-provider runs and recovers without backoff", async () => {
     const error = "Local provider unavailable at http://127.0.0.1:11434 (private diagnostic)";
     const blocked = {
       status: "skipped" as const,
@@ -42,7 +42,7 @@ describe("CronService failure alerts", () => {
       },
     };
     await withAlerts(
-      async ({ cron, sendCronFailureAlert, runCronFailureRepair, runIsolatedAgentJob, addJob }) => {
+      async ({ cron, sendCronFailureAlert, runIsolatedAgentJob, addJob }) => {
         const job = await addJob("local report", {
           delivery: createTelegramDelivery(),
           owner: { sessionKey: "agent:main:owner" },
@@ -66,7 +66,6 @@ describe("CronService failure alerts", () => {
         expect(alert.text).toContain("local model provider is unreachable");
         expect(alert.text).toContain("Start the provider or check its configured endpoint");
         expect(alert.text).not.toContain("private diagnostic");
-        expect(runCronFailureRepair).not.toHaveBeenCalled();
 
         vi.setSystemTime(Date.now() + 3_600_000);
         await cron.run(job.id, "due");
@@ -83,7 +82,6 @@ describe("CronService failure alerts", () => {
         expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
         expect(cron.getJob(job.id)?.state.failureAlertIncident).toBeUndefined();
         expect(cron.getJob(job.id)?.state.lastFailureAlertAtMs).toBeUndefined();
-        expect(runCronFailureRepair).not.toHaveBeenCalled();
       },
       { failureAlert: undefined, runResult: blocked },
     );
@@ -93,7 +91,7 @@ describe("CronService failure alerts", () => {
     "keeps %s silent with the default skipped-alert policy",
     async (scenario) => {
       await withAlerts(
-        async ({ cron, sendCronFailureAlert, runCronFailureRepair, addJob }) => {
+        async ({ cron, sendCronFailureAlert, addJob }) => {
           const job = await addJob("silent skip", {
             delivery: createTelegramDelivery(),
             ...(scenario === "job opt-out" ? { failureAlert: false as const } : {}),
@@ -101,7 +99,6 @@ describe("CronService failure alerts", () => {
           await cron.run(job.id, "force");
           await cron.run(job.id, "force");
           expect(sendCronFailureAlert).not.toHaveBeenCalled();
-          expect(runCronFailureRepair).not.toHaveBeenCalled();
         },
         {
           failureAlert: scenario === "global opt-out" ? { enabled: false } : undefined,
@@ -219,7 +216,10 @@ describe("CronService failure alerts", () => {
         expect(firstAlert.job.id).toBe(job.id);
         expectAlertTextContaining(sendCronFailureAlert, 'Automation "daily report" failed 2 times');
 
-        runIsolatedAgentJob.mockResolvedValue({ status: "error", error: "timeout" });
+        runIsolatedAgentJob.mockResolvedValue({
+          status: "error",
+          error: "402 payment required: insufficient credits",
+        });
         await cron.run(job.id, "force");
         expect(sendCronFailureAlert).toHaveBeenCalledTimes(1);
 
@@ -228,10 +228,13 @@ describe("CronService failure alerts", () => {
         await cron.run(job.id, "force");
         expect(sendCronFailureAlert).toHaveBeenCalledTimes(1);
 
-        runIsolatedAgentJob.mockResolvedValue({ status: "error", error: "timeout" });
+        runIsolatedAgentJob.mockResolvedValue({
+          status: "error",
+          error: "402 payment required: insufficient credits",
+        });
         await cron.run(job.id, "force");
         expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
-        expectAlertTextContaining(sendCronFailureAlert, "Cause: timeout");
+        expectAlertTextContaining(sendCronFailureAlert, "Cause: billing");
 
         runIsolatedAgentJob.mockResolvedValue({ status: "ok" });
         await cron.run(job.id, "force");
@@ -244,7 +247,10 @@ describe("CronService failure alerts", () => {
         expect(cron.getJob(job.id)?.state.failureAlertIncident).toBeUndefined();
         expect(cron.getJob(job.id)?.state.lastRunStatus).toBe("ok");
 
-        runIsolatedAgentJob.mockResolvedValue({ status: "error", error: "timeout" });
+        runIsolatedAgentJob.mockResolvedValue({
+          status: "error",
+          error: "402 payment required: insufficient credits",
+        });
         await cron.run(job.id, "force");
         expect(sendCronFailureAlert).toHaveBeenCalledTimes(2);
         await cron.run(job.id, "force");
@@ -256,6 +262,106 @@ describe("CronService failure alerts", () => {
       },
     );
   });
+
+  it("sends a plain alert for an owned recurring job", async () => {
+    await withAlerts(
+      async ({ cron, sendCronFailureAlert, addJob }) => {
+        const job = await addJob("owned report", {
+          delivery: createTelegramDelivery(),
+          owner: { agentId: "main", sessionKey: "agent:main:telegram:direct:owner" },
+        });
+
+        await cron.run(job.id, "force");
+        await cron.run(job.id, "force");
+
+        expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+        expectAlertTextContaining(sendCronFailureAlert, 'Automation "owned report" failed 2 times');
+        expect(cron.getJob(job.id)?.state.failureAlertIncident?.repair).toBeUndefined();
+      },
+      { failureAlert: { enabled: true, after: 2, cooldownMs: 0 } },
+    );
+  });
+
+  it("sends an owned terminal one-shot alert through its last route without a destination", async () => {
+    await withAlerts(
+      async ({ cron, sendCronFailureAlert, addJob }) => {
+        const ownerSessionKey = "agent:main:telegram:direct:owner";
+        const job = await addJob("one-shot sync", {
+          delivery: { mode: "none", bestEffort: true },
+          owner: { agentId: "main", sessionKey: ownerSessionKey },
+          schedule: { kind: "at", at: new Date(Date.now()).toISOString() },
+        });
+
+        await cron.run(job.id, "due");
+
+        expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+        expect(sendCronFailureAlert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            channel: "last",
+            job: expect.objectContaining({
+              agentId: "main",
+              sessionKey: ownerSessionKey,
+            }),
+            payload: expect.objectContaining({
+              text: expect.stringContaining('Automation "one-shot sync" failed 1 times'),
+            }),
+          }),
+        );
+      },
+      { failureAlert: undefined },
+    );
+  });
+
+  it("keeps transient provider failures quiet under the default threshold until the outage persists", async () => {
+    await withAlerts(
+      async ({ cron, sendCronFailureAlert, addJob }) => {
+        const job = await addJob("market watch", { delivery: createTelegramDelivery() });
+
+        for (let run = 1; run < 8; run += 1) {
+          await cron.run(job.id, "force");
+        }
+        expect(sendCronFailureAlert).not.toHaveBeenCalled();
+
+        await cron.run(job.id, "force");
+        expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+        expectAlertTextContaining(sendCronFailureAlert, 'Automation "market watch" failed 8 times');
+      },
+      {
+        failureAlert: { enabled: true, cooldownMs: 0 },
+        runResult: { status: "error", error: "LLM request timed out" },
+      },
+    );
+  });
+
+  it.each(["Invalid timeout configuration", "Invalid configuration"])(
+    "keeps explicit permanent failures on the default alert threshold: %s",
+    async (error) => {
+      await withAlerts(
+        async ({ cron, sendCronFailureAlert, addJob }) => {
+          const job = await addJob("permanent config failure", {
+            delivery: createTelegramDelivery(),
+          });
+
+          await cron.run(job.id, "force");
+          expect(sendCronFailureAlert).not.toHaveBeenCalled();
+          await cron.run(job.id, "force");
+          expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+          expectAlertTextContaining(
+            sendCronFailureAlert,
+            'Automation "permanent config failure" failed 2 times',
+          );
+        },
+        {
+          failureAlert: { enabled: true },
+          runResult: {
+            status: "error",
+            error,
+            errorClassification: { kind: "permanent" },
+          },
+        },
+      );
+    },
+  );
 
   it("fences delayed alerts across recovery and failure in the same clock tick", async () => {
     await withAlerts(

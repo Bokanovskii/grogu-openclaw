@@ -120,7 +120,6 @@ import {
   buildDeterministicEmbedding,
 } from "./mock-openai-contracts.js";
 import { planCronBlockedOutcomeTurn } from "./mock-openai-cron-blocked-outcome.js";
-import { planCronFailureRepairTurn } from "./mock-openai-cron-failure-repair.js";
 import {
   extractExactReplyDirective,
   extractExactMarkerDirective,
@@ -538,10 +537,6 @@ async function buildResponsesPayload(
   }
   const compactionRetryScenarioActive =
     scenarioState.compactionRetryActive || hasCompactionRetryMarker;
-  const cronFailureRepairTurn = planCronFailureRepairTurn(prompt, input);
-  if (cronFailureRepairTurn) {
-    return cronFailureRepairTurn;
-  }
   const cronBlockedOutcomeTurn = planCronBlockedOutcomeTurn(prompt);
   if (cronBlockedOutcomeTurn) {
     return cronBlockedOutcomeTurn;

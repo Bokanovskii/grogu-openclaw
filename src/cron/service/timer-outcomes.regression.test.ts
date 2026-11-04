@@ -224,6 +224,93 @@ describe("cron timer outcome and failure policy regressions", () => {
   });
 
   it.each([
+    "LLM request timed out",
+    "Sparky request queue is full; retry after current work finishes",
+    "Sparky local queue deadline expired before request dispatch",
+    "Sparky local queue deadline expired",
+  ])("keeps a recurring job on backoff through transient failure: %s", (error) => {
+    const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+    const deferredNotifications: DeferredCronNotifications = [];
+    const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 12 } });
+
+    applyJobResult(
+      state,
+      job,
+      { status: "error", error, provider: "sparky", startedAt, endedAt: startedAt + 10 },
+      { deferredNotifications },
+    );
+
+    expect(job.state.consecutiveErrors).toBe(13);
+    expect(job.enabled).toBe(true);
+    expect(job.state.autoDisabled).toBeUndefined();
+    expect(job.state.nextRunAtMs).toBeGreaterThan(startedAt);
+    expect(deferredNotifications.map((notification) => notification.kind)).not.toContain(
+      "auto-disabled",
+    );
+  });
+
+  it("still auto-disables a permanent configuration failure", () => {
+    const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+    const deferredNotifications: DeferredCronNotifications = [];
+    const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
+
+    applyJobResult(
+      state,
+      job,
+      {
+        status: "error",
+        error: "wrong model id",
+        provider: "sparky",
+        startedAt,
+        endedAt: startedAt + 10,
+      },
+      { deferredNotifications },
+    );
+
+    expect(job.enabled).toBe(false);
+    expect(job.state.autoDisabled?.reason).toBe("consecutive-failures");
+    expect(job.state.nextRunAtMs).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "explicit permanent classification",
+      errorClassification: { kind: "permanent" as const },
+      disables: true,
+    },
+    {
+      name: "unclassified timeout-like text",
+      errorClassification: undefined,
+      disables: false,
+    },
+  ])(
+    "keeps the producer classification authoritative: $name",
+    ({ errorClassification, disables }) => {
+      const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+      const deferredNotifications: DeferredCronNotifications = [];
+      const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
+
+      applyJobResult(
+        state,
+        job,
+        {
+          status: "error",
+          error: "Invalid timeout configuration",
+          ...(errorClassification ? { errorClassification } : {}),
+          provider: "sparky",
+          startedAt,
+          endedAt: startedAt + 10,
+        },
+        { deferredNotifications },
+      );
+
+      expect(job.enabled).toBe(!disables);
+      expect(Boolean(job.state.autoDisabled)).toBe(disables);
+      expect(job.state.nextRunAtMs === undefined).toBe(disables);
+    },
+  );
+
+  it.each([
     { name: "silent job", delivery: { mode: "none" as const }, disables: false },
     {
       name: "webhook job",

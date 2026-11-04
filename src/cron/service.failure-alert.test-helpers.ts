@@ -1,4 +1,4 @@
-import { expect, type Mock, vi } from "vitest";
+import { expect, vi } from "vitest";
 import { CronService } from "./service.js";
 import { setupCronServiceSuite } from "./service.test-harness.js";
 import type { CronJobCreate } from "./types.js";
@@ -8,7 +8,6 @@ type RunIsolatedAgentJob = NonNullable<CronServiceParams["runIsolatedAgentJob"]>
 type IsolatedAgentRunResult = Awaited<ReturnType<RunIsolatedAgentJob>>;
 type FailureAlertConfig = NonNullable<CronServiceParams["cronConfig"]>["failureAlert"];
 type SendCronFailureAlert = NonNullable<CronServiceParams["sendCronFailureAlert"]>;
-type RunCronFailureRepair = NonNullable<CronServiceParams["runCronFailureRepair"]>;
 type RunScriptJob = NonNullable<CronServiceParams["runScriptJob"]>;
 
 export function createTelegramDelivery(): NonNullable<CronJobCreate["delivery"]> {
@@ -48,7 +47,6 @@ export function setupFailureAlertSuite() {
       enqueueSystemEvent: ReturnType<typeof vi.fn>;
       requestHeartbeat: ReturnType<typeof vi.fn>;
       sendCronFailureAlert: ReturnType<typeof vi.fn<SendCronFailureAlert>>;
-      runCronFailureRepair: Mock<RunCronFailureRepair>;
       runIsolatedAgentJob: ReturnType<typeof vi.fn<RunIsolatedAgentJob>>;
       runScriptJob: ReturnType<typeof vi.fn<RunScriptJob>>;
       addJob: (name: string, overrides?: Partial<CronJobCreate>) => ReturnType<CronService["add"]>;
@@ -58,10 +56,9 @@ export function setupFailureAlertSuite() {
     const sendCronFailureAlert = vi.fn<SendCronFailureAlert>(async () => undefined);
     const enqueueSystemEvent = vi.fn();
     const requestHeartbeat = vi.fn();
-    const runCronFailureRepair = vi.fn<RunCronFailureRepair>(async () => undefined);
     const runResult = params.runResult ?? {
       status: "error",
-      error: "temporary upstream error",
+      error: "report template is invalid",
     };
     const runIsolatedAgentJob = vi.fn<RunIsolatedAgentJob>(async () => runResult);
     const runScriptJob = vi.fn<RunScriptJob>(async () => runResult);
@@ -78,7 +75,6 @@ export function setupFailureAlertSuite() {
       requestHeartbeat,
       runIsolatedAgentJob,
       runScriptJob,
-      runCronFailureRepair,
       ...(params.useFallback ? {} : { sendCronFailureAlert }),
     });
 
@@ -89,7 +85,6 @@ export function setupFailureAlertSuite() {
         enqueueSystemEvent,
         requestHeartbeat,
         sendCronFailureAlert,
-        runCronFailureRepair,
         runIsolatedAgentJob,
         runScriptJob,
         addJob: async (name, overrides) => await cron.add(createFailureAlertJob(name, overrides)),

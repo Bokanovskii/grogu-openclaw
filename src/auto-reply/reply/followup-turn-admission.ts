@@ -314,7 +314,7 @@ export async function admitFollowupTurn(params: {
     const notifyPreflightCompaction =
       turn.sendPolicy === "allow" && queued.currentInboundEventKind !== "room_event"
         ? async (phase: CompactionNoticePhase, text?: string) => {
-            if (phase !== "context_bounded" && !shouldNotifyUserAboutCompaction(config)) {
+            if (!shouldNotifyUserAboutCompaction(config)) {
               return;
             }
             if (phase !== "start") {

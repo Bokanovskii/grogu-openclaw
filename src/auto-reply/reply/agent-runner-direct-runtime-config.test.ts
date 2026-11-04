@@ -332,6 +332,27 @@ describe("runReplyAgent runtime config", () => {
     expect(memoryCall.runtimePolicySessionKey).toBe(runtimePolicySessionKey);
   });
 
+  it.each([
+    ["silent by default", false, 0],
+    ["visible when opted in", true, 1],
+  ] as const)("keeps bounded-context direct notices %s", async (_label, notifyUser, calls) => {
+    const { replyParams } = createDirectRuntimeReplyParams();
+    const onBlockReply = vi.fn();
+    replyParams.opts = { onBlockReply };
+    resolveQueuedReplyExecutionConfigMock.mockResolvedValue({
+      ...freshCfg,
+      agents: { defaults: { compaction: { notifyUser } } },
+    });
+    runSessionCompactionIfNeededMock.mockImplementation(async (params: PreflightParams) => {
+      await params.onCompactionNotice?.("context_bounded");
+      return params.sessionEntry;
+    });
+
+    await runReplyAgent(replyParams);
+
+    expect(onBlockReply).toHaveBeenCalledTimes(calls);
+  });
+
   it("continues the main reply after a recorded memory-flush failure", async () => {
     const { replyParams } = createDirectRuntimeReplyParams();
     const onBlockReply = vi.fn();

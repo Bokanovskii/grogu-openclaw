@@ -197,6 +197,8 @@ export async function runPreparedEmbeddedLoop(
     runInput: admittedRunInput,
     preparedRuntime,
     getSessionId: () => sessionPromptState.sessionId,
+    runStartedAtMs: started,
+    assertCurrent: assertAdmittedActive,
   });
   const { contextEngine, contextEngineLogicalTurnLease, ownsContextEngineLogicalTurnLease } =
     await admitEmbeddedContextEngine(admittedRunInput, initialHarness);
@@ -289,6 +291,7 @@ export async function runPreparedEmbeddedLoop(
         ...admittedRunInput,
         runParams: {
           ...params,
+          timeoutMs: failoverRetryController.resolveAttemptTimeoutMs(params.timeoutMs),
           onCompactionRequestBudget: (budget) => {
             if (!acceptsRequestBudget || abortSignal?.aborted) {
               return;

@@ -423,6 +423,40 @@ describe("private worker trigger templates", () => {
       ),
     ).resolves.toEqual({ error: { kind: "transient" } });
 
+    for (const code of ["invalid_input", "input_contract"]) {
+      await expect(
+        compile(messagesTemplate())(
+          {
+            seaglass: {
+              recentMessages: async () => {
+                throw Object.assign(new Error("trusted permanent failure"), {
+                  code,
+                  nativeCode: "ECONNRESET",
+                });
+              },
+            },
+          },
+          {},
+        ),
+      ).resolves.toEqual({ error: { kind: "schema" } });
+    }
+
+    await expect(
+      compile(messagesTemplate())(
+        {
+          seaglass: {
+            recentMessages: async () => {
+              throw Object.assign(new Error("generic internal transport failure"), {
+                code: "internal_error",
+                nativeName: "TimeoutError",
+              });
+            },
+          },
+        },
+        {},
+      ),
+    ).resolves.toEqual({ error: { kind: "transient" } });
+
     await expect(
       compile(messagesTemplate())(
         {

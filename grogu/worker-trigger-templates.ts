@@ -175,9 +175,14 @@ const normalizeFailureKind = (value) => {
   const kind = record(value) && typeof value.kind === "string" ? value.kind : "";
   if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) return "transient";
   if (["auth", "permission", "config", "schema"].includes(kind)) return kind;
-  const codeValue = record(value) ? value.nativeCode ?? value.code : undefined;
+  const bridgeCode = record(value) && typeof value.code === "string" ? value.code.toLowerCase() : "";
+  if (["invalid_input", "input_contract", "output_contract", "invalid_contract", "store_range", "store_type"].includes(bridgeCode)) return "schema";
+  const transientCodes = ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT", "ABORT_ERR"];
+  if (transientCodes.includes(bridgeCode.toUpperCase())) return "transient";
+  if (bridgeCode && !["tool_error", "internal_error"].includes(bridgeCode)) return "schema";
+  const codeValue = record(value) ? value.nativeCode : undefined;
   const code = typeof codeValue === "string" ? codeValue.toUpperCase() : "";
-  if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT", "ABORT_ERR"].includes(code)) return "transient";
+  if (transientCodes.includes(code)) return "transient";
   const nameValue = record(value) ? value.nativeName ?? value.name : undefined;
   const name = typeof nameValue === "string" ? nameValue : "";
   if (["AbortError", "TimeoutError"].includes(name)) return "transient";

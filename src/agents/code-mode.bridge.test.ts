@@ -13,7 +13,12 @@ import {
   resultDetails,
   testing,
 } from "./code-mode.test-support.js";
-import { jsonResult, type AnyAgentTool } from "./tools/common.js";
+import {
+  jsonResult,
+  ToolAuthorizationError,
+  ToolInputError,
+  type AnyAgentTool,
+} from "./tools/common.js";
 
 function bridge(targets: AnyAgentTool[], timeoutMs = 10_000, awaitResults?: boolean) {
   const h = createCodeModeHarness({ codeMode: { timeoutMs } });
@@ -93,6 +98,53 @@ describe("Code Mode bridge settlement and cancellation", () => {
     `);
     expect(details).toMatchObject({ status: "failed", code: "internal_error" });
   });
+
+  it.each([
+    {
+      label: "trusted input",
+      create: () =>
+        Object.assign(new ToolInputError("invalid collector input"), {
+          cause: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        }),
+      nativeCode: "ETIMEDOUT",
+    },
+    {
+      label: "trusted authorization",
+      create: () =>
+        Object.assign(new ToolAuthorizationError("collector authorization denied"), {
+          cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+        }),
+      nativeCode: "ECONNRESET",
+    },
+  ])(
+    "retains authoritative invalid_input with nested transport metadata for $label",
+    async (fixture) => {
+      const transport = pluginToolWithExecute("transport", "Fail transport", async () => {
+        throw fixture.create();
+      });
+      const details = await bridge([transport])(`
+      try {
+        await transport({});
+        return { unexpected: true };
+      } catch (error) {
+        return {
+          code: error.code,
+          nativeCode: error.nativeCode,
+          effectStatus: error.effectStatus,
+          message: error.message,
+        };
+      }
+    `);
+      expect(details).toMatchObject({
+        status: "completed",
+        value: {
+          code: "invalid_input",
+          nativeCode: fixture.nativeCode,
+          effectStatus: "unknown",
+        },
+      });
+    },
+  );
 
   it.each([false, true])(
     "drains nested work after a combinator settles (failure=%s)",

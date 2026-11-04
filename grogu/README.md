@@ -23,8 +23,11 @@ Upstream GitHub workflows are kept for reference under
 ## Repository history
 
 `main` carries the real upstream history (about 7 GiB packed at `v2026.10.7`),
-so each stable release merges with a true merge base and keeps its canonical
-commit ID. On a new machine, clone with `git clone --filter=blob:none` to skip
+so each stable release is recorded as a merge parent and keeps its canonical
+commit ID. Upstream cuts every stable release on its own release branch, so
+consecutive releases diverge (v2026.10.10 is 842 commits behind v2026.10.7). The
+integration therefore merges with the pinned release as the explicit merge base:
+only Grogu's own changes since that release are carried onto the new one. On a new machine, clone with `git clone --filter=blob:none` to skip
 historical file contents. GitHub rejects single pushes over 2 GB, so seeding a
 new private origin means pushing `main` in first-parent steps that each stay
 under that limit (`git rev-list --objects --disk-usage <next> ^<previous>`
@@ -57,26 +60,47 @@ node --import ./scripts/tsx.mjs grogu/maint.mts --profile <profile> <command>
 
 Release builds install the same CLI as `dist/grogu-maint.js`.
 
-| Command                         | Effect                                                                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                        |
-| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted. |
-| `backup`                        | Complete native online archive, verified, with a private digest receipt.                                                                                      |
-| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                             |
-| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                 |
-| `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                       |
-| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                    |
-| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                       |
-| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                    |
+| Command                         | Effect                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                                    |
+| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted.             |
+| `compaction-stage`              | Writes a validated private candidate config plus apply, rollback, and recovery scripts. Apply requires a verified complete-backup receipt and never restarts the Gateway. |
+| `backup`                        | Complete native online archive, verified, with a private digest receipt.                                                                                                  |
+| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                         |
+| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                             |
+| `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                                   |
+| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                |
+| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                   |
+| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                |
 
 Every command writes owner-only receipts to a new directory under the profile's
 `recoveryDir`.
 
+The backup receipt records archive bytes and separate capture, verification,
+and digest timings. It preserves the complete online archive and workspace
+contract; phase facts identify the slow owner without publishing paths or
+inventory.
+
+Worker prompt contracts live under `grogu/templates/workers/`. Private job
+definitions may consume them after review. They keep unchanged polls
+deterministic and model-free, distinguish authorization failures from empty
+sources, and require privacy-preserving bounded research plus one useful
+owner-only update for each material private signal.
+
+Gmail authorization verification stays separate from worker correctness. Use
+the existing non-mutating verify-only command after consent includes the
+read-only Gmail scope. For a forced refresh test, copy credential material into
+an owner-only isolated state and expire only the copied access-token cache.
+Production app audience avoids testing-mode seven-day expiry, but refresh
+tokens can still be revoked; a low-frequency health check must distinguish
+missing scope, revocation, and transient network/provider failure.
+
 ## Taking in upstream releases
 
 1. `grogu-upstream.yml` runs daily (or on dispatch) in the private repository.
-   It finds the newest stable OpenClaw release, merges it onto `main` in the
-   rolling `grogu/upstream` branch, archives any new upstream workflows, updates
+   It finds the newest stable OpenClaw release, applies Grogu's delta to it with
+   `git merge-tree --merge-base=<pinned release>`, commits the result with `main`
+   and the release as parents in the rolling `grogu/upstream` branch, archives any new upstream workflows, updates
    `upstream.json`, and opens or refreshes one draft PR. It never enables
    auto-merge, deploys, or makes model requests.
    - It needs the `GROGU_UPSTREAM_TOKEN` secret: a fine-grained token limited to
@@ -85,11 +109,18 @@ Every command writes owner-only receipts to a new directory under the profile's
      `.github/workflows`.
    - Install scripts are skipped and Git hooks are disabled, so no
      upstream-controlled code runs while that token is present.
+   - Checkout and the named upstream remote use `blob:none` partial clones.
+     Merge analysis retains full commit/tree ancestry and fetches only blobs
+     needed for the candidate tree. Disk and Git object-size checkpoints make
+     runner pressure visible without printing repository content.
 2. It dispatches `grogu-ci.yml` for the exact prepared commit, so the CI
    evidence is pinned to that SHA.
-3. If the merge conflicts, the run fails, lists the conflicting files, and
-   leaves the remote branch unchanged. Resolve the merge locally on a branch
-   from `main` and open the PR by hand.
+3. If the merge conflicts, the run fails, lists the conflicting files in the
+   job summary, and leaves the remote branch unchanged. Resolve it locally on a
+   branch from `main` with the same base:
+   `git merge-tree --write-tree --name-only -z --merge-base=<pinned commit> main <release commit>`
+   shows the conflicts; resolve them, record the release as the second parent,
+   update `upstream.json`, and open the PR by hand.
 4. Review the PR and CI. Merge only when green.
 5. Deploy deliberately: `backup`, `release-build`, `release-verify`, stage and
    check, cut over through the native service, then `status` and

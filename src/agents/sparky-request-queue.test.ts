@@ -157,11 +157,38 @@ describe("provider-origin admission", () => {
     });
     interactiveRelease();
     await flush();
-    expect(secondInteractiveAdmitted).toBe(false);
-    resume!();
-    await next;
+    expect(secondInteractiveAdmitted).toBe(true);
     const secondInteractiveRelease = await secondInteractive;
     secondInteractiveRelease();
+    resume!();
+    await next;
+  });
+
+  it("reopens the reserve after a preexisting interactive turn finishes during cooldown", async () => {
+    const pool = createSparkyAdmission();
+    const first = await pool.acquire(undefined, "interactive");
+    let resume: (() => void) | undefined;
+    const pause = pool.pauseFor(
+      120_000,
+      "non-interactive",
+      () =>
+        new Promise<void>((resolve) => {
+          resume = resolve;
+        }),
+    );
+    first();
+    let nextAdmitted = false;
+    const next = pool.acquire(undefined, "interactive").then((release) => {
+      nextAdmitted = true;
+      return release;
+    });
+
+    await flush();
+    expect(nextAdmitted).toBe(true);
+    const nextRelease = await next;
+    nextRelease();
+    resume!();
+    await pause;
   });
 
   it("pauses every class after an interactive 429 and releases aborted streams once", async () => {

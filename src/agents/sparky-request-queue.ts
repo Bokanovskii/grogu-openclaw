@@ -63,7 +63,6 @@ export function createSparkyAdmission(
   };
   let allPauses = 0;
   let nonInteractivePauses = 0;
-  let interactiveCooldownBypassUsed = false;
   let lastPriority: Priority = 0;
   const waiting: AdmissionEntry[] = [];
   const canAdmit = (entry: AdmissionEntry) => {
@@ -73,9 +72,7 @@ export function createSparkyAdmission(
     if (entry.workClass === "interactive") {
       return (
         nonInteractivePauses === 0 ||
-        (!interactiveCooldownBypassUsed &&
-          interactiveReserve > 0 &&
-          activeByWorkClass.interactive < interactiveReserve)
+        (interactiveReserve > 0 && activeByWorkClass.interactive < interactiveReserve)
       );
     }
     return (
@@ -108,9 +105,6 @@ export function createSparkyAdmission(
         continue;
       }
       lastPriority = next.priority;
-      if (next.workClass === "interactive" && nonInteractivePauses > 0) {
-        interactiveCooldownBypassUsed = true;
-      }
       active++;
       activeByWorkClass[next.workClass]++;
       let released = false;
@@ -133,9 +127,7 @@ export function createSparkyAdmission(
       active < maxActive &&
       allPauses === 0 &&
       (nonInteractivePauses === 0 ||
-        (!interactiveCooldownBypassUsed &&
-          interactiveReserve > 0 &&
-          activeByWorkClass.interactive < interactiveReserve)),
+        (interactiveReserve > 0 && activeByWorkClass.interactive < interactiveReserve)),
     queueInteractiveReserveOccupied: active > maxNonInteractive,
     queueInteractiveCooldownActive: allPauses > 0,
     queueNonInteractiveCooldownActive: allPauses > 0 || nonInteractivePauses > 0,
@@ -145,9 +137,6 @@ export function createSparkyAdmission(
       if (scope === "all") {
         allPauses++;
       } else {
-        if (nonInteractivePauses === 0) {
-          interactiveCooldownBypassUsed = activeByWorkClass.interactive > 0;
-        }
         nonInteractivePauses++;
       }
       try {
@@ -157,9 +146,6 @@ export function createSparkyAdmission(
           allPauses--;
         } else {
           nonInteractivePauses--;
-          if (nonInteractivePauses === 0) {
-            interactiveCooldownBypassUsed = false;
-          }
         }
         pump();
       }

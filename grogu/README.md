@@ -72,6 +72,25 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 Every command writes owner-only receipts to a new directory under the profile's
 `recoveryDir`.
 
+The backup receipt records archive bytes and separate capture, verification,
+and digest timings. It preserves the complete online archive and workspace
+contract; phase facts identify the slow owner without publishing paths or
+inventory.
+
+Worker prompt contracts live under `grogu/templates/workers/`. Private job
+definitions may consume them after review. They keep unchanged polls
+deterministic and model-free, distinguish authorization failures from empty
+sources, and require privacy-preserving bounded research plus one useful
+owner-only update for each material private signal.
+
+Gmail authorization verification stays separate from worker correctness. Use
+the existing non-mutating verify-only command after consent includes the
+read-only Gmail scope. For a forced refresh test, copy credential material into
+an owner-only isolated state and expire only the copied access-token cache.
+Production app audience avoids testing-mode seven-day expiry, but refresh
+tokens can still be revoked; a low-frequency health check must distinguish
+missing scope, revocation, and transient network/provider failure.
+
 ## Taking in upstream releases
 
 1. `grogu-upstream.yml` runs daily (or on dispatch) in the private repository.

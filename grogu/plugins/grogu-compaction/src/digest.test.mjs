@@ -9,7 +9,12 @@ test("renders a deterministic bounded timeline and collapsed tool facts", async 
       role: "assistant",
       content: [{ type: "tool_use", name: "sessions_search", input: { private: "omitted" } }],
     },
-    { role: "tool", name: "sessions_search", isError: false, content: "large private result" },
+    {
+      role: "toolResult",
+      toolName: "sessions_search",
+      isError: false,
+      content: [{ type: "text", text: "large private result" }],
+    },
     { role: "assistant", content: "I found the older decision and kept D-17." },
   ];
 

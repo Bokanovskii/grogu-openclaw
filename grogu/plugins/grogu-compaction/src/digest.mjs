@@ -81,7 +81,7 @@ function toolFacts(message, tools) {
           : "unknown";
     noteTool(tools, name, "called");
   }
-  if (message?.role !== "tool") {
+  if (message?.role !== "tool" && message?.role !== "toolResult") {
     return;
   }
   const name =

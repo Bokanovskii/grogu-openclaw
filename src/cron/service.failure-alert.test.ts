@@ -333,6 +333,36 @@ describe("CronService failure alerts", () => {
     );
   });
 
+  it.each(["Invalid timeout configuration", "Invalid configuration"])(
+    "keeps explicit permanent failures on the default alert threshold: %s",
+    async (error) => {
+      await withAlerts(
+        async ({ cron, sendCronFailureAlert, addJob }) => {
+          const job = await addJob("permanent config failure", {
+            delivery: createTelegramDelivery(),
+          });
+
+          await cron.run(job.id, "force");
+          expect(sendCronFailureAlert).not.toHaveBeenCalled();
+          await cron.run(job.id, "force");
+          expect(sendCronFailureAlert).toHaveBeenCalledOnce();
+          expectAlertTextContaining(
+            sendCronFailureAlert,
+            'Automation "permanent config failure" failed 2 times',
+          );
+        },
+        {
+          failureAlert: { enabled: true },
+          runResult: {
+            status: "error",
+            error,
+            errorClassification: { kind: "permanent" },
+          },
+        },
+      );
+    },
+  );
+
   it("fences delayed alerts across recovery and failure in the same clock tick", async () => {
     await withAlerts(
       async ({ cron, sendCronFailureAlert, runIsolatedAgentJob, addJob }) => {

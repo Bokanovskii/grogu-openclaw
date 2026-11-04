@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { evaluatePolicy } from "../../grogu/policy.js";
 import type { DeferredCronNotifications } from "../../src/cron/service/state.js";
 import { executeJobCore } from "../../src/cron/service/timer-execution.js";
-import { applyJobResult } from "../../src/cron/service/timer-outcomes.js";
+import { applyTriggerNoFireResult } from "../../src/cron/service/timer-outcomes.js";
 import type { CronJob } from "../../src/cron/types.js";
 
 describe("deterministic private worker trigger", () => {
@@ -52,14 +52,15 @@ describe("deterministic private worker trigger", () => {
     for (let tick = 0; tick < 3; tick += 1) {
       const result = await executeJobCore(state as never, job);
       expect(result.status).toBe("ok");
+      expect(result.triggerEval?.fired).toBe(false);
       const deferredNotifications: DeferredCronNotifications = [];
-      applyJobResult(
+      applyTriggerNoFireResult(
         state as never,
         job,
         {
-          ...result,
           startedAt: startedAt + tick * 2_000,
           endedAt: startedAt + tick * 2_000 + 10,
+          triggerEval: result.triggerEval!,
         },
         { deferredNotifications },
       );

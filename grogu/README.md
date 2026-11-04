@@ -46,6 +46,9 @@ The loader rejects symlinks, hardlinks, group/world access and files over 1 MiB.
   may reconcile. Bootstrap never changes schedules, models, delivery or pauses.
 
 The runtime reads the same file through `GROGU_PROFILE_FILE`.
+Fixed-command helpers that validate research checkpoints use the maintained
+`dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
+hashed chunk or an operator-created dist patch.
 
 ## Commands
 

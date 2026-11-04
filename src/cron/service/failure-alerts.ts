@@ -15,6 +15,7 @@ import { resolveTargetPrefixedChannel } from "../../infra/outbound/channel-targe
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { resolveCronDeliveryPlan, resolveFailureDestination } from "../delivery-plan.js";
 import { cronFailureDetailLines } from "../failure-notification-text.js";
+import { resolveCronExecutionRetryHint } from "../retry-hint.js";
 import { hasCanonicalCronDeliveryMode } from "../store/delivery-codec.js";
 import type {
   CronCompletionStatus,
@@ -23,7 +24,6 @@ import type {
   CronJob,
   CronMessageChannel,
 } from "../types.js";
-import { buildCronFailureRepairBrief } from "./failure-repair-brief.js";
 import { isJobEnabled } from "./jobs-scheduling.js";
 import {
   cronNotificationJob,
@@ -35,6 +35,9 @@ import type { CronJobPolicyContext, DeferredCronNotifications } from "./state.js
 
 const DEFAULT_FAILURE_ALERT_AFTER = 2;
 const DEFAULT_FAILURE_ALERT_COOLDOWN_MS = 60 * 60_000; // 1 hour
+// With the default threshold, scheduler retries and backoff own transient provider failures and
+// only a sustained outage alerts. An explicitly configured `after` is honored as written.
+const TRANSIENT_FAILURE_ALERT_AFTER = 8;
 
 /** Returns the last failure-notification delivery trace persisted on a cron job. */
 export function failureNotificationDeliveryFromJobState(
@@ -84,7 +87,7 @@ function clampNonNegativeInt(value: unknown, fallback: number): number {
   return floored >= 0 ? floored : fallback;
 }
 
-function hasFailureRepairOwner(
+function hasFailureAlertOwner(
   job: Partial<Pick<CronJob, "owner" | "payload" | "schedule">>,
 ): boolean {
   return Boolean(
@@ -141,8 +144,8 @@ export function resolveFailureAlert(
     primaryRoute?.mode === "announce" && primaryRoute.requested ? primaryRoute : undefined;
   const explicitlyConfigured = jobConfig !== undefined || globalConfig !== undefined;
   // An owned one-shot has a conversation to notify even without an external route.
-  const hasOneShotRepairRoute = job.schedule?.kind === "at" && hasFailureRepairOwner(job);
-  if (!alternateRoute && !primaryAnnounceRoute && !explicitlyConfigured && !hasOneShotRepairRoute) {
+  const hasOneShotAlertRoute = job.schedule?.kind === "at" && hasFailureAlertOwner(job);
+  if (!alternateRoute && !primaryAnnounceRoute && !explicitlyConfigured && !hasOneShotAlertRoute) {
     return null;
   }
   const configuredMode =
@@ -200,6 +203,7 @@ export function resolveFailureAlert(
 
   return {
     after: clampPositiveInt(jobConfig?.after ?? globalConfig?.after, DEFAULT_FAILURE_ALERT_AFTER),
+    afterConfigured: jobConfig?.after !== undefined || globalConfig?.after !== undefined,
     cooldownMs: clampNonNegativeInt(
       jobConfig?.cooldownMs ?? globalConfig?.cooldownMs,
       DEFAULT_FAILURE_ALERT_COOLDOWN_MS,
@@ -226,7 +230,6 @@ function buildFailureAlertPayload(params: {
   consecutiveErrors: number;
   route: ResolvedFailureAlert;
   status: "error" | "skipped";
-  repairRequested?: boolean;
   localProviderUnavailable?: boolean;
 }) {
   const safeJobName = params.job.name || params.job.id;
@@ -249,9 +252,6 @@ function buildFailureAlertPayload(params: {
         : cronFailureDetailLines(errorReason, params.failureNotificationDetail);
   const text = [
     `Automation "${safeJobName}" ${statusVerb} ${params.consecutiveErrors} times`,
-    ...(params.repairRequested
-      ? ["An automatic repair was requested in its owner conversation; it is still failing."]
-      : []),
     ...detailLines,
   ].join("\n");
   const oauthRefreshFailure = params.error ? classifyOAuthRefreshFailure(params.error) : null;
@@ -284,8 +284,6 @@ function startFailureAlertCycle(job: CronJob, incident: FailureAlertSignal, now:
   job.state.failureAlertIncident = {
     ...incident,
     scope: current?.scope === "run" ? "run" : incident.scope,
-    // An alert after the repair request is its fallback; the marker lasts until success.
-    ...(current?.repair ? { repair: { atMs: current.repair.atMs, alerted: true } } : {}),
   };
 }
 
@@ -355,9 +353,9 @@ function failureIncident(params: {
 }
 
 /**
- * Emits one alert per incident when threshold, best-effort, and cooldown policy allow it.
- * An owned job's first chat alert, or terminal one-shot failure, becomes a repair request.
- * A later failure alerts, naming the request, and the streak is never repaired twice.
+ * Emits one plain alert per incident when threshold, best-effort, and cooldown policy allow it.
+ * Failures never start model repair turns: transient errors are retried by the scheduler and
+ * alert only once they persist, so an unreachable model cannot spend more model time on itself.
  */
 function maybeEmitFailureAlert(
   state: CronJobPolicyContext,
@@ -387,22 +385,27 @@ function maybeEmitFailureAlert(
   const terminalOneShot =
     params.status === "error" && params.job.schedule.kind === "at" && !isJobEnabled(params.job);
   const alertConfig = params.alertConfig;
-  if (!alertConfig || (!terminalOneShot && params.consecutiveCount < alertConfig.after)) {
+  if (!alertConfig) {
     return;
   }
-  // Best-effort delivery suppresses inherited alert noise, not an independently
-  // configured job alert that the operator explicitly requested.
-  if (params.job.delivery?.bestEffort === true && !params.job.failureAlert) {
+  const transient =
+    params.status === "error" &&
+    resolveCronExecutionRetryHint({ error: params.error, classifiedReason: params.errorReason })
+      .retryable;
+  const alertAfter =
+    transient && !alertConfig.afterConfigured
+      ? Math.max(alertConfig.after, TRANSIENT_FAILURE_ALERT_AFTER)
+      : alertConfig.after;
+  if (!terminalOneShot && params.consecutiveCount < alertAfter) {
+    return;
+  }
+  // Best-effort delivery suppresses inherited recurring noise, not an independently
+  // configured alert or the only terminal visibility for an owned one-shot.
+  if (!terminalOneShot && params.job.delivery?.bestEffort === true && !params.job.failureAlert) {
     return;
   }
   const incident = failureIncident({ ...params, route: alertConfig });
-  const now = state.deps.nowMs();
-  const repair = params.job.state.failureAlertIncident?.repair;
-  // The repair request took this streak's alert and cooldown slot; if the job still
-  // fails, the user gets that alert once.
-  if (repair && !repair.alerted) {
-    startFailureAlertCycle(params.job, incident, now);
-  } else if (!requestFailureNotification(state, params.job, alertConfig, incident)) {
+  if (!requestFailureNotification(state, params.job, alertConfig, incident)) {
     return;
   }
   const job = cronNotificationJob(params.job);
@@ -417,40 +420,11 @@ function maybeEmitFailureAlert(
       consecutiveErrors: params.consecutiveCount,
       route: alertConfig,
       status: params.status,
-      repairRequested: repair !== undefined,
       localProviderUnavailable,
     }),
     runAtMs: params.runAtMs,
     route: alertConfig,
   };
-  if (
-    !repair &&
-    (terminalOneShot || alertConfig.mode === "announce") &&
-    params.status === "error" &&
-    // Command jobs and on-exit or stream schedules are operator-only, so they alert as before.
-    hasFailureRepairOwner(params.job) &&
-    (terminalOneShot || isJobEnabled(params.job))
-  ) {
-    const opened = params.job.state.failureAlertIncident ?? incident;
-    params.job.state.failureAlertIncident = { ...opened, repair: { atMs: now } };
-    // A terminal job keeps its alert cycle open for fallback delivery if repair cannot start.
-    params.job.state.lastFailureNotificationDeliveryStatus = terminalOneShot
-      ? "unknown"
-      : "not-requested";
-    params.deferredNotifications.push({
-      kind: "failure-repair",
-      job,
-      ...(terminalOneShot ? { fallback: alert } : {}),
-      text: buildCronFailureRepairBrief({
-        job: params.job,
-        consecutiveErrors: params.consecutiveCount,
-        error: params.error,
-        errorReason: params.errorReason,
-        terminal: terminalOneShot,
-      }),
-    });
-    return;
-  }
   params.deferredNotifications.push(alert);
 }
 

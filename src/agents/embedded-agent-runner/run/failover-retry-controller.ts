@@ -1,3 +1,4 @@
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { sanitizeForLog } from "../../../../packages/terminal-core/src/ansi.js";
 import { sleepWithAbort } from "../../../infra/backoff.js";
 import { emitDiagnosticsTimelineEvent } from "../../../infra/diagnostics-timeline.js";
@@ -90,6 +91,9 @@ export function createEmbeddedRunFailoverRetryController(input: {
     };
   };
   getSessionId: () => string;
+  /** Logical-run start used to keep retries inside the run and delivery authority lifetime. */
+  runStartedAtMs?: number;
+  assertCurrent?: () => void;
 }) {
   const { runInput, preparedRuntime } = input;
   const { runParams: params, globalLane, agentDir, fallbackConfigured } = runInput;
@@ -103,6 +107,12 @@ export function createEmbeddedRunFailoverRetryController(input: {
   // Consecutive outages count failed-request time as well as backoff. A completed
   // successful model response ends the outage, but never refunds retry attempts.
   let transientRetryWindowStartMs: number | null = null;
+  const retryAuthorityDeadlineAtMs =
+    Number.isFinite(params.timeoutMs) &&
+    params.timeoutMs > 0 &&
+    params.timeoutMs < MAX_TIMER_TIMEOUT_MS
+      ? (input.runStartedAtMs ?? Date.now()) + params.timeoutMs
+      : undefined;
 
   const resolveProfileFailureReason = (
     failoverReason: FailoverReason | null,
@@ -202,6 +212,12 @@ export function createEmbeddedRunFailoverRetryController(input: {
     get transientRetryCount() {
       return transientRetryCount;
     },
+    resolveAttemptTimeoutMs: (requestedTimeoutMs: number): number => {
+      if (transientRetryCount === 0 || retryAuthorityDeadlineAtMs === undefined) {
+        return requestedTimeoutMs;
+      }
+      return Math.max(1, Math.min(requestedTimeoutMs, retryAuthorityDeadlineAtMs - Date.now()));
+    },
     observeAttempt: (
       attempt: Pick<
         EmbeddedRunAttemptResult,
@@ -267,6 +283,7 @@ export function createEmbeddedRunFailoverRetryController(input: {
         reason: TransientRetryReason;
       }) => void | Promise<void>;
     }): Promise<boolean> => {
+      input.assertCurrent?.();
       const recordDecision = (
         decision: "accepted" | "rejected",
         reason:
@@ -276,6 +293,7 @@ export function createEmbeddedRunFailoverRetryController(input: {
           | "retry_budget_exhausted"
           | "retry_delay_unavailable"
           | "retry_delay_exceeds_cap"
+          | "retry_authority_exhausted"
           | "wait_interrupted"
           | "backoff_completed",
       ) =>
@@ -312,7 +330,7 @@ export function createEmbeddedRunFailoverRetryController(input: {
         return false;
       }
       // Honor the SDK's retry-delay cap when replay-safe fallback is available.
-      // Otherwise a long Retry-After must wait: declining would end the turn.
+      // Without fallback, a provider floor may wait only while the admitted run remains live.
       const retryDelayCapMs =
         retry.maxRetryDelayMs !== undefined &&
         Number.isFinite(retry.maxRetryDelayMs) &&
@@ -367,6 +385,17 @@ export function createEmbeddedRunFailoverRetryController(input: {
         );
         return false;
       }
+      const authorityRemainingMs =
+        retryAuthorityDeadlineAtMs === undefined
+          ? undefined
+          : retryAuthorityDeadlineAtMs - Date.now();
+      if (authorityRemainingMs !== undefined && delayMs >= authorityRemainingMs) {
+        recordDecision("rejected", "retry_authority_exhausted");
+        log.warn(
+          `transient retry delay ${delayMs}ms leaves no run authority for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)}; stopping same-model retries`,
+        );
+        return false;
+      }
       log.warn(
         `transient same-model retry ${retryCount + 1}/${retryBudget} for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)} reason=${retry.reason}: delayMs=${delayMs}`,
       );
@@ -395,6 +424,14 @@ export function createEmbeddedRunFailoverRetryController(input: {
           recordDecision("rejected", "wait_interrupted");
         }
         closeRetryWait?.(completed);
+      }
+      input.assertCurrent?.();
+      if (retryAuthorityDeadlineAtMs !== undefined && Date.now() >= retryAuthorityDeadlineAtMs) {
+        recordDecision("rejected", "retry_authority_exhausted");
+        log.warn(
+          `transient retry wait exhausted run authority for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)}; stopping same-model retries`,
+        );
+        return false;
       }
       recordDecision("accepted", "backoff_completed");
       transientRetryCount += 1;

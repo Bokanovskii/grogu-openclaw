@@ -223,6 +223,27 @@ describe("cron timer outcome and failure policy regressions", () => {
     expect(sendCronFailureAlert).not.toHaveBeenCalled();
   });
 
+  it("keeps a recurring job on its backoff schedule through a long transient outage", () => {
+    const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+    const deferredNotifications: DeferredCronNotifications = [];
+    const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 12 } });
+
+    applyJobResult(
+      state,
+      job,
+      { status: "error", error: "LLM request timed out", startedAt, endedAt: startedAt + 10 },
+      { deferredNotifications },
+    );
+
+    expect(job.state.consecutiveErrors).toBe(13);
+    expect(job.enabled).toBe(true);
+    expect(job.state.autoDisabled).toBeUndefined();
+    expect(job.state.nextRunAtMs).toBeGreaterThan(startedAt);
+    expect(deferredNotifications.map((notification) => notification.kind)).not.toContain(
+      "auto-disabled",
+    );
+  });
+
   it.each([
     { name: "silent job", delivery: { mode: "none" as const }, disables: false },
     {

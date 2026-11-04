@@ -1,21 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projectProviderError } from "../../../../packages/ai/src/utils/provider-error.js";
-import { createReplyOperation } from "../../../auto-reply/reply/reply-run-registry.js";
-import { isReplyRunEvidenceStale } from "../../../auto-reply/reply/reply-run-registry.state.js";
 import * as diagnosticsTimeline from "../../../infra/diagnostics-timeline.js";
-import {
-  closeDiagnosticEmbeddedRunOwner,
-  createDiagnosticEmbeddedRunOwner,
-  getDiagnosticSessionActivitySnapshot,
-  markDiagnosticEmbeddedRunStarted,
-  resolveRunStaleThresholdMs,
-} from "../../../logging/diagnostic-run-activity.js";
 import { FailoverError } from "../../failover-error.js";
 import { resolveRetryAfterMs } from "../../failover/retry-evidence.js";
-import {
-  createDeferredEmbeddedRunLifecycleManager,
-  createEmbeddedAttemptDeferredLifecycleOwner,
-} from "./deferred-lifecycle-owner.js";
 
 const mocks = vi.hoisted(() => ({
   sleepWithAbort: vi.fn(async (_ms: number, _abortSignal?: AbortSignal): Promise<void> => {}),
@@ -43,6 +30,8 @@ function createController(
   fallbackConfigured = false,
   abortSignal?: AbortSignal,
   onRetryWait?: ControllerInput["runInput"]["runParams"]["onRetryWait"],
+  timeoutMs = 60_000,
+  runStartedAtMs = Date.now(),
 ) {
   return createEmbeddedRunFailoverRetryController({
     runInput: {
@@ -50,6 +39,7 @@ function createController(
         runId: "run:failover-retry-controller-test",
         abortSignal,
         onRetryWait,
+        timeoutMs,
       } as ControllerInput["runInput"]["runParams"],
       globalLane: "test",
       agentDir: "/tmp/openclaw-failover-retry-controller-test",
@@ -68,6 +58,7 @@ function createController(
       advanceAttemptAuthProfile: advanceAuthProfile,
     },
     getSessionId: () => "session:failover-retry-controller-test",
+    runStartedAtMs,
   });
 }
 
@@ -197,7 +188,14 @@ describe("createEmbeddedRunFailoverRetryController", () => {
     let nowMs = 1_000_000;
     const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
     try {
-      const controller = createController(vi.fn(async () => false));
+      const controller = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        180_000,
+        nowMs,
+      );
       await expect(
         controller.maybeRetryTransient({ reason: "rate_limit", retryAfterMs: 120000 }),
       ).resolves.toBe(true);
@@ -241,6 +239,9 @@ describe("createEmbeddedRunFailoverRetryController", () => {
       const controller = createController(
         vi.fn(async () => false),
         fallback,
+        undefined,
+        undefined,
+        10_000_000,
       );
       controller.observeAttempt({ providerRetryMaxRetries: 3 });
       const onRetry = vi.fn();
@@ -286,100 +287,77 @@ describe("createEmbeddedRunFailoverRetryController", () => {
     },
   );
 
-  it.each([false, true])(
-    "honors a floor beyond the native timer limit (abort=%s)",
-    async (abort) => {
-      const { sleepWithAbort } = await vi.importActual<typeof import("../../../infra/backoff.js")>(
-        "../../../infra/backoff.js",
+  it("keeps retry waits and the next attempt inside run and delivery authority", async () => {
+    let nowMs = 1_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    try {
+      const controller = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        60_000,
+        nowMs,
       );
-      vi.useFakeTimers();
-      mocks.sleepWithAbort.mockImplementation(sleepWithAbort);
-      const cancellation = new AbortController();
-      const dayMs = 24 * 60 * 60 * 1000;
-      const retryAfterMs = 30 * dayMs;
-      const ref = {
-        sessionId: "retry-wait-session",
-        runId: "retry-wait-run",
-        sessionKey: "agent:main:retry-wait",
-      };
-      const operation = createReplyOperation({
-        ...ref,
-        turnKind: "visible",
-        resetTriggered: false,
-      });
-      const diagnosticOwner = createDiagnosticEmbeddedRunOwner(ref);
-      markDiagnosticEmbeddedRunStarted({ ...ref, owner: diagnosticOwner });
-      const lifecycle = createDeferredEmbeddedRunLifecycleManager(ref);
-      lifecycle.adopt(
-        createEmbeddedAttemptDeferredLifecycleOwner({
-          ...ref,
-          diagnosticOwner,
-          isCurrent: () => true,
-          onRetryWaitCompleted: () => operation.recordActivity(),
-          trajectoryRecorder: null,
-          clearActiveRun: () => closeDiagnosticEmbeddedRunOwner(diagnosticOwner),
+      const onRetry = vi.fn();
+
+      await expect(
+        controller.maybeRetryTransient({
+          reason: "rate_limit",
+          retryAfterMs: 60_000,
+          onRetry,
         }),
+      ).resolves.toBe(false);
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(mocks.sleepWithAbort).not.toHaveBeenCalled();
+
+      await expect(
+        controller.maybeRetryTransient({
+          reason: "rate_limit",
+          retryAfterMs: 30_000,
+        }),
+      ).resolves.toBe(true);
+      nowMs += 30_000;
+      expect(controller.resolveAttemptTimeoutMs(60_000)).toBe(30_000);
+
+      const callbackOverrunController = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        60_000,
+        nowMs,
       );
-      const deadlineAtMs = Date.now() + retryAfterMs;
-      try {
-        const controller = createController(
-          vi.fn(async () => false),
-          false,
-          cancellation.signal,
-          lifecycle.beginRetryWait,
-        );
-        let retried = false;
-        const retry = controller
-          .maybeRetryTransient({ reason: "rate_limit", retryAfterMs })
-          .then((result) => {
-            retried = result;
-            return result;
-          });
-        await vi.advanceTimersByTimeAsync(dayMs + 1);
-        const activity = getDiagnosticSessionActivitySnapshot(ref);
-        expect(activity.activeWorkKind).toBe("embedded_run");
-        expect(activity.activeRetryWaitDeadlineAtMs).toBe(deadlineAtMs);
-        expect(activity.lastProgressAgeMs).toBe(dayMs + 1);
-        expect(resolveRunStaleThresholdMs(activity)).toBe(retryAfterMs);
-        expect(isReplyRunEvidenceStale(operation)).toBe(false);
-        if (abort) {
-          const rejected = expect(retry).rejects.toMatchObject({ name: "AbortError" });
-          cancellation.abort();
-          expect(
-            getDiagnosticSessionActivitySnapshot(ref).activeRetryWaitDeadlineAtMs,
-          ).toBeUndefined();
-          await rejected;
-          expect(controller.transientRetryCount).toBe(0);
-          expect(vi.getTimerCount()).toBe(0);
-        } else {
-          await vi.advanceTimersByTimeAsync(retryAfterMs - dayMs - 2);
-          expect(retried).toBe(false);
-          await vi.advanceTimersByTimeAsync(1);
-          await expect(retry).resolves.toBe(true);
-          expect(controller.transientRetryCount).toBe(1);
-          expect(
-            getDiagnosticSessionActivitySnapshot(ref).activeRetryWaitDeadlineAtMs,
-          ).toBeUndefined();
-          expect(getDiagnosticSessionActivitySnapshot(ref).lastProgressAgeMs).toBe(0);
-          expect(getDiagnosticSessionActivitySnapshot(ref).lastProgressReason).toBe(
-            "retry_wait:ended",
-          );
-          expect(isReplyRunEvidenceStale(operation)).toBe(false);
-        }
-      } finally {
-        await lifecycle.complete();
-        operation.complete();
-        vi.useRealTimers();
-        mocks.sleepWithAbort.mockImplementation(async () => {});
-      }
-    },
-  );
+      mocks.sleepWithAbort.mockImplementationOnce(async (delayMs: number) => {
+        nowMs += delayMs;
+      });
+      await expect(
+        callbackOverrunController.maybeRetryTransient({
+          reason: "rate_limit",
+          retryAfterMs: 30_000,
+          onRetry: () => {
+            nowMs += 30_001;
+          },
+        }),
+      ).resolves.toBe(false);
+      expect(callbackOverrunController.transientRetryCount).toBe(0);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
 
   it("records the truncation when the window ends a budget that still has attempts", async () => {
     let nowMs = 1_000_000;
     const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
     try {
-      const controller = createController(vi.fn(async () => false));
+      const controller = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        120_000,
+        nowMs,
+      );
       // A raised budget only delivers the attempts the 90s window fits; without this
       // record an operator cannot tell why the configured retries never ran.
       controller.observeAttempt({ providerRetryMaxRetries: 8 });
@@ -400,7 +378,14 @@ describe("createEmbeddedRunFailoverRetryController", () => {
     let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
     const now = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
     try {
-      const controller = createController(vi.fn(async () => false));
+      const controller = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        120_000,
+        nowMs,
+      );
       await expect(controller.maybeRetryTransient({ reason: "timeout" })).resolves.toBe(true);
       nowMs += 89_000;
       const retryAfterMs = resolveRetryAfterMs(
@@ -426,7 +411,14 @@ describe("createEmbeddedRunFailoverRetryController", () => {
       nowMs += delayMs;
     });
     try {
-      const controller = createController(vi.fn(async () => false));
+      const controller = createController(
+        vi.fn(async () => false),
+        false,
+        undefined,
+        undefined,
+        120_000,
+        nowMs,
+      );
 
       await expect(
         controller.maybeRetryTransient({ reason: "server_error", retryAfterMs: 60_000 }),

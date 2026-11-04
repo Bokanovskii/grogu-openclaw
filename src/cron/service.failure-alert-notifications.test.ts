@@ -131,7 +131,7 @@ describe("CronService failure notification delivery", () => {
       sendCronFailureAlert,
       runIsolatedAgentJob: async () => ({
         status: "error",
-        error: "temporary upstream error",
+        error: "report template is invalid",
       }),
     });
     try {

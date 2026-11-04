@@ -1,6 +1,7 @@
 /** Shared state and owner-notification policy for cron auto-disable transitions. */
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { cronFailureDetailLines } from "../failure-notification-text.js";
+import { resolveCronExecutionRetryHint } from "../retry-hint.js";
 import { isSystemMonitorDeclaration } from "../system-owned-declaration.js";
 import type { CronJob, CronJobState } from "../types.js";
 import { cronNotificationJob } from "./notification-intents.js";
@@ -55,7 +56,11 @@ export function autoDisableCronJob(params: {
   return true;
 }
 
-/** Auto-disables only time-based recurring jobs once their run-error streak reaches the limit. */
+/**
+ * Auto-disables only time-based recurring jobs once their run-error streak reaches the limit.
+ * A transient provider or network outage keeps the job on its retry/backoff schedule instead,
+ * so a model server that is down for a while cannot silently switch automations off.
+ */
 export function maybeAutoDisableCronJobAfterRunFailure(params: {
   job: CronJob;
   atMs: number;
@@ -64,7 +69,11 @@ export function maybeAutoDisableCronJobAfterRunFailure(params: {
   const consecutiveErrors = params.job.state.consecutiveErrors ?? 0;
   if (
     (params.job.schedule.kind !== "cron" && params.job.schedule.kind !== "every") ||
-    consecutiveErrors < MAX_CONSECUTIVE_RUN_FAILURES
+    consecutiveErrors < MAX_CONSECUTIVE_RUN_FAILURES ||
+    resolveCronExecutionRetryHint({
+      error: params.job.state.lastError,
+      classifiedReason: params.job.state.lastErrorReason,
+    }).retryable
   ) {
     return false;
   }

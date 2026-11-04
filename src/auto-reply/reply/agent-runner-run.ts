@@ -488,10 +488,8 @@ export async function runReplyAgent(
   );
   const compactionNoticeMessageId = sessionCtx.MessageSidFull ?? sessionCtx.MessageSid;
   const sendDirectCompactionNotice = async (phase: CompactionNoticePhase, text?: string) => {
-    if (
-      !opts?.onBlockReply ||
-      (phase !== "context_bounded" && !shouldNotifyUserAboutCompaction(cfg))
-    ) {
+    // Bounded-context fallbacks are maintenance status too; channels stay quiet unless opted in.
+    if (!opts?.onBlockReply || !shouldNotifyUserAboutCompaction(cfg)) {
       return;
     }
     const noticePayload = createCompactionNoticePayload({

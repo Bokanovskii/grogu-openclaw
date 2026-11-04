@@ -7,7 +7,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import type WebSocket from "ws";
 import { createInfoWarnErrorLogger } from "../../test/helpers/mock-logger.js";
-import { createDeferred, withinTest } from "../../test/helpers/promise.js";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { resetConfigRuntimeState } from "../config/config.js";
 import { readCronRunRecordsForTests } from "../cron/run-history.test-support.js";
 import { loadCronStore, saveCronStore } from "../cron/store.js";
@@ -24,16 +24,13 @@ import { getGatewayProcessInstanceId } from "./process-instance.js";
 import type { GatewayCronState } from "./server-cron.js";
 import type { GatewayClient } from "./server-methods/types.js";
 import {
-  agentCommandMock,
   connectOk,
   cronIsolatedRun,
   installGatewayTestHooks,
   onceMessage,
-  prepareGatewayReplyRuntimeForTest,
   rpcReq,
   startServerWithClient,
   testState,
-  writeSessionStore,
 } from "./test-helpers.js";
 
 const fetchWithSsrFGuardMock = vi.hoisted(() =>
@@ -1141,85 +1138,5 @@ describe("gateway server cron", () => {
       expect.objectContaining({ id: jobId, trigger: validTrigger }),
     ]);
   });
-
-  test("repairs an owned job with an ordinary owner-topic turn whatever the heartbeat config", async ({
-    signal,
-  }) => {
-    const { dir } = await setupCronTestRun({ cronEnabled: true });
-    const group = "-100155462274";
-    const ownerSessionKey = `agent:main:telegram:group:${group}:topic:42`;
-    const hour = new Date().getUTCHours();
-    // Our production heartbeat shape: none of it may apply to the repair turn.
-    testState.agentConfig = {
-      heartbeat: {
-        every: "1h",
-        target: "none",
-        isolatedSession: true,
-        lightContext: true,
-        activeHours: {
-          start: `${String((hour + 2) % 24).padStart(2, "0")}:00`,
-          end: `${String((hour + 3) % 24).padStart(2, "0")}:00`,
-          timezone: "UTC",
-        },
-      },
-    };
-    testState.sessionStorePath = path.join(dir, "sessions.json");
-    await writeSessionStore({
-      agentId: "main",
-      entries: {
-        [ownerSessionKey]: {
-          sessionId: "owner-topic-session",
-          updatedAt: Date.now(),
-          chatType: "group",
-          deliveryContext: { channel: "telegram", to: group, threadId: 42 },
-          lastChannel: "telegram",
-          lastTo: group,
-          lastThreadId: 42,
-        },
-      },
-    });
-    const ws = await startCronClient();
-    await prepareGatewayReplyRuntimeForTest({ force: true });
-    const repairTurnStarted = createDeferred();
-    agentCommandMock.mockImplementationOnce(async () => {
-      repairTurnStarted.resolve();
-    });
-    cronIsolatedRun.mockResolvedValue({ status: "error", error: "scripts/sync.md is missing" });
-    const added = await rpcReq(ws, "cron.add", {
-      name: "meeting sync",
-      enabled: true,
-      schedule: { kind: "every", everyMs: 60_000 },
-      sessionTarget: "isolated",
-      wakeMode: "now",
-      payload: { kind: "agentTurn", message: "Follow scripts/sync.md." },
-      delivery: { mode: "announce", channel: "telegram", to: group, threadId: 42 },
-      owner: { agentId: "main", sessionKey: ownerSessionKey },
-    });
-    expect(added.ok, JSON.stringify(added.error ?? null)).toBe(true);
-    const jobPayload = added.payload;
-    const jobId =
-      jobPayload && typeof jobPayload === "object" && "id" in jobPayload
-        ? String(jobPayload.id)
-        : "";
-    expect(jobId).not.toBe("");
-
-    await runCronJobAndWaitForFinished(ws, jobId);
-    await runCronJobAndWaitForFinished(ws, jobId);
-
-    await withinTest(repairTurnStarted.promise, signal);
-    expect(agentCommandMock).toHaveBeenCalledOnce();
-    // The owner topic's own session and route: no `:heartbeat` side session, no dropped reply,
-    // and only the turn's authored reply is delivered (no runtime timeout warning).
-    expect(agentCommandMock.mock.calls[0]?.[0]).toMatchObject({
-      sessionKey: ownerSessionKey,
-      deliver: true,
-      channel: "telegram",
-      to: group,
-      threadId: 42,
-      message: expect.stringContaining("Automation repair request from the scheduler"),
-      internalDeliverySuppressErrors: true,
-    });
-    expect(cronIsolatedRun).toHaveBeenCalledTimes(2);
-  }, 45_000);
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

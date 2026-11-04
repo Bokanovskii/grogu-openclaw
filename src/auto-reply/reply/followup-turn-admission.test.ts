@@ -774,6 +774,26 @@ describe("admitFollowupTurn", () => {
     );
   });
 
+  it("keeps bounded-context fallback notices silent unless compaction notices are enabled", async () => {
+    const operation = createOperation();
+    const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };
+    const onCompactionNoticePayload = vi.fn(async () => {});
+    state.admitReply.mockResolvedValue({ status: "owned", operation, sessionEntry: initialEntry });
+    state.preflight.mockImplementation(async ({ onCompactionNotice }) => {
+      await onCompactionNotice?.("context_bounded");
+      return initialEntry;
+    });
+
+    const result = await admitFollowupTurn({
+      queued: createRun(),
+      defaults: createDefaults({ sessionEntry: initialEntry }),
+      onCompactionNoticePayload,
+    });
+
+    expect(result).toMatchObject({ kind: "admitted" });
+    expect(onCompactionNoticePayload).not.toHaveBeenCalled();
+  });
+
   it("releases the admitted operation when deferred terminal notice delivery fails", async () => {
     const operation = createOperation();
     const initialEntry: SessionEntry = { sessionId: "queued-session", updatedAt: 1 };

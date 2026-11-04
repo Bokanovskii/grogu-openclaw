@@ -39,6 +39,13 @@ jobs:
             echo "::error::target_sha must match the workflow event commit"
             exit 1
           fi
+      # The free private runner exhausted disk after checkout, install, and offline checks.
+      # Drop preinstalled toolchains this job never uses before repository work consumes space.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.target_sha || github.sha }}
@@ -79,3 +86,8 @@ jobs:
           ui/src/pages/chat/components/chat-transcript-message-index.test.ts
           ui/src/pages/chat/components/chat-transcript-replies.test.ts
           ui/src/e2e/chat-reasoning-visibility.e2e.test.ts
+      - name: Report runner disk
+        if: always()
+        run: |
+          df -h /
+          du -sh node_modules .artifacts 2>/dev/null || true

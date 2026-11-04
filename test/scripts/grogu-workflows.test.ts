@@ -30,6 +30,11 @@ describe("upstream automation quarantine", () => {
     expect(workflow).toContain("Stylelint");
     expect(workflow).toContain("REQUIRED LOCAL gate");
     expect(workflow).not.toContain("continue-on-error");
+    const freeDisk = workflow.indexOf("- name: Free runner disk");
+    const checkout = workflow.indexOf("- uses: actions/checkout@");
+    expect(freeDisk).toBeGreaterThan(-1);
+    expect(checkout).toBeGreaterThan(freeDisk);
+    expect(workflow).toMatch(/- name: Report runner disk\n\s+if: always\(\)/u);
   });
 
   it("rejects newly introduced upstream workflows and preserves them outside the executable directory", async () => {

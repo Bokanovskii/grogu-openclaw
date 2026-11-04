@@ -132,6 +132,17 @@ export type RequestTelemetryFields = {
   workClass?: string;
 };
 
+type RequestQueueTelemetry = {
+  queuedAhead: number;
+  queueActiveInteractive?: number;
+  queueActiveUtility?: number;
+  queueActiveScheduled?: number;
+  queueInteractiveReserveAvailable?: boolean;
+  queueInteractiveReserveOccupied?: boolean;
+  queueInteractiveCooldownActive?: boolean;
+  queueNonInteractiveCooldownActive?: boolean;
+};
+
 export function createRequestTracker(
   fields: RequestTelemetryFields,
   options: {
@@ -223,20 +234,7 @@ export function createRequestTracker(
         save();
       }
     },
-    queue(
-      pool: {
-        queuedAhead: number;
-        queueActiveInteractive?: number;
-        queueActiveUtility?: number;
-        queueActiveScheduled?: number;
-        queueInteractiveReserveAvailable?: boolean;
-        queueInteractiveReserveOccupied?: boolean;
-        queueInteractiveCooldownActive?: boolean;
-        queueNonInteractiveCooldownActive?: boolean;
-      },
-      timeoutMs: number,
-      priority = 0,
-    ) {
+    queue(pool: RequestQueueTelemetry, timeoutMs: number, priority = 0) {
       tracker.update({
         phase: "queued",
         queuedAhead: pool.queuedAhead,
@@ -251,7 +249,7 @@ export function createRequestTracker(
         queueNonInteractiveCooldownActive: pool.queueNonInteractiveCooldownActive ?? null,
       });
     },
-    admitted(pool?: Parameters<typeof tracker.queue>[0]) {
+    admitted(pool?: RequestQueueTelemetry) {
       if (record.terminal) {
         return;
       }

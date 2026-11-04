@@ -40,6 +40,12 @@ export function buildGroguCompactionConfig(
 ): JsonRecord {
   const next = structuredClone(record(current));
   const plugins = (next.plugins = record(next.plugins));
+  if (!Array.isArray(plugins.allow)) {
+    throw new Error(
+      "Staging requires an explicit plugins.allow list so enabling grogu-digest cannot change other plugin trust decisions",
+    );
+  }
+  plugins.allow = addUnique(stringArray(plugins.allow), ["grogu-digest"]);
   const load = (plugins.load = record(plugins.load));
   load.paths = addUnique(stringArray(load.paths), [binding.pluginDirectory]);
   const pluginEntries = (plugins.entries = record(plugins.entries));

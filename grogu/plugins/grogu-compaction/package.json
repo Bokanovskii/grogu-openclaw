@@ -1,0 +1,25 @@
+{
+  "name": "@grogu/compaction",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.10.7"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.mjs"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.10.7"
+    }
+  },
+  "scripts": {
+    "test": "node --test ./src/digest.test.mjs"
+  }
+}

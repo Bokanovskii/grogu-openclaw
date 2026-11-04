@@ -22,6 +22,10 @@
       "workspace": "/path/to/private/research-workspace",
       "tracks": ["example-track"],
       "artifactPrefix": "research/example/"
+    },
+    "compaction": {
+      "agentId": "grogu",
+      "pluginDirectory": "/path/to/checkout/grogu/plugins/grogu-compaction"
     }
   },
   "native": {

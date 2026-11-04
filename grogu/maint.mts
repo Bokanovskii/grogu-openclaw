@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { reconcileManagedJobs } from "./bootstrap.js";
+import { stageGroguCompactionConfig } from "./compaction-config.js";
 import {
   createPrivateArtifactDirectory,
   createVerifiedBackup,
@@ -25,6 +26,15 @@ function profile() {
   }
   return loadOperatorProfile(options.profile);
 }
+
+program
+  .command("compaction-stage")
+  .description(
+    "Write validated candidate, apply, rollback and recovery artifacts; never change live config",
+  )
+  .action(async () => {
+    console.log(JSON.stringify(await stageGroguCompactionConfig(profile())));
+  });
 
 program
   .command("release-build <source>")

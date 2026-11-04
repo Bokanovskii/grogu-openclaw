@@ -57,17 +57,18 @@ node --import ./scripts/tsx.mjs grogu/maint.mts --profile <profile> <command>
 
 Release builds install the same CLI as `dist/grogu-maint.js`.
 
-| Command                         | Effect                                                                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                        |
-| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted. |
-| `backup`                        | Complete native online archive, verified, with a private digest receipt.                                                                                      |
-| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                             |
-| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                 |
-| `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                       |
-| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                    |
-| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                       |
-| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                    |
+| Command                         | Effect                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                                    |
+| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted.             |
+| `compaction-stage`              | Writes a validated private candidate config plus apply, rollback, and recovery scripts. Apply requires a verified complete-backup receipt and never restarts the Gateway. |
+| `backup`                        | Complete native online archive, verified, with a private digest receipt.                                                                                                  |
+| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                         |
+| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                             |
+| `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                                   |
+| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                |
+| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                   |
+| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                |
 
 Every command writes owner-only receipts to a new directory under the profile's
 `recoveryDir`.

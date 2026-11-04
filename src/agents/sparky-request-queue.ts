@@ -1,4 +1,5 @@
 import { parseRetryAfterHeadersSeconds } from "@openclaw/ai/internal/retry-after";
+import { toErrorObject } from "../infra/errors.js";
 import type { Model } from "../llm/types.js";
 import { currentHttpRequestTelemetry } from "./model-request-telemetry.js";
 
@@ -15,7 +16,9 @@ type AdmissionEntry = {
   detach: () => void;
 };
 const abortReason = (signal?: AbortSignal) =>
-  signal?.reason ?? new DOMException("Sparky request cancelled", "AbortError");
+  signal?.reason == null
+    ? new DOMException("Sparky request cancelled", "AbortError")
+    : toErrorObject(signal.reason, "Sparky request cancelled");
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);

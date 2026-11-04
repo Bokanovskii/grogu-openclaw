@@ -1,4 +1,5 @@
 import type { Context, Model } from "@openclaw/llm-core";
+import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { parseRetryAfterErrorSeconds } from "../internal/retry-after.js";
 
 function waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
@@ -10,7 +11,11 @@ function waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
     function abort() {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      reject(signal?.reason ?? new DOMException("Admission wait cancelled", "AbortError"));
+      reject(
+        signal?.reason === undefined
+          ? new DOMException("Admission wait cancelled", "AbortError")
+          : toErrorObject(signal.reason, "Admission wait cancelled"),
+      );
     }
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) {

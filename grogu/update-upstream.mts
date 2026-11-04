@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -21,6 +21,13 @@ async function run(bin: string, args: string[]) {
     maxBuffer: 4 * 1024 * 1024,
   });
   return stdout.trim();
+}
+
+async function summarize(lines: string[]) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (file) {
+    await appendFile(file, `${lines.join("\n")}\n`);
+  }
 }
 
 async function publishPrepared(head: string, upstreamCommit: string, latest: string) {
@@ -182,16 +189,40 @@ async function main() {
       "The fetched release differs from its canonical commit; do not publish a candidate",
     );
   }
-  await run("git", ["merge-base", "--is-ancestor", status.pinnedCommit, upstreamCommit]);
+  // Upstream cuts each stable release on its own branch, so consecutive releases diverge.
+  // A three-way merge against the pinned release applies exactly Grogu's delta to the new
+  // release; the merge commit then records both histories for the next integration.
+  await run("git", ["merge-base", "--is-ancestor", priorPin.commit, "HEAD"]);
+  let mergedTree: string;
   try {
-    await run("git", ["merge", "--no-commit", "--no-ff", upstreamCommit]);
+    mergedTree = sha.parse(
+      (
+        await run("git", [
+          "merge-tree",
+          "--write-tree",
+          "--name-only",
+          `--merge-base=${priorPin.commit}`,
+          "HEAD",
+          upstreamCommit,
+        ])
+      ).split("\n")[0],
+    );
   } catch (error) {
-    const conflicts = await run("git", ["diff", "--name-only", "--diff-filter=U"]);
+    const stdout = String((error as { stdout?: unknown }).stdout ?? "");
+    const conflicts = stdout.split("\n\n")[0]!.split("\n").slice(1).filter(Boolean);
+    await summarize([
+      `### Upstream ${status.latest} needs conflict resolution`,
+      "",
+      `Grogu's changes since ${priorPin.release} overlap upstream in ${conflicts.length} files. The remote branch and production are unchanged.`,
+      "",
+      ...conflicts.map((file) => `- \`${file}\``),
+    ]);
     throw new Error(
-      `Upstream integration needs explicit conflict resolution; remote branch and production unchanged. Conflicts: ${conflicts}`,
+      `Upstream integration needs explicit conflict resolution; remote branch and production unchanged. Conflicts: ${conflicts.join(", ") || "unknown"}`,
       { cause: error },
     );
   }
+  await run("git", ["read-tree", "--reset", "-u", mergedTree]);
   await archiveUpstreamWorkflows(root);
   await writeFile(
     path.join(root, "grogu/upstream.json"),
@@ -208,7 +239,19 @@ async function main() {
   );
   await run("git", ["add", "--update"]);
   await run("git", ["add", "grogu/upstream.json", ".github/upstream-workflows"]);
-  await run("git", ["commit", "--no-verify", "-m", `chore: integrate upstream ${status.latest}`]);
+  const integrated = sha.parse(
+    await run("git", [
+      "commit-tree",
+      await run("git", ["write-tree"]),
+      "-p",
+      "HEAD",
+      "-p",
+      upstreamCommit,
+      "-m",
+      `chore: integrate upstream ${status.latest}`,
+    ]),
+  );
+  await run("git", ["reset", "--hard", integrated]);
   const head = sha.parse(await run("git", ["rev-parse", "HEAD"]));
   const beforePush = admitRollingPullRequests(
     JSON.parse(

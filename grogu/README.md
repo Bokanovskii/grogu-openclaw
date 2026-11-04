@@ -23,8 +23,11 @@ Upstream GitHub workflows are kept for reference under
 ## Repository history
 
 `main` carries the real upstream history (about 7 GiB packed at `v2026.10.7`),
-so each stable release merges with a true merge base and keeps its canonical
-commit ID. On a new machine, clone with `git clone --filter=blob:none` to skip
+so each stable release is recorded as a merge parent and keeps its canonical
+commit ID. Upstream cuts every stable release on its own release branch, so
+consecutive releases diverge (v2026.10.10 is 842 commits behind v2026.10.7). The
+integration therefore merges with the pinned release as the explicit merge base:
+only Grogu's own changes since that release are carried onto the new one. On a new machine, clone with `git clone --filter=blob:none` to skip
 historical file contents. GitHub rejects single pushes over 2 GB, so seeding a
 new private origin means pushing `main` in first-parent steps that each stay
 under that limit (`git rev-list --objects --disk-usage <next> ^<previous>`
@@ -75,8 +78,9 @@ Every command writes owner-only receipts to a new directory under the profile's
 ## Taking in upstream releases
 
 1. `grogu-upstream.yml` runs daily (or on dispatch) in the private repository.
-   It finds the newest stable OpenClaw release, merges it onto `main` in the
-   rolling `grogu/upstream` branch, archives any new upstream workflows, updates
+   It finds the newest stable OpenClaw release, applies Grogu's delta to it with
+   `git merge-tree --merge-base=<pinned release>`, commits the result with `main`
+   and the release as parents in the rolling `grogu/upstream` branch, archives any new upstream workflows, updates
    `upstream.json`, and opens or refreshes one draft PR. It never enables
    auto-merge, deploys, or makes model requests.
    - It needs the `GROGU_UPSTREAM_TOKEN` secret: a fine-grained token limited to
@@ -87,9 +91,12 @@ Every command writes owner-only receipts to a new directory under the profile's
      upstream-controlled code runs while that token is present.
 2. It dispatches `grogu-ci.yml` for the exact prepared commit, so the CI
    evidence is pinned to that SHA.
-3. If the merge conflicts, the run fails, lists the conflicting files, and
-   leaves the remote branch unchanged. Resolve the merge locally on a branch
-   from `main` and open the PR by hand.
+3. If the merge conflicts, the run fails, lists the conflicting files in the
+   job summary, and leaves the remote branch unchanged. Resolve it locally on a
+   branch from `main` with the same base:
+   `git merge-tree --write-tree --merge-base=<pinned commit> main <release commit>`
+   shows the conflicts; resolve them, record the release as the second parent,
+   update `upstream.json`, and open the PR by hand.
 4. Review the PR and CI. Merge only when green.
 5. Deploy deliberately: `backup`, `release-build`, `release-verify`, stage and
    check, cut over through the native service, then `status` and

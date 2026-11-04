@@ -132,6 +132,17 @@ export type RequestTelemetryFields = {
   workClass?: string;
 };
 
+type RequestQueueTelemetry = {
+  queuedAhead: number;
+  queueActiveInteractive?: number;
+  queueActiveUtility?: number;
+  queueActiveScheduled?: number;
+  queueInteractiveReserveAvailable?: boolean;
+  queueInteractiveReserveOccupied?: boolean;
+  queueInteractiveCooldownActive?: boolean;
+  queueNonInteractiveCooldownActive?: boolean;
+};
+
 export function createRequestTracker(
   fields: RequestTelemetryFields,
   options: {
@@ -223,15 +234,22 @@ export function createRequestTracker(
         save();
       }
     },
-    queue(pool: { queuedAhead: number }, timeoutMs: number, priority = 0) {
+    queue(pool: RequestQueueTelemetry, timeoutMs: number, priority = 0) {
       tracker.update({
         phase: "queued",
         queuedAhead: pool.queuedAhead,
         queueTimeoutMs: telemetryFinite(timeoutMs),
         queuePriority: priority,
+        queueActiveInteractive: pool.queueActiveInteractive ?? null,
+        queueActiveUtility: pool.queueActiveUtility ?? null,
+        queueActiveScheduled: pool.queueActiveScheduled ?? null,
+        queueInteractiveReserveAvailable: pool.queueInteractiveReserveAvailable ?? null,
+        queueInteractiveReserveOccupied: pool.queueInteractiveReserveOccupied ?? null,
+        queueInteractiveCooldownActive: pool.queueInteractiveCooldownActive ?? null,
+        queueNonInteractiveCooldownActive: pool.queueNonInteractiveCooldownActive ?? null,
       });
     },
-    admitted() {
+    admitted(pool?: RequestQueueTelemetry) {
       if (record.terminal) {
         return;
       }
@@ -240,6 +258,17 @@ export function createRequestTracker(
         admittedAtMs,
         queueWaitMs: Math.max(0, admittedAtMs - start),
         phase: "awaiting_headers",
+        ...(pool
+          ? {
+              queueActiveInteractive: pool.queueActiveInteractive ?? null,
+              queueActiveUtility: pool.queueActiveUtility ?? null,
+              queueActiveScheduled: pool.queueActiveScheduled ?? null,
+              queueInteractiveReserveAvailable: pool.queueInteractiveReserveAvailable ?? null,
+              queueInteractiveReserveOccupied: pool.queueInteractiveReserveOccupied ?? null,
+              queueInteractiveCooldownActive: pool.queueInteractiveCooldownActive ?? null,
+              queueNonInteractiveCooldownActive: pool.queueNonInteractiveCooldownActive ?? null,
+            }
+          : {}),
       });
     },
     headers(response: Response, reused?: boolean) {

@@ -8,6 +8,8 @@ import {
   hasLongWindowRateLimitEvidence,
   resolveRetryAfterMs,
 } from "../agents/failover/retry-evidence.js";
+import { loadGroguPrivateProfile } from "../agents/grogu-private-profile.js";
+import { sparkyUtilityBounds } from "../agents/sparky-request-queue.js";
 import { resolveUtilityModelRefForAgent } from "../agents/utility-model.js";
 import {
   ACTIVITY_SUMMARY_FORMAT_REVISION,
@@ -360,9 +362,12 @@ export function createSessionActivitySummaries(deps: {
         state.calls += 1;
         const controller = new AbortController();
         state.controller = controller;
+        const utilityBounds = loadGroguPrivateProfile()
+          ? sparkyUtilityBounds(ref)
+          : { timeoutMs: MODEL_TIMEOUT_MS, maxTokens: 240 };
         const timer = setTimeout(
           () => controller.abort(new Error("Activity recap timed out")),
-          MODEL_TIMEOUT_MS,
+          utilityBounds.timeoutMs,
         );
         try {
           const assertRequestCurrent = () => {
@@ -382,6 +387,7 @@ export function createSessionActivitySummaries(deps: {
             const result = await (deps.completeModel ?? defaultCompleteModel)({
               ...prepared,
               purpose: "session-activity-summary",
+              ...("thinkLevel" in utilityBounds ? { thinkLevel: utilityBounds.thinkLevel } : {}),
               config: deps.getConfig(),
               systemPrompt: SYSTEM_PROMPT,
               prompt: JSON.stringify({
@@ -389,10 +395,10 @@ export function createSessionActivitySummaries(deps: {
                 messages: notes,
                 omittedContent: omitted,
               }),
-              timeoutMs: MODEL_TIMEOUT_MS,
+              timeoutMs: utilityBounds.timeoutMs,
               abortSignal: controller.signal,
               assertCurrent: assertRequestCurrent,
-              streamParams: { maxTokens: 240, temperature: 0.2 },
+              streamParams: { maxTokens: utilityBounds.maxTokens, temperature: 0.2 },
             });
             return result.text;
           };

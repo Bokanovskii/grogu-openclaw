@@ -9,6 +9,10 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { hasErrnoCode } from "../../../infra/errno.js";
 import { captureAgentToolSourceExecutionGuard } from "../../agent-tool-source-execution-guard.js";
+import {
+  assertResearchCheckpointCandidate,
+  ResearchCheckpointValidationError,
+} from "../../research-checkpoint-guard.js";
 import type { AgentTool } from "../../runtime/index.js";
 import { textResult } from "../../tools/tool-results.js";
 import { decodeUtf8File } from "../../utf8-file.js";
@@ -181,6 +185,14 @@ export function createEditTool(
           }
           editCount = plan.editCount;
           expectedContent = plan.content;
+          await assertResearchCheckpointCandidate({
+            filePath: absolutePath,
+            mutationKey: await queueKey,
+            content: expectedContent,
+            signal,
+          });
+          assertFileToolNotAborted(signal);
+          assertCurrent();
           await ops.writeFile(absolutePath, expectedContent);
           assertFileToolNotAborted(signal);
           assertCurrent();
@@ -198,6 +210,9 @@ export function createEditTool(
         } catch (error: unknown) {
           assertCurrent();
           const normalizedError = error instanceof Error ? error : new Error(String(error));
+          if (normalizedError instanceof ResearchCheckpointValidationError) {
+            throw normalizedError;
+          }
           const currentContent = await ops
             .readFile(absolutePath)
             .then((current) => current.toString("utf-8"))

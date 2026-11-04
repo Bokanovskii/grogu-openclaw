@@ -27,6 +27,8 @@ import { createLazyPromise } from "../../shared/lazy-promise.js";
 import { isRecord } from "../../utils.js";
 import { extractReadableContent } from "../../web-fetch/content-extractors.runtime.js";
 import { resolveWebProviderConfig } from "../../web/provider-runtime-shared.js";
+import { loadGroguPrivateProfile } from "../grogu-private-profile.js";
+import type { OpenClawToolsOptions } from "../openclaw-tools.types.js";
 import { stringEnum } from "../schema/string-enum.js";
 import { writePrivateTempFile } from "../sessions/tools/private-temp-file.js";
 import { formatFullOutputFooter } from "../sessions/tools/tool-contracts.js";
@@ -45,6 +47,7 @@ import {
   truncateWebFetchText,
   type ExtractMode,
 } from "./web-fetch-utils.js";
+import { createWebFetchArtifactScope } from "./web-fetch-workspace-artifacts.js";
 import {
   DEFAULT_CACHE_TTL_MINUTES,
   DEFAULT_TIMEOUT_SECONDS,
@@ -319,6 +322,7 @@ async function spillWebFetchContent(
   wrapped: WebFetchWrappedContent,
   maxChars: number,
   sourceTruncated: boolean,
+  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>,
 ): Promise<WebFetchWrappedContent> {
   if (!wrapped.truncated) {
     return sourceTruncated ? { ...wrapped, truncated: true } : wrapped;
@@ -327,18 +331,27 @@ async function spillWebFetchContent(
   // uses this fixed file cap so vanished pages can still be read after truncation.
   const content = truncateUtf16Safe(value, WEB_FETCH_SPILL_MAX_CHARS);
   const spillChars = content.length;
-  const spillPath = await writePrivateTempFile(
-    "openclaw-web-fetch",
-    wrapWebContent(content, "web_fetch"),
-  );
   const spillCapped = value.length > WEB_FETCH_SPILL_MAX_CHARS;
   const isSpillTruncated = sourceTruncated || spillCapped;
+  const spill = artifactScope
+    ? await artifactScope.write(wrapWebContent(content, "web_fetch"), {
+        chars: spillChars,
+        truncated: isSpillTruncated,
+      })
+    : {
+        path: await writePrivateTempFile(
+          "openclaw-web-fetch",
+          wrapWebContent(content, "web_fetch"),
+        ),
+        chars: spillChars,
+        ...(isSpillTruncated ? { truncated: true as const } : {}),
+      };
   const spillNote = sourceTruncated
     ? " Spilled available content from truncated response."
     : spillCapped
       ? ` Spilled first ${spillChars} chars.`
       : "";
-  const fullOutputFooter = formatFullOutputFooter(spillPath);
+  const fullOutputFooter = formatFullOutputFooter(spill.path);
   const footer = `\n\n[Showing truncated web_fetch content. ${fullOutputFooter}.${spillNote}]`;
   const compactFooter = `[${fullOutputFooter}]`;
   let visible = wrapped;
@@ -355,11 +368,7 @@ async function spillWebFetchContent(
     truncated: true,
     text,
     length: text.length,
-    spill: {
-      path: spillPath,
-      chars: spillChars,
-      ...(isSpillTruncated ? { truncated: true } : {}),
-    },
+    spill,
   };
 }
 
@@ -368,6 +377,7 @@ function normalizeContentType(value: string | null | undefined): string | undefi
 }
 
 type WebFetchRuntimeParams = {
+  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>;
   url: string;
   extractMode: ExtractMode;
   maxChars: number;
@@ -420,6 +430,7 @@ function sanitizeWebFetchUrl(raw: string): string {
 }
 
 async function buildWebFetchPayload(params: {
+  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>;
   providerId?: string;
   payload: unknown;
   requestedUrl: string;
@@ -470,6 +481,7 @@ async function buildWebFetchPayload(params: {
     wrapWebFetchContent(rawText, bodyMaxChars),
     bodyMaxChars,
     payload.truncated === true,
+    params.artifactScope,
   );
   const providerRawLength =
     resolveOptionalIntegerOption(payload.rawLength, { min: 0 }) ?? wrapped.rawLength;
@@ -537,6 +549,7 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
   // Append the operator header set after the existing cache discriminators so
   // requests without custom headers keep their current cache key.
   const cacheDiscriminators = [
+    params.artifactScope?.cacheKey,
     `user-agent:${sha256Hex(params.userAgent)}`,
     params.providerCacheKey ? `provider:${params.providerCacheKey}` : "",
     params.ssrfPolicy ? `ssrf-policy:${sha256Hex(JSON.stringify(params.ssrfPolicy))}` : "",
@@ -550,8 +563,16 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
     ].join(":"),
   );
   const cached = readCache(FETCH_CACHE, cacheKey, params.cacheTtlMs);
-  if (cached) {
+  if (
+    cached &&
+    (!params.artifactScope ||
+      !cached.value.spill ||
+      (await params.artifactScope.canReuse(cached.value.spill)))
+  ) {
     return { ...cached.value, cached: true };
+  }
+  if (cached) {
+    FETCH_CACHE.delete(cacheKey);
   }
 
   // Preserve the direct fetch's rejection; replacing it with signal.reason would
@@ -586,6 +607,7 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
     }
     throwIfFetchAborted(params.signal);
     return await buildWebFetchPayload({
+      artifactScope: params.artifactScope,
       providerId: providerFallback.provider.id,
       payload: rawPayload,
       requestedUrl: params.url,
@@ -739,6 +761,7 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
     }
 
     return await buildWebFetchPayload({
+      artifactScope: params.artifactScope,
       payload: {
         finalUrl,
         status: res.status,
@@ -764,14 +787,25 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
   }
 }
 
-export function createWebFetchTool(options?: {
-  config?: OpenClawConfig;
-  sandboxed?: boolean;
-  runtimeWebFetch?: RuntimeWebFetchMetadata;
-  lateBindRuntimeConfig?: boolean;
-  lookupFn?: LookupFn;
-  hostnameAllowlistRef?: { value?: string[] };
-}): AnyAgentTool | null {
+export function createWebFetchTool(
+  options?: Pick<
+    OpenClawToolsOptions,
+    | "workspaceDir"
+    | "sandboxRoot"
+    | "fsPolicy"
+    | "sandboxFsBridge"
+    | "execSession"
+    | "assertInvocationCurrent"
+  > & {
+    artifactAgentId?: string;
+    config?: OpenClawConfig;
+    sandboxed?: boolean;
+    runtimeWebFetch?: RuntimeWebFetchMetadata;
+    lateBindRuntimeConfig?: boolean;
+    lookupFn?: LookupFn;
+    hostnameAllowlistRef?: { value?: string[] };
+  },
+): AnyAgentTool | null {
   const fetch = resolveFetchConfig(options?.config);
   if (fetch?.enabled === false) {
     return null;
@@ -850,6 +884,18 @@ export function createWebFetchTool(options?: {
       );
       try {
         const result = await runWebFetch({
+          artifactScope: loadGroguPrivateProfile()
+            ? createWebFetchArtifactScope({
+                workspaceDir:
+                  options?.sandboxRoot ?? options?.fsPolicy?.root ?? options?.workspaceDir,
+                agentId: options?.artifactAgentId,
+                readOnly: options?.execSession?.permissionMode === "read-only",
+                sandboxed: options?.sandboxed,
+                bridge: options?.sandboxFsBridge,
+                signal,
+                assertInvocationCurrent: options?.assertInvocationCurrent,
+              })
+            : undefined,
           url,
           extractMode,
           maxChars: resolveIntegerOption(

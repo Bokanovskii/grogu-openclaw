@@ -398,11 +398,19 @@ function isTurnOutputGroup(item: TurnRenderItem): item is MessageGroup {
   );
 }
 
-function isCollapsibleWorkGroup(item: TurnRenderItem): item is MessageGroup {
+function isCollapsibleWorkGroup(item: TurnRenderItem, superseded = false): item is MessageGroup {
   if (item.kind !== "group" || item.isStreaming || groupHasVisibleReplyContent(item, false)) {
     return false;
   }
   const role = item.role.toLowerCase();
+  // Answer prose stays visible; only an errored attempt a later reply superseded folds as work.
+  if (
+    role === "assistant" &&
+    item.visibleContent === "text" &&
+    !(superseded && item.messages.some(({ message }) => asRecord(message)?.stopReason === "error"))
+  ) {
+    return false;
+  }
   return (
     role === "tool" ||
     (role === "assistant" &&
@@ -591,7 +599,7 @@ export function collapseCompletedTurnWork(
       // Share the renderer's error classification, including structured results.
       if (
         index !== finalReplyIndex &&
-        isCollapsibleWorkGroup(item) &&
+        isCollapsibleWorkGroup(item, index < finalReplyIndex) &&
         (index < finalReplyIndex || !groupHasFailedResult(item))
       ) {
         groups.push(item);

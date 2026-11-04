@@ -175,7 +175,12 @@ describe("reply attribution grouping", () => {
         searchOpen: true,
         searchQuery: "Rollout",
       }).flatMap((group) => group.messages);
-      expect(sources.map((source) => source.message)).toEqual([invocation, result]);
+      // Grogu renders answer prose apart from the tool call it preceded.
+      expect(sources.map((source) => source.message)).toEqual([
+        { ...invocation, content: [invocation.content[0]] },
+        { ...invocation, content: [invocation.content[1]] },
+        result,
+      ]);
     },
   );
 

@@ -430,6 +430,45 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+test("projects the inherited reasoning default beside the raw session override", async () => {
+  await withStateDirEnv("openclaw-row-reasoning-default-", async ({ stateDir }) => {
+    const base = config();
+    const cfg: OpenClawConfig = {
+      ...base,
+      agents: {
+        entries: { main: { reasoningDefault: "on" } },
+        defaults: { ...base.agents?.defaults, reasoningDefault: "stream" },
+      },
+    };
+    setRuntimeConfigSnapshot(cfg);
+    setActivePluginRegistry(createEmptyPluginRegistry());
+    const row = (agentId: string, entry: SessionEntry) => {
+      const key = `agent:${agentId}:dashboard:reasoning`;
+      return buildGatewaySessionRow({
+        cfg,
+        agentId,
+        key,
+        entry,
+        preparedAcpMeta: null,
+        store: { [key]: entry },
+        storePath: path.join(stateDir, "agents", agentId, "sessions", "sessions.json"),
+        now: START,
+        skipTranscriptUsageFallback: true,
+        lightweightListRow: true,
+      });
+    };
+
+    const inherited = row("main", BASE_ENTRY);
+    expect(inherited.reasoningLevel).toBeUndefined();
+    expect(inherited.reasoningDefault).toBe("on");
+    expect(row("main", { ...BASE_ENTRY, reasoningLevel: "off" })).toMatchObject({
+      reasoningLevel: "off",
+      reasoningDefault: "on",
+    });
+    expect(row("other", BASE_ENTRY).reasoningDefault).toBe("stream");
+  });
+});
+
 test("preserves complete base rows across time and caller presentation fixtures", async () => {
   await withStateDirEnv("openclaw-row-materialize-golden-", async ({ stateDir }) => {
     const cfg = config();

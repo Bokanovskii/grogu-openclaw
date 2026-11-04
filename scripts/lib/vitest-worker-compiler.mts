@@ -30,6 +30,21 @@ import {
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(import.meta.url);
+const activeWorkflowPrefix = ".github/workflows/";
+
+// Grogu quarantines inherited workflows; artifacts keep their upstream-relative paths.
+function resolveVitestWorkerAssetSource(asset: string): string {
+  const source = path.join(root, asset);
+  if (!asset.startsWith(activeWorkflowPrefix) || fs.existsSync(source)) {
+    return source;
+  }
+  const archived = path.join(
+    root,
+    ".github/upstream-workflows",
+    asset.slice(activeWorkflowPrefix.length),
+  );
+  return fs.existsSync(archived) ? archived : source;
+}
 
 async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
   const started = performance.now();
@@ -394,7 +409,7 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
       (sourceAsset) => [sourceAsset, path.join("dist", legacyOutputPrefix, sourceAsset)] as const,
     ),
   ]) {
-    const source = path.join(root, asset);
+    const source = resolveVitestWorkerAssetSource(asset);
     const destination = path.join(directory, relativeDestination);
     const contents = fs.readFileSync(source);
     const hash = hashVitestWorkerArtifact(contents);

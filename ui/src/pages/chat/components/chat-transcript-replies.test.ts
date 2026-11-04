@@ -188,7 +188,7 @@ describe("chat transcript replies", () => {
   );
 
   it.each([false, true])(
-    "opens folded work when a reply navigation loads its source (run frame: %s)",
+    "shows a reply navigation source that stays visible as answer prose (run frame: %s)",
     async (framed) => {
       const transcript = createTestTranscript();
       const container = document.body.appendChild(document.createElement("div"));
@@ -233,9 +233,7 @@ describe("chat transcript replies", () => {
         ];
         rerender();
         await flushDeferredRowPrune();
-        expect(
-          requireElement(container, ".chat-work-group button").getAttribute("aria-expanded"),
-        ).toBe("true");
+        expect(container.querySelector(".chat-work-group")).toBeNull();
         expect(requireElement(container, "[data-entry-id='source-message']").textContent).toContain(
           "The original answer",
         );

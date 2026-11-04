@@ -55,6 +55,66 @@ async function captureTransportRequest(
 }
 
 describe("openai completions transport", () => {
+  it("re-encodes only rejected Sparky admission and never replays an accepted incomplete stream", async () => {
+    vi.stubEnv("GROGU_PROFILE_FILE", "/synthetic/profile.json");
+    vi.useFakeTimers();
+    const previousHost = getAiTransportHost();
+    const bodies: string[] = [];
+    let rejectAdmission = true;
+    let incomplete = false;
+    configureAiTransportHost({
+      ...previousHost,
+      buildModelFetch: () => async (input, init) => {
+        const request = new Request(input, init);
+        bodies.push(await request.text());
+        if (rejectAdmission) {
+          rejectAdmission = false;
+          return new Response(JSON.stringify({ error: { message: "Concurrency limit reached" } }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after-ms": "1" },
+          });
+        }
+        return new Response(
+          `data: ${JSON.stringify(makeCompletionsChunk({ content: "ok" }, incomplete ? null : "stop"))}\n\n${incomplete ? "" : "data: [DONE]\n\n"}`,
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      },
+    });
+    try {
+      const run = async () => {
+        const stream = createOpenAICompletionsTransportStreamFn()(
+          makeCompletionsModel({
+            provider: "sparky",
+            id: "synthetic",
+            baseUrl: "https://synthetic.invalid/v1",
+          }),
+          { messages: [{ role: "user", content: "public fixture", timestamp: 1 }] },
+          { apiKey: "synthetic-key", timeoutMs: 1_000 },
+        );
+        if (stream instanceof Promise) {
+          throw new Error("Expected synchronous stream");
+        }
+        for await (const event of stream) {
+          void event;
+        }
+        return stream.result();
+      };
+      const pending = run();
+      await vi.runAllTimersAsync();
+      expect((await pending).stopReason).toBe("stop");
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]).toBe(bodies[1]);
+      incomplete = true;
+      expect((await run()).stopReason).toBe("error");
+      expect(bodies).toHaveLength(3);
+    } finally {
+      configureAiTransportHost(previousHost);
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
   it.each([
     {
       modelId: "gpt-6-astra",

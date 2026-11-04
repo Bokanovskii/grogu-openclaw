@@ -24,6 +24,7 @@ type ModelCallUsage = NonNullable<
   Extract<DiagnosticEventInput, { type: "model.call.completed" }>["usage"]
 >;
 export type ModelCallObservationState = {
+  requestImageCount?: number | null;
   requestPayloadBytes?: number;
   providerAcceptanceKind?: ProviderAcceptance["kind"];
   responseStatus?: number;

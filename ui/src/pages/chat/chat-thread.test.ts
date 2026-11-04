@@ -503,13 +503,17 @@ describe("collapseCompletedTurnWork", () => {
         assistantMessage("All done.", 4_000),
       ],
     });
-    expect(items.map((item) => item.kind)).toEqual(["group", "work-group", "group", "group"]);
-    expect(canvasBlocksIn(requireGroup(items[2]))).toHaveLength(1);
-    expect(requireWorkGroup(items[1]).groups.map((group) => group.role)).toEqual([
-      "assistant",
-      "tool",
+    expect(items.map((item) => item.kind)).toEqual([
+      "group",
+      "work-group",
+      "group",
+      "group",
+      "group",
     ]);
-    expect(messageRecord(requireGroup(items[3])).content).toBe("All done.");
+    expect(canvasBlocksIn(requireGroup(items[2]))).toHaveLength(1);
+    expect(requireWorkGroup(items[1]).groups.map((group) => group.role)).toEqual(["tool"]);
+    expect(messageRecord(requireGroup(items[3])).content).toBe("Checking the details.");
+    expect(messageRecord(requireGroup(items[4])).content).toBe("All done.");
   });
 
   it("keeps completed work expanded for non-dashboard session", () => {
@@ -1590,7 +1594,7 @@ describe("buildCachedChatItems", () => {
 
   it.each([
     {
-      name: "nearest assistant turn",
+      name: "independent managed-document slot beside the nearest assistant turn",
       props: {
         messages: [
           chatMessage("assistant", undefined, 1_000, {
@@ -1611,10 +1615,10 @@ describe("buildCachedChatItems", () => {
           ),
         ],
       },
-      order: null,
+      order: ["assistant", "tool", "assistant"],
       canvases: [
         [0, 1],
-        [1, 0],
+        [2, 0],
       ],
     },
     {
@@ -1677,7 +1681,7 @@ describe("buildCachedChatItems", () => {
     }
     const groups = items.filter((item) => item.kind === "group");
     for (const [index, count] of canvases) {
-      const blocks = canvasBlocksIn(groupAt(groups, index));
+      const blocks = canvasBlocksAcross(groupAt(groups, index));
       if (count === 0) {
         expect(blocks).toStrictEqual([]);
       } else {

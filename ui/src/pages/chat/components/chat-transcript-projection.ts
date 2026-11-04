@@ -79,7 +79,10 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
   const { showOwnSenderName, sessionPeople } = resolveTranscriptParticipants(props);
   const mediaPolicyKey = assistantMediaPolicyKey(activeSession, props.mediaPolicyEpoch);
   const isGlobalAliasKey = isTranscriptGlobalAlias(props);
-  const showReasoning = props.showThinking && activeSession?.reasoningLevel === "on";
+  // Unset sessions inherit the configured default, matching run-time reasoning resolution.
+  const showReasoning =
+    props.showThinking &&
+    (activeSession?.reasoningLevel ?? activeSession?.reasoningDefault) === "on";
   const assistantAgentId = props.currentAgentId ?? props.fullMessageAgentId;
   const assistantAvatar = resolveAssistantDisplayAvatar({
     currentAgentId: assistantAgentId,

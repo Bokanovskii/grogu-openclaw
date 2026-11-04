@@ -76,6 +76,12 @@ import {
 } from "./chat-thread-run-identity.ts";
 import { coalesceToolActivityMessages } from "./chat-tool-activity-coalesce.ts";
 import { safeNormalizeMessage } from "./chat-turn-boundary.ts";
+import {
+  deduplicateInlineWidgets,
+  isManagedInlineWidget,
+  prepareInlineWidgetInput,
+  splitAssistantProse,
+} from "./chat-widget-projection.ts";
 import type { CompactionStatus } from "./tool-stream-contract.ts";
 
 export type BuildChatItemsProps = ChatInputPlacementProps & {
@@ -114,14 +120,18 @@ function canvasAssistantItemKey(
   source: Parameters<typeof canvasPreviewBaseIdentity>[1],
   fallback: string,
 ): string {
+  if (isManagedInlineWidget(source.preview)) {
+    return `canvas:doc:${source.preview.viewId}`;
+  }
   const identity = canvasPreviewBaseIdentity(message, source);
   return identity ? `canvas:${identity}` : `${fallback}:canvas`;
 }
 
 export function buildChatItems(
-  props: BuildChatItemsProps,
+  inputProps: BuildChatItemsProps,
   inputOrder: ChatInputOrderState = { keys: [] },
 ): Array<ChatItem | MessageGroup> {
+  const props = prepareInlineWidgetInput(inputProps);
   let items: ChatItem[] = [];
   const tools = props.toolMessages.filter(
     (message): message is Record<string, unknown> => asRecord(message) !== null,
@@ -363,12 +373,14 @@ export function buildChatItems(
       items,
       canvasBounds ?? undefined,
     );
-    const assistant = findNearestAssistantMessage(
-      items,
-      preview.timestamp,
-      canvasMinimumIndex,
-      canvasMaximumIndex,
-    );
+    const assistant = isManagedInlineWidget(preview.preview)
+      ? null
+      : findNearestAssistantMessage(
+          items,
+          preview.timestamp,
+          canvasMinimumIndex,
+          canvasMaximumIndex,
+        );
     if (assistant) {
       items[assistant.index] = {
         ...assistant.item,
@@ -388,6 +400,7 @@ export function buildChatItems(
       preview.timestamp,
       canvasMinimumIndex,
       canvasMaximumIndex,
+      isManagedInlineWidget(preview.preview),
     );
     const nextItem = items[insertionIndex];
     const nextTimestamp =
@@ -612,10 +625,14 @@ export function buildChatItems(
       : undefined;
   const projectYields = (source: ChatItem[], complete?: ChatItem[]) =>
     projectSessionsYieldItems(source, props.showToolCalls, complete);
-  const complete = hidden ? projectYields(coalesceToolActivityMessages(items)) : undefined;
-  return groupMessages(projectYields(coalesceToolActivityMessages(items, hidden), complete), {
-    items: complete,
-    people: props.replyPeople,
-    localPerson: props.replyLocalPerson,
-  });
+  const visibleItems = splitAssistantProse(deduplicateInlineWidgets(items));
+  const complete = hidden ? projectYields(coalesceToolActivityMessages(visibleItems)) : undefined;
+  return groupMessages(
+    projectYields(coalesceToolActivityMessages(visibleItems, hidden), complete),
+    {
+      items: complete,
+      people: props.replyPeople,
+      localPerson: props.replyLocalPerson,
+    },
+  );
 }

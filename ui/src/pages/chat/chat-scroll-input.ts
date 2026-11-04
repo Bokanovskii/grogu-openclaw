@@ -1,6 +1,7 @@
 import { isApplePlatform } from "../../lib/keyboard-shortcut-contract.ts";
 
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+const wheelRemainders = new WeakMap<HTMLElement, { document: Document; remainder: number }>();
 
 export function forwardChatWheelToTranscript(
   event: WheelEvent,
@@ -64,7 +65,16 @@ export function forwardChatWheelToTranscript(
       : event.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.2
         : 1;
-  transcript.scrollBy({ top: event.deltaY * unit, behavior: "instant" });
+  const previous = wheelRemainders.get(transcript);
+  const total =
+    (previous?.document === transcript.ownerDocument ? previous.remainder : 0) +
+    event.deltaY * unit;
+  const requested = Math.round(total);
+  wheelRemainders.set(transcript, {
+    document: transcript.ownerDocument,
+    remainder: total - requested,
+  });
+  transcript.scrollBy({ top: requested, behavior: "instant" });
 }
 
 export function isTranscriptScrollKey(event: KeyboardEvent): boolean {

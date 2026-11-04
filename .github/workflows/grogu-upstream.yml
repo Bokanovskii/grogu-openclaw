@@ -1,0 +1,46 @@
+name: Grogu stable upstream discovery
+
+on:
+  schedule:
+    - cron: "31 7 * * *"
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: grogu-upstream-writer
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event.repository.private
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The workflow token only reads this checkout. Pushing upstream history that
+    # touches .github/workflows needs a repo-scoped token with workflow permission.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "26.12.1"
+      - name: Install the source-pinned package manager and dependencies
+        run: |
+          npm install --global "pnpm@$(node -p "require('./grogu/toolchain.json').pnpm")"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare one private draft update PR without model requests or deployment
+        env:
+          GH_TOKEN: ${{ secrets.GROGU_UPSTREAM_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Set GROGU_UPSTREAM_TOKEN: a fine-grained token for this repository only, with Contents, Pull requests, Actions and Workflows write"
+            exit 1
+          fi
+          git config --local core.hooksPath /dev/null
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node --import ./scripts/tsx.mjs grogu/update-upstream.mts

@@ -36,6 +36,11 @@ import type {
   PluginHookModelCallEndedEvent,
   PluginHookModelCallStartedEvent,
 } from "../../../plugins/hook-types.js";
+import {
+  countRequestImages,
+  normalizeReportedUsage,
+} from "../../model-request-telemetry-metadata.js";
+import { beginModelRequestTelemetry } from "../../model-request-telemetry.js";
 import type { StreamFn } from "../../runtime/index.js";
 import type {
   createModelObserver,
@@ -179,16 +184,13 @@ function withDiagnosticRequestContext(
   const originalOnPayload = options?.onPayload;
   const originalOnResponse = options?.onResponse;
   const onPayload: NonNullable<ModelCallStreamOptions>["onPayload"] = (payload, model) => {
-    if (modelRequestBodyState(requestOptions).enabled) {
-      return originalOnPayload?.(payload, model);
-    }
-    if (!originalOnPayload) {
-      observer.assignRequestPayloadBytes(payload);
-      return undefined;
-    }
-    const result = originalOnPayload(payload, model);
+    const result = originalOnPayload?.(payload, model);
     const observeReplacement = (replacement: unknown) => {
-      observer.assignRequestPayloadBytes(replacement ?? payload);
+      const actualPayload = replacement ?? payload;
+      observer.state.requestImageCount = countRequestImages(actualPayload);
+      if (!modelRequestBodyState(requestOptions).enabled) {
+        observer.assignRequestPayloadBytes(actualPayload);
+      }
       return replacement;
     };
     return isPromiseLike(result) ? result.then(observeReplacement) : observeReplacement(result);
@@ -251,6 +253,10 @@ export function createModelLifecycle(params: {
     ...(observer.promptStats ? { promptStats: observer.promptStats } : {}),
     trace,
   };
+  const telemetry = beginModelRequestTelemetry({
+    ...eventBase,
+    timeoutMs: params.requestTimeoutMs,
+  });
   emitCoreModelRequestStartedDiagnosticEvent(
     eventBase,
     params.ctx.ownerGeneration,
@@ -295,6 +301,17 @@ export function createModelLifecycle(params: {
         ? "aborted"
         : (fields?.failureKind ?? "error")
       : (observer.state.terminalReason ?? "unknown");
+    telemetry.update({ inputImageCount: observer.state.requestImageCount ?? null }, false);
+    telemetry.finish({
+      outcome: failure ? "error" : observer.state.terminalSucceeded ? "completed" : "incomplete",
+      error: failure?.error,
+      signal: params.options?.signal,
+      usage: normalizeReportedUsage(observer.state.usage, {
+        successful: observer.state.terminalSucceeded === true,
+      }),
+      stopReason: terminalReason,
+      requestBytes: observer.state.requestPayloadBytes,
+    });
     const { providerAcceptanceKind } = observer.state;
     const provider = boundedTimelineAttribute(eventBase.provider);
     const model = boundedTimelineAttribute(eventBase.model);
@@ -350,10 +367,12 @@ export function createModelLifecycle(params: {
   let terminalNotified = false;
   return {
     eventBase,
+    telemetry,
     observer,
     propagatedOptions,
     startedAt,
     observeChunk(chunk: unknown) {
+      telemetry.observe(chunk);
       observer.observeResponseChunk(startedAt, chunk);
       observer.maybeEmitStreamProgress(eventBase);
       if (params.ctx.onOutputDelta && isModelOutputDelta(chunk)) {

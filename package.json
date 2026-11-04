@@ -21,7 +21,8 @@
     "url": "git+https://github.com/openclaw/openclaw.git"
   },
   "bin": {
-    "openclaw": "openclaw.mjs"
+    "openclaw": "openclaw.mjs",
+    "grogu-maint": "dist/grogu-maint.js"
   },
   "publishConfig": {
     "executableFiles": [
@@ -50,6 +51,7 @@
     "node-host-launcher.mjs",
     "node-compile-cache.mjs",
     "openclaw.mjs",
+    "dist/grogu-maint.js",
     "worker-heap-flag.mjs",
     "pnpm-workspace.yaml",
     "README.md",

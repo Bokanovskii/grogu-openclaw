@@ -15,6 +15,54 @@ export function hasReadableSseData(block: string): boolean {
     .some((line) => line.startsWith("data:") && line.slice("data:".length).trim().length > 0);
 }
 
+function readSparkySseErrorPrefix(
+  buffer: string,
+): { end: number; error: Record<string, unknown> } | undefined {
+  const start = buffer.search(/[^\s\uFEFF]/u);
+  if (start < 0 || buffer[start] !== "{") {
+    return undefined;
+  }
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < Math.min(buffer.length, SSE_NONOK_BODY_MAX_BYTES); index++) {
+    const char = buffer[index];
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = false;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === "{") {
+      depth++;
+    } else if (char === "}" && --depth === 0) {
+      try {
+        const value: unknown = JSON.parse(buffer.slice(start, index + 1));
+        if (
+          value &&
+          typeof value === "object" &&
+          "error" in value &&
+          value.error &&
+          typeof value.error === "object" &&
+          !Array.isArray(value.error) &&
+          "message" in value.error &&
+          typeof value.error.message === "string"
+        ) {
+          return { end: index + 1, error: value.error as Record<string, unknown> };
+        }
+      } catch {
+        // Leave unrelated or malformed prefixes to the ordinary bounded SSE parser.
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 export function findSseEventBoundary(
   buffer: string,
   startIndex = 0,
@@ -77,7 +125,12 @@ function capNonOkResponseBodyLazily(response: Response, maxBytes: number): Respo
 
 export function prepareOpenAISdkSseResponse(
   response: Response,
-  options: { sanitize: boolean; synthesizeJsonAsSse: boolean; onSseComment?: () => void },
+  options: {
+    sanitize: boolean;
+    synthesizeJsonAsSse: boolean;
+    recoverUnframedErrors?: boolean;
+    onSseComment?: () => void;
+  },
 ): Response {
   const contentType = response.headers.get("content-type") ?? "";
   if (!response.body) {
@@ -106,6 +159,13 @@ export function prepareOpenAISdkSseResponse(
 
   const enqueueSanitized = (controller: ReadableStreamDefaultController<Uint8Array>): boolean => {
     for (;;) {
+      const prefix = options.recoverUnframedErrors ? readSparkySseErrorPrefix(buffer) : undefined;
+      if (prefix) {
+        buffer = buffer.slice(prefix.end);
+        scanOffset = 0;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: prefix.error })}\n\n`));
+        return true;
+      }
       const boundary = findSseEventBoundary(buffer, scanOffset);
       if (!boundary) {
         // A delimiter can straddle chunks; only its last three characters need revisiting.
@@ -181,8 +241,8 @@ export function prepareOpenAISdkSseResponse(
           buffer += text;
         }
       } catch (error) {
-        await cancelReaderBestEffort(reader, error);
         controller.error(error);
+        void cancelReaderBestEffort(reader, error);
       }
     },
     async cancel(reason) {

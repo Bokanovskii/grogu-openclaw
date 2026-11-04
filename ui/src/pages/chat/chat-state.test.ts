@@ -1385,7 +1385,8 @@ describe("canonical session message recovery", () => {
     expect(state.chatMessages).toEqual([prompt, toolBoundary, persistedFinal]);
     expect(renderedTranscript(state)).toEqual([
       { role: "user", text: "Inspect the repository." },
-      { role: "tool", text: "Checking the repository." },
+      { role: "assistant", text: "Checking the repository." },
+      { role: "tool", text: null },
       { role: "assistant", text: "The repair is complete." },
     ]);
   });

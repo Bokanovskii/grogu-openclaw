@@ -6,6 +6,8 @@ import { prepareModelRequestBody } from "../../packages/ai/src/transports/model-
 import { SsrFBlockedError } from "../infra/net/ssrf.js";
 import { mintSecretSentinel } from "../secrets/sentinel.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { createGroguRuntimeFixture } from "./grogu-runtime.test-support.js";
+import { closeModelRequestTelemetry } from "./model-request-telemetry.js";
 import {
   buildGuardedModelFetch,
   buildProviderRequestDispatcherPolicyMock,
@@ -76,6 +78,37 @@ async function parseSse(response: Response) {
 
 describe("buildGuardedModelFetch", () => {
   installProviderTransportFetchTestHooks();
+  it("recovers only a selected Sparky unframed provider error through the guarded transport", async () => {
+    const f = createGroguRuntimeFixture();
+    vi.stubEnv("GROGU_PROFILE_FILE", f.profileFile);
+    vi.stubEnv("OPENCLAW_MODEL_TELEMETRY_DIRECTORY", `${f.directory}/telemetry`);
+    const release = mockResponse(
+      new Response(
+        responseStream([
+          '{"error":{"message":"synthetic invalid role","code":"invalid_request"}}',
+          "\n\n: provider error\n\n",
+        ]).stream,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    try {
+      const response = await request(streaming, {
+        ...model,
+        provider: "sparky",
+        baseUrl: "https://synthetic.invalid/v1",
+      });
+      await expect(parseSse(response)).rejects.toMatchObject({ code: "invalid_request" });
+      expect(fetchWithSsrFGuardMock).toHaveBeenCalledOnce();
+      expect(latestGuardedFetchParams()).toMatchObject({
+        allowCrossOriginUnsafeRedirectReplay: false,
+      });
+      expect(release).toHaveBeenCalled();
+    } finally {
+      await closeModelRequestTelemetry();
+      vi.unstubAllEnvs();
+      f.cleanup();
+    }
+  });
 
   it("waits for local reconciliation and releases its lease after consuming the body", async () => {
     vi.stubEnv("OPENCLAW_DEBUG_PROXY_ENABLED", "1");

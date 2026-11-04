@@ -45,7 +45,7 @@ export const PREFLIGHT_CHECKS: CheckCommand[] = [
 
 export function usage() {
   return [
-    "Usage: node --import tsx scripts/check.mts [--base <ref>] [--timed] [--include-architecture] [--include-test-types]",
+    "Usage: node --import tsx scripts/check.mts [--base <ref>] [--timed] [--include-architecture] [--include-test-types] [--skip-lint]",
     "",
     "Runs the local check graph: guard preflights, typecheck, lint, and policy guards.",
     "",
@@ -54,6 +54,8 @@ export function usage() {
     "  --timed                 Print timing summary even when checks pass.",
     "  --include-architecture  Run architecture import-cycle checks instead of runtime cycles.",
     "  --include-test-types    Typecheck production and test sources.",
+    "  --skip-lint             Skip pnpm lint: Control UI i18n verification, type-aware Oxlint,",
+    "                          and Stylelint. Format and every other gate still run.",
     "  -h, --help              Show this help.",
   ].join("\n");
 }
@@ -61,12 +63,20 @@ export function usage() {
 function parseCheckArgs(argv: string[]) {
   return parseFlagArgs(
     argv,
-    { base: "", help: false, includeArchitecture: false, includeTestTypes: false, timed: false },
+    {
+      base: "",
+      help: false,
+      includeArchitecture: false,
+      includeTestTypes: false,
+      skipLint: false,
+      timed: false,
+    },
     [
       stringFlag("--base", "base", { rejectShortOptions: true }),
       booleanFlag("--timed", "timed", true, { repeatable: true }),
       booleanFlag("--include-architecture", "includeArchitecture", true, { repeatable: true }),
       booleanFlag("--include-test-types", "includeTestTypes", true, { repeatable: true }),
+      booleanFlag("--skip-lint", "skipLint", true, { repeatable: true }),
       booleanFlag("--help", "help", true, { repeatable: true }),
       booleanFlag("-h", "help", true, { repeatable: true }),
     ],
@@ -79,7 +89,10 @@ function parseCheckArgs(argv: string[]) {
   );
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  executeCommand: typeof runCommand = runCommand,
+) {
   let args;
   try {
     args = parseCheckArgs(argv);
@@ -92,6 +105,11 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(usage());
     process.exitCode = 0;
     return;
+  }
+  if (args.skipLint) {
+    console.error(
+      "[check] skipping pnpm lint (Control UI i18n verify, type-aware Oxlint, Stylelint) via --skip-lint: run pnpm check without it locally before merging",
+    );
   }
 
   const tailChecks = [
@@ -142,7 +160,7 @@ export async function main(argv = process.argv.slice(2)) {
       name: "lint",
       parallel: false,
       commands: [
-        { name: "lint", args: ["lint"] },
+        ...(args.skipLint ? [] : [{ name: "lint", args: ["lint"] }]),
         { name: "format", args: ["format:check"] },
       ],
     },
@@ -159,8 +177,8 @@ export async function main(argv = process.argv.slice(2)) {
   for (const stage of stages) {
     console.error(`\n[check] ${stage.name}`);
     const results = stage.parallel
-      ? await Promise.all(stage.commands.map((command) => runCommand(command)))
-      : await runSerial(stage.commands);
+      ? await Promise.all(stage.commands.map((command) => executeCommand(command)))
+      : await runSerial(stage.commands, executeCommand);
 
     timings.push(...results);
     const failed = results.find((result) => result.status !== 0);
@@ -177,10 +195,10 @@ export async function main(argv = process.argv.slice(2)) {
   process.exitCode = exitCode;
 }
 
-async function runSerial(commands: CheckCommand[]) {
+async function runSerial(commands: CheckCommand[], executeCommand: typeof runCommand) {
   const results: Array<Awaited<ReturnType<typeof runCommand>>> = [];
   for (const command of commands) {
-    const result = await runCommand(command);
+    const result = await executeCommand(command);
     results.push(result);
     if (result.status !== 0) {
       break;

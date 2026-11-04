@@ -19,6 +19,8 @@ verified cutover.
 
 Upstream GitHub workflows are kept for reference under
 `.github/upstream-workflows/`; only `grogu-ci.yml` and `grogu-upstream.yml` run.
+The free private runner uses `pnpm check --skip-lint`, which skips the whole
+`pnpm lint` stage; ordinary `pnpm check` remains the required local pre-merge gate.
 
 ## Repository history
 

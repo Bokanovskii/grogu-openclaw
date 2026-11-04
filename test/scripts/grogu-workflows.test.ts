@@ -18,6 +18,25 @@ function workflowFixture() {
 }
 
 describe("upstream automation quarantine", () => {
+  it("keeps the full lint stage local while preserving the hosted source gate", () => {
+    const workflow = fs.readFileSync(
+      path.join(process.cwd(), ".github/workflows/grogu-ci.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain("Run offline source checks without the lint stage");
+    expect(workflow).toContain("pnpm check --skip-lint --base");
+    expect(workflow).toContain("Control UI i18n verify");
+    expect(workflow).toContain("type-aware Oxlint/tsgolint");
+    expect(workflow).toContain("Stylelint");
+    expect(workflow).toContain("REQUIRED LOCAL gate");
+    expect(workflow).not.toContain("continue-on-error");
+    const freeDisk = workflow.indexOf("- name: Free runner disk");
+    const checkout = workflow.indexOf("- uses: actions/checkout@");
+    expect(freeDisk).toBeGreaterThan(-1);
+    expect(checkout).toBeGreaterThan(freeDisk);
+    expect(workflow).toMatch(/- name: Report runner disk\n\s+if: always\(\)/u);
+  });
+
   it("rejects newly introduced upstream workflows and preserves them outside the executable directory", async () => {
     const { fixture, active } = workflowFixture();
     await expect(assertWorkflowIsolation(fixture.directory)).rejects.toThrow(/locale-refresh/);

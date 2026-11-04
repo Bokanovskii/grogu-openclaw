@@ -106,14 +106,29 @@ function noteTool(tools, name, outcome) {
   tools.set(normalized, current);
 }
 
+function messageTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    return truncateUtf8(value.trim(), 128);
+  }
+  return undefined;
+}
+
 function timelineEntry(message) {
   const role = message?.role;
   const text = contentText(message?.content);
+  const timestamp = messageTimestamp(message?.timestamp);
   if (!text) {
     return null;
   }
   if (role === "user") {
-    return { role: "owner", text: truncateUtf8(text, MAX_ENTRY_BYTES) };
+    return {
+      role: "owner",
+      ...(timestamp === undefined ? {} : { timestamp }),
+      text: truncateUtf8(text, MAX_ENTRY_BYTES),
+    };
   }
   if (role !== "assistant") {
     return null;
@@ -126,7 +141,13 @@ function timelineEntry(message) {
         typeof item === "object" &&
         ["tool_use", "toolCall", "tool_call", "function_call"].includes(item.type),
     );
-  return hasToolCall ? null : { role: "assistant", text: truncateUtf8(text, MAX_ENTRY_BYTES) };
+  return hasToolCall
+    ? null
+    : {
+        role: "assistant",
+        ...(timestamp === undefined ? {} : { timestamp }),
+        text: truncateUtf8(text, MAX_ENTRY_BYTES),
+      };
 }
 
 function parsePreviousTimeline(summary) {
@@ -151,10 +172,14 @@ function parsePreviousTimeline(summary) {
       if (
         entry &&
         (entry.role === "owner" || entry.role === "assistant") &&
-        typeof entry.text === "string"
+        typeof entry.text === "string" &&
+        (entry.timestamp === undefined || messageTimestamp(entry.timestamp) !== undefined)
       ) {
         entries.push({
           role: entry.role,
+          ...(entry.timestamp === undefined
+            ? {}
+            : { timestamp: messageTimestamp(entry.timestamp) }),
           text: truncateUtf8(cleanText(entry.text), MAX_ENTRY_BYTES),
         });
       }
@@ -163,6 +188,18 @@ function parsePreviousTimeline(summary) {
     }
   }
   return entries;
+}
+
+function dedupeTimeline(entries) {
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const key = JSON.stringify([entry.role, entry.timestamp ?? null, entry.text]);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function toolSection(tools) {
@@ -220,7 +257,7 @@ export async function summarizeGroguDigest({ messages, previousSummary, signal }
   }
   const previousEntries = parsePreviousTimeline(previousSummary);
   return renderDigest({
-    entries: [...(previousEntries ?? []), ...currentEntries],
+    entries: dedupeTimeline([...(previousEntries ?? []), ...currentEntries]),
     tools,
     legacySummary: previousEntries === null ? previousSummary : undefined,
   });

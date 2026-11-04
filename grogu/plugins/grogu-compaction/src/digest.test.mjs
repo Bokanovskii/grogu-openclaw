@@ -4,7 +4,11 @@ import { groguDigestFormat, summarizeGroguDigest } from "./digest.mjs";
 
 test("renders a deterministic bounded timeline and collapsed tool facts", async () => {
   const messages = [
-    { role: "user", content: "2026-11-03T10:00Z Decision D-17: keep quoted id msg_abc." },
+    {
+      role: "user",
+      timestamp: 1793664000000,
+      content: "Decision D-17: keep quoted id msg_abc.",
+    },
     {
       role: "assistant",
       content: [{ type: "tool_use", name: "sessions_search", input: { private: "omitted" } }],
@@ -24,6 +28,7 @@ test("renders a deterministic bounded timeline and collapsed tool facts", async 
   assert.equal(first, second);
   assert.match(first, /^GROGU_CONTEXT_DIGEST\nformat=grogu-digest\/v1\n/);
   assert.match(first, /Decision D-17: keep quoted id msg_abc/);
+  assert.match(first, /1793664000000/);
   assert.match(first, /I found the older decision and kept D-17/);
   assert.match(first, /"sessions_search" called=1 ok=1 error=0 unknown=0/);
   assert.doesNotMatch(first, /large private result|private.*omitted/);
@@ -49,6 +54,18 @@ test("merges recognized summaries and bounds unrecognized legacy text", async ()
   assert.match(legacy, /legacy-summary:/);
   assert.match(legacy, /…\[truncated\]/);
   assert.ok(Buffer.byteLength(legacy, "utf8") <= groguDigestFormat.maxBytes);
+});
+
+test("deduplicates recognized timeline entries that overlap the current transcript", async () => {
+  const messages = [
+    { role: "user", timestamp: 1000, content: "Unresolved request R-2." },
+    { role: "assistant", timestamp: 2000, content: "Keep R-2 pending." },
+  ];
+  const previousSummary = await summarizeGroguDigest({ messages });
+  const merged = await summarizeGroguDigest({ messages, previousSummary });
+
+  assert.equal((merged.match(/Unresolved request R-2/g) ?? []).length, 1);
+  assert.equal((merged.match(/Keep R-2 pending/g) ?? []).length, 1);
 });
 
 test("keeps the newest timeline entries when the digest budget is exceeded", async () => {

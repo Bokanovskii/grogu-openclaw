@@ -1,0 +1,13 @@
+{
+  "id": "grogu-digest",
+  "name": "Grogu Deterministic Digest",
+  "description": "Deterministic, model-free transcript compaction for Grogu.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

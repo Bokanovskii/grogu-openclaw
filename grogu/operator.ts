@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, stat as statFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -191,7 +191,7 @@ export async function createVerifiedBackup(profile: OperatorProfile) {
   const digestStartedAt = Date.now();
   const digest = await sha256File(result.archivePath);
   const digestMs = Date.now() - digestStartedAt;
-  const archiveBytes = (await stat(result.archivePath)).size;
+  const archiveBytes = (await statFile(result.archivePath)).size;
   const receipt = await writePrivateReceipt(directory, "backup-provenance.json", {
     schemaVersion: 1,
     archivePath: result.archivePath,

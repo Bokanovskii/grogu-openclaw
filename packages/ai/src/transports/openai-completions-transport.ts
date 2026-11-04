@@ -313,7 +313,7 @@ export function streamOpenAICompletionsRequest(
     const provisionalCommentaryTags: PendingCommentaryTags = new Map();
     let firstEventAbort: ReturnType<typeof createFirstStreamEventAbortController> | undefined;
     try {
-      context = projectSparkyImageHistory(model, context);
+      const projectedContext = projectSparkyImageHistory(model, context);
       const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
       const directEmitReasoning = Boolean(
         mode === "direct" &&
@@ -331,7 +331,7 @@ export function streamOpenAICompletionsRequest(
           ? {
               client: createDirectCompletionsClient(
                 model,
-                context,
+                projectedContext,
                 apiKey,
                 resolveProviderSimpleCompletionHeaders(model, options),
                 cacheRetention === "none" ? undefined : options?.sessionId,
@@ -339,8 +339,14 @@ export function streamOpenAICompletionsRequest(
               ),
               sawStreamDONE: undefined,
             }
-          : createManagedCompletionsClient(model, context, options, apiKey, cacheRetention);
-      let params = buildOpenAICompletionsRequest(model, context, options, policy);
+          : createManagedCompletionsClient(
+              model,
+              projectedContext,
+              options,
+              apiKey,
+              cacheRetention,
+            );
+      let params = buildOpenAICompletionsRequest(model, projectedContext, options, policy);
       const encodeBody = prepareModelRequestBody(options);
       const nextParams = await options?.onPayload?.(params, model);
       if (nextParams !== undefined) {
@@ -351,7 +357,7 @@ export function streamOpenAICompletionsRequest(
           (options as { openclawCodeModeToolSurface?: unknown } | undefined)
             ?.openclawCodeModeToolSurface === true
         ) {
-          const visibleToolNames = resolveCodeModeResponsesVisibleToolNames(context);
+          const visibleToolNames = resolveCodeModeResponsesVisibleToolNames(projectedContext);
           enforceCodeModeResponsesToolSurface(
             params,
             visibleToolNames,
@@ -381,34 +387,35 @@ export function streamOpenAICompletionsRequest(
                 timeoutMs: options?.timeoutMs,
               }),
             };
-      const { request, response } = await retrySparkyAdmission(
-        model,
-        async () => {
-          // Re-encode each rejected attempt: an SDK-owned request body may be consumed.
-          const request = client.chat.completions.create(
-            params as OpenAI.Chat.Completions.ChatCompletionCreateParams,
-            { ...requestOptions, ...(await encodeBody(params)) },
-          );
-          const response = await request.asResponse();
-          return { request, response };
-        },
-        {
-          signal: firstEventAbort.signal,
-          timeoutMs: requestOptions?.timeout,
-        },
-      );
+      const { request: completionRequest, response: completionResponse } =
+        await retrySparkyAdmission(
+          model,
+          async () => {
+            // Re-encode each rejected attempt: an SDK-owned request body may be consumed.
+            const attemptRequest = client.chat.completions.create(
+              params as OpenAI.Chat.Completions.ChatCompletionCreateParams,
+              { ...requestOptions, ...(await encodeBody(params)) },
+            );
+            const attemptResponse = await attemptRequest.asResponse();
+            return { request: attemptRequest, response: attemptResponse };
+          },
+          {
+            signal: firstEventAbort.signal,
+            timeoutMs: requestOptions?.timeout,
+          },
+        );
       const responseStream = {
         async *[Symbol.asyncIterator]() {
           // Parse only after provider acceptance; JSON bodies are consumed here too.
           if (!params.stream) {
-            yield (await boundResponseBody(response, {
+            yield (await boundResponseBody(completionResponse, {
               maxBytes: 16 * 1024 * 1024,
               onOverflow: ({ maxBytes }) =>
                 new Error(`Chat Completions JSON response exceeds ${maxBytes} bytes`),
             }).json()) as OpenAI.Chat.Completions.ChatCompletion; // SAFETY: Provider JSON follows the Chat Completions wire contract.
             return;
           }
-          const data = await request;
+          const data = await completionRequest;
           if (Symbol.asyncIterator in data) {
             yield* data;
           } else {
@@ -420,7 +427,7 @@ export function streamOpenAICompletionsRequest(
         stream: responseStream,
         signal: firstEventAbort.signal,
         abort: firstEventAbort.abort,
-        hook: createOpenAIProviderAcceptanceHook(options, response, model),
+        hook: createOpenAIProviderAcceptanceHook(options, completionResponse, model),
         onReady: () => stream.push({ type: "start", partial: output }),
       });
       const directEvents =

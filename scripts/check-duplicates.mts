@@ -21,6 +21,7 @@ const targets = [
   "security",
   "test",
   "skills",
+  "grogu",
   "config",
   "cli-root-options.mjs",
   "docker-entrypoint.mjs",

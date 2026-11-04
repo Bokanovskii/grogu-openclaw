@@ -65,10 +65,9 @@ export function parseGroguPrivateProfile(value: unknown): GroguPrivateProfile {
   }
   const researchCheckpoint: ResearchCheckpointBinding = Object.freeze({
     workspace: path.resolve(binding.workspace),
+    // SAFETY: The guard above verifies every array element is a nonempty trimmed string.
     tracks: Object.freeze([...binding.tracks] as string[]),
-    ...(binding.artifactPrefix === undefined
-      ? {}
-      : { artifactPrefix: binding.artifactPrefix as string }),
+    ...(binding.artifactPrefix === undefined ? {} : { artifactPrefix: binding.artifactPrefix }),
   });
   return Object.freeze({ schemaVersion: 1, bindings: Object.freeze({ researchCheckpoint }) });
 }

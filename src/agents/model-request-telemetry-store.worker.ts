@@ -154,7 +154,7 @@ export function createRequestTelemetryStore(
           .where("started_at", ">=", since)
           .orderBy("started_at", "desc")
           .limit(limit),
-      ).rows.map((row) => modelRequestMetadataSnapshot(JSON.parse(row.data) as ModelRequestRecord));
+      ).rows.map((row) => modelRequestMetadataSnapshot(JSON.parse(row.data)));
     },
     close() {
       database.close();
@@ -185,6 +185,7 @@ if (!isMainThread) {
         stores.set(directory, store);
       }
       if (input.action === "write" && Array.isArray(input.records) && input.records.length <= 64) {
+        // SAFETY: The owned worker transport accepts this message only from the typed parent writer.
         store.writeBatch(input.records as ModelRequestRecord[]);
         return [];
       }

@@ -187,23 +187,22 @@ export function splitAssistantProse(items: ChatItem[]): ChatItem[] {
         segments.push({ tool, content: [block] });
       }
     }
-    return segments.map((segment, index) => ({
-      ...item,
-      key: `${item.key}:${segment.tool ? "tools" : "prose"}:${index}`,
-      message: {
-        ...raw,
-        content: segment.content,
-        ...(!segment.tool
-          ? {
-              toolCallId: undefined,
-              tool_call_id: undefined,
-              toolUseId: undefined,
-              tool_use_id: undefined,
-              toolName: undefined,
-              tool_name: undefined,
-            }
-          : {}),
-      },
-    }));
+    return segments.map((segment, index) => {
+      const message = Object.assign({}, raw, { content: segment.content });
+      if (!segment.tool) {
+        Object.assign(message, {
+          toolCallId: undefined,
+          tool_call_id: undefined,
+          toolUseId: undefined,
+          tool_use_id: undefined,
+          toolName: undefined,
+          tool_name: undefined,
+        });
+      }
+      return Object.assign({}, item, {
+        key: `${item.key}:${segment.tool ? "tools" : "prose"}:${index}`,
+        message,
+      });
+    });
   });
 }

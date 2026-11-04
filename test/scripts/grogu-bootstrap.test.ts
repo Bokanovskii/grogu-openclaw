@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   parseManagedWorkerTriggers,
   planManagedJobPatch,
+  readWorkerSchemaPin,
   readUpdatedManagedJob,
 } from "../../grogu/bootstrap.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 
+const schemaSha256 = "a".repeat(64);
 const job: CronJob = {
   id: "synthetic-job",
   name: "Watchdog",
@@ -28,51 +30,56 @@ describe("revision-checked metadata bootstrap", () => {
         id: "job-gmail",
         template: {
           version: 1,
-          source: "gmail",
-          tool: {
-            server: "gmail",
-            name: "gmail_search",
-            schemaSha256: "a".repeat(64),
-            args: {
-              query: "newer_than:1d",
-              max: 1,
-              include_body: false,
-              sanitize_content: true,
-            },
-          },
-          result: {
-            complete: "structuredContent.exit_code",
-            completeValue: 0,
-            guards: [
-              { path: "isError", equals: false },
-              { path: "structuredContent.tool", equals: "gmail_search" },
-              { path: "structuredContent.risk", equals: "read" },
-            ],
-            items: "structuredContent.messages",
-            cursor: "structuredContent.cursor",
-            fields: {
-              id: "message_id",
-              secondaryId: "thread_id",
-              timestamp: "timestamp",
-            },
+          templateId: "gmail-metadata-v1",
+          schemaSha256,
+          toolsAllow: ["gmail__gmail_search"],
+          args: {
+            query: "newer_than:1d",
+            max: 1,
+            include_body: false,
+            sanitize_content: true,
           },
           maxItems: 1,
           continuation: {
             delayMs: 60_000,
             intervalMs: 60_000,
+            nativeSweepIntervalMs: 300_000,
             maxOpen: 8,
-            maxFires: 3,
+            maxFires: 2,
+            ttlMs: 86_400_000,
+          },
+        },
+      },
+      {
+        logicalName: "messages",
+        id: "job-messages",
+        template: {
+          version: 1,
+          templateId: "messages-metadata-v1",
+          schemaSha256,
+          toolsAllow: ["seaglass__recent_messages"],
+          args: { limit: 50, offset: 0, include_text: false },
+          maxItems: 50,
+          continuation: {
+            delayMs: 60_000,
+            intervalMs: 60_000,
+            nativeSweepIntervalMs: 300_000,
+            maxOpen: 8,
+            maxFires: 2,
             ttlMs: 86_400_000,
           },
         },
       },
     ]);
-    expect(parsed).toHaveLength(1);
+    expect(parsed).toHaveLength(2);
     expect(parsed[0]).toMatchObject({
       logicalName: "gmail",
       id: "job-gmail",
       contractVersion: 1,
-      trigger: { script: expect.stringContaining("MCP[template.tool.server]") },
+      templateId: "gmail-metadata-v1",
+      toolsAllow: ["gmail__gmail_search"],
+      trigger: { script: expect.stringContaining("MCP.gmail.gmailSearch") },
+      triggerSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(() =>
       parseManagedWorkerTriggers([
@@ -83,6 +90,28 @@ describe("revision-checked metadata bootstrap", () => {
         },
       ]),
     ).toThrow(/Invalid or duplicate/);
+    expect(() => parseManagedWorkerTriggers([])).toThrow(/exactly the two existing jobs/);
+    expect(() => parseManagedWorkerTriggers([parsed[0]])).toThrow();
+  });
+
+  it("reads exact schema pins only from native MCP probe metadata", () => {
+    expect(
+      readWorkerSchemaPin(
+        {
+          toolSchemas: {
+            gmail__gmail_search: {
+              inputSchema: { type: "object" },
+              schemaFormat: "openclaw-effective-input-schema/v1",
+              schemaSha256,
+            },
+          },
+        },
+        "gmail__gmail_search",
+      ),
+    ).toBe(schemaSha256);
+    expect(() =>
+      readWorkerSchemaPin({ tools: ["gmail__gmail_search"] }, "gmail__gmail_search"),
+    ).toThrow(/toolSchemas/);
   });
 
   it("is idempotent and patches only changed fields while preserving a manual pause and model", () => {

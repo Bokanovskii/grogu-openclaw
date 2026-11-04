@@ -89,11 +89,30 @@ owner-only update for each material private signal. Add each private job id and
 its required template marker to `bindings.modelPolicy.workerContracts`;
 `policy-check` then reports missing jobs or markers without printing prompts.
 Each `native.workerTriggers` entry selects a tracked template from
-`worker-trigger-templates.ts`, an approved MCP server/tool plus its reviewed
-schema hash, private bounded arguments, metadata-only result selectors, and
-continuation limits. Gmail, Messages, and Calendar templates reject write/body
-options and incomplete or structured-failure responses rather than fabricating
-an empty source. Run `workers-bootstrap` in preview mode before activation.
+`worker-trigger-templates.ts`, an approved MCP server/tool plus its live
+catalog schema hash, private bounded arguments, fixed metadata-only decoding,
+and continuation limits. Bind exactly the two existing jobs: one Gmail
+collector and one Messages collector. Calendar remains the existing payload
+tool and is requested only by bounded `native_source_sweep` trigger intent.
+No Calendar MCP trigger template or new job is installed.
+
+Capture the supported effective input-schema pins without invoking a source
+tool:
+
+```sh
+openclaw mcp probe gmail --json |
+  jq -r '.toolSchemas.gmail__gmail_search.schemaSha256'
+openclaw mcp probe seaglass --json |
+  jq -r '.toolSchemas.seaglass__recent_messages.schemaSha256'
+```
+
+The probe also publishes `schemaFormat:
+openclaw-effective-input-schema/v1` and the normalized `inputSchema`.
+`workers-bootstrap` repeats both named probes and refuses preview or apply when
+either private pin differs from the live catalog. Gmail and Messages templates
+reject write/body options and incomplete or structured-failure responses
+rather than fabricating an empty source. Run `workers-bootstrap` in preview
+mode before activation.
 The rendered trigger owns source polling, cursor/watermark comparison, and
 `fire: false` for unchanged data; only `fire: true` admits the existing
 agent-turn payload for bounded research.

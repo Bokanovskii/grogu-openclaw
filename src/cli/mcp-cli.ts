@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { expectDefined } from "@openclaw/normalization-core";
+import { expectDefined, stableStringify } from "@openclaw/normalization-core";
 import {
   asPositiveFiniteNumber,
   parseStrictFiniteNumber,
@@ -608,6 +609,20 @@ async function readMcpProbeResult(runtime: SessionMcpRuntime) {
         }),
     ),
     tools: projectedTools.map((tool) => tool.name).toSorted(),
+    toolSchemas: Object.fromEntries(
+      projectedTools
+        .toSorted((left, right) => left.name.localeCompare(right.name))
+        .map((tool) => [
+          tool.name,
+          {
+            inputSchema: tool.parameters,
+            schemaFormat: "openclaw-effective-input-schema/v1",
+            schemaSha256: createHash("sha256")
+              .update(stableStringify(tool.parameters))
+              .digest("hex"),
+          },
+        ]),
+    ),
     diagnostics: catalog.diagnostics ?? [],
   };
 }

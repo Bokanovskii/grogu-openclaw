@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { reconcileManagedJobs } from "./bootstrap.js";
+import { reconcileManagedJobs, reconcileWorkerTriggers } from "./bootstrap.js";
 import { stageGroguCompactionConfig } from "./compaction-config.js";
 import {
   createPrivateArtifactDirectory,
@@ -56,6 +56,16 @@ program
   .option("--apply", "Apply only non-behavioral metadata changes", false)
   .action(async (options: { apply: boolean }) => {
     console.log(JSON.stringify(await reconcileManagedJobs(profile(), options.apply)));
+  });
+
+program
+  .command("workers-bootstrap")
+  .description(
+    "Preview deterministic private-source trigger installation; no model request or live write by default",
+  )
+  .option("--apply", "Apply revision-checked trigger changes after review", false)
+  .action(async (options: { apply: boolean }) => {
+    console.log(JSON.stringify(await reconcileWorkerTriggers(profile(), options.apply)));
   });
 
 program

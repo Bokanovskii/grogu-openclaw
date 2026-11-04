@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { evaluatePolicy, type ModelPolicy } from "../../grogu/policy.js";
+import {
+  renderWorkerTriggerScript,
+  workerTriggerScriptSha256,
+  workerTriggerTemplateSchema,
+} from "../../grogu/worker-trigger-templates.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 
 const automatic = "local/automatic-model";
+const schemaSha256 = "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1";
+const approvedTools = [
+  "gmail__gmail_search",
+  "seaglass__recent_messages",
+  "icloud_calendar_events",
+  "sessions_search",
+];
 const policy: ModelPolicy = {
   automaticModel: automatic,
   ownerOverrides: { configPaths: [], jobIds: [] },
@@ -27,7 +39,12 @@ function compliantConfig() {
   };
 }
 
-function agentJob(id: string, model?: string, fallbacks?: string[]): CronJob {
+function agentJob(
+  id: string,
+  model?: string,
+  fallbacks?: string[],
+  trigger?: CronJob["trigger"],
+): CronJob & { payload: Extract<CronJob["payload"], { kind: "agentTurn" }> } {
   return {
     id,
     name: id,
@@ -43,6 +60,7 @@ function agentJob(id: string, model?: string, fallbacks?: string[]): CronJob {
       ...(model ? { model } : {}),
       ...(fallbacks ? { fallbacks } : {}),
     },
+    ...(trigger ? { trigger } : {}),
     state: {},
   };
 }
@@ -92,5 +110,130 @@ describe("automatic routing and queue policy", () => {
         expected: "followup",
       },
     ]);
+  });
+
+  it("requires declared private-signal and deterministic-poll worker contracts", () => {
+    const template = workerTriggerTemplateSchema.parse({
+      version: 1,
+      templateId: "messages-metadata-v1",
+      schemaSha256,
+      toolsAllow: approvedTools,
+      args: { limit: 1, include_text: false },
+      maxItems: 1,
+      continuation: {
+        delayMs: 60_000,
+        intervalMs: 60_000,
+        nativeSweepIntervalMs: 300_000,
+        maxOpen: 8,
+        maxFires: 2,
+        ttlMs: 86_400_000,
+      },
+    });
+    const script = renderWorkerTriggerScript(template);
+    const contract = (
+      jobId: string,
+      marker:
+        | "GROGU_PRIVATE_SIGNAL_V1"
+        | "GROGU_DETERMINISTIC_POLL_V1"
+        | "GROGU_GMAIL_AUTH_HEALTH_V1",
+    ) => ({
+      jobId,
+      contractVersion: 1 as const,
+      templateId: "messages-metadata-v1" as const,
+      schemaSha256: template.schemaSha256,
+      triggerSha256: workerTriggerScriptSha256(script),
+      toolsAllow: [...template.toolsAllow],
+      markers: [marker],
+    });
+    const privateSignal = agentJob("private-signal", automatic, undefined, {
+      script,
+    });
+    privateSignal.payload.message = "GROGU_PRIVATE_SIGNAL_V1";
+    privateSignal.payload.toolsAllow = [...template.toolsAllow];
+    const polling = agentJob("polling", automatic);
+    const violations = evaluatePolicy(compliantConfig(), [privateSignal, polling], {
+      ...policy,
+      workerContracts: [
+        contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+        contract("polling", "GROGU_DETERMINISTIC_POLL_V1"),
+        contract("missing", "GROGU_GMAIL_AUTH_HEALTH_V1"),
+      ],
+    });
+
+    expect(violations.map((violation) => violation.where)).toEqual([
+      "job:polling:contract",
+      "job:missing:contract",
+    ]);
+
+    privateSignal.trigger = { script: "return { fire: true };" };
+    expect(
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1")],
+      }),
+    ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
+
+    privateSignal.trigger = { script };
+    expect(
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [
+          {
+            ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+            schemaSha256: "1c733f1dc6feb2ca9ba610acdf98f4e37f26ad9751c566735505b9d17ef6c7d7",
+          },
+        ],
+      }),
+    ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
+
+    expect(() =>
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [
+          {
+            ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+            schemaSha256: "0".repeat(64),
+          },
+        ],
+      }),
+    ).toThrow();
+
+    expect(() =>
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [
+          {
+            ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+            toolsAllow: [...approvedTools, "*"],
+          },
+        ],
+      }),
+    ).toThrow(/toolsAllow/);
+
+    privateSignal.payload.toolsAllow = [...approvedTools, "new_unapproved_read"];
+    expect(
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1")],
+      }),
+    ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
+  });
+
+  it("keeps non-trigger worker marker contracts compatible", () => {
+    const backup = agentJob("backup", automatic);
+    backup.payload.message = "GROGU_BACKUP_OBSERVABILITY_V1";
+    expect(
+      evaluatePolicy(compliantConfig(), [backup], {
+        ...policy,
+        workerContracts: [
+          {
+            jobId: backup.id,
+            contractVersion: 1,
+            markers: ["GROGU_BACKUP_OBSERVABILITY_V1"],
+            requireTrigger: false,
+          },
+        ],
+      }),
+    ).toEqual([]);
   });
 });

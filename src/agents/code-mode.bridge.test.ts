@@ -13,7 +13,12 @@ import {
   resultDetails,
   testing,
 } from "./code-mode.test-support.js";
-import { jsonResult, type AnyAgentTool } from "./tools/common.js";
+import {
+  jsonResult,
+  ToolAuthorizationError,
+  ToolInputError,
+  type AnyAgentTool,
+} from "./tools/common.js";
 
 function bridge(targets: AnyAgentTool[], timeoutMs = 10_000, awaitResults?: boolean) {
   const h = createCodeModeHarness({ codeMode: { timeoutMs } });
@@ -28,6 +33,119 @@ afterEach(async () => {
 });
 
 describe("Code Mode bridge settlement and cancellation", () => {
+  it.each([
+    { label: "timeout code", properties: { code: "ETIMEDOUT" }, nativeCode: "ETIMEDOUT" },
+    {
+      label: "reset cause",
+      properties: { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) },
+      nativeCode: "ECONNRESET",
+    },
+    { label: "abort code", properties: { code: "ABORT_ERR" }, nativeCode: "ABORT_ERR" },
+    { label: "abort name", properties: { name: "AbortError" }, nativeName: "AbortError" },
+    { label: "timeout name", properties: { name: "TimeoutError" }, nativeName: "TimeoutError" },
+    { label: "unreviewed code", properties: { code: "EACCES" } },
+  ])("preserves bounded native transport metadata for $label", async (fixture) => {
+    const transport = pluginToolWithExecute("transport", "Fail transport", async () => {
+      throw Object.assign(new Error("transport failed"), fixture.properties, {
+        privateDetail: "must-not-cross",
+      });
+    });
+    const details = await bridge([transport])(`
+      try {
+        await transport({});
+        return { unexpected: true };
+      } catch (error) {
+        return {
+          code: error.code,
+          nativeCode: error.nativeCode,
+          nativeName: error.nativeName,
+          effectStatus: error.effectStatus,
+          message: error.message,
+          privateDetail: error.privateDetail,
+        };
+      }
+    `);
+    expect(details).toMatchObject({
+      status: "completed",
+      value: {
+        code: "tool_error",
+        effectStatus: "unknown",
+        ...(fixture.nativeCode ? { nativeCode: fixture.nativeCode } : {}),
+        ...(fixture.nativeName ? { nativeName: fixture.nativeName } : {}),
+      },
+    });
+    expect(JSON.stringify(details.value)).not.toContain("must-not-cross");
+    if (!fixture.nativeCode) {
+      expect(details.value).not.toHaveProperty("nativeCode");
+    }
+    if (!fixture.nativeName) {
+      expect(details.value).not.toHaveProperty("nativeName");
+    }
+  });
+
+  it("keeps bridge provenance authoritative after guest error mutation", async () => {
+    const transport = pluginToolWithExecute("transport", "Fail transport", async () => {
+      throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
+    });
+    const details = await bridge([transport])(`
+      try {
+        await transport({});
+      } catch (error) {
+        error.code = "invalid_input";
+        error.nativeCode = "EACCES";
+        throw error;
+      }
+    `);
+    expect(details).toMatchObject({ status: "failed", code: "internal_error" });
+  });
+
+  it.each([
+    {
+      label: "trusted input",
+      create: () =>
+        Object.assign(new ToolInputError("invalid collector input"), {
+          cause: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        }),
+      nativeCode: "ETIMEDOUT",
+    },
+    {
+      label: "trusted authorization",
+      create: () =>
+        Object.assign(new ToolAuthorizationError("collector authorization denied"), {
+          cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+        }),
+      nativeCode: "ECONNRESET",
+    },
+  ])(
+    "retains authoritative invalid_input with nested transport metadata for $label",
+    async (fixture) => {
+      const transport = pluginToolWithExecute("transport", "Fail transport", async () => {
+        throw fixture.create();
+      });
+      const details = await bridge([transport])(`
+      try {
+        await transport({});
+        return { unexpected: true };
+      } catch (error) {
+        return {
+          code: error.code,
+          nativeCode: error.nativeCode,
+          effectStatus: error.effectStatus,
+          message: error.message,
+        };
+      }
+    `);
+      expect(details).toMatchObject({
+        status: "completed",
+        value: {
+          code: "invalid_input",
+          nativeCode: fixture.nativeCode,
+          effectStatus: "unknown",
+        },
+      });
+    },
+  );
+
   it.each([false, true])(
     "drains nested work after a combinator settles (failure=%s)",
     async (failure) => {

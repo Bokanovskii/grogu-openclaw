@@ -49,6 +49,9 @@ The loader rejects symlinks, hardlinks, group/world access and files over 1 MiB.
   may reconcile. Bootstrap never changes schedules, models, delivery or pauses.
 
 The runtime reads the same file through `GROGU_PROFILE_FILE`.
+Fixed-command helpers that validate research checkpoints use the maintained
+`dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
+hashed chunk or an operator-created dist patch.
 
 ## Commands
 
@@ -69,12 +72,92 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                         |
 | `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                             |
 | `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                                   |
+| `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                          |
 | `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                |
 | `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                   |
 | `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                |
 
 Every command writes owner-only receipts to a new directory under the profile's
 `recoveryDir`.
+
+The backup receipt records archive bytes and separate capture, verification,
+and digest timings. It preserves the complete online archive and workspace
+contract; phase facts identify the slow owner without publishing paths or
+inventory.
+
+Worker prompt contracts live under `grogu/templates/workers/`. Private job
+definitions may consume them after review. They keep unchanged polls
+deterministic and model-free, distinguish authorization failures from empty
+sources, and require privacy-preserving bounded research plus one useful
+owner-only update for each material private signal. Add each private job id and
+its required template marker to `bindings.modelPolicy.workerContracts`;
+`policy-check` then reports missing jobs or markers without printing prompts.
+Each `native.workerTriggers` entry selects a tracked template from
+`worker-trigger-templates.ts`, an approved MCP server/tool plus its live
+catalog schema hash, private bounded arguments, fixed metadata-only decoding,
+and continuation limits. Bind exactly the two existing jobs: one Gmail
+primary and one Messages primary. Both multi-source payloads retain their
+complete, ordered, already-approved `toolsAllow` lists, including both
+collector permissions and existing Calendar/research tools; the renderer calls
+only its selected primary. Bootstrap patches only `trigger`, rejects wildcard
+or `exec`/`message` broadening, and receipts a hash proving the remaining job
+definition stayed unchanged. Calendar remains the existing payload tool and is
+requested only by bounded `native_source_sweep` trigger intent. No Calendar MCP
+trigger template or new job is installed.
+
+Capture the supported effective input-schema pins without invoking a source
+tool:
+
+```sh
+openclaw mcp probe gmail --json |
+  jq -er '.toolSchemas.gmail__gmail_search.schemaSha256'
+openclaw mcp probe seaglass --json |
+  jq -er '.toolSchemas.seaglass__recent_messages.schemaSha256'
+```
+
+The probe also publishes `schemaFormat:
+openclaw-effective-input-schema/v1` and the normalized `inputSchema`.
+`workers-bootstrap` repeats both named probes and refuses preview or apply when
+either private pin differs from the live catalog. The Gmail adapter parses the
+configured wrapper's `structuredContent.stdout`; the Messages adapter parses
+the single JSON text block in `content`. Gmail has no page-token input, so
+`has_more` or `nextPageToken` records valid truncated bounded-head coverage
+with the configured limit and discards the token; Messages `has_more` is
+truncated coverage only for an offset-0 page. Only a truncated page must be
+newest-first with readable numeric timestamps (and offset 0 for Messages),
+otherwise the observation is a typed `incomplete` or `schema` failure; complete
+pages keep the earlier generic non-empty timestamp check. Messages ids are
+positive safe integers and timestamps may be fractional. Only a successful
+non-truncated zero result is authoritative empty coverage. Both adapters reject
+write/body options, malformed wrappers, and structured source failures rather
+than fabricating an empty source. A failing Gmail result is classified by gog's
+documented exit code first (4 `auth`, 6 `permission`, 10 `config`, and 7, 8, 11
+or 130 `transient`, so a rate limit is retried); any other or unreadable code
+keeps the generic classification, and only the kind is returned, never error
+text. Run `workers-bootstrap` in preview mode before activation.
+The rendered trigger owns source polling and `fire: false` for unchanged data.
+It stores a bounded identity list plus the oldest timestamp of a truncated head
+(its floor, taken over every observed row) and fires for an unseen identity
+unless it is positively older than that floor, so removals and older items
+exposed below the floor do not fire (except an exact equal-timestamp tie, and
+an identity whose timestamp cannot be read always fires). Earlier full-item
+state is still read. A stored v2 fingerprint whose identity keys, coverage kind
+or truncation flag, or floor are unusable is silently rebaselined instead of
+fired on; its other fields are trusted as the trigger wrote them. Only
+`fire: true` admits the existing agent-turn payload for bounded research.
+`policy-check` compares each collector contract's pinned `triggerSha256` with
+the installed script, so a renderer change needs that pin updated together with
+`workers-bootstrap --apply`.
+`--apply` uses the live job's configuration revision and stores the prior
+trigger in the owner-only plan receipt for rollback.
+
+Gmail authorization verification stays separate from worker correctness. Use
+the existing non-mutating verify-only command after consent includes the
+read-only Gmail scope. For a forced refresh test, copy credential material into
+an owner-only isolated state and expire only the copied access-token cache.
+Production app audience avoids testing-mode seven-day expiry, but refresh
+tokens can still be revoked; a low-frequency health check must distinguish
+missing scope, revocation, and transient network/provider failure.
 
 ## Taking in upstream releases
 

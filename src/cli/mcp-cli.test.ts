@@ -342,6 +342,7 @@ describe("mcp cli", () => {
         generatedAt: expect.any(String),
         servers: {},
         tools: [],
+        toolSchemas: {},
         diagnostics: [],
       });
     });
@@ -822,6 +823,19 @@ describe("mcp cli", () => {
         callTool: async () => ({ content: [] }),
         dispose: async () => {},
       }));
+
+      mockLog.mockClear();
+      await runMcpCommand(["mcp", "probe", "memory", "--json"]);
+      expect(JSON.parse(lastLogLine())).toMatchObject({
+        tools: ["memory__create_entities"],
+        toolSchemas: {
+          memory__create_entities: {
+            inputSchema: { type: "object" },
+            schemaFormat: "openclaw-effective-input-schema/v1",
+            schemaSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+        },
+      });
 
       mockLog.mockClear();
       await runMcpCommand(["mcp", "probe", "memory"]);

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, stat as statFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -172,7 +172,7 @@ export async function sha256File(file: string): Promise<string> {
 const completeBackupSchema = z
   .object({
     archivePath: absolutePath,
-    verified: z.literal(true),
+    verified: z.boolean(),
     dryRun: z.literal(false),
     includeWorkspace: z.literal(true),
     onlyConfig: z.literal(false),
@@ -181,19 +181,30 @@ const completeBackupSchema = z
 
 export async function createVerifiedBackup(profile: OperatorProfile) {
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
+  const captureStartedAt = Date.now();
   const result = completeBackupSchema.parse(
-    await runNative(
-      profile,
-      ["backup", "create", "--output", directory, "--verify", "--json"],
-      directory,
-    ),
+    await runNative(profile, ["backup", "create", "--output", directory, "--json"], directory),
   );
+  const captureMs = Date.now() - captureStartedAt;
+  const verificationStartedAt = Date.now();
+  await runNative(profile, ["backup", "verify", result.archivePath, "--json"], directory);
+  const verificationMs = Date.now() - verificationStartedAt;
+  const digestStartedAt = Date.now();
   const digest = await sha256File(result.archivePath);
+  const digestMs = Date.now() - digestStartedAt;
+  const archiveBytes = (await statFile(result.archivePath)).size;
   const receipt = await writePrivateReceipt(directory, "backup-provenance.json", {
     schemaVersion: 1,
     archivePath: result.archivePath,
     sha256: digest,
     verified: true,
+    includeWorkspace: true,
+    archiveBytes,
+    phaseTimingsMs: {
+      capture: captureMs,
+      verification: verificationMs,
+      digest: digestMs,
+    },
     capture: "online-per-database",
     quiescentCutoverBackup: false,
   });

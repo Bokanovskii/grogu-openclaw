@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import { parseTriggerResult } from "./trigger-script-result.js";
 
 describe("parseTriggerResult worker source failures", () => {
+  it("prefers an explicit returned trigger result over logged JSON errors", () => {
+    expect(
+      parseTriggerResult({
+        status: "completed",
+        value: { fire: false, state: { cursor: "stable" } },
+        output: [
+          {
+            type: "json",
+            value: { error: { kind: "transient" } },
+          },
+        ],
+      } as never),
+    ).toEqual({
+      kind: "evaluated",
+      fire: false,
+      state: { cursor: "stable" },
+    });
+  });
+
   it.each(["transient", "timeout", "network", "incomplete", "unavailable"])(
     "keeps %s failures retryable",
     (kind) => {

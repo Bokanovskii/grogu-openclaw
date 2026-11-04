@@ -22,23 +22,20 @@ function scriptResultCandidate(
   return undefined;
 }
 
-function scriptReportedFailureKind(
+function scriptTriggerCandidate(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
-): string | undefined {
-  const candidates = [
-    result.value,
-    ...result.output
-      .toReversed()
-      .filter((entry) => isRecord(entry) && entry.type === "json")
-      .map((entry) => (isRecord(entry) ? entry.value : undefined)),
-  ];
-  for (const candidate of candidates) {
-    if (
-      isRecord(candidate) &&
-      isRecord(candidate.error) &&
-      typeof candidate.error.kind === "string"
-    ) {
-      return candidate.error.kind;
+): unknown {
+  const isTriggerCandidate = (candidate: unknown) =>
+    isRecord(candidate) &&
+    (typeof candidate.fire === "boolean" ||
+      (isRecord(candidate.error) && typeof candidate.error.kind === "string"));
+  if (isTriggerCandidate(result.value)) {
+    return result.value;
+  }
+  for (let index = result.output.length - 1; index >= 0; index -= 1) {
+    const entry = result.output[index];
+    if (isRecord(entry) && entry.type === "json" && isTriggerCandidate(entry.value)) {
+      return entry.value;
     }
   }
   return undefined;
@@ -54,8 +51,13 @@ export function scriptFailure(
 export function parseTriggerResult(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
 ): CronTriggerEvaluationResult {
-  const kind = scriptReportedFailureKind(result);
-  if (kind) {
+  const candidate = scriptTriggerCandidate(result);
+  if (
+    isRecord(candidate) &&
+    isRecord(candidate.error) &&
+    typeof candidate.error.kind === "string"
+  ) {
+    const kind = candidate.error.kind;
     if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) {
       return scriptFailure("worker source temporarily unavailable", "timeout");
     }
@@ -64,7 +66,6 @@ export function parseTriggerResult(
     }
     return scriptFailure("worker source returned an unknown failure", "invalid_input");
   }
-  const candidate = scriptResultCandidate(result, true);
   if (!isRecord(candidate) || typeof candidate.fire !== "boolean") {
     return scriptFailure("cron trigger script must return an object with boolean fire");
   }

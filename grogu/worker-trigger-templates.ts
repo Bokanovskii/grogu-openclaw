@@ -76,9 +76,20 @@ export const workerTriggerTemplateSchema = z
         value.args.max < 1 ||
         value.args.max > 100 ||
         value.args.include_body !== false ||
+        (value.args.include_recipients !== undefined && value.args.include_recipients !== false) ||
         value.args.sanitize_content !== true ||
         value.maxItems !== value.args.max ||
-        keys.some((key) => !["query", "max", "include_body", "sanitize_content"].includes(key)))
+        keys.some(
+          (key) =>
+            ![
+              "headers",
+              "include_body",
+              "include_recipients",
+              "max",
+              "query",
+              "sanitize_content",
+            ].includes(key),
+        ))
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -141,6 +152,20 @@ const offset = (value, label) => {
   if (Number.isSafeInteger(value) && value >= 0) return value;
   throw new Error("worker_source_malformed:" + label);
 };
+const parsedRecord = (value) => {
+  if (record(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    return record(JSON.parse(value));
+  } catch {
+    return null;
+  }
+};
+const textContentRecord = (envelope) => {
+  if (!Array.isArray(envelope?.content) || envelope.content.length !== 1) return null;
+  const block = record(envelope.content[0]);
+  return block?.type === "text" ? parsedRecord(block.text) : null;
+};
 const failure = (kind) => ({ error: { kind } });
 const normalizeFailureKind = (value) => {
   const kind = record(value) && typeof value.kind === "string" ? value.kind : "schema";
@@ -159,13 +184,23 @@ const normalizeState = (value, nowMs, template) => {
     }
   }
   const entries = Array.isArray(loaded?.continuations) ? loaded.continuations : [];
-  const continuations = entries.flatMap((entry) => {
+  const continuationCandidates = entries.flatMap((entry) => {
     const item = record(entry);
     if (!item || typeof item.id !== "string" || !item.id || !["gmail", "messages"].includes(item.source)) return [];
     if (!Number.isSafeInteger(item.fires) || item.fires < 0 || item.fires >= template.continuation.maxFires) return [];
     if (!Number.isFinite(item.dueAt) || !Number.isFinite(item.expiresAt) || item.expiresAt <= nowMs) return [];
     return [{ id: item.id, source: item.source, dueAt: Math.max(nowMs, item.dueAt), expiresAt: Math.min(item.expiresAt, nowMs + maxTtlMs), fires: item.fires }];
-  }).sort((a, b) => a.dueAt - b.dueAt || a.id.localeCompare(b.id)).slice(0, template.continuation.maxOpen);
+  }).sort((a, b) => a.source.localeCompare(b.source) || a.id.localeCompare(b.id) || b.fires - a.fires || a.dueAt - b.dueAt || a.expiresAt - b.expiresAt);
+  const continuationKeys = new Set();
+  const continuations = continuationCandidates
+    .filter((entry) => {
+      const key = entry.source + ":" + entry.id;
+      if (continuationKeys.has(key)) return false;
+      continuationKeys.add(key);
+      return true;
+    })
+    .sort((a, b) => a.dueAt - b.dueAt || a.source.localeCompare(b.source) || a.id.localeCompare(b.id))
+    .slice(0, template.continuation.maxOpen);
   const loadedSweep = loaded?.nextNativeSweepAt;
   const nextNativeSweepAt = Number.isFinite(loadedSweep) && loadedSweep >= 0
     ? Math.min(loadedSweep, nowMs + maxTtlMs)
@@ -185,48 +220,86 @@ const decodeGmail = (observation, maxItems) => {
   const envelope = record(observation);
   const value = record(envelope?.structuredContent);
   if (!envelope || !value) return failure("schema");
-  if (envelope.isError === true) return failure(normalizeFailureKind(value.error ?? envelope.error));
+  const stdout = parsedRecord(value.stdout);
+  if (envelope.isError === true) {
+    return failure(normalizeFailureKind(stdout?.error ?? value.error ?? envelope.error));
+  }
   if (value.tool !== "gmail_search" || value.risk !== "read") return failure("schema");
-  if (value.exit_code !== 0) return failure(normalizeFailureKind(value.error));
-  if (!Array.isArray(value.messages) || value.messages.length > maxItems) return failure("schema");
-  const hasMore = value.hasMore ?? value.has_more;
-  const continuation = value.nextPageToken ?? value.next_page_token ?? value.nextCursor ?? value.next_cursor ?? value.continuation ?? value.cursor;
-  if (hasMore === true || (continuation != null && continuation !== "") || (value.messages.length >= maxItems && hasMore !== false)) return failure("incomplete");
+  if (value.exit_code !== 0) return failure(normalizeFailureKind(stdout?.error ?? value.error));
+  if (!stdout || !Array.isArray(stdout.messages) || stdout.messages.length > maxItems) return failure("schema");
+  if (!Number.isSafeInteger(stdout.count) || stdout.count < 0 || stdout.count !== stdout.messages.length || typeof stdout.has_more !== "boolean") return failure("schema");
+  const truncated = stdout.has_more || (stdout.nextPageToken != null && stdout.nextPageToken !== "");
   try {
-    const items = canonicalize(value.messages.map((raw, index) => {
+    const items = canonicalize(stdout.messages.map((raw, index) => {
       const item = record(raw);
       if (!item) throw new Error();
       return {
-        id: nonempty(item.message_id ?? item.id, "gmail." + index + ".id"),
-        threadId: optional(item.thread_id ?? item.threadId, "gmail." + index + ".thread"),
-        timestamp: timestamp(item.timestamp ?? item.internalDate, "gmail." + index + ".timestamp"),
-        status: optional(item.status, "gmail." + index + ".status"),
+        id: nonempty(item.id, "gmail." + index + ".id"),
+        threadId: optional(item.threadId, "gmail." + index + ".thread"),
+        timestamp: timestamp(item.internalDateIso ?? item.date, "gmail." + index + ".timestamp"),
       };
     }), (item) => String(item.id));
-    return { items, cursor: optional(value.historyId ?? value.history_id, "gmail.history") };
+    return {
+      items,
+      cursor: null,
+      coverage: {
+        kind: "bounded_head",
+        limit: maxItems,
+        truncated,
+        empty: !truncated && items.length === 0,
+      },
+    };
   } catch {
     return failure("schema");
   }
 };
 const decodeMessages = (observation, maxItems) => {
   const envelope = record(observation);
-  const value = record(envelope?.structuredContent) || envelope;
-  if (!value) return failure("schema");
-  if (envelope?.isError === true) return failure(normalizeFailureKind(value.error ?? envelope.error));
-  if (value.error != null) return failure(normalizeFailureKind(value.error));
-  if (!Array.isArray(value.messages) || value.messages.length > maxItems) return failure("schema");
+  if (!envelope) return failure("schema");
+  const value = textContentRecord(envelope);
+  if (envelope.isError === true) return failure(normalizeFailureKind(value?.error ?? envelope.error));
+  if (!value || value.error != null) return failure(normalizeFailureKind(value?.error));
+  if (
+    typeof value.source !== "string" ||
+    !value.source.trim() ||
+    !Number.isSafeInteger(value.since_ts) ||
+    value.since_ts < 0 ||
+    !Number.isSafeInteger(value.before_ts) ||
+    value.before_ts < 0 ||
+    !Number.isSafeInteger(value.limit) ||
+    value.limit < 1 ||
+    value.limit > 100 ||
+    !Number.isSafeInteger(value.offset) ||
+    value.offset < 0 ||
+    typeof value.has_more !== "boolean" ||
+    !Number.isSafeInteger(value.next_offset) ||
+    value.next_offset < 0 ||
+    !Array.isArray(value.messages) ||
+    value.messages.length > value.limit ||
+    value.messages.length > maxItems
+  ) return failure("schema");
+  if (value.has_more) return failure("incomplete");
   try {
     const items = canonicalize(value.messages.map((raw, index) => {
       const item = record(raw);
       if (!item) throw new Error();
       return {
-        id: nonempty(item.message_id ?? item.id ?? item.guid, "messages." + index + ".id"),
-        conversationId: nonempty(item.chat_id ?? item.conversation_id, "messages." + index + ".conversation"),
-        timestamp: timestamp(item.timestamp ?? item.date, "messages." + index + ".timestamp"),
+        id: nonempty(item.message_id, "messages." + index + ".id"),
+        conversationId: nonempty(item.chat_id, "messages." + index + ".conversation"),
+        timestamp: timestamp(item.ts, "messages." + index + ".timestamp"),
       };
     }), (item) => String(item.conversationId) + ":" + String(item.id));
-    const cursor = { sinceTs: timestamp(value.since_ts, "messages.since_ts"), beforeTs: timestamp(value.before_ts, "messages.before_ts"), nextOffset: value.next_offset == null ? null : offset(value.next_offset, "messages.next_offset") };
-    return { items, cursor };
+    const cursor = { sinceTs: offset(value.since_ts, "messages.since_ts"), beforeTs: offset(value.before_ts, "messages.before_ts"), nextOffset: offset(value.next_offset, "messages.next_offset") };
+    return {
+      items,
+      cursor,
+      coverage: {
+        kind: "bounded_recent_window",
+        limit: value.limit,
+        truncated: false,
+        empty: items.length === 0,
+      },
+    };
   } catch {
     return failure("schema");
   }
@@ -236,7 +309,7 @@ const evaluate = (template, observation, previousState, nowMs) => {
   const source = template.templateId === "gmail-metadata-v1" ? "gmail" : "messages";
   const decoded = source === "gmail" ? decodeGmail(observation, template.maxItems) : decodeMessages(observation, template.maxItems);
   if (decoded.error) return decoded;
-  const fingerprint = JSON.stringify(decoded.items);
+  const fingerprint = JSON.stringify({ items: decoded.items, coverage: decoded.coverage });
   if (utf8Bytes(fingerprint) > maxStateBytes / 2) return failure("schema");
   const prior = record(state.sources[source]);
   const baseline = !prior || typeof prior.fingerprint !== "string";
@@ -251,7 +324,7 @@ const evaluate = (template, observation, previousState, nowMs) => {
   const nativeSweepDue = state.nextNativeSweepAt <= nowMs;
   let message;
   if (changed) {
-    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, items: decoded.items, nativeSourceSweep: nativeSweepDue });
+    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: decoded.items, uncertainty: decoded.coverage.truncated ? "older_matches_not_observed" : null, nativeSourceSweep: nativeSweepDue });
   } else if (dueIndex >= 0) {
     const due = state.continuations[dueIndex];
     const fires = due.fires + 1;

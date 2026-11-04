@@ -101,18 +101,23 @@ tool:
 
 ```sh
 openclaw mcp probe gmail --json |
-  jq -r '.toolSchemas.gmail__gmail_search.schemaSha256'
+  jq -er '.toolSchemas.gmail__gmail_search.schemaSha256'
 openclaw mcp probe seaglass --json |
-  jq -r '.toolSchemas.seaglass__recent_messages.schemaSha256'
+  jq -er '.toolSchemas.seaglass__recent_messages.schemaSha256'
 ```
 
 The probe also publishes `schemaFormat:
 openclaw-effective-input-schema/v1` and the normalized `inputSchema`.
 `workers-bootstrap` repeats both named probes and refuses preview or apply when
-either private pin differs from the live catalog. Gmail and Messages templates
-reject write/body options and incomplete or structured-failure responses
-rather than fabricating an empty source. Run `workers-bootstrap` in preview
-mode before activation.
+either private pin differs from the live catalog. The Gmail adapter parses the
+configured wrapper's `structuredContent.stdout`; the Messages adapter parses
+the single JSON text block in `content`. Gmail has no page-token input, so
+`has_more` or `nextPageToken` records valid truncated bounded-head coverage
+with the configured limit and discards the token. Only a successful
+non-truncated zero result is authoritative empty coverage. Messages pagination
+remains an incomplete observation. Both adapters reject write/body options,
+malformed wrappers, and structured source failures rather than fabricating an
+empty source. Run `workers-bootstrap` in preview mode before activation.
 The rendered trigger owns source polling, cursor/watermark comparison, and
 `fire: false` for unchanged data; only `fire: true` admits the existing
 agent-turn payload for bounded research.

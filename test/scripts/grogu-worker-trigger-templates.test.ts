@@ -5,6 +5,10 @@ import {
   workerTriggerTemplateSchema,
   type WorkerTriggerTemplate,
 } from "../../grogu/worker-trigger-templates.js";
+import {
+  consumeMcpCodeModeGuestResult,
+  projectMcpCallToolResult,
+} from "../../src/agents/mcp-content.js";
 
 const schemaSha256 = "a".repeat(64);
 const continuation = {
@@ -54,15 +58,51 @@ function compile(template: WorkerTriggerTemplate): TriggerRun {
   return new AsyncFunction("MCP", "trigger", renderWorkerTriggerScript(template));
 }
 
-function messagesMcp(messages: unknown[]) {
+function messagesResult(
+  messages: unknown[],
+  options: { hasMore?: boolean; nextOffset?: number } = {},
+) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          source: "messages",
+          observed_at_ts: 300,
+          newest_source_ts: messages.length > 0 ? 200 : null,
+          since_ts: 100,
+          before_ts: 200,
+          limit: 50,
+          offset: 0,
+          has_more: options.hasMore ?? false,
+          next_offset: options.nextOffset ?? messages.length,
+          messages,
+        }),
+      },
+    ],
+    isError: false,
+  };
+}
+
+function messagesMcp(
+  messages: unknown[],
+  options: { hasMore?: boolean; nextOffset?: number } = {},
+) {
   return {
     seaglass: {
-      recentMessages: async () => ({
-        messages,
-        since_ts: 100,
-        before_ts: 200,
-        next_offset: 0,
-      }),
+      recentMessages: async () => messagesResult(messages, options),
+    },
+  };
+}
+
+function gmailResult(stdout: Record<string, unknown> | string) {
+  return {
+    isError: false,
+    structuredContent: {
+      tool: "gmail_search",
+      risk: "read",
+      exit_code: 0,
+      stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout),
     },
   };
 }
@@ -93,6 +133,18 @@ describe("private worker trigger templates", () => {
     ).toThrow(/metadata-only/);
     expect(() =>
       workerTriggerTemplateSchema.parse({
+        ...gmailTemplate(),
+        args: { ...gmailTemplate().args, pageToken: "not-supported" },
+      }),
+    ).toThrow(/metadata-only/);
+    expect(() =>
+      workerTriggerTemplateSchema.parse({
+        ...gmailTemplate(),
+        args: { ...gmailTemplate().args, include_recipients: true },
+      }),
+    ).toThrow(/metadata-only/);
+    expect(() =>
+      workerTriggerTemplateSchema.parse({
         ...messagesTemplate(),
         templateId: "calendar-metadata-v1",
       }),
@@ -118,8 +170,8 @@ describe("private worker trigger templates", () => {
     const run = compile(messagesTemplate());
     const initial = await run(
       messagesMcp([
-        { message_id: "b", chat_id: "chat", timestamp: 20, text: "private body" },
-        { message_id: "a", chat_id: "chat", timestamp: 10, text: "other body" },
+        { message_id: 2, chat_id: 7, ts: 20, sender: "private", text: "private body" },
+        { message_id: 1, chat_id: 7, ts: 10, sender: "private", text: "other body" },
       ]),
       {},
     );
@@ -129,81 +181,168 @@ describe("private worker trigger templates", () => {
     vi.setSystemTime(2_000);
     const reordered = await run(
       messagesMcp([
-        { message_id: "a", chat_id: "chat", timestamp: 10, text: "changed body" },
-        { message_id: "b", chat_id: "chat", timestamp: 20 },
-        { message_id: "a", chat_id: "chat", timestamp: 10 },
+        { message_id: 1, chat_id: 7, ts: 10, sender: "changed sender" },
+        { message_id: 2, chat_id: 7, ts: 20 },
+        { message_id: 1, chat_id: 7, ts: 10 },
       ]),
       { state: initial.state },
     );
     expect(reordered.fire).toBe(false);
     expect(JSON.stringify(reordered)).not.toContain("changed body");
 
-    const malformed = await run(
-      messagesMcp([{ message_id: null, chat_id: "chat", timestamp: 10 }]),
-      { state: reordered.state },
-    );
+    const malformed = await run(messagesMcp([{ message_id: null, chat_id: 7, ts: 10 }]), {
+      state: reordered.state,
+    });
     expect(malformed).toEqual({ error: { kind: "schema" } });
   });
 
-  it("requires complete Gmail pages and preserves typed source failures", async () => {
+  it("tracks bounded Gmail heads and preserves typed source failures", async () => {
     const run = compile(gmailTemplate());
     const partial = await run(
       {
         gmail: {
-          gmailSearch: async () => ({
-            isError: false,
-            structuredContent: {
-              tool: "gmail_search",
-              risk: "read",
-              exit_code: 0,
-              complete: false,
-              hasMore: true,
-              messages: [],
-            },
-          }),
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              externalContent: true,
+              has_more: true,
+              messages: [
+                {
+                  id: "m1",
+                  threadId: "t1",
+                  internalDateIso: "2026-11-04T00:00:00Z",
+                  from: "private",
+                  subject: "private",
+                },
+              ],
+              nextPageToken: "opaque-next",
+            }),
         },
       },
       {},
     );
-    expect(partial).toEqual({ error: { kind: "incomplete" } });
+    expect(partial).toMatchObject({ fire: false });
+    expect(JSON.stringify(partial)).not.toContain("opaque-next");
 
-    const ambiguousFullPage = await run(
+    const repeatedPartial = await run(
       {
         gmail: {
-          gmailSearch: async () => ({
-            isError: false,
-            structuredContent: {
-              tool: "gmail_search",
-              risk: "read",
-              exit_code: 0,
-              messages: [{ message_id: "m1", timestamp: 10 }],
-            },
-          }),
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              externalContent: true,
+              has_more: true,
+              messages: [
+                {
+                  id: "m1",
+                  threadId: "t1",
+                  internalDateIso: "2026-11-04T00:00:00Z",
+                  from: "changed private sender",
+                  subject: "changed private subject",
+                },
+              ],
+              nextPageToken: "different-opaque-next",
+            }),
+        },
+      },
+      { state: partial.state },
+    );
+    expect(repeatedPartial).toMatchObject({ fire: false });
+    expect(JSON.stringify(repeatedPartial)).not.toContain("different-opaque-next");
+
+    const changedPartial = await run(
+      {
+        gmail: {
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              externalContent: true,
+              has_more: true,
+              messages: [
+                {
+                  id: "m2",
+                  threadId: "t2",
+                  date: "2026-11-04T00:01:00Z",
+                  from: "private sender",
+                  subject: "private subject",
+                },
+              ],
+              nextPageToken: "opaque-next",
+            }),
+        },
+      },
+      { state: repeatedPartial.state },
+    );
+    expect(changedPartial).toMatchObject({ fire: true });
+    expect(JSON.parse(String(changedPartial.message))).toMatchObject({
+      kind: "source_delta",
+      coverage: { kind: "bounded_head", limit: 1, truncated: true, empty: false },
+      uncertainty: "older_matches_not_observed",
+    });
+    expect(JSON.stringify(changedPartial)).not.toContain("opaque-next");
+
+    const quietChangedPartial = await run(
+      {
+        gmail: {
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              externalContent: true,
+              has_more: true,
+              messages: [{ id: "m2", threadId: "t2", date: "2026-11-04T00:01:00Z" }],
+              nextPageToken: "rotated-token",
+            }),
+        },
+      },
+      { state: changedPartial.state },
+    );
+    expect(quietChangedPartial).toMatchObject({ fire: false });
+
+    const malformedPage = await run(
+      {
+        gmail: {
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              messages: [{ id: "m1", internalDateIso: "2026-11-04T00:00:00Z" }],
+            }),
         },
       },
       {},
     );
-    expect(ambiguousFullPage).toEqual({ error: { kind: "incomplete" } });
+    expect(malformedPage).toEqual({ error: { kind: "schema" } });
 
     const completeFullPage = await run(
       {
         gmail: {
-          gmailSearch: async () => ({
-            isError: false,
-            structuredContent: {
-              tool: "gmail_search",
-              risk: "read",
-              exit_code: 0,
-              hasMore: false,
-              messages: [{ message_id: "m1", timestamp: 10, body: "private" }],
-            },
-          }),
+          gmailSearch: async () =>
+            gmailResult({
+              count: 1,
+              externalContent: true,
+              has_more: false,
+              messages: [
+                {
+                  id: "m1",
+                  threadId: "t1",
+                  internalDateIso: "2026-11-04T00:00:00Z",
+                  from: "private sender",
+                  subject: "private subject",
+                },
+              ],
+              nextPageToken: "",
+            }),
         },
       },
-      {},
+      { state: quietChangedPartial.state },
     );
-    expect(completeFullPage).toMatchObject({ fire: false });
-    expect(JSON.stringify(completeFullPage)).not.toContain("private");
+    expect(completeFullPage).toMatchObject({ fire: true });
+    expect(JSON.parse(String(completeFullPage.message))).toMatchObject({
+      kind: "source_delta",
+      coverage: { kind: "bounded_head", limit: 1, truncated: false, empty: false },
+      uncertainty: null,
+    });
+    expect(JSON.stringify(completeFullPage)).not.toContain("private sender");
+    expect(JSON.stringify(completeFullPage)).not.toContain("private subject");
 
     const authFailure = await run(
       {
@@ -218,19 +357,107 @@ describe("private worker trigger templates", () => {
     expect(authFailure).toEqual({ error: { kind: "auth" } });
 
     await expect(
+      run(
+        {
+          gmail: {
+            gmailSearch: async () => ({
+              isError: true,
+              structuredContent: {
+                tool: "gmail_search",
+                risk: "read",
+                exit_code: 1,
+                stdout: JSON.stringify({ error: { kind: "permission" } }),
+              },
+            }),
+          },
+        },
+        {},
+      ),
+    ).resolves.toEqual({ error: { kind: "permission" } });
+
+    await expect(
+      run(
+        {
+          gmail: {
+            gmailSearch: async () => {
+              throw Object.assign(new Error("transport unavailable"), { kind: "network" });
+            },
+          },
+        },
+        {},
+      ),
+    ).resolves.toEqual({ error: { kind: "transient" } });
+
+    await expect(
       compile(messagesTemplate())(
         {
           seaglass: {
             recentMessages: async () => ({
               isError: true,
-              error: { kind: "network" },
-              structuredContent: {},
+              content: [{ type: "text", text: JSON.stringify({ error: { kind: "network" } }) }],
             }),
           },
         },
         {},
       ),
     ).resolves.toEqual({ error: { kind: "transient" } });
+
+    await expect(
+      compile(messagesTemplate())(
+        messagesMcp([{ message_id: 1, chat_id: 7, ts: 10 }], {
+          hasMore: true,
+          nextOffset: 1,
+        }),
+        {},
+      ),
+    ).resolves.toEqual({ error: { kind: "incomplete" } });
+  });
+
+  it("consumes the unchanged native MCP guest result shapes", async () => {
+    const rawMessages = messagesResult([
+      {
+        message_id: 1,
+        chat_id: 7,
+        ts: 10,
+        is_from_me: false,
+        sender: "private sender",
+        has_attachment: false,
+      },
+    ]);
+    const projectedMessages = projectMcpCallToolResult(rawMessages);
+    const guestMessages = consumeMcpCodeModeGuestResult(projectedMessages);
+    await expect(
+      compile(messagesTemplate())({ seaglass: { recentMessages: async () => guestMessages } }, {}),
+    ).resolves.toMatchObject({ fire: false });
+
+    const rawGmail = gmailResult({
+      count: 0,
+      externalContent: true,
+      has_more: false,
+      messages: [],
+      nextPageToken: "",
+    });
+    const projectedGmail = projectMcpCallToolResult(rawGmail);
+    const guestGmail = consumeMcpCodeModeGuestResult(projectedGmail);
+    const gmailEmpty = await compile(gmailTemplate())(
+      { gmail: { gmailSearch: async () => guestGmail } },
+      {},
+    );
+    expect(gmailEmpty).toMatchObject({ fire: false });
+    expect(
+      JSON.parse(
+        String(
+          (
+            gmailEmpty.state as {
+              sources: { gmail: { fingerprint: string } };
+            }
+          ).sources.gmail.fingerprint,
+        ),
+      ),
+    ).toMatchObject({
+      items: [],
+      coverage: { kind: "bounded_head", limit: 1, truncated: false, empty: true },
+    });
   });
 
   it("normalizes loaded state and emits bounded native Calendar sweep intent", async () => {
@@ -241,12 +468,30 @@ describe("private worker trigger templates", () => {
       state: {
         sources: {
           gmail: { fingerprint: "[]", lastSuccessAt: 1, private: "drop" },
-          messages: { fingerprint: "[]", lastSuccessAt: 1 },
+          messages: {
+            fingerprint: JSON.stringify({
+              items: [],
+              coverage: {
+                kind: "bounded_recent_window",
+                limit: 50,
+                truncated: false,
+                empty: true,
+              },
+            }),
+            lastSuccessAt: 1,
+          },
           private: { body: "drop" },
         },
         continuations: [
           { id: "valid", source: "gmail", dueAt: 2_000_000, expiresAt: 3_000_000, fires: 1 },
           { id: "negative", source: "gmail", dueAt: 2_000_000, expiresAt: 3_000_000, fires: -1 },
+          {
+            id: "valid",
+            source: "gmail",
+            dueAt: 1_500_000,
+            expiresAt: 3_500_000,
+            fires: 0,
+          },
         ],
         nextNativeSweepAt: 999_999,
         private: "drop",

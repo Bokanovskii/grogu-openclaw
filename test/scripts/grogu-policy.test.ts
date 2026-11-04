@@ -166,17 +166,42 @@ describe("automatic routing and queue policy", () => {
       }),
     ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
 
+    privateSignal.trigger = { script };
     expect(
       evaluatePolicy(compliantConfig(), [privateSignal], {
         ...policy,
         workerContracts: [
           {
             ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
-            schemaSha256: "a".repeat(64),
+            schemaSha256: "b".repeat(64),
           },
         ],
       }),
     ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
+
+    expect(() =>
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [
+          {
+            ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+            schemaSha256: "0",
+          },
+        ],
+      }),
+    ).toThrow();
+
+    expect(() =>
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [
+          {
+            ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
+            toolsAllow: ["seaglass__recent_messages", "gmail__gmail_search"],
+          },
+        ],
+      }),
+    ).toThrow(/toolsAllow/);
   });
 
   it("keeps non-trigger worker marker contracts compatible", () => {

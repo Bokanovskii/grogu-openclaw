@@ -1,6 +1,7 @@
 // Retry hint tests cover user-facing guidance for failed cron retry timing.
 import { describe, expect, it } from "vitest";
 import { resolveCronExecutionRetryHint } from "./retry-hint.js";
+import { resolveCronRunErrorReason } from "./run-error-reason.js";
 import {
   preExecutionTimeoutErrorMessage,
   setupTimeoutErrorMessage,
@@ -62,6 +63,37 @@ describe("resolveCronExecutionRetryHint", () => {
         retryable: true,
         category: "timeout",
       });
+    }
+  });
+
+  it("classifies exact local Sparky admission failures without swallowing other queues", () => {
+    expect(
+      resolveCronExecutionRetryHint({
+        error: "Sparky request queue is full; retry after current work finishes",
+      }),
+    ).toEqual({ retryable: true, category: "overloaded" });
+    for (const error of [
+      "Sparky local queue deadline expired before request dispatch",
+      "Sparky local queue deadline expired",
+    ]) {
+      expect(resolveCronRunErrorReason(error, "sparky")).toBe("timeout");
+      expect(resolveCronExecutionRetryHint({ error })).toEqual({
+        retryable: true,
+        category: "timeout",
+      });
+    }
+    expect(
+      resolveCronRunErrorReason(
+        "Sparky request queue is full; retry after current work finishes",
+        "sparky",
+      ),
+    ).toBe("overloaded");
+    for (const error of [
+      "Other request queue is full; retry after current work finishes",
+      "Sparky request queue is full because the configured model is invalid",
+      "Sparky local queue deadline expired while validating configuration",
+    ]) {
+      expect(resolveCronExecutionRetryHint({ error })).toEqual({ retryable: false });
     }
   });
 

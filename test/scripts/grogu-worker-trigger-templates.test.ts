@@ -412,7 +412,10 @@ describe("private worker trigger templates", () => {
         {
           seaglass: {
             recentMessages: async () => {
-              throw Object.assign(new Error("stream reset"), { code: "ECONNRESET" });
+              throw Object.assign(new Error("stream reset"), {
+                code: "tool_error",
+                nativeCode: "ECONNRESET",
+              });
             },
           },
         },

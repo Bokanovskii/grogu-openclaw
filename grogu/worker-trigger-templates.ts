@@ -175,9 +175,11 @@ const normalizeFailureKind = (value) => {
   const kind = record(value) && typeof value.kind === "string" ? value.kind : "";
   if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) return "transient";
   if (["auth", "permission", "config", "schema"].includes(kind)) return kind;
-  const code = record(value) && typeof value.code === "string" ? value.code.toUpperCase() : "";
+  const codeValue = record(value) ? value.nativeCode ?? value.code : undefined;
+  const code = typeof codeValue === "string" ? codeValue.toUpperCase() : "";
   if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT", "ABORT_ERR"].includes(code)) return "transient";
-  const name = record(value) && typeof value.name === "string" ? value.name : "";
+  const nameValue = record(value) ? value.nativeName ?? value.name : undefined;
+  const name = typeof nameValue === "string" ? nameValue : "";
   if (["AbortError", "TimeoutError"].includes(name)) return "transient";
   return "schema";
 };

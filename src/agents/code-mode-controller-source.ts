@@ -227,6 +227,8 @@ export const CODE_MODE_CONTROLLER_SOURCE = String.raw`
       if (parsed && typeof parsed === "object") {
         error.code = code;
         error.effectStatus = "unknown";
+        if (typeof parsed.nativeCode === "string") error.nativeCode = parsed.nativeCode;
+        if (typeof parsed.nativeName === "string") error.nativeName = parsed.nativeName;
       }
       rememberBridgeError(
         error,

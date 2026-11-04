@@ -2,7 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
-import { formatErrorMessage } from "../infra/errors.js";
+import {
+  collectErrorGraphCandidates,
+  extractErrorCode,
+  formatErrorMessage,
+  readErrorCauses,
+  readErrorName,
+} from "../infra/errors.js";
 import { NODE_FS_LIST_DIR_COMMAND } from "../infra/node-commands.js";
 import { createLazyRuntimeNamedExport } from "../shared/lazy-runtime.js";
 import { parseNodeList } from "../shared/node-list-parse.js";
@@ -37,6 +43,48 @@ const loadSwarmHandlers = createLazyRuntimeNamedExport(
 );
 
 export const CODE_MODE_NODES_TOOL_ID = "openclaw:core:nodes";
+
+const CODE_MODE_NATIVE_TRANSPORT_CODES = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+const CODE_MODE_NATIVE_TRANSPORT_NAMES = new Set(["AbortError", "TimeoutError"]);
+
+function readCodeModeNativeTransportMetadata(error: unknown): {
+  nativeCode?: string;
+  nativeName?: string;
+} {
+  let nativeCode: string | undefined;
+  let nativeName: string | undefined;
+  for (const candidate of collectErrorGraphCandidates(error, readErrorCauses)) {
+    if (!nativeCode) {
+      const code = extractErrorCode(candidate)?.trim().toUpperCase();
+      if (code && CODE_MODE_NATIVE_TRANSPORT_CODES.has(code)) {
+        nativeCode = code;
+      }
+    }
+    if (!nativeName) {
+      const name = readErrorName(candidate);
+      if (CODE_MODE_NATIVE_TRANSPORT_NAMES.has(name)) {
+        nativeName = name;
+      }
+    }
+    if (nativeCode && nativeName) {
+      break;
+    }
+  }
+  return {
+    ...(nativeCode ? { nativeCode } : {}),
+    ...(nativeName ? { nativeName } : {}),
+  };
+}
 
 function projectCodeModeNode(node: NodeListNode) {
   return {
@@ -518,6 +566,7 @@ export async function runBridgeRequest(params: {
             : (getToolContractFailureCode(classified) ??
               (isTrustedToolInputError(classified) ? "invalid_input" : "tool_error")),
       effectStatus: "unknown",
+      ...readCodeModeNativeTransportMetadata(error),
     });
   }
 }

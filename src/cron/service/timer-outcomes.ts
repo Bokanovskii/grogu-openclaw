@@ -382,6 +382,7 @@ export function applyJobResult(
       maybeAutoDisableCronJobAfterRunFailure({
         job,
         atMs: result.endedAt,
+        errorClassification: result.errorClassification,
         deferredNotifications: opts.deferredNotifications,
       })
     ) {

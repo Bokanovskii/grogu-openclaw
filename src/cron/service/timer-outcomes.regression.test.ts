@@ -273,6 +273,44 @@ describe("cron timer outcome and failure policy regressions", () => {
   });
 
   it.each([
+    {
+      name: "explicit permanent classification",
+      errorClassification: { kind: "permanent" as const },
+      disables: true,
+    },
+    {
+      name: "unclassified timeout-like text",
+      errorClassification: undefined,
+      disables: false,
+    },
+  ])(
+    "keeps the producer classification authoritative: $name",
+    ({ errorClassification, disables }) => {
+      const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+      const deferredNotifications: DeferredCronNotifications = [];
+      const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
+
+      applyJobResult(
+        state,
+        job,
+        {
+          status: "error",
+          error: "Invalid timeout configuration",
+          ...(errorClassification ? { errorClassification } : {}),
+          provider: "sparky",
+          startedAt,
+          endedAt: startedAt + 10,
+        },
+        { deferredNotifications },
+      );
+
+      expect(job.enabled).toBe(!disables);
+      expect(Boolean(job.state.autoDisabled)).toBe(disables);
+      expect(job.state.nextRunAtMs === undefined).toBe(disables);
+    },
+  );
+
+  it.each([
     { name: "silent job", delivery: { mode: "none" as const }, disables: false },
     {
       name: "webhook job",

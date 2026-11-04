@@ -130,8 +130,11 @@ pages keep the earlier generic non-empty timestamp check. Messages ids are
 positive safe integers and timestamps may be fractional. Only a successful
 non-truncated zero result is authoritative empty coverage. Both adapters reject
 write/body options, malformed wrappers, and structured source failures rather
-than fabricating an empty source. Run `workers-bootstrap` in preview mode
-before activation.
+than fabricating an empty source. A failing Gmail result is classified by gog's
+documented exit code first (4 `auth`, 6 `permission`, 10 `config`, and 7, 8, 11
+or 130 `transient`, so a rate limit is retried); any other or unreadable code
+keeps the generic classification, and only the kind is returned, never error
+text. Run `workers-bootstrap` in preview mode before activation.
 The rendered trigger owns source polling and `fire: false` for unchanged data.
 It stores a bounded identity list plus the oldest timestamp of a truncated head
 (its floor, taken over every observed row) and fires for an unseen identity

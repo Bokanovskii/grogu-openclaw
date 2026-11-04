@@ -190,6 +190,10 @@ const normalizeFailureKind = (value) => {
   if (["AbortError", "TimeoutError"].includes(name)) return "transient";
   return "schema";
 };
+// gog exit codes: 4 auth_required, 6 permission_denied, 7 rate_limited, 8 retryable, 10 config, 11 orphaned, 130 cancelled.
+// A Map never matches a string or prototype key; every other code keeps the generic classification.
+const gmailExitKinds = new Map([[4, "auth"], [6, "permission"], [7, "transient"], [8, "transient"], [10, "config"], [11, "transient"], [130, "transient"]]);
+const gmailFailureKind = (exitCode, error) => gmailExitKinds.get(exitCode) ?? normalizeFailureKind(error);
 const identities = {
   gmail: (item) => String(nonempty(item.id, "gmail.id")),
   messages: (item) => String(nonempty(item.conversationId, "messages.conversation")) + ":" + String(nonempty(item.id, "messages.id")),
@@ -199,6 +203,8 @@ const usableKeys = {
   gmail: (key) => typeof key === "string" && key.trim() !== "",
   messages: (key) => typeof key === "string" && /^[1-9][0-9]*:[1-9][0-9]*$/.test(key),
 };
+// The coverage kind each source writes, which a stored v2 prior of that source must carry.
+const coverageKinds = { gmail: "bounded_head", messages: "bounded_recent_window" };
 // Item timestamps in the unit of the stored floor (epoch ms for Gmail, epoch seconds for Messages); NaN when unreadable.
 const stamps = {
   gmail: (item) => typeof item.timestamp === "string" ? Date.parse(item.timestamp) : NaN,
@@ -220,9 +226,12 @@ const priorHead = (fingerprint, source) => {
     const stored = record(JSON.parse(fingerprint));
     if (stored?.v === 2) {
       // Anything the writer cannot emit is corrupt state, which is rebaselined rather than compared against.
-      const truncated = record(stored.coverage)?.truncated;
+      const coverage = record(stored.coverage);
+      const truncated = coverage?.truncated;
+      const idsUsable = Array.isArray(stored.ids) && stored.ids.every(usableKeys[source]);
+      const coverageUsable = coverage?.kind === coverageKinds[source] && typeof truncated === "boolean";
       const floorUsable = stored.floor === null || (truncated === true && Number.isFinite(stored.floor));
-      if (!Array.isArray(stored.ids) || !stored.ids.every(usableKeys[source]) || typeof truncated !== "boolean" || !floorUsable) return null;
+      if (!idsUsable || !coverageUsable || !floorUsable) return null;
       return { ids: new Set(stored.ids), floor: stored.floor };
     }
     if (!stored || stored.v !== undefined || !Array.isArray(stored.items)) return null;
@@ -281,10 +290,10 @@ const decodeGmail = (observation, maxItems) => {
   if (!envelope || !value) return failure("schema");
   const stdout = parsedRecord(value.stdout);
   if (envelope.isError === true) {
-    return failure(normalizeFailureKind(stdout?.error ?? value.error ?? envelope.error));
+    return failure(gmailFailureKind(value.exit_code, stdout?.error ?? value.error ?? envelope.error));
   }
   if (value.tool !== "gmail_search" || value.risk !== "read") return failure("schema");
-  if (value.exit_code !== 0) return failure(normalizeFailureKind(stdout?.error ?? value.error));
+  if (value.exit_code !== 0) return failure(gmailFailureKind(value.exit_code, stdout?.error ?? value.error));
   if (!stdout || !Array.isArray(stdout.messages) || stdout.messages.length > maxItems) return failure("schema");
   if (!Number.isSafeInteger(stdout.count) || stdout.count < 0 || stdout.count !== stdout.messages.length || typeof stdout.has_more !== "boolean") return failure("schema");
   const truncated = stdout.has_more || (stdout.nextPageToken != null && stdout.nextPageToken !== "");
@@ -307,7 +316,7 @@ const decodeGmail = (observation, maxItems) => {
       floor: truncated ? floorOf(rows, stamps.gmail) : null,
       cursor: null,
       coverage: {
-        kind: "bounded_head",
+        kind: coverageKinds.gmail,
         limit: maxItems,
         truncated,
         empty: !truncated && items.length === 0,
@@ -361,7 +370,7 @@ const decodeMessages = (observation, maxItems) => {
       floor: value.has_more ? floorOf(rows, stamps.messages) : null,
       cursor: { sinceTs: value.since_ts, beforeTs: value.before_ts, nextOffset: value.next_offset },
       coverage: {
-        kind: "bounded_recent_window",
+        kind: coverageKinds.messages,
         limit: value.limit,
         truncated: value.has_more,
         empty: !value.has_more && items.length === 0,

@@ -119,6 +119,34 @@ function gmailResult(stdout: Record<string, unknown> | string) {
 
 type GmailOptions = { hasMore?: boolean; nextPageToken?: string };
 
+// gog's failing envelope: the structured error has a numeric `code` and no `kind`.
+const gmailFailureText = {
+  stderr: "synthetic stderr detail",
+  message: "synthetic message detail",
+  class: "synthetic class detail",
+};
+
+function gmailFailure(
+  exitCode: unknown,
+  options: { isError?: boolean; stdoutAsText?: boolean } = {},
+) {
+  const stdout = {
+    error: { class: gmailFailureText.class, code: 7, message: gmailFailureText.message },
+  };
+  return {
+    isError: options.isError ?? true,
+    content: [{ type: "text", text: "synthetic failure text" }],
+    structuredContent: {
+      tool: "gmail_search",
+      service: "gmail",
+      risk: "read",
+      ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+      stdout: options.stdoutAsText ? JSON.stringify(stdout) : stdout,
+      stderr: gmailFailureText.stderr,
+    },
+  };
+}
+
 function gmailMcp(messages: unknown[], options: GmailOptions = {}) {
   return {
     gmail: {
@@ -637,6 +665,60 @@ describe("private worker trigger templates", () => {
     });
   });
 
+  it.each([
+    [4, "auth"],
+    [6, "permission"],
+    [7, "transient"],
+    [8, "transient"],
+    [10, "config"],
+    [11, "transient"],
+    [130, "transient"],
+    [1, "schema"],
+    [2, "schema"],
+    [3, "schema"],
+    [5, "schema"],
+    [99, "schema"],
+    [7.5, "schema"],
+    ["7", "schema"],
+    ["constructor", "schema"],
+    ["__proto__", "schema"],
+    [null, "schema"],
+    [Number.NaN, "schema"],
+    [undefined, "schema"],
+  ])("classifies a gmail failure with exit_code %o as %s", async (exitCode, kind) => {
+    const run = compile(gmailTemplate());
+    for (const isError of [true, false]) {
+      const result = await run(
+        { gmail: { gmailSearch: async () => gmailFailure(exitCode, { isError }) } },
+        {},
+      );
+      expect(result).toEqual({ error: { kind } });
+      for (const detail of Object.values(gmailFailureText)) {
+        expect(JSON.stringify(result)).not.toContain(detail);
+      }
+    }
+  });
+
+  it("classifies gmail failures by exit code before error text, through text stdout and the guest projection", async () => {
+    const run = compile(gmailTemplate());
+    const observe = (result: unknown) => run({ gmail: { gmailSearch: async () => result } }, {});
+    await expect(observe(gmailFailure(7, { stdoutAsText: true }))).resolves.toEqual({
+      error: { kind: "transient" },
+    });
+
+    const authText = JSON.stringify({ error: { kind: "auth" } });
+    const conflicting = gmailFailure(7);
+    await expect(
+      observe({
+        ...conflicting,
+        structuredContent: { ...conflicting.structuredContent, stdout: authText },
+      }),
+    ).resolves.toEqual({ error: { kind: "transient" } });
+
+    const guest = consumeMcpCodeModeGuestResult(projectMcpCallToolResult(gmailFailure(4)));
+    await expect(observe(guest)).resolves.toEqual({ error: { kind: "auth" } });
+  });
+
   it("normalizes loaded state and emits bounded native Calendar sweep intent", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000_000);
@@ -1055,6 +1137,9 @@ describe("private worker trigger templates", () => {
         truncated,
         empty: false,
       });
+      // The kind the other source writes: a prior carrying it was not written by this source.
+      const otherKind = heads[source === "gmail" ? "messages" : "gmail"].coverageKind;
+      const withKind = (kind: unknown, truncated = false) => ({ ...coverage(truncated), kind });
       // A usable complete prior holding item 0; an `undefined` field is dropped by JSON, i.e. missing.
       const prior = (fields: Record<string, unknown>) =>
         JSON.stringify({
@@ -1093,6 +1178,12 @@ describe("private worker trigger templates", () => {
         prior({ coverage: coverage("true") }),
         prior({ coverage: coverage(1) }),
         prior({ coverage: coverage(null) }),
+        prior({ coverage: withKind(otherKind) }),
+        prior({ coverage: withKind(otherKind, true), floor: head.at(10) }),
+        prior({ coverage: withKind(undefined) }),
+        prior({ coverage: withKind(undefined, true), floor: head.at(10) }),
+        prior({ coverage: withKind(["bounded_head"]) }),
+        prior({ coverage: withKind("unknown") }),
       ];
       for (const fingerprint of unusable) {
         const result = await observeComplete(fingerprint);

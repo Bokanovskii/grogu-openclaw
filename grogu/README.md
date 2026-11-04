@@ -141,9 +141,10 @@ It stores a bounded identity list plus the oldest timestamp of a truncated head
 unless it is positively older than that floor, so removals and older items
 exposed below the floor do not fire (except an exact equal-timestamp tie, and
 an identity whose timestamp cannot be read always fires). Earlier full-item
-state is still read; stored state the trigger could not have written is
-silently rebaselined. Only `fire: true` admits the existing agent-turn payload
-for bounded research.
+state is still read. A stored v2 fingerprint whose identity keys, coverage kind
+or truncation flag, or floor are unusable is silently rebaselined instead of
+fired on; its other fields are trusted as the trigger wrote them. Only
+`fire: true` admits the existing agent-turn payload for bounded research.
 `policy-check` compares each collector contract's pinned `triggerSha256` with
 the installed script, so a renderer change needs that pin updated together with
 `workers-bootstrap --apply`.

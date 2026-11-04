@@ -2,6 +2,18 @@ import type { Context, Model } from "@openclaw/llm-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { parseRetryAfterErrorSeconds } from "../internal/retry-after.js";
 
+function admissionAbortReason(signal?: AbortSignal): Error {
+  return signal?.reason == null
+    ? new DOMException("Admission wait cancelled", "AbortError")
+    : toErrorObject(signal.reason, "Admission wait cancelled");
+}
+
+function throwIfAdmissionAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw admissionAbortReason(signal);
+  }
+}
+
 function waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -11,11 +23,7 @@ function waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
     function abort() {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      reject(
-        signal?.reason === undefined
-          ? new DOMException("Admission wait cancelled", "AbortError")
-          : toErrorObject(signal.reason, "Admission wait cancelled"),
-      );
+      reject(admissionAbortReason(signal));
     }
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) {
@@ -72,20 +80,20 @@ export async function retrySparkyAdmission<T>(
   }
   const deadline = now() + timeoutMs;
   for (let attempt = 0; ; attempt++) {
-    signal?.throwIfAborted();
+    throwIfAdmissionAborted(signal);
     try {
       return await open();
     } catch (error) {
       if (!admissionRejected(error) || attempt >= 19) {
         throw error;
       }
-      signal?.throwIfAborted();
+      throwIfAdmissionAborted(signal);
       const delayMs = (parseRetryAfterErrorSeconds(error, now()) ?? 15) * 1_000;
       if (!Number.isFinite(delayMs) || delayMs >= deadline - now()) {
         throw error;
       }
       await sleep(delayMs, signal);
-      signal?.throwIfAborted();
+      throwIfAdmissionAborted(signal);
       if (now() >= deadline) {
         throw error;
       }

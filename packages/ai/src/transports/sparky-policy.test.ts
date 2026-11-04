@@ -15,6 +15,24 @@ const rejected = (ms: number) =>
   });
 
 describe("Sparky rejected-admission retries", () => {
+  it("preserves AbortError classification for a null admission-wait reason", async () => {
+    const signal = new AbortController();
+    const error = rejected(1);
+    await expect(
+      retrySparkyAdmission(
+        { provider: "sparky" },
+        vi.fn<() => Promise<never>>().mockRejectedValue(error),
+        {
+          signal: signal.signal,
+          timeoutMs: 100,
+          sleep: async () => {
+            signal.abort(null);
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("retries only concurrency admission, within the original deadline and maximum attempts", async () => {
     let now = 0;
     const error = rejected(1);

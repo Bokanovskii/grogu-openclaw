@@ -208,7 +208,11 @@ async function main() {
       ).split("\n")[0],
     );
   } catch (error) {
-    const stdout = String((error as { stdout?: unknown }).stdout ?? "");
+    const failure = error as { code?: unknown; stdout?: unknown };
+    if (failure.code !== 1) {
+      throw error;
+    }
+    const stdout = String(failure.stdout ?? "");
     const conflicts = stdout.split("\n\n")[0]!.split("\n").slice(1).filter(Boolean);
     await summarize([
       `### Upstream ${status.latest} needs conflict resolution`,

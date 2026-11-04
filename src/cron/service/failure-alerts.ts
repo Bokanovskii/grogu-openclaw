@@ -23,6 +23,7 @@ import type {
   CronFailureNotificationDetail,
   CronJob,
   CronMessageChannel,
+  CronRunErrorClassification,
 } from "../types.js";
 import { isJobEnabled } from "./jobs-scheduling.js";
 import {
@@ -226,6 +227,7 @@ function buildFailureAlertPayload(params: {
   job: CronNotificationJob;
   error?: string;
   errorReason?: FailoverReason;
+  errorClassification?: CronRunErrorClassification;
   failureNotificationDetail?: CronFailureNotificationDetail;
   consecutiveErrors: number;
   route: ResolvedFailureAlert;
@@ -390,8 +392,14 @@ function maybeEmitFailureAlert(
   }
   const transient =
     params.status === "error" &&
-    resolveCronExecutionRetryHint({ error: params.error, classifiedReason: params.errorReason })
-      .retryable;
+    params.errorClassification?.kind !== "permanent" &&
+    resolveCronExecutionRetryHint({
+      error: params.error,
+      classifiedReason:
+        params.errorClassification?.kind === "reason"
+          ? params.errorClassification.reason
+          : params.errorReason,
+    }).retryable;
   const alertAfter =
     transient && !alertConfig.afterConfigured
       ? Math.max(alertConfig.after, TRANSIENT_FAILURE_ALERT_AFTER)
@@ -451,6 +459,7 @@ export function finalizeCronFailureNotifications(
     result: {
       status: "ok" | "error" | "skipped";
       error?: string;
+      errorClassification?: CronRunErrorClassification;
       failureNotificationDetail?: CronFailureNotificationDetail;
       startedAt: number;
     };
@@ -481,6 +490,7 @@ export function finalizeCronFailureNotifications(
       alertConfig: params.alertConfig,
       status: params.result.status,
       error: params.result.error,
+      errorClassification: params.result.errorClassification,
       errorReason: params.job.state.lastErrorReason,
       failureNotificationDetail: params.result.failureNotificationDetail,
       runAtMs: params.result.startedAt,

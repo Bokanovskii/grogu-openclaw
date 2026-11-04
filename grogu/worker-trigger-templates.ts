@@ -152,10 +152,12 @@ const timestamp = (value, label) => {
   return parsed;
 };
 const optional = (value, label) => value == null ? null : nonempty(value, label);
-const offset = (value, label) => {
-  if (Number.isSafeInteger(value) && value >= 0) return value;
+// Seaglass row ids are positive integer ROWIDs; the Messages identity key joins two of them with ":".
+const rowId = (value, label) => {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
   throw new Error("worker_source_malformed:" + label);
 };
+const epochSeconds = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const parsedRecord = (value) => {
   if (record(value)) return value;
   if (typeof value !== "string") return null;
@@ -188,13 +190,46 @@ const normalizeFailureKind = (value) => {
   if (["AbortError", "TimeoutError"].includes(name)) return "transient";
   return "schema";
 };
+const identities = {
+  gmail: (item) => String(nonempty(item.id, "gmail.id")),
+  messages: (item) => String(nonempty(item.conversationId, "messages.conversation")) + ":" + String(nonempty(item.id, "messages.id")),
+};
+// Item timestamps in the unit of the stored floor (epoch ms for Gmail, epoch seconds for Messages); NaN when unreadable.
+const stamps = {
+  gmail: (item) => typeof item.timestamp === "string" ? Date.parse(item.timestamp) : NaN,
+  messages: (item) => typeof item.timestamp === "number" ? item.timestamp : NaN,
+};
+const floorOf = (items, stamp) => {
+  const times = items.map(stamp);
+  return times.length > 0 && times.every(Number.isFinite) ? Math.min(...times) : null;
+};
+// A truncated page only proves the newest items when their timestamps are readable and ordered newest-first.
+const headFailure = (rows, stamp) => {
+  const times = rows.map(stamp);
+  if (!times.every(Number.isFinite)) return failure("schema");
+  return times.every((time, index) => index === 0 || time <= times[index - 1]) ? null : failure("incomplete");
+};
+const priorHead = (fingerprint, source) => {
+  try {
+    const stored = record(JSON.parse(fingerprint));
+    // v1 (first deployed runtime) stored whole items; v2 stores only their identity keys and the truncated head's floor.
+    const legacy = stored && stored.v === undefined && Array.isArray(stored.items) ? stored.items : null;
+    const ids = stored?.v === 2 ? stored.ids : legacy?.map((item) => identities[source](item));
+    if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string")) return null;
+    const truncated = record(stored.coverage)?.truncated === true;
+    const floor = !truncated ? null : legacy ? floorOf(legacy, stamps[source]) : Number.isFinite(stored.floor) ? stored.floor : null;
+    return { ids: new Set(ids), floor };
+  } catch {
+    return null;
+  }
+};
 const normalizeState = (value, nowMs, template) => {
   const loaded = record(value);
   const loadedSources = record(loaded?.sources) || {};
   const sources = {};
   for (const source of ["gmail", "messages"]) {
     const item = record(loadedSources[source]);
-    if (item && typeof item.fingerprint === "string" && utf8Bytes(item.fingerprint) <= maxStateBytes / 2 && Number.isFinite(item.lastSuccessAt)) {
+    if (item && typeof item.fingerprint === "string" && utf8Bytes(item.fingerprint) <= maxStateBytes / 2 && Number.isFinite(item.lastSuccessAt) && priorHead(item.fingerprint, source)) {
       sources[source] = { fingerprint: item.fingerprint, lastSuccessAt: item.lastSuccessAt };
     }
   }
@@ -245,7 +280,7 @@ const decodeGmail = (observation, maxItems) => {
   if (!Number.isSafeInteger(stdout.count) || stdout.count < 0 || stdout.count !== stdout.messages.length || typeof stdout.has_more !== "boolean") return failure("schema");
   const truncated = stdout.has_more || (stdout.nextPageToken != null && stdout.nextPageToken !== "");
   try {
-    const items = canonicalize(stdout.messages.map((raw, index) => {
+    const rows = stdout.messages.map((raw, index) => {
       const item = record(raw);
       if (!item) throw new Error();
       return {
@@ -253,7 +288,10 @@ const decodeGmail = (observation, maxItems) => {
         threadId: optional(item.threadId, "gmail." + index + ".thread"),
         timestamp: timestamp(item.internalDateIso ?? item.date, "gmail." + index + ".timestamp"),
       };
-    }), (item) => String(item.id));
+    });
+    const unordered = truncated ? headFailure(rows, stamps.gmail) : null;
+    if (unordered) return unordered;
+    const items = canonicalize(rows, identities.gmail);
     return {
       items,
       cursor: null,
@@ -277,10 +315,8 @@ const decodeMessages = (observation, maxItems) => {
   if (
     typeof value.source !== "string" ||
     !value.source.trim() ||
-    !Number.isSafeInteger(value.since_ts) ||
-    value.since_ts < 0 ||
-    !Number.isSafeInteger(value.before_ts) ||
-    value.before_ts < 0 ||
+    !epochSeconds(value.since_ts) ||
+    !epochSeconds(value.before_ts) ||
     !Number.isSafeInteger(value.limit) ||
     value.limit < 1 ||
     value.limit > 100 ||
@@ -293,26 +329,29 @@ const decodeMessages = (observation, maxItems) => {
     value.messages.length > value.limit ||
     value.messages.length > maxItems
   ) return failure("schema");
-  if (value.has_more) return failure("incomplete");
   try {
-    const items = canonicalize(value.messages.map((raw, index) => {
+    const rows = value.messages.map((raw, index) => {
       const item = record(raw);
       if (!item) throw new Error();
       return {
-        id: nonempty(item.message_id, "messages." + index + ".id"),
-        conversationId: nonempty(item.chat_id, "messages." + index + ".conversation"),
+        id: rowId(item.message_id, "messages." + index + ".id"),
+        conversationId: rowId(item.chat_id, "messages." + index + ".conversation"),
         timestamp: timestamp(item.ts, "messages." + index + ".timestamp"),
       };
-    }), (item) => String(item.conversationId) + ":" + String(item.id));
-    const cursor = { sinceTs: offset(value.since_ts, "messages.since_ts"), beforeTs: offset(value.before_ts, "messages.before_ts"), nextOffset: offset(value.next_offset, "messages.next_offset") };
+    });
+    // A truncated page only proves the newest messages when it starts at the head.
+    if (value.has_more && value.offset !== 0) return failure("incomplete");
+    const unordered = value.has_more ? headFailure(rows, stamps.messages) : null;
+    if (unordered) return unordered;
+    const items = canonicalize(rows, identities.messages);
     return {
       items,
-      cursor,
+      cursor: { sinceTs: value.since_ts, beforeTs: value.before_ts, nextOffset: value.next_offset },
       coverage: {
         kind: "bounded_recent_window",
         limit: value.limit,
-        truncated: false,
-        empty: items.length === 0,
+        truncated: value.has_more,
+        empty: !value.has_more && items.length === 0,
       },
     };
   } catch {
@@ -324,11 +363,18 @@ const evaluate = (template, observation, previousState, nowMs) => {
   const source = template.templateId === "gmail-metadata-v1" ? "gmail" : "messages";
   const decoded = source === "gmail" ? decodeGmail(observation, template.maxItems) : decodeMessages(observation, template.maxItems);
   if (decoded.error) return decoded;
-  const fingerprint = JSON.stringify({ items: decoded.items, coverage: decoded.coverage });
+  const identity = identities[source];
+  const stamp = stamps[source];
+  const floor = decoded.coverage.truncated ? floorOf(decoded.items, stamp) : null;
+  const fingerprint = JSON.stringify({ v: 2, ids: decoded.items.map((item) => identity(item)), coverage: decoded.coverage, floor });
   if (utf8Bytes(fingerprint) > maxStateBytes / 2) return failure("schema");
   const prior = record(state.sources[source]);
-  const baseline = !prior || typeof prior.fingerprint !== "string";
-  const changed = !baseline && prior.fingerprint !== fingerprint;
+  const known = prior ? priorHead(prior.fingerprint, source) : null;
+  // Only an unseen item positively older than a truncated prior head's floor was exposed by a removal.
+  // Unreadable timestamps are never exposed, and equal timestamps count as inside, so both fire.
+  const exposed = (item) => known.floor !== null && Number.isFinite(stamp(item)) && stamp(item) < known.floor;
+  const added = known ? decoded.items.filter((item) => !known.ids.has(identity(item)) && !exposed(item)) : [];
+  const changed = added.length > 0;
   state.sources = { ...state.sources, [source]: { fingerprint, cursor: decoded.cursor, lastSuccessAt: nowMs } };
   if (changed) {
     const id = source + ":" + nowMs + ":" + fingerprint.length;
@@ -339,7 +385,7 @@ const evaluate = (template, observation, previousState, nowMs) => {
   const nativeSweepDue = state.nextNativeSweepAt <= nowMs;
   let message;
   if (changed) {
-    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: decoded.items, uncertainty: decoded.coverage.truncated ? "older_matches_not_observed" : null, nativeSourceSweep: nativeSweepDue });
+    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: added, uncertainty: decoded.coverage.truncated ? "older_matches_not_observed" : null, nativeSourceSweep: nativeSweepDue });
   } else if (dueIndex >= 0) {
     const due = state.continuations[dueIndex];
     const fires = due.fires + 1;

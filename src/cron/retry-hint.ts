@@ -1,4 +1,5 @@
 import type { FailoverReason } from "../agents/failover/signal.js";
+import { resolveSparkyLocalAdmissionFailureReason } from "./run-error-reason.js";
 
 /** Classifies cron run failures for retry policy decisions. */
 export type CronRetryOn = "rate_limit" | "overloaded" | "network" | "timeout" | "server_error";
@@ -64,6 +65,10 @@ export function resolveCronExecutionRetryHint(input: CronRetryHintInput): CronRe
     return keys.includes(classified as CronRetryOn)
       ? { retryable: true, category: classified as CronRetryOn }
       : { retryable: false };
+  }
+  const localAdmissionReason = resolveSparkyLocalAdmissionFailureReason(error);
+  if (localAdmissionReason && keys.includes(localAdmissionReason)) {
+    return { retryable: true, category: localAdmissionReason };
   }
   for (const key of keys) {
     if (TRANSIENT_PATTERNS[key]?.test(error)) {

@@ -223,7 +223,12 @@ describe("cron timer outcome and failure policy regressions", () => {
     expect(sendCronFailureAlert).not.toHaveBeenCalled();
   });
 
-  it("keeps a recurring job on its backoff schedule through a long transient outage", () => {
+  it.each([
+    "LLM request timed out",
+    "Sparky request queue is full; retry after current work finishes",
+    "Sparky local queue deadline expired before request dispatch",
+    "Sparky local queue deadline expired",
+  ])("keeps a recurring job on backoff through transient failure: %s", (error) => {
     const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
     const deferredNotifications: DeferredCronNotifications = [];
     const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 12 } });
@@ -231,7 +236,7 @@ describe("cron timer outcome and failure policy regressions", () => {
     applyJobResult(
       state,
       job,
-      { status: "error", error: "LLM request timed out", startedAt, endedAt: startedAt + 10 },
+      { status: "error", error, provider: "sparky", startedAt, endedAt: startedAt + 10 },
       { deferredNotifications },
     );
 
@@ -242,6 +247,29 @@ describe("cron timer outcome and failure policy regressions", () => {
     expect(deferredNotifications.map((notification) => notification.kind)).not.toContain(
       "auto-disabled",
     );
+  });
+
+  it("still auto-disables a permanent configuration failure", () => {
+    const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
+    const deferredNotifications: DeferredCronNotifications = [];
+    const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
+
+    applyJobResult(
+      state,
+      job,
+      {
+        status: "error",
+        error: "wrong model id",
+        provider: "sparky",
+        startedAt,
+        endedAt: startedAt + 10,
+      },
+      { deferredNotifications },
+    );
+
+    expect(job.enabled).toBe(false);
+    expect(job.state.autoDisabled?.reason).toBe("consecutive-failures");
+    expect(job.state.nextRunAtMs).toBeUndefined();
   });
 
   it.each([

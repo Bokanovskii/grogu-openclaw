@@ -83,6 +83,7 @@ export async function runNative(
   profile: OperatorProfile,
   args: string[],
   receiptDirectory: string,
+  options?: { configFile?: string },
 ): Promise<unknown> {
   let stdout: string;
   let stderr: string;
@@ -91,7 +92,7 @@ export async function runNative(
       env: {
         ...process.env,
         OPENCLAW_STATE_DIR: profile.stateDir,
-        OPENCLAW_CONFIG_PATH: profile.configFile,
+        OPENCLAW_CONFIG_PATH: options?.configFile ?? profile.configFile,
         OPENCLAW_OAUTH_DIR: profile.oauthDir,
         OPENCLAW_GATEWAY_URL: profile.gatewayUrl,
         GROGU_PROFILE_FILE: profile.profileFile,

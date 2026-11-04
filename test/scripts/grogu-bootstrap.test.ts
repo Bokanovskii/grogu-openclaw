@@ -20,7 +20,7 @@ const approvedTools = [
   "icloud_calendar_events",
   "sessions_search",
 ];
-const job: CronJob = {
+const job = {
   id: "synthetic-job",
   name: "Watchdog",
   enabled: false,
@@ -32,7 +32,7 @@ const job: CronJob = {
   wakeMode: "now",
   payload: { kind: "agentTurn", message: "Synthetic prompt.", model: "synthetic/model" },
   state: {},
-};
+} satisfies CronJob;
 
 const workerBindings = [
   {

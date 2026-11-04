@@ -44,7 +44,7 @@ function agentJob(
   model?: string,
   fallbacks?: string[],
   trigger?: CronJob["trigger"],
-): CronJob {
+): CronJob & { payload: Extract<CronJob["payload"], { kind: "agentTurn" }> } {
   return {
     id,
     name: id,

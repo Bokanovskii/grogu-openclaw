@@ -367,6 +367,7 @@ function maybeEmitFailureAlert(
     status: "error" | "skipped";
     error?: string;
     errorReason?: FailoverReason;
+    errorClassification?: CronRunErrorClassification;
     failureNotificationDetail?: CronFailureNotificationDetail;
     runAtMs?: number;
     consecutiveCount: number;

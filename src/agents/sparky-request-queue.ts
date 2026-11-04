@@ -13,7 +13,7 @@ type AdmissionEntry = {
   detach: () => void;
 };
 const abortReason = (signal?: AbortSignal) =>
-  signal?.reason === undefined
+  signal?.reason == null
     ? new DOMException("Sparky request cancelled", "AbortError")
     : toErrorObject(signal.reason, "Sparky request cancelled");
 const sleep = (ms: number) =>

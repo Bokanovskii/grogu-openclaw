@@ -85,7 +85,9 @@ Worker prompt contracts live under `grogu/templates/workers/`. Private job
 definitions may consume them after review. They keep unchanged polls
 deterministic and model-free, distinguish authorization failures from empty
 sources, and require privacy-preserving bounded research plus one useful
-owner-only update for each material private signal.
+owner-only update for each material private signal. Add each private job id and
+its required template marker to `bindings.modelPolicy.workerContracts`;
+`policy-check` then reports missing jobs or markers without printing prompts.
 
 Gmail authorization verification stays separate from worker correctness. Use
 the existing non-mutating verify-only command after consent includes the

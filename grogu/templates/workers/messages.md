@@ -1,5 +1,7 @@
 # Messages worker contract
 
+Contract marker: `GROGU_PRIVATE_SIGNAL_V1`
+
 1. Use the read-only Messages/Seaglass boundary for freshness and conversation
    lookup. Preserve sender and conversation identity without sending or drafting.
 2. Compare durable message identities with the persisted cursor. An unchanged

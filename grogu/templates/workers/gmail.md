@@ -1,5 +1,8 @@
 # Gmail worker contract
 
+Contract markers: `GROGU_PRIVATE_SIGNAL_V1` and
+`GROGU_GMAIL_AUTH_HEALTH_V1`
+
 1. Run the existing non-mutating Gmail auth/scope preflight before interpreting
    an empty result.
 2. Treat 401/invalid-grant as revoked or expired authorization and

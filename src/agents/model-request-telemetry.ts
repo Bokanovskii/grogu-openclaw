@@ -209,6 +209,7 @@ export function createRequestTracker(
   save();
   const tracker = {
     record,
+    // SAFETY: The tracker owns this mutable slot and only assigns AbortSignal instances later.
     signal: undefined as AbortSignal | undefined,
     run<T>(operation: () => T): T {
       return callContext.run(tracker, operation);

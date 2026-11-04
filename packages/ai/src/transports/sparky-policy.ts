@@ -141,6 +141,7 @@ export function projectSparkyImageHistory(
         text: "[earlier image omitted from this request: Sparky accepts at most 2 images; reattach it if its pixels are needed]",
       };
     });
+    // SAFETY: Each replacement is a valid text content part and every untouched part retains its original type.
     return changed ? ({ ...message, content } as typeof message) : message;
   });
   return { ...context, messages };

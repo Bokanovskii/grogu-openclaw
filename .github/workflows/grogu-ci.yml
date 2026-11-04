@@ -47,6 +47,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "26.12.1"
+      - uses: ./.github/actions/setup-ripgrep
       - name: Install the source-pinned package manager and dependencies
         run: |
           npm install --global "pnpm@$(node -p "require('./grogu/toolchain.json').pnpm")"

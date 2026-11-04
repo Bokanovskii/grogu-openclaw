@@ -148,7 +148,10 @@ const booleanFields = new Set([
 ]);
 
 /** Enforce the metadata-only contract again at persistence; never serialize arbitrary caller fields. */
-export function modelRequestMetadataSnapshot(record: ModelRequestRecord): ModelRequestRecord {
+export function modelRequestMetadataSnapshot(record: unknown): ModelRequestRecord {
+  if (!isRecord(record)) {
+    throw new Error("Invalid model request telemetry metadata");
+  }
   const result: Record<string, MetadataValue> = {};
   for (const [key, value] of Object.entries(record)) {
     if (numericFields.has(key)) {
@@ -162,18 +165,46 @@ export function modelRequestMetadataSnapshot(record: ModelRequestRecord): ModelR
       result[key] = value;
     }
   }
-  // The typed producer supplies these fields; validate them before retaining the snapshot.
+  const nullableNumber = (value: MetadataValue | undefined) =>
+    typeof value === "number" || value === null;
+  const nullableString = (value: MetadataValue | undefined) =>
+    typeof value === "string" || value === null;
+  // Persisted records cross a storage boundary; validate every required field before returning.
   if (
+    typeof result.version !== "number" ||
     !telemetryUuid(result.id) ||
     (result.kind !== "http_attempt" &&
       result.kind !== "model_call" &&
       result.kind !== "host_gap") ||
     typeof result.startedAtMs !== "number" ||
     typeof result.updatedAtMs !== "number" ||
-    typeof result.terminal !== "boolean"
+    typeof result.terminal !== "boolean" ||
+    typeof result.phase !== "string" ||
+    typeof result.workClass !== "string" ||
+    typeof result.httpAttempts !== "number" ||
+    typeof result.responseBytes !== "number" ||
+    typeof result.outputDeltas !== "number" ||
+    typeof result.textDeltas !== "number" ||
+    typeof result.reasoningDeltas !== "number" ||
+    typeof result.toolDeltas !== "number" ||
+    !nullableNumber(result.firstByteAtMs) ||
+    !nullableNumber(result.firstOutputAtMs) ||
+    !nullableNumber(result.firstTextAtMs) ||
+    !nullableNumber(result.firstReasoningAtMs) ||
+    !nullableNumber(result.firstToolAtMs) ||
+    !nullableNumber(result.lastOutputAtMs) ||
+    !nullableNumber(result.lastByteAtMs) ||
+    typeof result.maxByteGapMs !== "number" ||
+    !nullableNumber(result.admittedAtMs) ||
+    !nullableNumber(result.headersAtMs) ||
+    !nullableNumber(result.inputTokens) ||
+    !nullableNumber(result.outputTokens) ||
+    !nullableString(result.responseId) ||
+    !nullableNumber(result.httpStatus)
   ) {
     throw new Error("Invalid model request telemetry metadata");
   }
+  // SAFETY: The field allowlists and complete required-field guard above establish the record.
   return result as ModelRequestRecord;
 }
 

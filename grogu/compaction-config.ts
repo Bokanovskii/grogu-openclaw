@@ -4,9 +4,9 @@ import path from "node:path";
 import JSON5 from "json5";
 import { z } from "zod";
 import { readGroguPrivateProfileDocument } from "../src/agents/grogu-private-profile.js";
-import { validateConfigObject } from "../src/config/validation-core.js";
 import {
   createPrivateArtifactDirectory,
+  runNative,
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
@@ -150,18 +150,19 @@ export async function stageGroguCompactionConfig(profile: OperatorProfile) {
   const original = await readFile(profile.configFile);
   const current = JSON5.parse(original.toString("utf8"));
   const candidate = buildGroguCompactionConfig(current, binding);
-  const validation = validateConfigObject(candidate);
-  if (!validation.ok) {
-    throw new Error(
-      `The staged compaction config is invalid: ${validation.issues.map((issue) => issue.path).join(", ")}`,
-    );
-  }
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
   const originalFile = path.join(directory, "openclaw.original.json");
   const candidateFile = path.join(directory, "openclaw.candidate.json");
   const candidateBytes = Buffer.from(`${JSON.stringify(candidate, null, 2)}\n`);
   await writeFile(originalFile, original, { mode: 0o600, flag: "wx" });
   await writeFile(candidateFile, candidateBytes, { mode: 0o600, flag: "wx" });
+  z.object({ valid: z.literal(true) })
+    .passthrough()
+    .parse(
+      await runNative(profile, ["config", "validate", "--json"], directory, {
+        configFile: candidateFile,
+      }),
+    );
   const originalSha256 = sha256(original);
   const candidateSha256 = sha256(candidateBytes);
   const applyFile = path.join(directory, "apply.mjs");

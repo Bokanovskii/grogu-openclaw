@@ -10,7 +10,13 @@ import {
   projectMcpCallToolResult,
 } from "../../src/agents/mcp-content.js";
 
-const schemaSha256 = "a".repeat(64);
+const schemaSha256 = "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1";
+const approvedTools = [
+  "gmail__gmail_search",
+  "seaglass__recent_messages",
+  "icloud_calendar_events",
+  "sessions_search",
+];
 const continuation = {
   delayMs: 60_000,
   intervalMs: 60_000,
@@ -25,7 +31,7 @@ function messagesTemplate(): WorkerTriggerTemplate {
     version: 1,
     templateId: "messages-metadata-v1",
     schemaSha256,
-    toolsAllow: ["seaglass__recent_messages"],
+    toolsAllow: approvedTools,
     args: { since_ts: 100, limit: 50, offset: 0, include_text: false },
     maxItems: 50,
     continuation,
@@ -37,7 +43,7 @@ function gmailTemplate(): WorkerTriggerTemplate {
     version: 1,
     templateId: "gmail-metadata-v1",
     schemaSha256,
-    toolsAllow: ["gmail__gmail_search"],
+    toolsAllow: approvedTools,
     args: {
       query: "newer_than:1d",
       max: 1,
@@ -122,7 +128,19 @@ describe("private worker trigger templates", () => {
     expect(() =>
       workerTriggerTemplateSchema.parse({
         ...messagesTemplate(),
-        toolsAllow: ["seaglass__recent_messages", "message"],
+        schemaSha256: "0".repeat(64),
+      }),
+    ).toThrow(/effective probe/);
+    expect(() =>
+      workerTriggerTemplateSchema.parse({
+        ...messagesTemplate(),
+        toolsAllow: [...approvedTools, "message"],
+      }),
+    ).toThrow(/toolsAllow/);
+    expect(() =>
+      workerTriggerTemplateSchema.parse({
+        ...messagesTemplate(),
+        toolsAllow: [...approvedTools, "*"],
       }),
     ).toThrow(/toolsAllow/);
     expect(() =>
@@ -158,7 +176,8 @@ describe("private worker trigger templates", () => {
     expect(gmail).toContain("MCP.gmail.gmailSearch");
     expect(messages).not.toContain("__name");
     expect(messages).not.toContain("toString()");
-    expect(messages).not.toContain("icloud_calendar_events");
+    expect(messages).toContain('"icloud_calendar_events"');
+    expect(messages).not.toContain("MCP.icloud");
     expect(messages).not.toContain("private body");
     expect(workerTriggerScriptSha256(messages)).toMatch(/^[a-f0-9]{64}$/);
     expect(messages.length).toBeLessThan(65_536);
@@ -380,7 +399,20 @@ describe("private worker trigger templates", () => {
         {
           gmail: {
             gmailSearch: async () => {
-              throw Object.assign(new Error("transport unavailable"), { kind: "network" });
+              throw Object.assign(new Error("transport unavailable"), { code: "ETIMEDOUT" });
+            },
+          },
+        },
+        {},
+      ),
+    ).resolves.toEqual({ error: { kind: "transient" } });
+
+    await expect(
+      compile(messagesTemplate())(
+        {
+          seaglass: {
+            recentMessages: async () => {
+              throw Object.assign(new Error("stream reset"), { code: "ECONNRESET" });
             },
           },
         },

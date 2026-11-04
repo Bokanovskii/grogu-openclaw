@@ -8,6 +8,13 @@ const MAX_CONTINUATION_FIRES = 3;
 const MAX_TTL_MS = 24 * 60 * 60_000;
 
 const templateIdSchema = z.enum(["gmail-metadata-v1", "messages-metadata-v1"]);
+export function isEffectiveWorkerSchemaPin(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value) && new Set(value).size >= 4;
+}
+const schemaSha256Schema = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/)
+  .refine(isEffectiveWorkerSchemaPin, "schema hash must come from an effective probe");
 export type WorkerTriggerTemplateId = z.infer<typeof templateIdSchema>;
 
 function expectedCollectorTool(templateId: WorkerTriggerTemplateId) {
@@ -20,7 +27,7 @@ export const workerTriggerTemplateSchema = z
   .object({
     version: z.literal(WORKER_TRIGGER_CONTRACT_VERSION),
     templateId: templateIdSchema,
-    schemaSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    schemaSha256: schemaSha256Schema,
     toolsAllow: z.array(z.string().min(1)).min(1).max(32),
     args: z.record(z.string(), z.unknown()),
     maxItems: z.number().int().min(1).max(100).default(50),
@@ -43,15 +50,12 @@ export const workerTriggerTemplateSchema = z
   .strict()
   .superRefine((value, ctx) => {
     const expected = expectedCollectorTool(value.templateId);
-    const otherCollector =
-      value.templateId === "gmail-metadata-v1"
-        ? "seaglass__recent_messages"
-        : "gmail__gmail_search";
     if (
       new Set(value.toolsAllow).size !== value.toolsAllow.length ||
       !value.toolsAllow.includes(expected.raw) ||
-      value.toolsAllow.includes(otherCollector) ||
-      value.toolsAllow.some((tool) => ["exec", "message"].includes(tool))
+      value.toolsAllow.some(
+        (tool) => tool.includes("*") || ["exec", "message"].includes(tool.toLowerCase()),
+      )
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -168,9 +172,13 @@ const textContentRecord = (envelope) => {
 };
 const failure = (kind) => ({ error: { kind } });
 const normalizeFailureKind = (value) => {
-  const kind = record(value) && typeof value.kind === "string" ? value.kind : "schema";
+  const kind = record(value) && typeof value.kind === "string" ? value.kind : "";
   if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) return "transient";
   if (["auth", "permission", "config", "schema"].includes(kind)) return kind;
+  const code = record(value) && typeof value.code === "string" ? value.code.toUpperCase() : "";
+  if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT", "ABORT_ERR"].includes(code)) return "transient";
+  const name = record(value) && typeof value.name === "string" ? value.name : "";
+  if (["AbortError", "TimeoutError"].includes(name)) return "transient";
   return "schema";
 };
 const normalizeState = (value, nowMs, template) => {

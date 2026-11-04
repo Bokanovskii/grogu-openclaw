@@ -8,7 +8,10 @@ import {
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
-import { inspectRenderedWorkerTriggerScript } from "./worker-trigger-templates.js";
+import {
+  inspectRenderedWorkerTriggerScript,
+  isEffectiveWorkerSchemaPin,
+} from "./worker-trigger-templates.js";
 
 /** Tracked, non-personal behavior that every Grogu install must keep. */
 export const REQUIRED_CHANNEL_QUEUE_MODES: Readonly<Record<string, string>> = Object.freeze({
@@ -35,7 +38,10 @@ const collectorWorkerContractSchema = z
     jobId: z.string().min(1),
     contractVersion: z.literal(1),
     templateId: z.enum(["gmail-metadata-v1", "messages-metadata-v1"]),
-    schemaSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    schemaSha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .refine(isEffectiveWorkerSchemaPin, "schema hash must come from an effective probe"),
     triggerSha256: z.string().regex(/^[a-f0-9]{64}$/),
     toolsAllow: z.array(z.string().min(1)).min(1),
     markers: z.array(workerContractMarker).min(1),
@@ -47,15 +53,12 @@ const collectorWorkerContractSchema = z
       contract.templateId === "gmail-metadata-v1"
         ? "gmail__gmail_search"
         : "seaglass__recent_messages";
-    const otherCollector =
-      contract.templateId === "gmail-metadata-v1"
-        ? "seaglass__recent_messages"
-        : "gmail__gmail_search";
     if (
       new Set(contract.toolsAllow).size !== contract.toolsAllow.length ||
       !contract.toolsAllow.includes(expectedTool) ||
-      contract.toolsAllow.includes(otherCollector) ||
-      contract.toolsAllow.some((tool) => ["exec", "message"].includes(tool))
+      contract.toolsAllow.some(
+        (tool) => tool.includes("*") || ["exec", "message"].includes(tool.toLowerCase()),
+      )
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { stableStringify } from "@openclaw/normalization-core";
 import { Value } from "typebox/value";
 import { z } from "zod";
 import {
@@ -228,6 +230,46 @@ export function readUpdatedManagedJob(response: unknown): CronJob {
   return response;
 }
 
+function preservedWorkerJobDefinition(job: CronJob) {
+  return {
+    declarationKey: job.declarationKey,
+    displayName: job.displayName,
+    owner: job.owner,
+    scheduledToolPolicy: job.scheduledToolPolicy,
+    agentId: job.agentId,
+    sessionKey: job.sessionKey,
+    name: job.name,
+    description: job.description,
+    enabled: job.enabled,
+    deleteAfterRun: job.deleteAfterRun,
+    schedule: job.schedule,
+    pacing: job.pacing,
+    sessionTarget: job.sessionTarget,
+    wakeMode: job.wakeMode,
+    payload: job.payload,
+    delivery: job.delivery,
+    failureAlert: job.failureAlert,
+  };
+}
+
+export function workerJobDefinitionSha256(job: CronJob): string {
+  return createHash("sha256")
+    .update(stableStringify(preservedWorkerJobDefinition(job)))
+    .digest("hex");
+}
+
+export function assertWorkerJobDefinitionPreserved(
+  logicalName: string,
+  before: CronJob,
+  after: CronJob,
+): void {
+  if (
+    !isDeepStrictEqual(preservedWorkerJobDefinition(before), preservedWorkerJobDefinition(after))
+  ) {
+    throw new Error(`Native worker bootstrap ${logicalName} changed non-trigger job configuration`);
+  }
+}
+
 export async function reconcileManagedJobs(profile: OperatorProfile, apply = false) {
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
   const planned: { logicalName: string; update: ReturnType<typeof planManagedJobPatch> }[] = [];
@@ -274,6 +316,8 @@ export async function reconcileWorkerTriggers(profile: OperatorProfile, apply = 
     logicalName: string;
     update: ReturnType<typeof planManagedJobPatch>;
     rollback: { id: string; trigger: CronJob["trigger"] | null };
+    preservedConfigSha256: string;
+    before: CronJob;
   }[] = [];
   for (const desired of desiredWorkers) {
     const response = await callNative(profile, "cron.get", { id: desired.id }, directory);
@@ -294,31 +338,45 @@ export async function reconcileWorkerTriggers(profile: OperatorProfile, apply = 
         trigger: desired.trigger,
       }),
       rollback: { id: response.id, trigger: response.trigger ?? null },
+      preservedConfigSha256: workerJobDefinitionSha256(response),
+      before: response,
     });
   }
   const planReceipt = await writePrivateReceipt(directory, "worker-bootstrap-plan.json", {
     apply,
     schemaPins,
-    planned,
+    planned: planned.map(({ before: _before, ...item }) => item),
   });
+  const applied: {
+    logicalName: string;
+    preservedConfigSha256: string;
+  }[] = [];
   for (const item of planned) {
     if (apply && item.update) {
       const response = await callNative(profile, "cron.update", item.update, directory);
-      const remaining = planManagedJobPatch(
-        item.logicalName,
-        readUpdatedManagedJob(response),
-        item.update.patch,
-      );
+      const updated = readUpdatedManagedJob(response);
+      assertWorkerJobDefinitionPreserved(item.logicalName, item.before, updated);
+      const remaining = planManagedJobPatch(item.logicalName, updated, item.update.patch);
       if (remaining) {
         throw new Error(`Native worker bootstrap ${item.logicalName} did not converge`);
       }
+      applied.push({
+        logicalName: item.logicalName,
+        preservedConfigSha256: workerJobDefinitionSha256(updated),
+      });
     }
   }
+  const resultReceipt = await writePrivateReceipt(directory, "worker-bootstrap-result.json", {
+    apply,
+    schemaPins,
+    applied,
+  });
   return {
     mode: apply ? "applied" : "preview",
     jobs: planned.map((item) => ({ logicalName: item.logicalName, changed: item.update !== null })),
     schemaPins,
     planReceipt,
+    resultReceipt,
     privateReceipts: directory,
   };
 }

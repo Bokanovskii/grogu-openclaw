@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertWorkerJobDefinitionPreserved,
   parseManagedWorkerTriggers,
   planManagedJobPatch,
   readWorkerSchemaPin,
   readUpdatedManagedJob,
+  workerJobDefinitionSha256,
 } from "../../grogu/bootstrap.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 
-const schemaSha256 = "a".repeat(64);
+const schemaSha256 = "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1";
+const approvedTools = [
+  "gmail__gmail_search",
+  "seaglass__recent_messages",
+  "icloud_calendar_events",
+  "sessions_search",
+];
 const job: CronJob = {
   id: "synthetic-job",
   name: "Watchdog",
@@ -32,7 +40,7 @@ describe("revision-checked metadata bootstrap", () => {
           version: 1,
           templateId: "gmail-metadata-v1",
           schemaSha256,
-          toolsAllow: ["gmail__gmail_search"],
+          toolsAllow: approvedTools,
           args: {
             query: "newer_than:1d",
             max: 1,
@@ -57,7 +65,7 @@ describe("revision-checked metadata bootstrap", () => {
           version: 1,
           templateId: "messages-metadata-v1",
           schemaSha256,
-          toolsAllow: ["seaglass__recent_messages"],
+          toolsAllow: approvedTools,
           args: { limit: 50, offset: 0, include_text: false },
           maxItems: 50,
           continuation: {
@@ -77,7 +85,7 @@ describe("revision-checked metadata bootstrap", () => {
       id: "job-gmail",
       contractVersion: 1,
       templateId: "gmail-metadata-v1",
-      toolsAllow: ["gmail__gmail_search"],
+      toolsAllow: approvedTools,
       trigger: { script: expect.stringContaining("MCP.gmail.gmailSearch") },
       triggerSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
@@ -161,5 +169,26 @@ describe("revision-checked metadata bootstrap", () => {
       readUpdatedManagedJob({ ...job, deliveryPreview: { label: "Incomplete" } }),
     ).toThrow();
     expect(() => readUpdatedManagedJob({ ...job, unexpected: true })).toThrow();
+  });
+
+  it("proves trigger-only updates preserve the complete worker definition", () => {
+    const updated = {
+      ...job,
+      updatedAtMs: 2,
+      configRevision: "next-revision",
+      trigger: { script: "return { fire: false };" },
+    } satisfies CronJob;
+    expect(() => assertWorkerJobDefinitionPreserved("watchdog", job, updated)).not.toThrow();
+    expect(workerJobDefinitionSha256(updated)).toBe(workerJobDefinitionSha256(job));
+
+    expect(() =>
+      assertWorkerJobDefinitionPreserved("watchdog", job, {
+        ...updated,
+        payload: {
+          ...updated.payload,
+          toolsAllow: ["gmail__gmail_search"],
+        },
+      }),
+    ).toThrow(/non-trigger job configuration/);
   });
 });

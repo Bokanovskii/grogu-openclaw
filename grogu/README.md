@@ -92,9 +92,14 @@ Each `native.workerTriggers` entry selects a tracked template from
 `worker-trigger-templates.ts`, an approved MCP server/tool plus its live
 catalog schema hash, private bounded arguments, fixed metadata-only decoding,
 and continuation limits. Bind exactly the two existing jobs: one Gmail
-collector and one Messages collector. Calendar remains the existing payload
-tool and is requested only by bounded `native_source_sweep` trigger intent.
-No Calendar MCP trigger template or new job is installed.
+primary and one Messages primary. Both multi-source payloads retain their
+complete, ordered, already-approved `toolsAllow` lists, including both
+collector permissions and existing Calendar/research tools; the renderer calls
+only its selected primary. Bootstrap patches only `trigger`, rejects wildcard
+or `exec`/`message` broadening, and receipts a hash proving the remaining job
+definition stayed unchanged. Calendar remains the existing payload tool and is
+requested only by bounded `native_source_sweep` trigger intent. No Calendar MCP
+trigger template or new job is installed.
 
 Capture the supported effective input-schema pins without invoking a source
 tool:

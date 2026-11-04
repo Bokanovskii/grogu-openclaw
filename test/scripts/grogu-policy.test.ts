@@ -8,6 +8,13 @@ import {
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 
 const automatic = "local/automatic-model";
+const schemaSha256 = "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1";
+const approvedTools = [
+  "gmail__gmail_search",
+  "seaglass__recent_messages",
+  "icloud_calendar_events",
+  "sessions_search",
+];
 const policy: ModelPolicy = {
   automaticModel: automatic,
   ownerOverrides: { configPaths: [], jobIds: [] },
@@ -109,8 +116,8 @@ describe("automatic routing and queue policy", () => {
     const template = workerTriggerTemplateSchema.parse({
       version: 1,
       templateId: "messages-metadata-v1",
-      schemaSha256: "a".repeat(64),
-      toolsAllow: ["seaglass__recent_messages"],
+      schemaSha256,
+      toolsAllow: approvedTools,
       args: { limit: 1, include_text: false },
       maxItems: 1,
       continuation: {
@@ -173,7 +180,7 @@ describe("automatic routing and queue policy", () => {
         workerContracts: [
           {
             ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
-            schemaSha256: "b".repeat(64),
+            schemaSha256: "1c733f1dc6feb2ca9ba610acdf98f4e37f26ad9751c566735505b9d17ef6c7d7",
           },
         ],
       }),
@@ -185,7 +192,7 @@ describe("automatic routing and queue policy", () => {
         workerContracts: [
           {
             ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
-            schemaSha256: "0",
+            schemaSha256: "0".repeat(64),
           },
         ],
       }),
@@ -197,11 +204,19 @@ describe("automatic routing and queue policy", () => {
         workerContracts: [
           {
             ...contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1"),
-            toolsAllow: ["seaglass__recent_messages", "gmail__gmail_search"],
+            toolsAllow: [...approvedTools, "*"],
           },
         ],
       }),
     ).toThrow(/toolsAllow/);
+
+    privateSignal.payload.toolsAllow = [...approvedTools, "new_unapproved_read"];
+    expect(
+      evaluatePolicy(compliantConfig(), [privateSignal], {
+        ...policy,
+        workerContracts: [contract("private-signal", "GROGU_PRIVATE_SIGNAL_V1")],
+      }),
+    ).toEqual([expect.objectContaining({ where: "job:private-signal:contract" })]);
   });
 
   it("keeps non-trigger worker marker contracts compatible", () => {

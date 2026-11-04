@@ -17,8 +17,13 @@ describe("deterministic private worker trigger", () => {
     const template = workerTriggerTemplateSchema.parse({
       version: 1,
       templateId: "messages-metadata-v1",
-      schemaSha256: "a".repeat(64),
-      toolsAllow: ["seaglass__recent_messages"],
+      schemaSha256: "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1",
+      toolsAllow: [
+        "gmail__gmail_search",
+        "seaglass__recent_messages",
+        "icloud_calendar_events",
+        "sessions_search",
+      ],
       args: { limit: 1, include_text: false },
       maxItems: 1,
       continuation: {

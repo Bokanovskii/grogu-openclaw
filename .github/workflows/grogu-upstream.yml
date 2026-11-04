@@ -20,8 +20,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Full history, the upstream release pack and the workspace install exceed the
+      # runner's default free space; drop preinstalled toolchains this job never uses.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          filter: blob:none
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -29,6 +37,8 @@ jobs:
           node-version: "26.12.1"
       - name: Install the source-pinned package manager and dependencies
         run: |
+          df -h /
+          git count-objects -vH
           npm install --global "pnpm@$(node -p "require('./grogu/toolchain.json').pnpm")"
           pnpm install --frozen-lockfile --ignore-scripts
       - name: Prepare one private draft update PR without model requests or deployment
@@ -40,7 +50,18 @@ jobs:
             exit 1
           fi
           git config --local core.hooksPath /dev/null
+          # A background repack of the full history would double its disk use mid-merge.
+          git config --local gc.auto 0
+          git config --local maintenance.auto false
           gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          df -h /
+          git count-objects -vH
           node --import ./scripts/tsx.mjs grogu/update-upstream.mts
+      - name: Report runner disk
+        if: always()
+        run: |
+          df -h /
+          git count-objects -vH
+          du -sh .git node_modules 2>/dev/null || true

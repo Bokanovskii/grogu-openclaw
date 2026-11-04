@@ -13,6 +13,14 @@ const flush = async () => {
 };
 
 describe("provider-origin admission", () => {
+  it("preserves AbortError classification for an explicit null abort reason", async () => {
+    const controller = new AbortController();
+    controller.abort(null);
+    await expect(createSparkyAdmission().acquire(controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+  });
+
   it("admits four active requests, bounds waiting, and honors priority with aging", async () => {
     let now = 0;
     const pool = createSparkyAdmission({ now: () => now, maxWaiting: 2 });

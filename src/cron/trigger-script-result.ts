@@ -2,7 +2,11 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { CodeModeHeadlessResult } from "../agents/code-mode.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { formatErrorMessageWithCode } from "../infra/errors.js";
-import type { CronTriggerEvaluationResult, CronTriggerFailureCode } from "./types.js";
+import type {
+  CronTriggerEvaluationResult,
+  CronTriggerFailureCode,
+  CronTriggerSourceFailureKind,
+} from "./types.js";
 
 const MAX_TRIGGER_STATE_BYTES = 16 * 1024;
 
@@ -44,8 +48,9 @@ function scriptTriggerCandidate(
 export function scriptFailure(
   error: string,
   code: CronTriggerFailureCode = "internal_error",
+  sourceFailureKind?: CronTriggerSourceFailureKind,
 ): Extract<CronTriggerEvaluationResult, { kind: "error" }> {
-  return { kind: "error", code, error };
+  return { kind: "error", code, error, ...(sourceFailureKind ? { sourceFailureKind } : {}) };
 }
 
 export function parseTriggerResult(
@@ -61,8 +66,13 @@ export function parseTriggerResult(
     if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) {
       return scriptFailure("worker source temporarily unavailable", "timeout");
     }
-    if (["auth", "permission", "config", "schema"].includes(kind)) {
-      return scriptFailure(`worker source ${kind} failure`, "invalid_input");
+    if (kind === "auth" || kind === "permission" || kind === "config" || kind === "schema") {
+      const sourceFailureKind: CronTriggerSourceFailureKind = kind;
+      return scriptFailure(
+        `worker source ${sourceFailureKind} failure`,
+        "invalid_input",
+        sourceFailureKind,
+      );
     }
     return scriptFailure("worker source returned an unknown failure", "invalid_input");
   }

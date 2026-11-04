@@ -14,7 +14,10 @@ import { sha256Hex } from "../../infra/crypto-digest.js";
 import { resolveTargetPrefixedChannel } from "../../infra/outbound/channel-target-prefix.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { resolveCronDeliveryPlan, resolveFailureDestination } from "../delivery-plan.js";
-import { cronFailureDetailLines } from "../failure-notification-text.js";
+import {
+  cronFailureDetailLines,
+  cronSourceAccessFailureLines,
+} from "../failure-notification-text.js";
 import { resolveCronExecutionRetryHint } from "../retry-hint.js";
 import { hasCanonicalCronDeliveryMode } from "../store/delivery-codec.js";
 import type {
@@ -24,6 +27,7 @@ import type {
   CronJob,
   CronMessageChannel,
   CronRunErrorClassification,
+  CronTriggerSourceFailureKind,
 } from "../types.js";
 import { isJobEnabled } from "./jobs-scheduling.js";
 import {
@@ -222,6 +226,7 @@ export function resolveFailureAlert(
 type FailureAlertIncident = NonNullable<CronJob["state"]["failureAlertIncident"]>;
 /** One notification-worthy failure: its dedupe signature and recovery scope. */
 type FailureAlertSignal = Required<Omit<FailureAlertIncident, "repair">>;
+type SourceAccessFailureKind = Extract<CronTriggerSourceFailureKind, "auth" | "permission">;
 
 function buildFailureAlertPayload(params: {
   job: CronNotificationJob;
@@ -354,6 +359,66 @@ function failureIncident(params: {
   };
 }
 
+function sourceAccessFailureKind(
+  detail: CronFailureNotificationDetail | undefined,
+): SourceAccessFailureKind | undefined {
+  if (
+    detail?.kind !== "script-failure" ||
+    detail.source !== "trigger" ||
+    (detail.sourceFailureKind !== "auth" && detail.sourceFailureKind !== "permission")
+  ) {
+    return undefined;
+  }
+  return detail.sourceFailureKind;
+}
+
+function maybeEmitSourceAccessAlert(
+  state: CronJobPolicyContext,
+  params: {
+    job: CronJob;
+    detail: CronFailureNotificationDetail;
+    kind: SourceAccessFailureKind;
+    runAtMs?: number;
+    deferredNotifications: DeferredCronNotifications;
+  },
+): void {
+  const resolvedRoute = resolveFailureAlert(
+    { deps: state.deps },
+    { ...params.job, failureAlert: undefined },
+  );
+  if (!resolvedRoute || resolvedRoute.mode !== "announce") {
+    return;
+  }
+  const route: ResolvedFailureAlert = {
+    ...resolvedRoute,
+    after: 1,
+    cooldownMs: 0,
+    includeSkipped: false,
+  };
+  const incident = failureIncident({
+    status: "error",
+    failureNotificationDetail: params.detail,
+    route,
+  });
+  if (!requestFailureNotification(state, params.job, route, incident)) {
+    return;
+  }
+  const job = cronNotificationJob(params.job);
+  const safeJobName = job.name || job.id;
+  params.deferredNotifications.push({
+    kind: "failure-alert",
+    job,
+    payload: {
+      text: [
+        `Automation "${safeJobName}" source access failed`,
+        ...cronSourceAccessFailureLines(params.kind),
+      ].join("\n"),
+    },
+    runAtMs: params.runAtMs,
+    route,
+  });
+}
+
 /**
  * Emits one plain alert per incident when threshold, best-effort, and cooldown policy allow it.
  * Failures never start model repair turns: transient errors are retried by the scheduler and
@@ -385,6 +450,17 @@ function maybeEmitFailureAlert(
     return;
   }
   recordUnresolvedFailure(params.job, params.failureNotificationDetail);
+  const accessFailureKind = sourceAccessFailureKind(params.failureNotificationDetail);
+  if (params.status === "error" && accessFailureKind && params.failureNotificationDetail) {
+    maybeEmitSourceAccessAlert(state, {
+      job: params.job,
+      detail: params.failureNotificationDetail,
+      kind: accessFailureKind,
+      runAtMs: params.runAtMs,
+      deferredNotifications: params.deferredNotifications,
+    });
+    return;
+  }
   const terminalOneShot =
     params.status === "error" && params.job.schedule.kind === "at" && !isJobEnabled(params.job);
   const alertConfig = params.alertConfig;
@@ -483,8 +559,9 @@ export function finalizeCronFailureNotifications(
   }
   if (
     (params.result.status === "error" || params.result.status === "skipped") &&
-    !params.autoDisableNotificationOwnsFailure &&
-    !params.pendingTransientRetry
+    !params.pendingTransientRetry &&
+    (!params.autoDisableNotificationOwnsFailure ||
+      sourceAccessFailureKind(params.result.failureNotificationDetail) !== undefined)
   ) {
     maybeEmitFailureAlert(state, {
       job: params.job,

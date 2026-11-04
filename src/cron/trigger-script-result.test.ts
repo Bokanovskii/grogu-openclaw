@@ -49,6 +49,7 @@ describe("parseTriggerResult worker source failures", () => {
       kind: "error",
       code: "invalid_input",
       error: `worker source ${kind} failure`,
+      sourceFailureKind: kind,
     });
   });
 });

@@ -113,7 +113,7 @@ export async function executeJobCore(
       return {
         status: "error",
         error: `cron trigger evaluation failed (${evaluation.code}): ${evaluation.error}`,
-        ...cronScriptFailureMetadata("trigger", evaluation.code),
+        ...cronScriptFailureMetadata("trigger", evaluation.code, evaluation.sourceFailureKind),
         triggerEval: { fired: false, stateChanged: false },
       };
     }

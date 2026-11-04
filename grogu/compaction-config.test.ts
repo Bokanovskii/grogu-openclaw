@@ -4,7 +4,7 @@ import { buildGroguCompactionConfig } from "./compaction-config.js";
 
 test("adds the provider and history tools without lowering existing compaction bounds", () => {
   const original = {
-    plugins: { load: { paths: ["/existing"] } },
+    plugins: { allow: ["grogu-todos"], load: { paths: ["/existing"] } },
     agents: {
       defaults: {
         compaction: {
@@ -27,6 +27,7 @@ test("adds the provider and history tools without lowering existing compaction b
 
   assert.deepEqual(candidate, {
     plugins: {
+      allow: ["grogu-todos", "grogu-digest"],
       load: { paths: ["/existing", "/checkout/grogu/plugins/grogu-compaction"] },
       entries: { "grogu-digest": { enabled: true } },
     },
@@ -52,7 +53,10 @@ test("adds the provider and history tools without lowering existing compaction b
 test("uses alsoAllow when the agent inherits its normal tool profile", () => {
   assert.deepEqual(
     buildGroguCompactionConfig(
-      { agents: { entries: { grogu: { tools: { profile: "full" } } } } },
+      {
+        plugins: { allow: [] },
+        agents: { entries: { grogu: { tools: { profile: "full" } } } },
+      },
       {
         agentId: "grogu",
         pluginDirectory: "/checkout/grogu/plugins/grogu-compaction",
@@ -60,6 +64,7 @@ test("uses alsoAllow when the agent inherits its normal tool profile", () => {
     ),
     {
       plugins: {
+        allow: ["grogu-digest"],
         load: { paths: ["/checkout/grogu/plugins/grogu-compaction"] },
         entries: { "grogu-digest": { enabled: true } },
       },
@@ -77,5 +82,19 @@ test("uses alsoAllow when the agent inherits its normal tool profile", () => {
         },
       },
     },
+  );
+});
+
+test("refuses to infer trust when plugins.allow is absent", () => {
+  assert.throws(
+    () =>
+      buildGroguCompactionConfig(
+        { agents: { entries: { grogu: {} } } },
+        {
+          agentId: "grogu",
+          pluginDirectory: "/checkout/grogu/plugins/grogu-compaction",
+        },
+      ),
+    /explicit plugins\.allow/,
   );
 });

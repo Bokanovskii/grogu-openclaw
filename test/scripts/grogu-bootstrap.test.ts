@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { planManagedJobPatch, readUpdatedManagedJob } from "../../grogu/bootstrap.js";
+import {
+  parseManagedWorkerTriggers,
+  planManagedJobPatch,
+  readUpdatedManagedJob,
+} from "../../grogu/bootstrap.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 
 const job: CronJob = {
@@ -17,6 +21,29 @@ const job: CronJob = {
 };
 
 describe("revision-checked metadata bootstrap", () => {
+  it("accepts only explicit deterministic worker trigger bindings", () => {
+    expect(
+      parseManagedWorkerTriggers([
+        {
+          logicalName: "gmail",
+          id: "job-gmail",
+          trigger: { script: "return { fire: false, state: trigger.state };" },
+        },
+      ]),
+    ).toEqual([
+      {
+        logicalName: "gmail",
+        id: "job-gmail",
+        trigger: { script: "return { fire: false, state: trigger.state };" },
+      },
+    ]);
+    expect(() =>
+      parseManagedWorkerTriggers([
+        { logicalName: "gmail", id: "job-gmail", trigger: { script: "" } },
+      ]),
+    ).toThrow(/Invalid or duplicate/);
+  });
+
   it("is idempotent and patches only changed fields while preserving a manual pause and model", () => {
     const before = structuredClone(job);
     expect(planManagedJobPatch("watchdog", job, { name: job.name })).toBeNull();

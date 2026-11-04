@@ -27,7 +27,12 @@ function compliantConfig() {
   };
 }
 
-function agentJob(id: string, model?: string, fallbacks?: string[]): CronJob {
+function agentJob(
+  id: string,
+  model?: string,
+  fallbacks?: string[],
+  trigger?: CronJob["trigger"],
+): CronJob {
   return {
     id,
     name: id,
@@ -43,6 +48,7 @@ function agentJob(id: string, model?: string, fallbacks?: string[]): CronJob {
       ...(model ? { model } : {}),
       ...(fallbacks ? { fallbacks } : {}),
     },
+    ...(trigger ? { trigger } : {}),
     state: {},
   };
 }
@@ -95,7 +101,9 @@ describe("automatic routing and queue policy", () => {
   });
 
   it("requires declared private-signal and deterministic-poll worker contracts", () => {
-    const privateSignal = agentJob("private-signal", automatic);
+    const privateSignal = agentJob("private-signal", automatic, undefined, {
+      script: "return { fire: false };",
+    });
     privateSignal.payload.message = "GROGU_PRIVATE_SIGNAL_V1";
     const polling = agentJob("polling", automatic);
     const violations = evaluatePolicy(compliantConfig(), [privateSignal, polling], {
@@ -110,13 +118,22 @@ describe("automatic routing and queue policy", () => {
     expect(violations).toEqual([
       {
         where: "job:polling:contract",
-        found: { missing: ["GROGU_DETERMINISTIC_POLL_V1"] },
-        expected: ["GROGU_DETERMINISTIC_POLL_V1"],
+        found: {
+          missingMarkers: ["GROGU_DETERMINISTIC_POLL_V1"],
+          trigger: false,
+        },
+        expected: {
+          markers: ["GROGU_DETERMINISTIC_POLL_V1"],
+          trigger: true,
+        },
       },
       {
         where: "job:missing:contract",
         found: null,
-        expected: ["GROGU_GMAIL_AUTH_HEALTH_V1"],
+        expected: {
+          markers: ["GROGU_GMAIL_AUTH_HEALTH_V1"],
+          trigger: true,
+        },
       },
     ]);
   });

@@ -35,6 +35,7 @@ const modelPolicySchema = z
           .object({
             jobId: z.string().min(1),
             markers: z.array(workerContractMarker).min(1),
+            requireTrigger: z.boolean().optional(),
           })
           .strict(),
       )
@@ -49,6 +50,12 @@ export type PolicyViolation = Readonly<{ where: string; found: unknown; expected
 const policyJobSchema = z
   .object({
     id: z.string().min(1),
+    trigger: z
+      .object({
+        script: z.string().min(1),
+      })
+      .passthrough()
+      .optional(),
     payload: z
       .object({
         kind: z.string().min(1),
@@ -152,20 +159,28 @@ export function evaluatePolicy(
   const jobsById = new Map(jobs.map((job) => [job.id, job]));
   for (const contract of policy.workerContracts ?? []) {
     const job = jobsById.get(contract.jobId);
+    const expectedContract = {
+      markers: contract.markers,
+      trigger: contract.requireTrigger !== false,
+    };
     if (!job) {
       violations.push({
         where: `job:${contract.jobId}:contract`,
         found: null,
-        expected: contract.markers,
+        expected: expectedContract,
       });
       continue;
     }
     const missing = contract.markers.filter((marker) => !job.payload.message?.includes(marker));
-    if (missing.length > 0) {
+    const triggerMissing = contract.requireTrigger !== false && !job.trigger?.script.trim();
+    if (missing.length > 0 || triggerMissing) {
       violations.push({
         where: `job:${contract.jobId}:contract`,
-        found: { missing },
-        expected: contract.markers,
+        found: {
+          missingMarkers: missing,
+          trigger: Boolean(job.trigger?.script.trim()),
+        },
+        expected: expectedContract,
       });
     }
   }

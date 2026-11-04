@@ -23,6 +23,12 @@ type ManagedJob = Readonly<{
   patch: CronUpdateParams["patch"];
 }>;
 
+type ManagedWorkerTrigger = Readonly<{
+  logicalName: string;
+  id: string;
+  trigger: NonNullable<CronUpdateParams["patch"]["trigger"]>;
+}>;
+
 function managedJobs(profile: OperatorProfile): ManagedJob[] {
   const document = readGroguPrivateProfileDocument(profile.profileFile);
   const native = document?.native;
@@ -59,6 +65,58 @@ function managedJobs(profile: OperatorProfile): ManagedJob[] {
     }
     return { logicalName: entry.logicalName, id: entry.id, patch: update.patch };
   });
+}
+
+export function parseManagedWorkerTriggers(value: unknown): ManagedWorkerTrigger[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Private native.workerTriggers bindings are required for worker bootstrap");
+  }
+  const names = new Set<string>();
+  const ids = new Set<string>();
+  return value.map((entry: unknown) => {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      !("logicalName" in entry) ||
+      typeof entry.logicalName !== "string" ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(entry.logicalName) ||
+      !("id" in entry) ||
+      typeof entry.id !== "string" ||
+      !("trigger" in entry) ||
+      !Value.Check(CronUpdateParamsSchema, {
+        id: entry.id,
+        patch: { trigger: entry.trigger },
+      }) ||
+      names.has(entry.logicalName) ||
+      ids.has(entry.id)
+    ) {
+      throw new Error("Invalid or duplicate private native worker trigger binding");
+    }
+    names.add(entry.logicalName);
+    ids.add(entry.id);
+    const update = Value.Decode(CronUpdateParamsSchema, {
+      id: entry.id,
+      patch: { trigger: entry.trigger },
+    });
+    if (!update.patch.trigger) {
+      throw new Error("Worker trigger binding must install a nonempty trigger script");
+    }
+    return {
+      logicalName: entry.logicalName,
+      id: entry.id,
+      trigger: update.patch.trigger,
+    };
+  });
+}
+
+function managedWorkerTriggers(profile: OperatorProfile): ManagedWorkerTrigger[] {
+  const document = readGroguPrivateProfileDocument(profile.profileFile);
+  const native = document?.native;
+  return parseManagedWorkerTriggers(
+    native && typeof native === "object" && "workerTriggers" in native
+      ? native.workerTriggers
+      : undefined,
+  );
 }
 
 export function planManagedJobPatch(
@@ -120,6 +178,51 @@ export async function reconcileManagedJobs(profile: OperatorProfile, apply = fal
       );
       if (remaining) {
         throw new Error(`Native bootstrap ${item.logicalName} did not converge`);
+      }
+    }
+  }
+  return {
+    mode: apply ? "applied" : "preview",
+    jobs: planned.map((item) => ({ logicalName: item.logicalName, changed: item.update !== null })),
+    planReceipt,
+    privateReceipts: directory,
+  };
+}
+
+export async function reconcileWorkerTriggers(profile: OperatorProfile, apply = false) {
+  const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
+  const planned: {
+    logicalName: string;
+    update: ReturnType<typeof planManagedJobPatch>;
+    rollback: { id: string; trigger: CronJob["trigger"] | null };
+  }[] = [];
+  for (const desired of managedWorkerTriggers(profile)) {
+    const response = await callNative(profile, "cron.get", { id: desired.id }, directory);
+    if (!Value.Check(CronJobSchema, response)) {
+      throw new Error(`Native worker ${desired.logicalName} returned an invalid definition`);
+    }
+    planned.push({
+      logicalName: desired.logicalName,
+      update: planManagedJobPatch(desired.logicalName, response, {
+        trigger: desired.trigger,
+      }),
+      rollback: { id: response.id, trigger: response.trigger ?? null },
+    });
+  }
+  const planReceipt = await writePrivateReceipt(directory, "worker-bootstrap-plan.json", {
+    apply,
+    planned,
+  });
+  for (const item of planned) {
+    if (apply && item.update) {
+      const response = await callNative(profile, "cron.update", item.update, directory);
+      const remaining = planManagedJobPatch(
+        item.logicalName,
+        readUpdatedManagedJob(response),
+        item.update.patch,
+      );
+      if (remaining) {
+        throw new Error(`Native worker bootstrap ${item.logicalName} did not converge`);
       }
     }
   }

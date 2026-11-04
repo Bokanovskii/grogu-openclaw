@@ -69,6 +69,7 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                         |
 | `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                             |
 | `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                                   |
+| `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                          |
 | `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                |
 | `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                   |
 | `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                |
@@ -88,6 +89,12 @@ sources, and require privacy-preserving bounded research plus one useful
 owner-only update for each material private signal. Add each private job id and
 its required template marker to `bindings.modelPolicy.workerContracts`;
 `policy-check` then reports missing jobs or markers without printing prompts.
+Put each reviewed read-only condition script in `native.workerTriggers` and run
+`workers-bootstrap` in preview mode. The trigger must own source polling,
+cursor/watermark comparison, and `fire: false` for unchanged data; only
+`fire: true` admits the existing agent-turn payload for bounded research.
+`--apply` uses the live job's configuration revision and stores the prior
+trigger in the owner-only plan receipt for rollback.
 
 Gmail authorization verification stays separate from worker correctness. Use
 the existing non-mutating verify-only command after consent includes the

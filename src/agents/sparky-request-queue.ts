@@ -1,4 +1,5 @@
 import { parseRetryAfterHeadersSeconds } from "@openclaw/ai/internal/retry-after";
+import { toErrorObject } from "../infra/errors.js";
 import type { Model } from "../llm/types.js";
 import { currentHttpRequestTelemetry } from "./model-request-telemetry.js";
 
@@ -12,8 +13,13 @@ type AdmissionEntry = {
   detach: () => void;
 };
 const abortReason = (signal?: AbortSignal) =>
-  signal?.reason ?? new DOMException("Sparky request cancelled", "AbortError");
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  signal?.reason === undefined
+    ? new DOMException("Sparky request cancelled", "AbortError")
+    : toErrorObject(signal.reason, "Sparky request cancelled");
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 export function sparkyUtilityBounds(modelRef: string | undefined) {
   return modelRef?.startsWith("sparky/")
@@ -35,7 +41,10 @@ export function createSparkyAdmission(
   let lastPriority: Priority = 0;
   const waiting: AdmissionEntry[] = [];
   function pump() {
-    while (!pauses && active < maxActive && waiting.length) {
+    while (active < maxActive && waiting.length) {
+      if (pauses) {
+        return;
+      }
       const aged =
         lastPriority >= 0 ? waiting.findIndex((entry) => now() - entry.queuedAt >= agingMs) : -1;
       const index =

@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { parseMergeTreeNameOnlyZ } from "./merge-tree.js";
@@ -12,6 +14,10 @@ const execute = promisify(execFile);
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const branch = "grogu/upstream";
 const root = process.cwd();
+const MAX_REPORTED_CONFLICTS = 20;
+
+type MergeOutcome = { kind: "clean"; tree: string } | { kind: "conflicted"; conflicts: string[] };
+type CommandRunner = (bin: string, args: string[]) => Promise<string>;
 
 async function run(bin: string, args: string[]) {
   return (await runRaw(bin, args)).trim();
@@ -28,7 +34,11 @@ async function runRaw(bin: string, args: string[]) {
   return stdout;
 }
 
-async function analyzeMergeTree(base: string, upstreamCommit: string) {
+export async function analyzeMergeTree(
+  base: string,
+  upstreamCommit: string,
+  executeMergeTree: typeof runRaw = runRaw,
+): Promise<MergeOutcome> {
   const args = [
     "merge-tree",
     "--write-tree",
@@ -39,23 +49,129 @@ async function analyzeMergeTree(base: string, upstreamCommit: string) {
     upstreamCommit,
   ];
   try {
-    const parsed = parseMergeTreeNameOnlyZ(await runRaw("git", args));
+    const parsed = parseMergeTreeNameOnlyZ(await executeMergeTree("git", args));
     return { kind: "clean" as const, tree: parsed.tree };
   } catch (error) {
     const failure = error as { code?: unknown; stdout?: unknown };
     if (failure.code !== 1) {
       throw error;
     }
-    const parsed = parseMergeTreeNameOnlyZ(String(failure.stdout ?? ""));
+    if (typeof failure.stdout !== "string") {
+      throw error;
+    }
+    const parsed = parseMergeTreeNameOnlyZ(failure.stdout);
     return { kind: "conflicted" as const, conflicts: parsed.conflicts };
   }
 }
 
-async function summarize(lines: string[]) {
+async function summarize(summary: string) {
   const file = process.env.GITHUB_STEP_SUMMARY;
   if (file) {
-    await appendFile(file, `${lines.join("\n")}\n`);
+    await appendFile(file, `${summary}\n`);
   }
+}
+
+function normalizedConflictPaths(conflicts: readonly string[]): string[] {
+  const paths = [...new Set(conflicts)].toSorted((left, right) => left.localeCompare(right));
+  for (const file of paths) {
+    if (
+      !file ||
+      file.includes("\0") ||
+      file.includes("\n") ||
+      file.includes("\r") ||
+      file.includes("`") ||
+      path.isAbsolute(file) ||
+      path.win32.isAbsolute(file) ||
+      file.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    ) {
+      throw new Error("Upstream merge reported an invalid conflicted path");
+    }
+  }
+  return paths;
+}
+
+export function formatExpectedConflictSummary(params: {
+  release: string;
+  upstreamCommit: string;
+  conflicts: readonly string[];
+}): string {
+  const conflicts = normalizedConflictPaths(params.conflicts);
+  const visible = conflicts.slice(0, MAX_REPORTED_CONFLICTS);
+  const hidden = conflicts.length - visible.length;
+  const count =
+    conflicts.length === 0
+      ? "Conflicted paths: 0 reported by git (non-file conflict, e.g. a directory rename); inspect the merge manually"
+      : `Conflicted paths: ${conflicts.length}`;
+  return [
+    `### Upstream ${params.release} needs conflict resolution`,
+    "",
+    `Upstream commit: \`${params.upstreamCommit.slice(0, 12)}\``,
+    count,
+    "",
+    ...visible.map((file) => `- \`${file}\``),
+    ...(hidden > 0 ? [`- +${hidden} more`] : []),
+    "",
+    "No PR opened, nothing pushed; resolve manually or wait for the next release.",
+  ].join("\n");
+}
+
+export async function settleMergeOutcome(
+  merge: MergeOutcome,
+  params: {
+    release: string;
+    upstreamCommit: string;
+  },
+  deps: {
+    writeSummary: (summary: string) => Promise<void>;
+    log: (summary: string) => void;
+  },
+): Promise<{ kind: "conflicted" } | { kind: "clean"; tree: string }> {
+  if (merge.kind === "conflicted") {
+    const summary = formatExpectedConflictSummary({ ...params, conflicts: merge.conflicts });
+    await deps.writeSummary(summary);
+    deps.log(summary);
+    return { kind: "conflicted" };
+  }
+  return merge;
+}
+
+export function assertWriterEnvironment(env: NodeJS.ProcessEnv): void {
+  if (env.GITHUB_ACTIONS !== "true" || !env.GITHUB_REPOSITORY) {
+    throw new Error("The rolling-update writer runs only in its isolated private Actions checkout");
+  }
+  if (!env.GH_TOKEN?.trim()) {
+    throw new Error("GROGU_UPSTREAM_TOKEN is required for the rolling-update writer");
+  }
+}
+
+export async function registerAndFetchUpstreamRelease(params: {
+  runner: CommandRunner;
+  remoteName: string;
+  upstreamUrl: string;
+  tag: string;
+}): Promise<void> {
+  await params.runner("git", ["remote", "add", "--no-tags", params.remoteName, params.upstreamUrl]);
+  await params.runner("git", ["config", `remote.${params.remoteName}.promisor`, "true"]);
+  await params.runner("git", [
+    "config",
+    `remote.${params.remoteName}.partialclonefilter`,
+    "blob:none",
+  ]);
+  await params.runner("git", [
+    "fetch",
+    "--no-tags",
+    "--filter=blob:none",
+    params.remoteName,
+    `refs/tags/${params.tag}`,
+  ]);
+}
+
+export function isDirectRun(argvPath: string | undefined, moduleUrl = import.meta.url): boolean {
+  return (
+    argvPath !== undefined &&
+    argvPath !== "-" &&
+    pathToFileURL(realpathSync(argvPath)).href === moduleUrl
+  );
 }
 
 async function publishPrepared(head: string, upstreamCommit: string, latest: string) {
@@ -147,10 +263,8 @@ async function publishPrepared(head: string, upstreamCommit: string, latest: str
   );
 }
 
-async function main() {
-  if (process.env.GITHUB_ACTIONS !== "true" || !process.env.GITHUB_REPOSITORY) {
-    throw new Error("The rolling-update writer runs only in its isolated private Actions checkout");
-  }
+export async function main() {
+  assertWriterEnvironment(process.env);
   if (await run("git", ["status", "--porcelain"])) {
     throw new Error("Upstream preparation requires a clean isolated checkout");
   }
@@ -201,24 +315,13 @@ async function main() {
     await publishPrepared(oldHead, priorPin.commit, status.latest);
     return;
   }
-  await run("git", ["switch", "-c", "grogu/upstream-candidate"]);
   const upstreamRemote = "grogu-upstream-source";
-  await run("git", [
-    "remote",
-    "add",
-    "--no-tags",
-    upstreamRemote,
-    `https://github.com/${status.upstream}.git`,
-  ]);
-  await run("git", ["config", `remote.${upstreamRemote}.promisor`, "true"]);
-  await run("git", ["config", `remote.${upstreamRemote}.partialclonefilter`, "blob:none"]);
-  await run("git", [
-    "fetch",
-    "--no-tags",
-    "--filter=blob:none",
-    upstreamRemote,
-    `refs/tags/${status.latest}`,
-  ]);
+  await registerAndFetchUpstreamRelease({
+    runner: run,
+    remoteName: upstreamRemote,
+    upstreamUrl: `https://github.com/${status.upstream}.git`,
+    tag: status.latest,
+  });
   const upstreamCommit = sha.parse(await run("git", ["rev-parse", "FETCH_HEAD^{commit}"]));
   const canonicalCommit = sha.parse(
     await run("gh", ["api", `repos/${status.upstream}/commits/${status.latest}`, "--jq", ".sha"]),
@@ -233,20 +336,19 @@ async function main() {
   // release; the merge commit then records both histories for the next integration.
   await run("git", ["merge-base", "--is-ancestor", priorPin.commit, "HEAD"]);
   const merge = await analyzeMergeTree(priorPin.commit, upstreamCommit);
-  if (merge.kind === "conflicted") {
-    const conflicts = merge.conflicts;
-    await summarize([
-      `### Upstream ${status.latest} needs conflict resolution`,
-      "",
-      `Grogu's changes since ${priorPin.release} overlap upstream in ${conflicts.length} files. The remote branch and production are unchanged.`,
-      "",
-      ...conflicts.map((file) => `- \`${file}\``),
-    ]);
-    throw new Error(
-      `Upstream integration needs explicit conflict resolution; remote branch and production unchanged. Conflicts: ${conflicts.join(", ") || "unknown"}`,
-    );
+  const settled = await settleMergeOutcome(
+    merge,
+    { release: status.latest, upstreamCommit },
+    {
+      writeSummary: summarize,
+      log: console.log,
+    },
+  );
+  if (settled.kind === "conflicted") {
+    return;
   }
-  const mergedTree = merge.tree;
+  await run("git", ["switch", "-c", "grogu/upstream-candidate"]);
+  const mergedTree = settled.tree;
   await run("git", ["read-tree", "--reset", "-u", mergedTree]);
   await archiveUpstreamWorkflows(root);
   await writeFile(
@@ -307,9 +409,19 @@ async function main() {
   await publishPrepared(head, upstreamCommit, status.latest);
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : "Upstream preparation failed");
-  process.exitCode = 1;
+export async function runUpdateUpstreamCli(
+  runMain: () => Promise<void> = main,
+  logError: (message: string) => void = console.error,
+): Promise<number> {
+  try {
+    await runMain();
+    return 0;
+  } catch (error) {
+    logError(error instanceof Error ? error.message : "Upstream preparation failed");
+    return 1;
+  }
+}
+
+if (isDirectRun(process.argv[1])) {
+  process.exitCode = await runUpdateUpstreamCli();
 }

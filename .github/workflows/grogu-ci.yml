@@ -56,8 +56,11 @@ jobs:
         run: |
           node --import ./scripts/tsx.mjs --input-type=module -e "import { assertWorkflowIsolation } from './grogu/workflows.ts'; await assertWorkflowIsolation(process.cwd());"
           node scripts/run-tsgo.mjs -p grogu/tsconfig.json --noEmit
-      - name: Run the repository's offline source checks
-        run: pnpm check --base "$(node -p "require('./grogu/upstream.json').commit")"
+      # pnpm lint (Control UI i18n verify, type-aware Oxlint/tsgolint, Stylelint) is skipped here:
+      # tsgolint peaks near 6.5 GB RSS on a ~7.7 GB runner and repeatedly killed hosted attempts.
+      # Full `pnpm check` without this flag is a REQUIRED LOCAL gate before merging.
+      - name: Run offline source checks without the lint stage on the free private runner
+        run: pnpm check --skip-lint --base "$(node -p "require('./grogu/upstream.json').commit")"
       - name: Prove the downstream boundaries without providers or live services
         run: >-
           pnpm test test/scripts/grogu-upstream.test.ts test/scripts/grogu-upstream-pr.test.ts

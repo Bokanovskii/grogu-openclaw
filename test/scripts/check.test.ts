@@ -1,7 +1,7 @@
 // Check tests cover check script behavior.
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
-import { PREFLIGHT_CHECKS, runCommand } from "../../scripts/check.mts";
+import { describe, expect, it, vi } from "vitest";
+import { main, PREFLIGHT_CHECKS, runCommand } from "../../scripts/check.mts";
 
 describe("scripts/check", () => {
   function runCheck(...args: string[]) {
@@ -17,6 +17,7 @@ describe("scripts/check", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Usage: node --import tsx scripts/check.mts");
+    expect(result.stdout).toContain("--skip-lint");
     expect(result.stdout).not.toContain("[check]");
   });
 
@@ -45,6 +46,53 @@ describe("scripts/check", () => {
     expect(calls).toEqual([{ args: ["lint"], bin: "pnpm" }]);
     expect(result).toMatchObject({ name: "lint", status: 0 });
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("skips the pnpm lint stage in either hosted argument order", async () => {
+    for (const args of [
+      ["--skip-lint", "--base", "abc123"],
+      ["--base", "abc123", "--skip-lint"],
+    ]) {
+      const calls: Array<{ args: string[]; name: string }> = [];
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await main(args, async (command) => {
+          calls.push({ args: command.args, name: command.name });
+          return { durationMs: 0, name: command.name, status: 0 };
+        });
+        expect(error).toHaveBeenCalledWith(
+          "[check] skipping pnpm lint (Control UI i18n verify, type-aware Oxlint, Stylelint) via --skip-lint: run pnpm check without it locally before merging",
+        );
+      } finally {
+        error.mockRestore();
+        process.exitCode = undefined;
+      }
+
+      expect(calls.map((call) => call.name)).not.toContain("lint");
+      expect(calls.map((call) => call.name)).toContain("format");
+      expect(calls.map((call) => call.name)).toContain("runtime import cycles");
+      expect(
+        calls.some((call) => call.args.includes("--base") && call.args.includes("abc123")),
+      ).toBe(true);
+    }
+  });
+
+  it("retains the full pnpm lint stage in the default composition", async () => {
+    const calls: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await main([], async (command) => {
+        calls.push(command.name);
+        return { durationMs: 0, name: command.name, status: 0 };
+      });
+    } finally {
+      error.mockRestore();
+      process.exitCode = undefined;
+    }
+
+    expect(calls).toContain("lint");
+    expect(calls).toContain("format");
+    expect(calls).toContain("runtime import cycles");
   });
 
   it("keeps script policy guards in the aggregate preflight", () => {

@@ -6,6 +6,7 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { createGroguRuntimeFixture } from "./grogu-runtime.test-support.js";
 import {
   countRequestImages,
+  modelRequestMetadataSnapshot,
   normalizeReportedUsage,
   safeModelError,
 } from "./model-request-telemetry-metadata.js";
@@ -21,6 +22,18 @@ afterEach(() => {
 });
 
 describe("metadata-only request telemetry", () => {
+  it("rejects incomplete persisted metadata records", () => {
+    expect(() =>
+      modelRequestMetadataSnapshot({
+        id: "00000000-0000-4000-8000-000000000000",
+        kind: "model_call",
+        startedAtMs: 1,
+        updatedAtMs: 2,
+        terminal: false,
+      }),
+    ).toThrow("Invalid model request telemetry metadata");
+  });
+
   it("preserves timing, usage, queue context and host-gap attribution without retaining content", () => {
     let now = 0;
     const records: ReturnType<typeof createRequestTracker>["record"][] = [];

@@ -52,6 +52,7 @@ function readSparkySseErrorPrefix(
           "message" in value.error &&
           typeof value.error.message === "string"
         ) {
+          // SAFETY: The guards above establish a non-array object with a string message field.
           return { end: index + 1, error: value.error as Record<string, unknown> };
         }
       } catch {

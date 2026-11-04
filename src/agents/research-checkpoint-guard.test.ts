@@ -7,6 +7,7 @@ import { createEditTool } from "./sessions/tools/edit.js";
 import { createWriteTool } from "./sessions/tools/write.js";
 
 const authority = vi.hoisted(() => ({ current: true }));
+// mock-isolation: Keep the real process-wide source guard outside this authority fixture.
 vi.mock("./agent-tool-source-execution-guard.js", () => ({
   captureAgentToolSourceExecutionGuard: (signal?: AbortSignal) => () => {
     signal?.throwIfAborted();

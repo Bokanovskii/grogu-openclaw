@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import JSON5 from "json5";
@@ -101,7 +101,7 @@ if (requireBackup) {
   if (receipt?.verified !== true || typeof receipt.archivePath !== "string" || typeof receipt.sha256 !== "string") {
     throw new Error("The backup receipt is not a verified complete backup receipt");
   }
-  if (await digestFile(receipt.archivePath) !== receipt.sha256) throw new Error("The verified backup archive digest changed");
+  if ((await digestFile(receipt.archivePath)) !== receipt.sha256) throw new Error("The verified backup archive digest changed");
 }
 
 const current = await readFile(configFile);

@@ -109,9 +109,9 @@ describe("automatic routing and queue policy", () => {
     const violations = evaluatePolicy(compliantConfig(), [privateSignal, polling], {
       ...policy,
       workerContracts: [
-        { jobId: "private-signal", markers: ["GROGU_PRIVATE_SIGNAL_V1"] },
-        { jobId: "polling", markers: ["GROGU_DETERMINISTIC_POLL_V1"] },
-        { jobId: "missing", markers: ["GROGU_GMAIL_AUTH_HEALTH_V1"] },
+        { jobId: "private-signal", contractVersion: 1, markers: ["GROGU_PRIVATE_SIGNAL_V1"] },
+        { jobId: "polling", contractVersion: 1, markers: ["GROGU_DETERMINISTIC_POLL_V1"] },
+        { jobId: "missing", contractVersion: 1, markers: ["GROGU_GMAIL_AUTH_HEALTH_V1"] },
       ],
     });
 
@@ -123,6 +123,7 @@ describe("automatic routing and queue policy", () => {
           trigger: false,
         },
         expected: {
+          contractVersion: 1,
           markers: ["GROGU_DETERMINISTIC_POLL_V1"],
           trigger: true,
         },
@@ -131,6 +132,7 @@ describe("automatic routing and queue policy", () => {
         where: "job:missing:contract",
         found: null,
         expected: {
+          contractVersion: 1,
           markers: ["GROGU_GMAIL_AUTH_HEALTH_V1"],
           trigger: true,
         },

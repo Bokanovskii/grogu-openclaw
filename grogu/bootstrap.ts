@@ -16,6 +16,11 @@ import {
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
+import {
+  WORKER_TRIGGER_CONTRACT_VERSION,
+  renderWorkerTriggerScript,
+  workerTriggerTemplateSchema,
+} from "./worker-trigger-templates.js";
 
 type ManagedJob = Readonly<{
   logicalName: string;
@@ -27,6 +32,7 @@ type ManagedWorkerTrigger = Readonly<{
   logicalName: string;
   id: string;
   trigger: NonNullable<CronUpdateParams["patch"]["trigger"]>;
+  contractVersion: 1;
 }>;
 
 function managedJobs(profile: OperatorProfile): ManagedJob[] {
@@ -82,10 +88,11 @@ export function parseManagedWorkerTriggers(value: unknown): ManagedWorkerTrigger
       !/^[a-z][a-z0-9-]{0,63}$/.test(entry.logicalName) ||
       !("id" in entry) ||
       typeof entry.id !== "string" ||
-      !("trigger" in entry) ||
+      !("template" in entry) ||
+      !workerTriggerTemplateSchema.safeParse(entry.template).success ||
       !Value.Check(CronUpdateParamsSchema, {
         id: entry.id,
-        patch: { trigger: entry.trigger },
+        patch: { trigger: { script: renderWorkerTriggerScript(entry.template) } },
       }) ||
       names.has(entry.logicalName) ||
       ids.has(entry.id)
@@ -96,7 +103,7 @@ export function parseManagedWorkerTriggers(value: unknown): ManagedWorkerTrigger
     ids.add(entry.id);
     const update = Value.Decode(CronUpdateParamsSchema, {
       id: entry.id,
-      patch: { trigger: entry.trigger },
+      patch: { trigger: { script: renderWorkerTriggerScript(entry.template) } },
     });
     if (!update.patch.trigger) {
       throw new Error("Worker trigger binding must install a nonempty trigger script");
@@ -105,6 +112,7 @@ export function parseManagedWorkerTriggers(value: unknown): ManagedWorkerTrigger
       logicalName: entry.logicalName,
       id: entry.id,
       trigger: update.patch.trigger,
+      contractVersion: WORKER_TRIGGER_CONTRACT_VERSION,
     };
   });
 }

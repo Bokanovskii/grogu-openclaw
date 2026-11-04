@@ -31,7 +31,7 @@ describe("deterministic private worker trigger", () => {
       evaluatePolicy({ messages: { queue: { byChannel: { telegram: "followup" } } } }, [job], {
         automaticModel: "sparky/synthetic",
         ownerOverrides: { configPaths: [], jobIds: [] },
-        workerContracts: [{ jobId: job.id, markers: [marker] }],
+        workerContracts: [{ jobId: job.id, contractVersion: 1, markers: [marker] }],
       }),
     ).toEqual([]);
 

@@ -88,10 +88,15 @@ sources, and require privacy-preserving bounded research plus one useful
 owner-only update for each material private signal. Add each private job id and
 its required template marker to `bindings.modelPolicy.workerContracts`;
 `policy-check` then reports missing jobs or markers without printing prompts.
-Put each reviewed read-only condition script in `native.workerTriggers` and run
-`workers-bootstrap` in preview mode. The trigger must own source polling,
-cursor/watermark comparison, and `fire: false` for unchanged data; only
-`fire: true` admits the existing agent-turn payload for bounded research.
+Each `native.workerTriggers` entry selects a tracked template from
+`worker-trigger-templates.ts`, an approved MCP server/tool plus its reviewed
+schema hash, private bounded arguments, metadata-only result selectors, and
+continuation limits. Gmail, Messages, and Calendar templates reject write/body
+options and incomplete or structured-failure responses rather than fabricating
+an empty source. Run `workers-bootstrap` in preview mode before activation.
+The rendered trigger owns source polling, cursor/watermark comparison, and
+`fire: false` for unchanged data; only `fire: true` admits the existing
+agent-turn payload for bounded research.
 `--apply` uses the live job's configuration revision and stores the prior
 trigger in the owner-only plan receipt for rollback.
 

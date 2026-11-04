@@ -34,6 +34,7 @@ const modelPolicySchema = z
         z
           .object({
             jobId: z.string().min(1),
+            contractVersion: z.literal(1),
             markers: z.array(workerContractMarker).min(1),
             requireTrigger: z.boolean().optional(),
           })
@@ -160,6 +161,7 @@ export function evaluatePolicy(
   for (const contract of policy.workerContracts ?? []) {
     const job = jobsById.get(contract.jobId);
     const expectedContract = {
+      contractVersion: contract.contractVersion,
       markers: contract.markers,
       trigger: contract.requireTrigger !== false,
     };

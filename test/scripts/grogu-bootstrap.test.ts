@@ -22,24 +22,65 @@ const job: CronJob = {
 
 describe("revision-checked metadata bootstrap", () => {
   it("accepts only explicit deterministic worker trigger bindings", () => {
-    expect(
+    const parsed = parseManagedWorkerTriggers([
+      {
+        logicalName: "gmail",
+        id: "job-gmail",
+        template: {
+          version: 1,
+          source: "gmail",
+          tool: {
+            server: "gmail",
+            name: "gmail_search",
+            schemaSha256: "a".repeat(64),
+            args: {
+              query: "newer_than:1d",
+              max: 1,
+              include_body: false,
+              sanitize_content: true,
+            },
+          },
+          result: {
+            complete: "structuredContent.exit_code",
+            completeValue: 0,
+            guards: [
+              { path: "isError", equals: false },
+              { path: "structuredContent.tool", equals: "gmail_search" },
+              { path: "structuredContent.risk", equals: "read" },
+            ],
+            items: "structuredContent.messages",
+            cursor: "structuredContent.cursor",
+            fields: {
+              id: "message_id",
+              secondaryId: "thread_id",
+              timestamp: "timestamp",
+            },
+          },
+          maxItems: 1,
+          continuation: {
+            delayMs: 60_000,
+            intervalMs: 60_000,
+            maxOpen: 8,
+            maxFires: 3,
+            ttlMs: 86_400_000,
+          },
+        },
+      },
+    ]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({
+      logicalName: "gmail",
+      id: "job-gmail",
+      contractVersion: 1,
+      trigger: { script: expect.stringContaining("MCP[template.tool.server]") },
+    });
+    expect(() =>
       parseManagedWorkerTriggers([
         {
           logicalName: "gmail",
           id: "job-gmail",
-          trigger: { script: "return { fire: false, state: trigger.state };" },
+          trigger: { script: "return { fire: false };" },
         },
-      ]),
-    ).toEqual([
-      {
-        logicalName: "gmail",
-        id: "job-gmail",
-        trigger: { script: "return { fire: false, state: trigger.state };" },
-      },
-    ]);
-    expect(() =>
-      parseManagedWorkerTriggers([
-        { logicalName: "gmail", id: "job-gmail", trigger: { script: "" } },
       ]),
     ).toThrow(/Invalid or duplicate/);
   });

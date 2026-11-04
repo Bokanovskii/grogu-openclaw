@@ -126,10 +126,24 @@ export class CodeModeProgramDataInbox {
 
 function normalizeReplyError(value: unknown, maxBytes: number): unknown {
   if (value !== null && typeof value === "object" && "message" in value && "code" in value) {
+    const nativeCode =
+      "nativeCode" in value &&
+      typeof value.nativeCode === "string" &&
+      /^[A-Z0-9_]{1,64}$/.test(value.nativeCode)
+        ? value.nativeCode
+        : undefined;
+    const nativeName =
+      "nativeName" in value &&
+      typeof value.nativeName === "string" &&
+      (value.nativeName === "AbortError" || value.nativeName === "TimeoutError")
+        ? value.nativeName
+        : undefined;
     return {
       message: boundCodeModeError(String(value.message), maxBytes),
       code: String(value.code),
       effectStatus: "unknown",
+      ...(nativeCode ? { nativeCode } : {}),
+      ...(nativeName ? { nativeName } : {}),
     };
   }
   return boundCodeModeError(String(value), maxBytes);

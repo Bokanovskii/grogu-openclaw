@@ -92,10 +92,44 @@ sources, and require privacy-preserving bounded research plus one useful
 owner-only update for each material private signal. Add each private job id and
 its required template marker to `bindings.modelPolicy.workerContracts`;
 `policy-check` then reports missing jobs or markers without printing prompts.
-Put each reviewed read-only condition script in `native.workerTriggers` and run
-`workers-bootstrap` in preview mode. The trigger must own source polling,
-cursor/watermark comparison, and `fire: false` for unchanged data; only
-`fire: true` admits the existing agent-turn payload for bounded research.
+Each `native.workerTriggers` entry selects a tracked template from
+`worker-trigger-templates.ts`, an approved MCP server/tool plus its live
+catalog schema hash, private bounded arguments, fixed metadata-only decoding,
+and continuation limits. Bind exactly the two existing jobs: one Gmail
+primary and one Messages primary. Both multi-source payloads retain their
+complete, ordered, already-approved `toolsAllow` lists, including both
+collector permissions and existing Calendar/research tools; the renderer calls
+only its selected primary. Bootstrap patches only `trigger`, rejects wildcard
+or `exec`/`message` broadening, and receipts a hash proving the remaining job
+definition stayed unchanged. Calendar remains the existing payload tool and is
+requested only by bounded `native_source_sweep` trigger intent. No Calendar MCP
+trigger template or new job is installed.
+
+Capture the supported effective input-schema pins without invoking a source
+tool:
+
+```sh
+openclaw mcp probe gmail --json |
+  jq -er '.toolSchemas.gmail__gmail_search.schemaSha256'
+openclaw mcp probe seaglass --json |
+  jq -er '.toolSchemas.seaglass__recent_messages.schemaSha256'
+```
+
+The probe also publishes `schemaFormat:
+openclaw-effective-input-schema/v1` and the normalized `inputSchema`.
+`workers-bootstrap` repeats both named probes and refuses preview or apply when
+either private pin differs from the live catalog. The Gmail adapter parses the
+configured wrapper's `structuredContent.stdout`; the Messages adapter parses
+the single JSON text block in `content`. Gmail has no page-token input, so
+`has_more` or `nextPageToken` records valid truncated bounded-head coverage
+with the configured limit and discards the token. Only a successful
+non-truncated zero result is authoritative empty coverage. Messages pagination
+remains an incomplete observation. Both adapters reject write/body options,
+malformed wrappers, and structured source failures rather than fabricating an
+empty source. Run `workers-bootstrap` in preview mode before activation.
+The rendered trigger owns source polling, cursor/watermark comparison, and
+`fire: false` for unchanged data; only `fire: true` admits the existing
+agent-turn payload for bounded research.
 `--apply` uses the live job's configuration revision and stores the prior
 trigger in the owner-only plan receipt for rollback.
 

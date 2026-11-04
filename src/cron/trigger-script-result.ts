@@ -22,6 +22,25 @@ function scriptResultCandidate(
   return undefined;
 }
 
+function scriptTriggerCandidate(
+  result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
+): unknown {
+  const isTriggerCandidate = (candidate: unknown) =>
+    isRecord(candidate) &&
+    (typeof candidate.fire === "boolean" ||
+      (isRecord(candidate.error) && typeof candidate.error.kind === "string"));
+  if (isTriggerCandidate(result.value)) {
+    return result.value;
+  }
+  for (let index = result.output.length - 1; index >= 0; index -= 1) {
+    const entry = result.output[index];
+    if (isRecord(entry) && entry.type === "json" && isTriggerCandidate(entry.value)) {
+      return entry.value;
+    }
+  }
+  return undefined;
+}
+
 export function scriptFailure(
   error: string,
   code: CronTriggerFailureCode = "internal_error",
@@ -32,7 +51,21 @@ export function scriptFailure(
 export function parseTriggerResult(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
 ): CronTriggerEvaluationResult {
-  const candidate = scriptResultCandidate(result, true);
+  const candidate = scriptTriggerCandidate(result);
+  if (
+    isRecord(candidate) &&
+    isRecord(candidate.error) &&
+    typeof candidate.error.kind === "string"
+  ) {
+    const kind = candidate.error.kind;
+    if (["transient", "timeout", "network", "incomplete", "unavailable"].includes(kind)) {
+      return scriptFailure("worker source temporarily unavailable", "timeout");
+    }
+    if (["auth", "permission", "config", "schema"].includes(kind)) {
+      return scriptFailure(`worker source ${kind} failure`, "invalid_input");
+    }
+    return scriptFailure("worker source returned an unknown failure", "invalid_input");
+  }
   if (!isRecord(candidate) || typeof candidate.fire !== "boolean") {
     return scriptFailure("cron trigger script must return an object with boolean fire");
   }

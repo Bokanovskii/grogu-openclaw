@@ -4,8 +4,12 @@ import {
   resolveSqliteReadScope,
   toDatabaseOptions,
 } from "../config/sessions/session-accessor.sqlite-scope.js";
-import { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
+import {
+  resolveAllAgentSessionStoreTargetsSync,
+  resolveConfiguredAgentDatabaseTargets,
+} from "../config/sessions/targets.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { createRetainedAgentDatabaseMatcher } from "../state/agent-deletion-discovery.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import type { SessionGroupMembershipSnapshot } from "./session-group-catalog.types.js";
 import type { SessionMutationTarget } from "./session-mutation-authorization-error.js";
@@ -15,11 +19,19 @@ export function readSessionGroupMembership(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv,
 ): SessionGroupMembershipSnapshot {
-  const stores = resolveAllAgentSessionStoreTargetsSync(cfg, { env }).map((target) => {
-    const resolved = resolveSqliteReadScope({ ...target, env });
-    const options = toDatabaseOptions(resolved);
-    return { agentId: target.agentId, storePath: resolveOpenClawAgentSqlitePath(options) };
-  });
+  const deleted = createRetainedAgentDatabaseMatcher(
+    env,
+    () => resolveConfiguredAgentDatabaseTargets(cfg, { env }),
+    "database",
+    "runtime",
+  );
+  const stores = resolveAllAgentSessionStoreTargetsSync(cfg, { env })
+    .map((target) => {
+      const resolved = resolveSqliteReadScope({ ...target, env });
+      const options = toDatabaseOptions(resolved);
+      return { agentId: target.agentId, storePath: resolveOpenClawAgentSqlitePath(options) };
+    })
+    .filter((target) => !deleted(target.storePath, target.agentId));
   const groups = new Map<string, SessionMutationTarget[]>();
   for (const store of stores) {
     for (const { sessionKey, entry } of listSessionEntriesReadOnly({

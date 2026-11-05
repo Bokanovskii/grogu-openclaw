@@ -41,6 +41,7 @@ import { getChatHistoryLoadState } from "./chat-history-state.ts";
 import {
   buildPendingInputQueueItems,
   getChatPendingInputs,
+  isRecalledPendingInput,
   loadChatPendingInputs,
 } from "./chat-pending-inputs.ts";
 import { chatStartupStatusLabel, type ChatRunStartupStatus } from "./chat-run-startup.ts";
@@ -192,7 +193,12 @@ export function renderChat(props: ChatProps) {
     : undefined;
   const pendingInputs = props.historyState ? getChatPendingInputs(props.historyState) : undefined;
   const displayedPendingInputs = pendingInputs
-    ? [...pendingInputs.page.items.filter((input) => !input.queued), ...pendingInputs.queuedInputs]
+    ? [
+        ...pendingInputs.page.items.filter(
+          (input) => !input.queued && !isRecalledPendingInput(props.historyState!, input),
+        ),
+        ...pendingInputs.queuedInputs,
+      ]
     : undefined;
   const requestUpdate = props.onRequestUpdate ?? (() => {});
   const focusComposer = (selector = ".agent-chat__composer-combobox > textarea") =>

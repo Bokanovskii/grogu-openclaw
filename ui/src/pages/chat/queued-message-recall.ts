@@ -6,7 +6,7 @@ import { formatUiError } from "../../lib/format-error.ts";
 import { getChatAttachmentDataUrl } from "./attachment-payload-store.ts";
 import { requestChatAbort } from "./chat-abort-request.ts";
 import { setChatError } from "./chat-history-state.ts";
-import { getChatPendingInputs } from "./chat-pending-inputs.ts";
+import { getChatPendingInputs, markRecalledPendingInput } from "./chat-pending-inputs.ts";
 import { readChatQueueForScope, removeQueuedMessage } from "./chat-queue.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import type { ChatInputHistoryKeyInput, ChatInputHistoryKeyResult } from "./input-history.ts";
@@ -60,6 +60,7 @@ function withdrawDispatchedSteer(
     if (!result.ok) {
       setChatError(host, formatUiError(result.error));
     } else if (!result.noActiveRun && host.sessionKey === sessionKey && !host.chatMessage.trim()) {
+      markRecalledPendingInput(host, item.runId);
       host.handleChatDraftChange(item.text, item.mentions ? [...item.mentions] : []);
     }
     invalidate();

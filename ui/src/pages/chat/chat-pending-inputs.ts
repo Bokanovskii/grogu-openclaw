@@ -176,6 +176,25 @@ export function buildPendingInputItems(
   return items;
 }
 
+// Steers recalled into the composer stay cancelled on the server but need no transcript notice.
+const recalledPendingInputRunIds = new WeakMap<object, Set<string>>();
+
+export function markRecalledPendingInput(state: object, runId: string) {
+  const runIds = recalledPendingInputRunIds.get(state) ?? new Set<string>();
+  recalledPendingInputRunIds.set(state, runIds.add(runId));
+}
+
+export function isRecalledPendingInput(
+  state: object,
+  input: Pick<ChatPendingInputsPage["items"][number], "runId" | "state">,
+): boolean {
+  return Boolean(
+    input.state === "cancelled" &&
+    input.runId &&
+    recalledPendingInputRunIds.get(state)?.has(input.runId),
+  );
+}
+
 export function getChatPendingInputs(state: ChatState): PendingInputView | undefined {
   const view = pendingInputViews.get(state);
   return view?.sessionKey === state.sessionKey &&

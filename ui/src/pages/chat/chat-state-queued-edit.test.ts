@@ -9,6 +9,7 @@ import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { storeChatComposerMemoryFallback } from "./chat-composer-memory-fallback.ts";
 import { createInitializationContext } from "./chat-pane.test-support.ts";
+import { isRecalledPendingInput } from "./chat-pending-inputs.ts";
 import { enqueueChatMessage, readChatQueueForScope, updateQueuedMessage } from "./chat-queue.ts";
 import { OFFLINE_QUEUE_STORAGE_ERROR } from "./chat-send-support.ts";
 import { ChatStateController } from "./chat-state-controller.ts";
@@ -207,6 +208,7 @@ describe("ArrowUp queued message recall", () => {
 
       expect(state.handleChatInputHistoryKey(arrowUp).handled).toBe(true);
       await vi.waitFor(() => expect(state.chatMessage).toBe("steer me back"));
+      expect(isRecalledPendingInput(state, { runId: "steer-run", state: "cancelled" })).toBe(true);
       expect(requests).toEqual([["chat.abort", expect.objectContaining({ runId: "steer-run" })]]);
       state.chatMessage = "";
     } finally {

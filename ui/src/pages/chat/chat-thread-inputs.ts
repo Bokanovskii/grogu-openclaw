@@ -35,6 +35,8 @@ export type ChatInputPlacementProps = {
   searchOpen?: boolean;
   searchQuery?: string;
   messageRecovery?: ChatMessageRecovery;
+  /** The gateway's active run; a derived local run cannot receive steers. */
+  runId?: string | null;
 };
 
 /** Canonical history, accepted custody, then local delivery are representations of one input. */
@@ -111,7 +113,7 @@ export function placeChatInputs(
   const acceptedKeys = new Map(blocks.map((block) => [block.items[0]!.key, block]));
   const historyKeys = new Set(items.map((item) => item.key));
   for (const queued of queue) {
-    if (!shouldRenderQueuedSendInThread(queued)) {
+    if (!shouldRenderQueuedSendInThread(queued, props.runId)) {
       continue;
     }
     const message = queuedSendThreadMessage(queued);

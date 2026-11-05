@@ -76,6 +76,13 @@ function parseFallbackAttemptSummaries(summaries: unknown, attempts: unknown): s
   return out;
 }
 
+/** Run-keyed live data the transcript reads for the working indicator. */
+export function chatRunLiveMaps(
+  host: Pick<ToolStreamHost, "chatRunUsageById" | "chatRunReasoningById">,
+) {
+  return { runUsageById: host.chatRunUsageById, runReasoningById: host.chatRunReasoningById };
+}
+
 export function resolveChatProjectionRunId(params: {
   localRunId?: string | null;
   activeRunIds?: readonly string[];

@@ -789,3 +789,26 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
     content: none;
   }
 }
+
+/* Live reasoning: one line whose newest text stays visible as older text slides out left. */
+.chat-working-indicator:has(.chat-working-indicator__reasoning) {
+  display: flex;
+  width: 100%;
+}
+
+.chat-working-indicator__reasoning {
+  display: flex;
+  flex: 1 1 0;
+  justify-content: flex-end;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--font-size-sm, 0.8125rem);
+  font-style: italic;
+  white-space: nowrap;
+  mask-image: linear-gradient(to right, transparent, #000 3rem);
+}
+
+.chat-working-indicator__reasoning-text {
+  flex-shrink: 0;
+}

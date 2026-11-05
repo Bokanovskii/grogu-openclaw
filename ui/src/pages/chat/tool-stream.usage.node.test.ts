@@ -42,6 +42,15 @@ describe("app-tool-stream run usage", () => {
     expect(host.chatRunUsageById?.get("still-active")?.outputTokens).toBe(59);
   });
 
+  it("keeps a whitespace-collapsed tail of live reasoning per run", () => {
+    const host = createHost({ chatRunId: "client-run" });
+    const text = `${"x".repeat(400)}\n\n  latest   thought`;
+    handleAgentEvent(host, agentEvent("client-run", 1, "thinking", { text, delta: "t" }, "main"));
+    const tail = host.chatRunReasoningById?.get("client-run") ?? "";
+    expect(tail.endsWith("x latest thought")).toBe(true);
+    expect(tail.length).toBe(240);
+  });
+
   it("keeps the last usage through completion even without an intervening render", () => {
     const host = createHost({ chatRunId: "client-run" });
     handleAgentEvent(host, agentEvent("client-run", 1, "usage", { outputTokens: 695 }, "main"));

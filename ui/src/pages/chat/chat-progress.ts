@@ -161,10 +161,29 @@ export function isQueuedSendInlineState(item: ChatQueueItem): boolean {
   );
 }
 
-export function shouldRenderQueuedSendInThread(item: ChatQueueItem): boolean {
+/** A steer into another active run belongs to the queue until the transcript records it. */
+export function isSteerAwaitingInjection(
+  item: ChatQueueItem,
+  activeRunId: string | null | undefined,
+): boolean {
+  return (
+    item.queueMode === "steer" &&
+    Boolean(activeRunId) &&
+    activeRunId !== (item.sendRunId ?? item.pendingRunId) &&
+    (item.sendState === "waiting-model" ||
+      item.sendState === "submitting" ||
+      item.sendState === "sending")
+  );
+}
+
+export function shouldRenderQueuedSendInThread(
+  item: ChatQueueItem,
+  activeRunId?: string | null,
+): boolean {
   // Page-local submit timing is not persisted; durable attempts keep restored prompts visible.
   return (
     queuedSendStarted(item) &&
+    !isSteerAwaitingInjection(item, activeRunId) &&
     (item.sendState === "waiting-model" ||
       item.sendState === "submitting" ||
       item.sendState === "sending" ||
@@ -180,7 +199,7 @@ export function resolveWorkingProgress(
   streamSegments: Array<{ ts: number; runId?: string }>,
   toolMessages: unknown[],
 ): WorkingProgress {
-  const visibleSends = queue.filter(shouldRenderQueuedSendInThread);
+  const visibleSends = queue.filter((item) => shouldRenderQueuedSendInThread(item, runId));
   const pendingSends = visibleSends.filter((item) => !isQueuedSendInlineState(item));
   const queuedProgress =
     pendingSends.find((item) => item.sendState === "submitting" || item.sendState === "sending") ??

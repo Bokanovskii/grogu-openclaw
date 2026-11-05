@@ -150,7 +150,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
         : undefined,
   } satisfies Parameters<typeof buildCachedChatItems>[0];
   const chatItems = buildCachedChatItems(chatItemsInput);
-  const { workingIndicator, activityRunId, activityGroupKey, runOutputTokens } =
+  const { workingIndicator, activityRunId, activityGroupKey, runOutputTokens, runReasoning } =
     projectTranscriptActivity(chatItems, props);
   const latestBrowserTabs = props.latestBrowserTabs;
   syncToolCardExpansionState(
@@ -352,6 +352,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     onOpenSubagent: (subagents.listed && props.onOpenSubagent) || props.onOpenSession,
     onOpenSubagents: subagents.listed ? props.onOpenSubagents : undefined,
     runOutputTokens,
+    runReasoning,
     questionPrompts,
   } satisfies StreamGroupOptions;
   const renderGroupOptions = (item: MessageGroup) => {
@@ -423,7 +424,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
   };
   // Only the working indicator shows live usage and subagent status, so rows
   // without one keep memoizing across usage and child-roster patches.
-  const workingUsageKey = JSON.stringify([runOutputTokens, subagents.statusKey]);
+  const workingUsageKey = JSON.stringify([runOutputTokens, runReasoning, subagents.statusKey]);
   const liveStatusSignature = (item: ChatRenderItem): string => {
     if (item.kind === "stream-run") {
       return item.parts.some((part) => part.kind === "reading-indicator") ? workingUsageKey : "";

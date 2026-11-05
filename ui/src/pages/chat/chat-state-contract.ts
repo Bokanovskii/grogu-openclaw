@@ -68,6 +68,7 @@ export type ChatState = StreamCausalBoundaryState & {
    * Stop must use the session-owned abort path (sessions.abort), not chat.abort. */
   chatRunSessionAbortable?: boolean;
   chatRunUsageById?: Map<string, RunOutputUsage>;
+  chatRunReasoningById?: Map<string, string>;
   providerPolicyNotice?: ProviderPolicyNotice | null;
   /** Producer-cumulative text; visible tails derive from the segment baseline. */
   chatStream: string | null;

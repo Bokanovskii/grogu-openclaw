@@ -40,6 +40,8 @@ export function renderChatWorkingIndicator(
     onOpenSubagents?: () => void;
     startupLabel?: string;
     outputTokens?: number | null;
+    /** Tail of the run's live reasoning, shown as one scrolling line. */
+    reasoning?: string;
     presentation?: "standalone" | "continuation";
   } = {},
 ) {
@@ -196,6 +198,15 @@ export function renderChatWorkingIndicator(
             : nothing
         }
       </span>
+      ${
+        working && options.reasoning
+          ? html`<span class="chat-working-indicator__reasoning" aria-hidden="true"
+              ><span class="chat-working-indicator__reasoning-text"
+                >${options.reasoning}</span
+              ></span
+            >`
+          : nothing
+      }
     </div>
     ${options.subagentActivity ?? nothing}
   `;

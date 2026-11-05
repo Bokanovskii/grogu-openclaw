@@ -287,6 +287,36 @@ function handleUsageEvent(host: ToolStreamHost, payload: AgentEventPayload): boo
   return true;
 }
 
+const REASONING_TAIL_CHARS = 240;
+
+/** Keeps only the visible tail of a run's live reasoning; transcripts own the full text. */
+function handleReasoningEvent(host: ToolStreamHost, payload: AgentEventPayload): boolean {
+  if (payload.stream !== "thinking") {
+    return false;
+  }
+  const sessionKey = toTrimmedString(payload.sessionKey);
+  if (sessionKey) {
+    if (!uiSessionEventMatches(host, sessionKey, toTrimmedString(payload.agentId))) {
+      return true;
+    }
+  } else if (!host.chatRunId || payload.runId !== host.chatRunId) {
+    return true;
+  }
+  const text = typeof payload.data?.text === "string" ? payload.data.text : "";
+  const tail = text.replace(/\s+/gu, " ").trim().slice(-REASONING_TAIL_CHARS);
+  if (!tail || host.chatRunReasoningById?.get(payload.runId) === tail) {
+    return true;
+  }
+  const reasoningByRun = new Map(host.chatRunReasoningById);
+  reasoningByRun.delete(payload.runId);
+  reasoningByRun.set(payload.runId, tail);
+  for (const staleRunId of [...reasoningByRun.keys()].slice(0, -RUN_USAGE_LIMIT)) {
+    reasoningByRun.delete(staleRunId);
+  }
+  host.chatRunReasoningById = reasoningByRun;
+  return true;
+}
+
 function handleNoticeEvent(host: ToolStreamHost, payload: AgentEventPayload): boolean {
   const systemNotice = payload.stream === "notice";
   if (!systemNotice && payload.stream !== "codex_app_server.guardian") {
@@ -490,6 +520,7 @@ export function handleAgentEvent(
 
   if (
     handleUsageEvent(host, payload) ||
+    handleReasoningEvent(host, payload) ||
     handleNoticeEvent(host, payload) ||
     handleStreamStatus(host, payload) ||
     handlePreambleProgress(host, payload, source)

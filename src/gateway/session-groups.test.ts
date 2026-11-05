@@ -9,12 +9,14 @@ import * as sessionGroupCategories from "../config/sessions/session-group-catego
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import * as workerAdmission from "../infra/sqlite-worker-operation-admission.js";
+import { completeAgentDeletionJournalInDatabase } from "../state/agent-deletion-journal.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
 import {
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
   runOpenClawAgentWriteTransaction,
 } from "../state/openclaw-agent-db.js";
+import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import * as stateDatabase from "../state/openclaw-state-db.js";
 import {
   closeOpenClawStateDatabaseAsync,
@@ -23,6 +25,7 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { beginAgentDeletionJournal } from "../test-utils/agent-deletion-journal.js";
 import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
 import { ensureSessionGroupCatalog, readSessionGroupCatalog } from "./session-group-catalog.js";
 import { readSessionGroupCatalogSnapshot } from "./session-group-catalog.kernel.js";
@@ -536,6 +539,81 @@ describe("session groups catalog", () => {
       })?.category,
     ).toBeUndefined();
   });
+
+  it.each(["rename", "delete"] as const)(
+    "%s ignores retained deleted stores but includes unconfigured live agents",
+    async (action) => {
+      const groupCfg: OpenClawConfig = {
+        agents: { ownership: "explicit", entries: { main: {} } },
+      };
+      await putSessionGroups({ cfg: groupCfg, names: ["Old", "Keep"], env });
+      const stores = new Map<string, string>();
+      for (const agentId of ["main", "manual", "retired"]) {
+        stores.set(
+          agentId,
+          await seedSessionStore(
+            {
+              [`agent:${agentId}:dashboard:member`]: {
+                sessionId: `${agentId}-member`,
+                updatedAt: 1,
+                category: "Old",
+              },
+              [`agent:${agentId}:dashboard:other`]: {
+                sessionId: `${agentId}-other`,
+                updatedAt: 1,
+                category: "Keep",
+              },
+            },
+            agentId,
+          ),
+        );
+      }
+      const retainedPath = resolveOpenClawAgentSqlitePath({ agentId: "retired", env });
+      beginAgentDeletionJournal(
+        {
+          agentId: "retired",
+          operationId: "delete-retired",
+          agentDir: path.dirname(retainedPath),
+          workspaceDir: path.join(root, "workspace-retired"),
+          sessionsDir: path.join(root, "agents", "retired", "sessions"),
+          databasePaths: [retainedPath],
+          deleteFiles: false,
+        },
+        { env },
+      );
+      stateDatabase.runOpenClawStateWriteTransaction(
+        (database) => {
+          completeAgentDeletionJournalInDatabase(database, "retired", "delete-retired");
+        },
+        { env },
+      );
+      await closeOpenClawAgentDatabasesAsync(root);
+      const retainedBytes = await fs.readFile(retainedPath);
+
+      const result =
+        action === "rename"
+          ? await renameSessionGroup({ cfg: groupCfg, name: "Old", to: "New", env })
+          : await deleteSessionGroup({ cfg: groupCfg, name: "Old", env });
+
+      expect(result.updatedSessions).toBe(2);
+      expect(result.groups.map((group) => group.name)).toEqual(
+        action === "rename" ? ["New", "Keep"] : ["Keep"],
+      );
+      for (const agentId of ["main", "manual"]) {
+        const scope = { agentId, storePath: stores.get(agentId) };
+        expect(
+          loadSessionEntry({ ...scope, sessionKey: `agent:${agentId}:dashboard:member` }),
+        ).toMatchObject({ sessionId: `${agentId}-member` });
+        expect(
+          loadSessionEntry({ ...scope, sessionKey: `agent:${agentId}:dashboard:member` })?.category,
+        ).toBe(action === "rename" ? "New" : undefined);
+        expect(
+          loadSessionEntry({ ...scope, sessionKey: `agent:${agentId}:dashboard:other` })?.category,
+        ).toBe("Keep");
+      }
+      expect(await fs.readFile(retainedPath)).toEqual(retainedBytes);
+    },
+  );
 
   it.each([
     { action: "rename", targetExists: false, stopAgent: "main" },

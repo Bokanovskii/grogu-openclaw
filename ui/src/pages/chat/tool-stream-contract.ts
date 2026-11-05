@@ -85,6 +85,8 @@ export type ToolStreamHost = {
   chatQueue?: readonly ChatQueueItem[];
   chatMessages?: unknown[];
   chatRunUsageById?: Map<string, RunOutputUsage>;
+  /** Latest reasoning tail per run, for the working indicator's live line. */
+  chatRunReasoningById?: Map<string, string>;
   chatStream: string | null;
   chatStreamStartedAt: number | null;
   chatRunStartup?: ChatRunStartupState | null;

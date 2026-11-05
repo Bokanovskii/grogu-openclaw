@@ -13,7 +13,7 @@ const activityGroups = createTranscriptMemo<string | undefined>();
 
 export function projectTranscriptActivity(
   chatItems: ReturnType<typeof buildCachedChatItems>,
-  props: Pick<ChatThreadProps, "runId" | "runActive" | "runUsageById">,
+  props: Pick<ChatThreadProps, "runId" | "runActive" | "runUsageById" | "runReasoningById">,
 ) {
   const generation = getChatItemsGeneration(chatItems);
   const workingIndicator = workingIndicators(chatItems, [generation], () =>
@@ -47,5 +47,8 @@ export function projectTranscriptActivity(
       props.runUsageById,
       workingIndicator?.runId ? [...earlierRunIds, workingIndicator.runId] : [],
     ) ?? sumRunOutputTokens(props.runUsageById, earlierRunIds);
-  return { workingIndicator, activityRunId, activityGroupKey, runOutputTokens };
+  const runReasoning = workingIndicator?.runId
+    ? props.runReasoningById?.get(workingIndicator.runId)
+    : undefined;
+  return { workingIndicator, activityRunId, activityGroupKey, runOutputTokens, runReasoning };
 }

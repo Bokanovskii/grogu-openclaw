@@ -9,7 +9,7 @@ import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { storeChatComposerMemoryFallback } from "./chat-composer-memory-fallback.ts";
 import { createInitializationContext } from "./chat-pane.test-support.ts";
-import { enqueueChatMessage, readChatQueueForScope } from "./chat-queue.ts";
+import { enqueueChatMessage, readChatQueueForScope, updateQueuedMessage } from "./chat-queue.ts";
 import { OFFLINE_QUEUE_STORAGE_ERROR } from "./chat-send-support.ts";
 import { ChatStateController } from "./chat-state-controller.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
@@ -182,6 +182,32 @@ describe("ArrowUp queued message recall", () => {
       // A non-empty draft keeps the remaining queue intact.
       state.handleChatInputHistoryKey(arrowUp);
       expect(readChatQueueForScope(state, state.sessionKey)).toHaveLength(1);
+      state.chatMessage = "";
+    } finally {
+      controller.hostDisconnected();
+    }
+  });
+
+  it("withdraws a dispatched steer on the server before recalling it", async () => {
+    const { controller, state } = createControllerFixture();
+    const requests: Array<[string, unknown]> = [];
+    state.client = createTestGatewayClient(async (method, params) => {
+      requests.push([method, params]);
+      return { ok: true, aborted: true, runIds: ["steer-run"] };
+    });
+    state.connected = true;
+    try {
+      const queued = enqueueChatMessage(state, "steer me back")!;
+      updateQueuedMessage(state, queued.id, (item) => ({
+        ...item,
+        queueMode: "steer",
+        sendRunId: "steer-run",
+        serverQueued: true,
+      }));
+
+      expect(state.handleChatInputHistoryKey(arrowUp).handled).toBe(true);
+      await vi.waitFor(() => expect(state.chatMessage).toBe("steer me back"));
+      expect(requests).toEqual([["chat.abort", expect.objectContaining({ runId: "steer-run" })]]);
       state.chatMessage = "";
     } finally {
       controller.hostDisconnected();

@@ -355,8 +355,12 @@ export function createPageState(
   state.handleChatScroll = (event) => handleChatScroll(state, event);
   state.handleChatDraftChange = (next, mentions) => handleChatDraftChange(state, next, mentions);
   state.handleChatInputHistoryKey = (input) =>
-    recallNewestQueuedMessage(state, input, (id) => cancelPendingQueuedChatInput(state, id)) ??
-    handleChatInputHistoryKey(state, input);
+    recallNewestQueuedMessage(
+      state,
+      input,
+      (id) => cancelPendingQueuedChatInput(state, id),
+      () => renderLifecycle.invalidate(),
+    ) ?? handleChatInputHistoryKey(state, input);
   state.applySettings = (patch) => {
     const next = { ...state.settings, ...patch };
     state.settings = patchSettings({

@@ -248,6 +248,7 @@ export function createPageState(
     chatAttachments: [],
     chatRunId: null,
     chatRunUsageById: new Map<string, RunOutputUsage>(),
+    chatRunReasoningById: new Map<string, string>(),
     chatStream: null,
     chatStreamStartedAt: null,
     chatRunStartup: null,

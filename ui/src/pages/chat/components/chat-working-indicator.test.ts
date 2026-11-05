@@ -67,6 +67,15 @@ describe("selectWorkingClawSurprise", () => {
 });
 
 describe("renderChatWorkingIndicator", () => {
+  it("shows the live reasoning tail on one line", () => {
+    const container = document.createElement("div");
+    const part = { kind: "reading-indicator" as const, key: "reasoning-test", startedAt: 1 };
+    render(renderChatWorkingIndicator(part, { reasoning: "checking the forecast" }), container);
+    expect(container.querySelector(".chat-working-indicator__reasoning")?.textContent).toBe(
+      "checking the forecast",
+    );
+  });
+
   it("selects the working glyph independently of the mascot and keeps text when hidden", () => {
     const container = document.createElement("div");
     const part = { kind: "reading-indicator" as const, key: "brand-test", startedAt: 1 };

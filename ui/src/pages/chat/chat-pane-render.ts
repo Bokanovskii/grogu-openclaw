@@ -65,7 +65,7 @@ import { openSessionWorkspaceFile } from "./components/chat-session-workspace.ts
 import { resolveChatLinkFaviconFetcher } from "./link-favicon-loader.ts";
 import { hasAbortableSessionRun, hasDirectSessionRun } from "./run-lifecycle.ts";
 import { lockChatScroll, scheduleChatScroll } from "./scroll.ts";
-import { resolveChatProjectionRunId } from "./tool-stream-status.ts";
+import { chatRunLiveMaps, resolveChatProjectionRunId } from "./tool-stream-status.ts";
 import { workspaceResultConflictFromPlacement } from "./workspace-conflict.ts";
 
 export class ChatPane extends ChatPaneLayoutRender {
@@ -452,7 +452,7 @@ export class ChatPane extends ChatPaneLayoutRender {
       stream: catalogKey ? null : state.chatStream,
       streamStartedAt: catalogKey ? null : state.chatStreamStartedAt,
       runId: catalogKey ? null : projectionRunId,
-      runUsageById: catalogKey ? undefined : state.chatRunUsageById,
+      ...(catalogKey ? {} : chatRunLiveMaps(state)),
       assistantAvatarUrl: resolveChatAvatarUrl(state),
       sendShortcut: state.settings.chatSendShortcut,
       followUpMode: state.chatFollowUpMode,

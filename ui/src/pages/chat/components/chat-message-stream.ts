@@ -80,6 +80,7 @@ export type StreamGroupOptions = StreamMessageOptions & {
   onOpenSubagent?: (key: string) => void;
   onOpenSubagents?: () => void;
   runOutputTokens?: number | null;
+  runReasoning?: string;
   questionPrompts?: ReadonlyMap<string, QuestionPrompt>;
 };
 
@@ -132,6 +133,7 @@ export function renderStreamGroupPart(
       onOpenSubagents: opts.onOpenSubagents,
       startupLabel: opts.startupLabel,
       outputTokens: opts.runOutputTokens,
+      reasoning: opts.runReasoning,
       presentation,
     });
   }

@@ -137,6 +137,7 @@ export type ChatThreadProps = ChatSendStatusActions &
     /** Browser-local active run identity, retained across transient disconnects. */
     runId?: string | null;
     runUsageById?: ReadonlyMap<string, RunOutputUsage>;
+    runReasoningById?: ReadonlyMap<string, string>;
     queue: ChatQueueItem[];
     initialTurnId?: string;
     pendingInputs?: ChatPendingInputsPage["items"];

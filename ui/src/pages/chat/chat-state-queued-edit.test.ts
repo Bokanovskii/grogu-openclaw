@@ -9,7 +9,7 @@ import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { storeChatComposerMemoryFallback } from "./chat-composer-memory-fallback.ts";
 import { createInitializationContext } from "./chat-pane.test-support.ts";
-import { enqueueChatMessage } from "./chat-queue.ts";
+import { enqueueChatMessage, readChatQueueForScope } from "./chat-queue.ts";
 import { OFFLINE_QUEUE_STORAGE_ERROR } from "./chat-send-support.ts";
 import { ChatStateController } from "./chat-state-controller.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
@@ -152,4 +152,39 @@ describe("queued edit page callbacks", () => {
       expect(canReloadControlUiDocument()).toBe(true);
     },
   );
+});
+
+describe("ArrowUp queued message recall", () => {
+  const arrowUp = {
+    key: "ArrowUp" as const,
+    selectionStart: 0,
+    selectionEnd: 0,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    isComposing: false,
+    keyCode: 38,
+  };
+
+  it("moves the newest queued message back into an empty composer", () => {
+    const { controller, state } = createControllerFixture(true);
+    try {
+      enqueueChatMessage(state, "first queued")!;
+      enqueueChatMessage(state, "second queued")!;
+
+      expect(state.handleChatInputHistoryKey(arrowUp).handled).toBe(true);
+      expect(state.chatMessage).toBe("second queued");
+      expect(readChatQueueForScope(state, state.sessionKey).map((item) => item.text)).toEqual([
+        "first queued",
+      ]);
+
+      // A non-empty draft keeps the remaining queue intact.
+      state.handleChatInputHistoryKey(arrowUp);
+      expect(readChatQueueForScope(state, state.sessionKey)).toHaveLength(1);
+      state.chatMessage = "";
+    } finally {
+      controller.hostDisconnected();
+    }
+  });
 });

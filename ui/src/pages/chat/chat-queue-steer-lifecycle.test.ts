@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 it.each(["custody", "receipt", "retry", "remount"] as const)(
-  "keeps a queued steer once through %s and adopts its canonical transcript position",
+  "keeps a dispatched steer queued through %s until its canonical transcript position",
   async (ackMode) => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -127,6 +127,7 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
       render(
         renderChatQueue({
           canAbort: true,
+          activeRunId: host.chatRunId,
           queue: host.chatQueue,
           displayQueue: [...buildPendingInputQueueItems(display.queuedInputs), ...display.queue],
           onQueueSteer: (id) => {
@@ -188,11 +189,15 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
       });
       container.querySelector<HTMLButtonElement>(".chat-queue__steer")!.click();
       await requested.promise;
-      const delivered = [original.content, queued.text, "Already visible output."];
-      expect.soft(snapshot(), "request dispatch").toEqual({ thread: delivered, queue: [] });
+      expect.soft(snapshot(), "request dispatch").toEqual({
+        thread: [original.content, "Already visible output."],
+        queue: [queued.text],
+      });
       let continued = false;
       let prefixPersisted = false;
-      let steerProjected = true;
+      // A dispatched steer stays queued; only a transcript copy or a failed
+      // delivery places it in the thread.
+      let steerPlacement: "queue" | "boundary" | "tail" = "queue";
       const continueOutput = () => {
         continued = true;
         history.inFlightRun!.text = prefixPersisted
@@ -209,20 +214,20 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
         thread: [
           original.content,
           ...(prefixPersisted ? ["Already visible output."] : []),
-          ...(steerProjected ? [queued.text] : []),
+          ...(steerPlacement === "boundary" ? [queued.text] : []),
           ...(prefixPersisted
             ? continued
               ? ["Later output."]
               : []
             : [continued ? "Already visible output. Later output." : "Already visible output."]),
-          ...(steerProjected ? [] : [queued.text]),
+          ...(steerPlacement === "tail" ? [queued.text] : []),
         ],
-        queue: [],
+        queue: steerPlacement === "queue" ? [queued.text] : [],
       });
       if (ackMode === "retry") {
         ack.reject(new Error("Steer rejected"));
         await transport.promise;
-        steerProjected = false;
+        steerPlacement = "tail";
         expect.soft(snapshot(), "rejected delivery").toEqual(expected());
         expect
           .soft(host.chatQueue, "rejected source")
@@ -234,7 +239,7 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
         transport = createDeferred();
         retry!.click();
         await retryRequested.promise;
-        steerProjected = true;
+        steerPlacement = "queue";
         expect.soft(snapshot(), "retry retains original run ownership").toEqual(expected());
       }
       (ackMode === "retry" ? retryAck : ack).resolve({
@@ -243,6 +248,9 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
         ...(ackMode === "receipt" || ackMode === "remount" ? { messageSeq: 3 } : {}),
       });
       await transport.promise;
+      if (ackMode === "receipt" || ackMode === "remount") {
+        steerPlacement = "boundary";
+      }
       expect(host.chatRunId).toBe("active-run");
       expect.soft(snapshot(), "ACK").toEqual(expected());
       if (ackMode === "custody" || ackMode === "retry") {
@@ -253,12 +261,12 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
               runId: queued.sendRunId,
               message: { role: "user", content: queued.text, timestamp: 10_000 },
               acceptedAt: 10_000,
+              // An accepted steer is not a queued follow-up turn.
               state: "queued",
-              queued: true,
             },
           ],
           total: 1,
-          queuedCount: 1,
+          queuedCount: 0,
         };
       }
       await loadChatHistory(host);
@@ -326,6 +334,7 @@ it.each(["custody", "receipt", "retry", "remount"] as const)(
         kind: "live",
         activeRunId: "active-run",
       });
+      steerPlacement = "boundary";
       history.messages = [...history.messages!, steer];
       history.pendingInputs = { items: [], total: 0, queuedCount: 0 };
       history.inFlightRun!.text = prefixPersisted

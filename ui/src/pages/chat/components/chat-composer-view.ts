@@ -94,6 +94,7 @@ export function renderChatComposerQueue(props: ChatComposerProps, showAbortableU
   const canAct = props.connected && props.canSend && !props.submitDisabledReason;
   return renderChatQueue({
     queue: props.queue,
+    activeRunId: props.runId,
     displayQueue: props.displayQueue,
     offline: props.offline,
     canAbort: showAbortableUi,

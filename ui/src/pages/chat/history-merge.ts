@@ -460,6 +460,9 @@ export function selectChatInputDisplay(
   const accepted = new Set(inputs.map((input) => input.runId));
   const retainedSteer = (runId: string | undefined) =>
     Boolean(runId && (steerSendKeys.has(runId) || steerSendKeys.has(`${runId}:user`)));
+  const steerRunIds = new Set(
+    queue.flatMap((item) => (item.queueMode === "steer" && item.sendRunId ? [item.sendRunId] : [])),
+  );
   const unseenInputs = inputs.filter(
     (input) => !userIds.has(input.id) && !retainedSteer(input.runId),
   );
@@ -472,10 +475,30 @@ export function selectChatInputDisplay(
           !sendKeys.has(`${item.sendRunId}:user`)),
     ),
     pendingInputs: unseenInputs.filter(
-      (input) => !input.queued && asNullableRecord(input.message)?.display !== false,
+      (input) =>
+        !input.queued &&
+        !isAwaitingSteerInput(input, steerRunIds) &&
+        asNullableRecord(input.message)?.display !== false,
     ),
-    queuedInputs: unseenInputs.filter((input) => input.queued),
+    queuedInputs: unseenInputs.filter(
+      (input) => input.queued || isAwaitingSteerInput(input, steerRunIds),
+    ),
   };
+}
+
+/**
+ * Accepted input this page dispatched as a steer awaits injection into the
+ * active run. It stays in the queue until the transcript records it.
+ */
+export function isAwaitingSteerInput(
+  input: ChatPendingInputsPage["items"][number],
+  steerRunIds: ReadonlySet<string>,
+): boolean {
+  return (
+    !input.queued &&
+    input.state === "queued" &&
+    Boolean(input.runId && steerRunIds.has(input.runId))
+  );
 }
 
 /** A custody or consumption receipt retires only an uncommitted local user source. */

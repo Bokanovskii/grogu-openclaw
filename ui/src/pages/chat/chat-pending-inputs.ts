@@ -86,7 +86,7 @@ export function buildPendingInputQueueItems(
   return inputs
     .toSorted((left, right) => left.acceptedAt - right.acceptedAt)
     .flatMap<ChatQueueDisplayItem>((input) => {
-      if (!input.queued || input.state !== "queued" || !input.runId) {
+      if (input.state !== "queued" || !input.runId) {
         return [];
       }
       const message = normalizeMessage(input.message);
@@ -108,6 +108,8 @@ export function buildPendingInputQueueItems(
           createdAt: input.acceptedAt,
           pendingRunId: input.runId,
           serverQueued: true,
+          // Unflagged accepted input reaches this queue only as an awaiting steer.
+          ...(input.queued ? {} : { queueMode: "steer" as const }),
           sender: message.sender ?? undefined,
         },
       ];
@@ -234,6 +236,9 @@ function reconcilePendingInputPage(
   receipts?: ChatInputReceipts,
 ): ChatPendingInputsPage {
   const { page: displayPage, acceptedRunIds } = reconcileChatInputCustody(state, page, receipts);
+  const consumed = new Set(
+    (receipts ?? []).filter((receipt) => receipt.state === "consumed").map((r) => r.runId),
+  );
   const settled = new Set([
     ...(receipts ?? [])
       .filter(
@@ -249,6 +254,9 @@ function reconcilePendingInputPage(
     const canonical = findChatSubmissionMessage(state.chatMessages, item.sendRunId, true);
     if (
       item.sendRunId &&
+      // A consumed steer stays queued until the transcript places it after the
+      // output its run produced before injection.
+      !(item.queueMode === "steer" && !canonical && consumed.has(item.sendRunId)) &&
       (settled.has(item.sendRunId) ||
         (canonical && (canonical.id !== null || canonical.sequence !== null))) &&
       (!item.sessionId || item.sessionId === state.currentSessionId)

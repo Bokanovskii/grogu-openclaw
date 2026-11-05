@@ -17,13 +17,15 @@ import {
   recordCompositionEnd,
 } from "../../../lib/ime.ts";
 import { getChatAttachmentPreviewUrl } from "../attachment-payload-store.ts";
-import { isQueuedSendInlineState } from "../chat-progress.ts";
+import { isQueuedSendInlineState, isSteerAwaitingInjection } from "../chat-progress.ts";
 import { isSteerableQueuedMessage } from "../chat-queue.ts";
 import { renderChatAuthorAvatar } from "./chat-author-avatar.ts";
 import type { ChatComposerProps } from "./chat-composer-types.ts";
 
 type ChatQueueProps = {
   queue: ChatQueueItem[];
+  /** Steers into this run stay queued until it injects them. */
+  activeRunId?: string | null;
   displayQueue?: ChatQueueDisplayItem[];
   offline?: boolean;
   canAbort?: boolean;
@@ -166,9 +168,10 @@ export function renderChatQueue(props: ChatQueueProps) {
   const edit = props.queuedEdit;
   const visibleQueue = (props.displayQueue ?? props.queue).filter(
     (item) =>
-      item.sendState !== "submitting" &&
-      item.sendState !== "sending" &&
-      !isQueuedSendInlineState(item),
+      isSteerAwaitingInjection(item, props.activeRunId) ||
+      (item.sendState !== "submitting" &&
+        item.sendState !== "sending" &&
+        !isQueuedSendInlineState(item)),
   );
   // A peer can retire the source while this pane is away. Render its retained
   // correction for recovery/cancel; this never recreates a row in the outbox.
@@ -289,7 +292,13 @@ function renderChatQueueItem(
     !item.serverQueued && !failed && (props.offline || item.sendState === "waiting-reconnect");
   const stateLabel = sendStateLabel(item, !item.serverQueued && props.offline === true);
   const steered = item.queueMode === "steer" && stateLabel === null;
-  const busy = item.sendState === "executing-command";
+  // A dispatched steer has left the browser's custody; removing the row cannot recall it.
+  const busy =
+    item.sendState === "executing-command" ||
+    (item.queueMode === "steer" &&
+      (item.serverQueued === true ||
+        item.sendState === "submitting" ||
+        item.sendState === "sending"));
   const editing = edit?.editingId === item.id;
   const mentionText = editing ? (edit?.editingText ?? item.text) : item.text;
   const mentions = editing ? edit?.editingMentions : item.mentions;

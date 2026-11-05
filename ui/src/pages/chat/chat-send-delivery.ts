@@ -261,7 +261,6 @@ async function sendPreparedChatMessage(
   const isVisible = () => visibleSessionMatches(host, sessionKey, prepared.agentId);
   const recoverNativeRuntime =
     allowNativeRecovery && isVisible() ? captureChatNativeRuntimeRecovery(host, route) : undefined;
-  let steerSubmission: ReturnType<ChatHost["chatSubmissions"]["retain"]>;
   const buildSubmittedUserMessage = (steerTargetRunId?: string) =>
     buildLocalUserMessage(
       {
@@ -305,29 +304,11 @@ async function sendPreparedChatMessage(
     const deliveryLeafEntryId = prepared.intent
       ? prepared.expectedLeafEntryId
       : expectedLeafEntryId;
-    if (prepared.queueMode === "steer" && isVisible() && host.chatRunId) {
-      const steerTargetRunId = host.chatRunId;
-      const projectedMessage = buildSubmittedUserMessage(steerTargetRunId);
-      if (projectedMessage) {
-        steerSubmission = host.chatSubmissions.retain({
-          kind: "delivered",
-          deliveryKey: chatOutboxDeliveryKey(host, scope, runId),
-          owner: host.client!,
-          sessionKey,
-          agentId: prepared.agentId,
-          sessionId: prepared.sessionId ?? host.currentSessionId ?? undefined,
-          pendingRunId: runId,
-          message: projectedMessage,
-        });
-        reduceChatSessionProjection(
-          host,
-          { type: "sendPending", runId, message: projectedMessage },
-          {
-            scope: readChatSessionProjectionScope(host, { sessionKey, agentId: prepared.agentId }),
-          },
-        );
-      }
-    }
+    // A steer joins the active run's transcript only when that run consumes it.
+    // Until then the composer queue owns its display, so it cannot sit above
+    // output the run produced before injection.
+    const steerTargetRunId =
+      prepared.queueMode === "steer" && isVisible() ? (host.chatRunId ?? undefined) : undefined;
     const ack = await requestChatSend(host, {
       message,
       workContext: prepared.workContext,
@@ -359,9 +340,6 @@ async function sendPreparedChatMessage(
         return "pending";
       }
       const error = formatTerminalChatSendAckError(ack, "chat");
-      if (steerSubmission) {
-        steerSubmission.pending = false;
-      }
       // Release in-flight ownership before publishing Retry; an immediate click
       // must not see this completed send as the run that blocks its replacement.
       finishScopedChatSending(host, scope);
@@ -419,7 +397,24 @@ async function sendPreparedChatMessage(
           sessionKey,
           agentId: prepared.agentId,
         });
-        const projectedMessage = buildSubmittedUserMessage();
+        // A durable steer stays queued until consumed; a persisted one keeps its run boundary.
+        const projectedMessage =
+          steerTargetRunId && ack.messageSeq === undefined && storageMode === "durable"
+            ? undefined
+            : buildSubmittedUserMessage(steerTargetRunId);
+        if (projectedMessage && steerTargetRunId) {
+          // Panes recreated before the transcript page arrives keep the run boundary.
+          host.chatSubmissions.retain({
+            kind: "delivered",
+            deliveryKey: chatOutboxDeliveryKey(host, scope, runId),
+            owner: host.client!,
+            sessionKey,
+            agentId: prepared.agentId,
+            sessionId: prepared.sessionId ?? host.currentSessionId ?? undefined,
+            pendingRunId: runId,
+            message: projectedMessage,
+          });
+        }
         if (projectedMessage) {
           reduceChatSessionProjection(
             host,
@@ -490,19 +485,6 @@ async function sendPreparedChatMessage(
   } catch (err) {
     if (!requestConnectionIsCurrent()) {
       return "pending";
-    }
-    if (steerSubmission) {
-      steerSubmission.pending = false;
-    }
-    if (prepared.queueMode === "steer" && isVisible()) {
-      // The retained outbox row owns Retry and uncertain-delivery feedback.
-      reduceChatSessionProjection(
-        host,
-        { type: "sendFailed", runId },
-        {
-          scope: readChatSessionProjectionScope(host, { sessionKey, agentId: prepared.agentId }),
-        },
-      );
     }
     const restriction =
       err instanceof GatewayRequestError

@@ -4,6 +4,7 @@ import { extractTextCached } from "../../lib/chat/message-extract.ts";
 import { buildChatItems, type BuildChatItemsProps } from "./chat-thread-build.ts";
 import { createProps } from "./chat-thread.test-support.ts";
 import { buildCachedChatItems, resetChatThreadState } from "./chat-thread.ts";
+import { selectChatInputDisplay } from "./history-merge.ts";
 
 type PendingInput = NonNullable<BuildChatItemsProps["pendingInputs"]>[number];
 
@@ -176,6 +177,30 @@ describe("transcript input order", () => {
         ],
       }),
     ).toEqual(["Earlier commentary", "Earlier tool", "Steer"]);
+  });
+
+  it("keeps a steer into another active run out of the thread until its transcript copy", () => {
+    const messages = [
+      { role: "user", content: "Original", __openclaw: { idempotencyKey: "run:user", seq: 1 } },
+    ];
+    const steer = { ...queuedInput("Steer", 10, "sending"), queueMode: "steer" as const };
+    const accepted = acceptedInput("Steer", 20);
+    expect(visibleRows({ messages, runId: "run", queue: [steer] })).toEqual(["Original"]);
+    expect(
+      visibleRows({ messages, runId: "run", queue: [steer], pendingInputs: [accepted] }),
+    ).toEqual(["Original"]);
+    expect(
+      selectChatInputDisplay(messages, [steer], [accepted]).queuedInputs.map((input) => input.id),
+    ).toEqual(["Steer"]);
+    expect(
+      visibleRows({
+        messages: [
+          ...messages,
+          { role: "user", content: "Steer", __openclaw: { steerTargetRunId: "run", seq: 2 } },
+        ],
+        runId: "run",
+      }),
+    ).toEqual(["Original", "Steer"]);
   });
 
   it.each(["steer", "interrupt"] as const)(

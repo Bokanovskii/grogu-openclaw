@@ -40,6 +40,8 @@ export type CostUsageTotals = {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /** Reasoning tokens reported by the provider; a subset of `output`. */
+  reasoning?: number;
   totalTokens: number;
   totalCost: number;
   // Cost breakdown by token type (from actual API data when available)

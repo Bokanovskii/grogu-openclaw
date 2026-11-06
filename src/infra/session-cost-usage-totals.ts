@@ -22,6 +22,7 @@ export function cloneCostUsageTotals(totals: CostUsageTotals): CostUsageTotals {
     output: totals.output,
     cacheRead: totals.cacheRead,
     cacheWrite: totals.cacheWrite,
+    ...(totals.reasoning !== undefined ? { reasoning: totals.reasoning } : {}),
     totalTokens: totals.totalTokens,
     totalCost: totals.totalCost,
     inputCost: totals.inputCost,
@@ -38,6 +39,9 @@ export function addCostUsageTotals(target: CostUsageTotals, source: CostUsageTot
   target.output += source.output;
   target.cacheRead += source.cacheRead;
   target.cacheWrite += source.cacheWrite;
+  if (source.reasoning) {
+    target.reasoning = (target.reasoning ?? 0) + source.reasoning;
+  }
   target.totalTokens += source.totalTokens;
   target.totalCost += source.totalCost;
   target.inputCost += source.inputCost;

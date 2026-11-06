@@ -333,7 +333,7 @@ describe("cron batch outcome finalization", () => {
     }
   });
 
-  it("notifies the owning agent once after a recurring auto-disable is durable", async () => {
+  it("notifies the owning agent once after a recurring failure streak is durable", async () => {
     const job = dueJob("recurring-auto-disable-notification", {
       name: "Recurring report",
       schedule: { kind: "every", everyMs: 60_000, anchorMs: DUE_AT - 60_000 },
@@ -346,7 +346,7 @@ describe("cron batch outcome finalization", () => {
       const persisted = openOpenClawStateDatabase()
         .db.prepare("SELECT enabled FROM cron_jobs WHERE store_key = ? AND job_id = ?")
         .get(cronStoreKey(storePath), job.id);
-      expect(persisted).toMatchObject({ enabled: 0 });
+      expect(persisted).toMatchObject({ enabled: 1 });
       order.push("notify");
     });
     const requestHeartbeat = vi.fn(() => {
@@ -366,7 +366,7 @@ describe("cron batch outcome finalization", () => {
     );
     expect(order).toEqual(["notify", "heartbeat"]);
     expect(enqueueSystemEvent).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining(`openclaw automations enable ${job.id}`),
+      expect.stringContaining("stays enabled"),
       {
         agentId: "main",
         sessionKey: undefined,
@@ -376,8 +376,7 @@ describe("cron batch outcome finalization", () => {
     );
     const text = enqueueSystemEvent.mock.calls[0]?.[0];
     expect(text).toContain("Recurring report");
-    expect(text).toContain(job.id);
-    expect(text).toContain("10 consecutive run failures");
+    expect(text).toContain("failed 10 times in a row");
     expect(text).toContain("Cause: billing");
     expect(text).not.toContain("/private/agent/work");
     expect(resolveOriginDeliveryContext).toHaveBeenCalledWith({
@@ -393,11 +392,10 @@ describe("cron batch outcome finalization", () => {
       }),
     );
     expect((await loadCronStore(storePath)).jobs[0]).toMatchObject({
-      enabled: false,
+      enabled: true,
       state: {
         consecutiveErrors: 10,
         lastError: "402 payment required: insufficient credits at /private/agent/work",
-        autoDisabled: { reason: "consecutive-failures", atMs: DUE_AT + 10, consecutiveErrors: 10 },
       },
     });
   });

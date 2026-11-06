@@ -141,7 +141,7 @@ describe("cron timer outcome and failure policy regressions", () => {
     },
   );
 
-  it("records failure diagnostics and auto-disables on the tenth consecutive failure", () => {
+  it("records failure diagnostics and notifies once, without disabling, on the tenth consecutive failure", () => {
     const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
     const deferredNotifications: DeferredCronNotifications = [];
     const enqueueSystemEvent = vi.fn();
@@ -210,13 +210,9 @@ describe("cron timer outcome and failure policy regressions", () => {
       },
       { deferredNotifications },
     );
-    expect(job.enabled).toBe(false);
-    expect(job.state.nextRunAtMs).toBeUndefined();
-    expect(job.state.autoDisabled).toEqual({
-      reason: "consecutive-failures",
-      atMs: startedAt + 60_010,
-      consecutiveErrors: 10,
-    });
+    expect(job.enabled).toBe(true);
+    expect(job.state.nextRunAtMs).toBeGreaterThan(startedAt + 60_010);
+    expect(job.state.autoDisabled).toBeUndefined();
     expect(deferredNotifications).toHaveLength(1);
     runPostPersistCronNotifications(state, structuredClone(deferredNotifications));
     expect(enqueueSystemEvent).toHaveBeenCalledOnce();
@@ -249,7 +245,7 @@ describe("cron timer outcome and failure policy regressions", () => {
     );
   });
 
-  it("still auto-disables a permanent configuration failure", () => {
+  it("keeps a permanent configuration failure enabled on backoff", () => {
     const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
     const deferredNotifications: DeferredCronNotifications = [];
     const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
@@ -267,25 +263,26 @@ describe("cron timer outcome and failure policy regressions", () => {
       { deferredNotifications },
     );
 
-    expect(job.enabled).toBe(false);
-    expect(job.state.autoDisabled?.reason).toBe("consecutive-failures");
-    expect(job.state.nextRunAtMs).toBeUndefined();
+    expect(job.enabled).toBe(true);
+    expect(job.state.autoDisabled).toBeUndefined();
+    expect(job.state.nextRunAtMs).toBeGreaterThan(startedAt);
+    expect(deferredNotifications.filter((n) => n.kind === "auto-disabled")).toHaveLength(1);
   });
 
   it.each([
     {
       name: "explicit permanent classification",
       errorClassification: { kind: "permanent" as const },
-      disables: true,
+      notifies: true,
     },
     {
       name: "unclassified timeout-like text",
       errorClassification: undefined,
-      disables: false,
+      notifies: false,
     },
   ])(
     "keeps the producer classification authoritative: $name",
-    ({ errorClassification, disables }) => {
+    ({ errorClassification, notifies }) => {
       const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
       const deferredNotifications: DeferredCronNotifications = [];
       const { state, job } = outcomeFixture(startedAt, { state: { consecutiveErrors: 9 } });
@@ -304,23 +301,26 @@ describe("cron timer outcome and failure policy regressions", () => {
         { deferredNotifications },
       );
 
-      expect(job.enabled).toBe(!disables);
-      expect(Boolean(job.state.autoDisabled)).toBe(disables);
-      expect(job.state.nextRunAtMs === undefined).toBe(disables);
+      expect(job.enabled).toBe(true);
+      expect(job.state.autoDisabled).toBeUndefined();
+      expect(job.state.nextRunAtMs).toBeGreaterThan(startedAt);
+      expect(deferredNotifications.filter((n) => n.kind === "auto-disabled")).toHaveLength(
+        notifies ? 1 : 0,
+      );
     },
   );
 
   it.each([
-    { name: "silent job", delivery: { mode: "none" as const }, disables: false },
+    { name: "silent job", delivery: { mode: "none" as const }, notifies: false },
     {
       name: "webhook job",
       delivery: { mode: "webhook" as const, to: "https://hooks.example.test/cron" },
-      disables: true,
+      notifies: true,
     },
-    { name: "announce job", delivery: undefined, disables: true },
+    { name: "announce job", delivery: undefined, notifies: true },
   ])(
-    "backs off agent-reported failures and auto-disables only with a notification owner: $name",
-    ({ delivery, disables }) => {
+    "backs off agent-reported failures and never disables them: $name",
+    ({ delivery, notifies }) => {
       const startedAt = Date.parse("2026-08-01T12:00:00.000Z");
       let now = startedAt;
       const deferredNotifications: DeferredCronNotifications = [];
@@ -348,10 +348,10 @@ describe("cron timer outcome and failure policy regressions", () => {
 
       expect(job.state.lastRunStatus).toBe("error");
       expect(job.state.lastError).toBe("No shell tool is available in this run.");
-      expect(job.enabled).toBe(!disables);
-      expect(job.state.consecutiveErrors).toBe(disables ? 10 : 11);
+      expect(job.enabled).toBe(true);
+      expect(job.state.consecutiveErrors).toBe(11);
       expect(deferredNotifications.filter((n) => n.kind === "auto-disabled")).toHaveLength(
-        disables ? 1 : 0,
+        notifies ? 1 : 0,
       );
       // The streak still drives error backoff past the one-minute cadence: 5 and 15 minutes, then hourly.
       expect(delaysMs.slice(2, 6)).toEqual([300_000, 900_000, 3_600_000, 3_600_000]);

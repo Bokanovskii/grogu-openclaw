@@ -807,11 +807,102 @@ describe("private worker trigger templates", () => {
         kind: "source_delta",
         source,
         coverage: { truncated: true },
-        uncertainty: "older_matches_not_observed",
+        uncertainty: null,
       });
       expect(deltaItems(added)).toEqual([head.item(500, 2000)]);
     },
   );
+
+  // Serves a newest-first source the way each connector pages it: Messages by offset, Gmail by `before:`.
+  function pagedMcp(source: Source, entries: readonly Entry[], calls: unknown[]) {
+    const head = heads[source];
+    const sorted = entries.toSorted((a, b) => b[1] - a[1]);
+    const pageOf = (rows: readonly Entry[], offset: number) => ({
+      rows: rows.slice(offset, offset + 100).map(([n, t]) => head.row(n, t)),
+      hasMore: rows.length > offset + 100,
+    });
+    if (source === "messages") {
+      return {
+        seaglass: {
+          recentMessages: async (args: { offset: number }) => {
+            calls.push(args);
+            const { rows, hasMore } = pageOf(sorted, args.offset);
+            return messagesResult(rows, {
+              ...liveWindow,
+              offset: args.offset,
+              hasMore,
+              nextOffset: args.offset + rows.length,
+            });
+          },
+        },
+      };
+    }
+    return {
+      gmail: {
+        gmailSearch: async (args: { query: string }) => {
+          calls.push(args);
+          const before = /before:(\d+)/.exec(args.query)?.[1];
+          const visible = before
+            ? sorted.filter(([, t]) => (gmailEpoch + t * 1000) / 1000 < Number(before))
+            : sorted;
+          const { rows, hasMore } = pageOf(visible, 0);
+          return gmailResult({ messages: rows, count: rows.length, has_more: hasMore });
+        },
+      },
+    };
+  }
+
+  it.each(["messages", "gmail"] as const)(
+    "%s: pages past a truncated head so a burst larger than one page is reported in full",
+    async (source) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const { head, run, observe } = driver(source);
+      const baseline = await observe(base);
+      const burst: Entry[] = Array.from({ length: 250 }, (_, i): Entry => [1000 + i, 5000 - i]);
+
+      const calls: unknown[] = [];
+      const result = await run(pagedMcp(source, [...burst, ...base], calls), {
+        state: baseline.state,
+      });
+      expect(result).toMatchObject({ fire: true });
+      expect(JSON.parse(String(result.message))).toMatchObject({ uncertainty: null });
+      expect(deltaItems(result)).toHaveLength(250);
+      expect(deltaItems(result)).toContainEqual(head.item(1249, 5000 - 249));
+      expect(calls).toHaveLength(3);
+
+      // Past the trigger's tool budget, the delta is partial and says so.
+      const flood: Entry[] = Array.from({ length: 600 }, (_, i): Entry => [2000 + i, 9000 - i]);
+      const partial = await run(pagedMcp(source, [...flood, ...base], []), {
+        state: baseline.state,
+      });
+      // Gmail's `before:` cursor rereads each page's boundary second, so each extra page adds 99.
+      expect(deltaItems(partial)).toHaveLength(source === "gmail" ? 496 : 500);
+      expect(JSON.parse(String(partial.message))).toMatchObject({
+        uncertainty: "older_matches_not_observed",
+      });
+    },
+  );
+
+  it("accepts the null next_offset Seaglass reports for a final short page", async () => {
+    const run = compile(messagesTemplate(100));
+    const rows = [messagesRow(1, 10), messagesRow(2, 5)];
+    const result = await run(
+      {
+        seaglass: {
+          recentMessages: async () => {
+            const page = messagesResult(rows, { ...liveWindow });
+            const text = JSON.parse(page.content[0].text) as Record<string, unknown>;
+            page.content[0].text = JSON.stringify({ ...text, next_offset: null });
+            return page;
+          },
+        },
+      },
+      { state: undefined },
+    );
+    expect(result).not.toHaveProperty("error");
+    expect(result).toMatchObject({ fire: false });
+  });
 
   it.each(["messages", "gmail"] as const)(
     "%s: ignores older items exposed below the head floor and moves the floor",

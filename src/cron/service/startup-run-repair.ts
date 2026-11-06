@@ -5,7 +5,7 @@ import { parseAbsoluteTimeMs } from "../parse.js";
 import type { CronRunLogEntry } from "../run-log-types.js";
 import type { InterruptedStartupRun } from "../store/run-recovery.types.js";
 import type { CronJob, CronRunStatus } from "../types.js";
-import { maybeAutoDisableCronJobAfterRunFailure } from "./auto-disable.js";
+import { notifyCronFailureStreak } from "./auto-disable.js";
 import { finalizeCronFailureNotifications, resolveFailureAlert } from "./failure-alerts.js";
 import type { CronJobPolicyContext, DeferredCronNotifications } from "./state.js";
 import type { CronTriggerEvalOutcome } from "./timer-execution-timeout.js";
@@ -76,7 +76,7 @@ export function markInterruptedStartupRun(params: {
   job.updatedAtMs = nowMs;
 
   const alertConfig = resolveFailureAlert(params.state, job);
-  const autoDisableNotificationOwnsFailure = maybeAutoDisableCronJobAfterRunFailure({
+  const autoDisableNotificationOwnsFailure = notifyCronFailureStreak({
     job,
     atMs: nowMs,
     deferredNotifications: params.deferredNotifications,
@@ -84,7 +84,7 @@ export function markInterruptedStartupRun(params: {
   if (autoDisableNotificationOwnsFailure) {
     params.state.deps.log.error(
       { jobId: job.id, name: job.name, consecutiveErrors: job.state.consecutiveErrors },
-      "cron: auto-disabled interrupted job after consecutive run failures",
+      "cron: interrupted job reached consecutive failure limit; staying enabled",
     );
   }
   // Only startup recovery with durable evidence of no delivery handoff may replay

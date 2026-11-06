@@ -81,6 +81,7 @@ const APP_ROUTE_DEFINITIONS = {
   "memory-import": { path: "/memory-import", aliases: ["/settings/memory-import"] },
   workboard: { path: "/workboard" },
   worktrees: { path: "/worktrees", aliases: ["/settings/worktrees"] },
+  artifacts: { path: "/artifacts" },
   sessions: { path: "/sessions", aliases: ["/settings/sessions"] },
   systems: { path: "/systems" },
   usage: { path: "/usage" },

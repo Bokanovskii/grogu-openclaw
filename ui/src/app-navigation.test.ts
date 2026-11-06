@@ -463,6 +463,7 @@ describe("SIDEBAR_NAV_ROUTES", () => {
       "usage",
       "cron",
       "sessions",
+      "artifacts",
       "systems",
       "activity",
       "meetings",

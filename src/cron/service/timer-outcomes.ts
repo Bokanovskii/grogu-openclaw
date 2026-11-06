@@ -8,7 +8,7 @@ import { resolveCronRunErrorReason } from "../run-error-reason.js";
 import { cronSchedulingInputsEqual } from "../schedule-identity.js";
 import { computeNextRunAtMs } from "../schedule.js";
 import type { CronJob, CronRunStatus } from "../types.js";
-import { maybeAutoDisableCronJobAfterRunFailure } from "./auto-disable.js";
+import { notifyCronFailureStreak } from "./auto-disable.js";
 import {
   finalizeCronFailureNotifications,
   resolveFailureIncident,
@@ -375,30 +375,27 @@ export function applyJobResult(
       job.state.nextRunAtMs = previousScheduleState.nextRunAtMs;
       job.state.pacedNextRunAtMs = previousScheduleState.pacedNextRunAtMs;
       job.state.forcePreservedNextRunAtMs = previousScheduleState.nextRunAtMs;
-    } else if (
-      result.status === "error" &&
-      isJobEnabled(job) &&
-      !silentReportedFailure &&
-      maybeAutoDisableCronJobAfterRunFailure({
-        job,
-        atMs: result.endedAt,
-        errorClassification: result.errorClassification,
-        deferredNotifications: opts.deferredNotifications,
-      })
-    ) {
-      autoDisableNotificationOwnsFailure = true;
-      // Keep this after the ownership and immediate-preserve gates: those paths
-      // restore schedule state and would otherwise silently undo the disable.
-      state.deps.log.error(
-        {
-          jobId: job.id,
-          name: job.name,
-          consecutiveErrors: job.state.consecutiveErrors,
-          error: result.error,
-        },
-        "cron: auto-disabled job after consecutive run failures",
-      );
     } else if (result.status === "error" && isJobEnabled(job)) {
+      if (
+        !silentReportedFailure &&
+        notifyCronFailureStreak({
+          job,
+          atMs: result.endedAt,
+          errorClassification: result.errorClassification,
+          deferredNotifications: opts.deferredNotifications,
+        })
+      ) {
+        autoDisableNotificationOwnsFailure = true;
+        state.deps.log.error(
+          {
+            jobId: job.id,
+            name: job.name,
+            consecutiveErrors: job.state.consecutiveErrors,
+            error: result.error,
+          },
+          "cron: job reached consecutive failure limit; staying enabled on backoff",
+        );
+      }
       const retryDecision = resolveTransientCronRetryDecision({
         error: result.error,
         errorClassification: result.errorClassification,

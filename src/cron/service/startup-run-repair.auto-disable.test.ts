@@ -25,7 +25,7 @@ import {
 import { runPostPersistCronNotifications } from "./store.js";
 
 describe("startup run repair auto-disable", () => {
-  it("records the tenth restart-interrupted recurring failure before notification", () => {
+  it("keeps the tenth restart-interrupted recurring failure enabled and notifies once", () => {
     const runningAtMs = Date.parse("2026-08-01T16:00:00.000Z");
     const nowMs = runningAtMs + 30_000;
     const enqueueSystemEvent = vi.fn();
@@ -76,17 +76,8 @@ describe("startup run repair auto-disable", () => {
       deferredNotifications,
     });
 
-    expect(job).toMatchObject({
-      enabled: false,
-      state: {
-        consecutiveErrors: 10,
-        autoDisabled: {
-          reason: "consecutive-failures",
-          atMs: nowMs,
-          consecutiveErrors: 10,
-        },
-      },
-    });
+    expect(job).toMatchObject({ enabled: true, state: { consecutiveErrors: 10 } });
+    expect(job.state.autoDisabled).toBeUndefined();
     expect(enqueueSystemEvent).not.toHaveBeenCalled();
     expect(job.state.deliverySuppressionReason).toBeUndefined();
     expect(requestHeartbeat).not.toHaveBeenCalled();
@@ -114,7 +105,7 @@ describe("startup run repair auto-disable", () => {
       creatorSessionKey: "agent:main:telegram:group:42:topic:77",
       executionSessionTarget: "session:agent:main:telegram:group:99" as const,
     },
-  ])("delivers an auto-disable safety notice to $name with cadence disabled", async (testCase) => {
+  ])("delivers a failure-streak notice to $name with cadence disabled", async (testCase) => {
     vi.useFakeTimers();
     const nowMs = Date.parse("2026-08-01T16:00:00.000Z");
     vi.setSystemTime(nowMs);
@@ -216,9 +207,9 @@ describe("startup run repair auto-disable", () => {
           reason: "wake",
         }),
       );
-      expect(prompts[0]).toContain('Automation "Important report" was auto-disabled');
-      expect(prompts[0]).toContain("10 consecutive run failures");
-      expect(prompts[0]).toContain("openclaw automations enable restart-auto-disable-notification");
+      expect(job.enabled).toBe(true);
+      expect(prompts[0]).toContain('Automation "Important report" has failed 10 times in a row');
+      expect(prompts[0]).toContain("stays enabled");
       expect(prompts[0]).toContain("Please relay this reminder to the user");
     } finally {
       try {

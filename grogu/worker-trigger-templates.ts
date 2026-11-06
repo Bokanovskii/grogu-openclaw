@@ -326,7 +326,7 @@ const decodeGmail = (observation, maxItems) => {
     return failure("schema");
   }
 };
-const decodeMessages = (observation, maxItems) => {
+const decodeMessages = (observation, maxItems, paged = false) => {
   const envelope = record(observation);
   if (!envelope) return failure("schema");
   const value = textContentRecord(envelope);
@@ -343,8 +343,8 @@ const decodeMessages = (observation, maxItems) => {
     !Number.isSafeInteger(value.offset) ||
     value.offset < 0 ||
     typeof value.has_more !== "boolean" ||
-    !Number.isSafeInteger(value.next_offset) ||
-    value.next_offset < 0 ||
+    // Seaglass reports a null next_offset when the window has no further page.
+    (value.has_more ? !Number.isSafeInteger(value.next_offset) || value.next_offset < 0 : value.next_offset !== null && (!Number.isSafeInteger(value.next_offset) || value.next_offset < 0)) ||
     !Array.isArray(value.messages) ||
     value.messages.length > value.limit ||
     value.messages.length > maxItems
@@ -360,7 +360,7 @@ const decodeMessages = (observation, maxItems) => {
       };
     });
     // A truncated page only proves the newest messages when it starts at the head.
-    if (value.has_more && value.offset !== 0) return failure("incomplete");
+    if (value.has_more && value.offset !== 0 && !paged) return failure("incomplete");
     const unordered = value.has_more ? headFailure(rows, stamps.messages) : null;
     if (unordered) return unordered;
     const items = canonicalize(rows, identities.messages);
@@ -380,7 +380,41 @@ const decodeMessages = (observation, maxItems) => {
     return failure("schema");
   }
 };
-const evaluate = (template, observation, previousState, nowMs) => {
+const maxOlderPages = 4;
+// Arguments for the page just older than a truncated one: Messages keeps its window and advances
+// the offset; Gmail has no page token, so it narrows the query to before the page's oldest second.
+const olderPageArgs = (template, page) => {
+  if (!page.coverage.truncated) return null;
+  if (template.templateId === "gmail-metadata-v1") {
+    return Number.isFinite(page.floor) ? { ...template.args, query: template.args.query + " before:" + (Math.floor(page.floor / 1000) + 1) } : null;
+  }
+  return Number.isSafeInteger(page.cursor?.nextOffset)
+    ? { ...template.args, since_ts: page.cursor.sinceTs, before_ts: page.cursor.beforeTs, offset: page.cursor.nextOffset }
+    : null;
+};
+// A burst larger than one page must still be reported in full: page past a truncated head until it
+// overlaps the prior head (or falls below its floor), within the trigger's tool-call budget.
+const collectOlderRows = async (source, decoded, known, fetchOlderPage) => {
+  const identity = identities[source];
+  const stamp = stamps[source];
+  const reaches = (rows) => rows.some((row) => known.ids.has(identity(row)) || (known.floor !== null && Number.isFinite(stamp(row)) && stamp(row) < known.floor));
+  const seen = new Set(decoded.rows.map((row) => identity(row)));
+  const older = [];
+  let page = decoded;
+  let reached = reaches(decoded.rows);
+  for (let pages = 0; !reached && page.coverage.truncated && pages < maxOlderPages; pages += 1) {
+    const next = await fetchOlderPage(page);
+    if (!next || next.error) return { older, complete: false };
+    const unseen = next.rows.filter((row) => !seen.has(identity(row)));
+    if (unseen.length === 0) return { older, complete: false };
+    for (const row of unseen) seen.add(identity(row));
+    older.push(...unseen);
+    reached = reaches(unseen);
+    page = next;
+  }
+  return { older, complete: reached || !page.coverage.truncated };
+};
+const evaluate = async (template, observation, previousState, nowMs, fetchOlderPage) => {
   const state = normalizeState(previousState, nowMs, template);
   const source = template.templateId === "gmail-metadata-v1" ? "gmail" : "messages";
   const decoded = source === "gmail" ? decodeGmail(observation, template.maxItems) : decodeMessages(observation, template.maxItems);
@@ -395,8 +429,12 @@ const evaluate = (template, observation, previousState, nowMs) => {
   // An unseen identity is exposed by a removal only when its row is positively older than a truncated prior head's floor.
   // Unreadable timestamps are never exposed and equal timestamps count as inside, so both fire.
   const exposed = (row) => known.floor !== null && Number.isFinite(stamp(row)) && stamp(row) < known.floor;
-  const fresh = known ? new Set(decoded.rows.filter((row) => !known.ids.has(identity(row)) && !exposed(row)).map((row) => identity(row))) : new Set();
-  const added = decoded.items.filter((item) => fresh.has(identity(item)));
+  const olderScan = known && decoded.coverage.truncated && fetchOlderPage
+    ? await collectOlderRows(source, decoded, known, fetchOlderPage)
+    : { older: [], complete: !decoded.coverage.truncated };
+  const observedRows = [...decoded.rows, ...olderScan.older];
+  const fresh = known ? new Set(observedRows.filter((row) => !known.ids.has(identity(row)) && !exposed(row)).map((row) => identity(row))) : new Set();
+  const added = canonicalize(observedRows, identity).filter((item) => fresh.has(identity(item)));
   const changed = added.length > 0;
   state.sources = { ...state.sources, [source]: { fingerprint, cursor: decoded.cursor, lastSuccessAt: nowMs } };
   if (changed) {
@@ -408,7 +446,7 @@ const evaluate = (template, observation, previousState, nowMs) => {
   const nativeSweepDue = state.nextNativeSweepAt <= nowMs;
   let message;
   if (changed) {
-    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: added, uncertainty: decoded.coverage.truncated ? "older_matches_not_observed" : null, nativeSourceSweep: nativeSweepDue });
+    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: added, uncertainty: olderScan.complete ? null : "older_matches_not_observed", nativeSourceSweep: nativeSweepDue });
   } else if (dueIndex >= 0) {
     const due = state.continuations[dueIndex];
     const fires = due.fires + 1;
@@ -431,15 +469,30 @@ export function workerTriggerScriptSha256(script: string): string {
 export function renderWorkerTriggerScript(value: unknown): string {
   const template = workerTriggerTemplateSchema.parse(value);
   const callable = expectedCollectorTool(template.templateId).callable;
+  const decode =
+    template.templateId === "gmail-metadata-v1"
+      ? "decodeGmail(older, template.maxItems)"
+      : "decodeMessages(older, template.maxItems, true)";
   return `const template = ${JSON.stringify(template)};
 ${PORTABLE_TRIGGER_RUNTIME}
+const fetchOlderPage = async (page) => {
+  const args = olderPageArgs(template, page);
+  if (!args) return null;
+  let older;
+  try {
+    older = await ${callable}(args);
+  } catch (error) {
+    return failure(normalizeFailureKind(error));
+  }
+  return ${decode};
+};
 let observation;
 try {
   observation = await ${callable}(template.args);
 } catch (error) {
   return failure(normalizeFailureKind(error));
 }
-return evaluate(template, observation, trigger.state, Date.now());`;
+return await evaluate(template, observation, trigger.state, Date.now(), fetchOlderPage);`;
 }
 
 export function inspectRenderedWorkerTriggerScript(script: string): WorkerTriggerTemplate {

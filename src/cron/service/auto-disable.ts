@@ -57,11 +57,13 @@ export function autoDisableCronJob(params: {
 }
 
 /**
- * Auto-disables only time-based recurring jobs once their run-error streak reaches the limit.
- * A transient provider or network outage keeps the job on its retry/backoff schedule instead,
- * so a model server that is down for a while cannot silently switch automations off.
+ * Recurring jobs are never switched off for run failures: a broken source or tool can heal
+ * on its own, and a permanently disabled automation fails silently. Once a non-retryable
+ * streak reaches the limit, the owning agent is told once and the job stays on its capped
+ * error backoff (hourly at worst), so it resumes by itself when the cause clears.
+ * Returns true when that notice was queued, so it owns this failure's notification.
  */
-export function maybeAutoDisableCronJobAfterRunFailure(params: {
+export function notifyCronFailureStreak(params: {
   job: CronJob;
   atMs: number;
   errorClassification?: CronRunErrorClassification;
@@ -78,16 +80,22 @@ export function maybeAutoDisableCronJobAfterRunFailure(params: {
               ? params.errorClassification.reason
               : params.job.state.lastErrorReason,
         }).retryable;
+  const { job } = params;
   if (
-    (params.job.schedule.kind !== "cron" && params.job.schedule.kind !== "every") ||
-    consecutiveErrors < MAX_CONSECUTIVE_RUN_FAILURES ||
-    retryable
+    (job.schedule.kind !== "cron" && job.schedule.kind !== "every") ||
+    consecutiveErrors !== MAX_CONSECUTIVE_RUN_FAILURES ||
+    retryable ||
+    isSystemMonitorDeclaration(job.declarationKey)
   ) {
     return false;
   }
-  return autoDisableCronJob({
-    ...params,
-    reason: "consecutive-failures",
-    consecutiveErrors,
-  });
+  const name = truncateUtf16Safe((job.name || job.id).replace(/\s+/g, " ").trim(), 120);
+  const text = [
+    `⚠️ Automation "${name}" has failed ${consecutiveErrors} times in a row. It stays enabled and keeps retrying on its error backoff (at most hourly).`,
+    ...cronFailureDetailLines(job.state.lastErrorReason),
+    "Fix the underlying cause; the next successful run clears the failure streak.",
+  ].join("\n");
+  // Reuses the owner-queue route of auto-disable notices; the job itself is left enabled.
+  params.deferredNotifications.push({ kind: "auto-disabled", job: cronNotificationJob(job), text });
+  return true;
 }

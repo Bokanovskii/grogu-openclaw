@@ -9,10 +9,9 @@ import type {
   AgentsWorkspaceListResult,
 } from "../../../../packages/gateway-protocol/src/schema/agents-workspace.js";
 import type { AgentsListResult } from "../../api/types.ts";
-import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
+import { subtitleForRoute } from "../../app-navigation.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
 import { toSanitizedMarkdownHtml } from "../../components/markdown.ts";
-import { renderSettingsPageHeader } from "../../components/settings-ui.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
 import { t } from "../../i18n/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
@@ -244,7 +243,7 @@ class ArtifactsPage extends OpenClawLightDomElement {
       ${
         this.agents.length > 1
           ? html`<select
-              class="settings-select"
+              class="settings-select artifacts-toolbar__select"
               aria-label=${t("artifacts.agent")}
               @change=${(event: Event) =>
                 this.selectAgent((event.target as HTMLSelectElement).value)}
@@ -259,7 +258,7 @@ class ArtifactsPage extends OpenClawLightDomElement {
           : nothing
       }
       <select
-        class="settings-select"
+        class="settings-select artifacts-toolbar__select"
         aria-label=${t("artifacts.sort")}
         @change=${(event: Event) => {
           this.sort = (event.target as HTMLSelectElement).value as ArtifactSortMode;
@@ -298,11 +297,10 @@ class ArtifactsPage extends OpenClawLightDomElement {
       </div>
     `;
     return html`
-      ${renderSettingsPageHeader({
-        title: titleForRoute("artifacts"),
-        subtitle: subtitleForRoute("artifacts"),
-        actions: this.renderActions(),
-      })}
+      <div class="artifacts-toolbar">
+        <p class="artifacts-toolbar__subtitle">${subtitleForRoute("artifacts")}</p>
+        <div class="artifacts-toolbar__actions">${this.renderActions()}</div>
+      </div>
       ${renderSettingsWorkspace(body, { fillHeight: true })}
     `;
   }

@@ -312,6 +312,7 @@ function renderUsageInsights(
   const avgCost = aggregates.messages.total ? totals.totalCost / aggregates.messages.total : 0;
   const cacheBase = totals.input + totals.cacheRead + totals.cacheWrite;
   const cacheHitRate = cacheBase > 0 ? totals.cacheRead / cacheBase : 0;
+  const reasoningTokens = Math.min(totals.reasoning ?? 0, totals.output);
   const cacheHitLabel =
     cacheBase > 0 ? `${(cacheHitRate * 100).toFixed(1)}%` : t("usage.common.emptyValue");
   const errorRatePct = stats.errorRate * 100;
@@ -415,6 +416,27 @@ function renderUsageInsights(
               value: aggregates.tools.totalCalls,
               sub: `${aggregates.tools.uniqueTools} ${t("usage.overview.toolsUsed")}`,
               className: "usage-summary-card--half",
+            })}
+            ${renderSummaryStat({
+              hintId: "input-tokens",
+              metric: "inputTokens",
+              value: formatUsageTokens(cacheBase),
+              sub: `${formatUsageTokens(totals.cacheRead)} ${t("usage.overview.cached")} · ${formatUsageTokens(totals.input + totals.cacheWrite)} ${t("usage.overview.uncached")}`,
+              className: "usage-summary-card--medium",
+            })}
+            ${renderSummaryStat({
+              hintId: "output-tokens",
+              metric: "outputTokens",
+              value: formatUsageTokens(totals.output),
+              sub: `${formatUsageTokens(reasoningTokens)} ${t("usage.overview.reasoning")} · ${formatUsageTokens(totals.output - reasoningTokens)} ${t("usage.overview.final")}`,
+              className: "usage-summary-card--medium",
+            })}
+            ${renderSummaryStat({
+              hintId: "total-tokens",
+              metric: "totalTokens",
+              value: formatUsageTokens(totals.totalTokens),
+              sub: `${formatUsageTokens(cacheBase)} ${t("usage.overview.inputLower")} · ${formatUsageTokens(totals.output)} ${t("usage.overview.outputLower")}`,
+              className: "usage-summary-card--medium",
             })}
             ${renderSummaryStat({
               hintId: "average-tokens",

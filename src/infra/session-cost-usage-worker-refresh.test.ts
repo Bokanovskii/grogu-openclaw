@@ -154,4 +154,27 @@ describe("paged SQLite usage rollups", () => {
       Object.values(result.rollup.buckets).find((bucket) => bucket.latency.count > 0)?.latency,
     ).toMatchObject({ count: 1, min: 1000, max: 1000, sum: 1000 });
   });
+
+  it("rolls up provider-reported reasoning tokens as a capped subset of output", async () => {
+    const withReasoning = (
+      id: string,
+      parentId: string | null,
+      output: number,
+      reasoning: number,
+    ) => {
+      const event = message(id, parentId, 1);
+      const msg = event.message as Record<string, unknown>;
+      return {
+        ...event,
+        message: { ...msg, usage: { input: 1, output, reasoningTokens: reasoning } },
+      };
+    };
+    const result = await scan([
+      { seq: 1, event: withReasoning("root", null, 50, 30) },
+      { seq: 2, event: withReasoning("a", "root", 10, 99) },
+    ]);
+    const buckets = Object.values(result.rollup.buckets);
+    expect(buckets.reduce((sum, bucket) => sum + (bucket.totals.reasoning ?? 0), 0)).toBe(40);
+    expect(buckets.reduce((sum, bucket) => sum + bucket.totals.output, 0)).toBe(60);
+  });
 });

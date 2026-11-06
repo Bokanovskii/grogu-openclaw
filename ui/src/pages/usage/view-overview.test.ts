@@ -91,8 +91,8 @@ describe("renderUsageInsights", () => {
 
     const buttons = [...container.querySelectorAll<HTMLButtonElement>("button.usage-summary-hint")];
     const tooltips = [...container.querySelectorAll("openclaw-tooltip")];
-    expect(buttons).toHaveLength(9);
-    expect(tooltips).toHaveLength(9);
+    expect(buttons).toHaveLength(12);
+    expect(tooltips).toHaveLength(12);
     await Promise.all(
       [...container.querySelectorAll("openclaw-agent-row-chip")].map((chip) => chip.updateComplete),
     );
@@ -227,6 +227,31 @@ describe("renderUsageInsights", () => {
     );
 
     expect(container.textContent).not.toContain("1000.0% of cost");
+  });
+
+  it("splits input into cached/uncached and output into reasoning/final", () => {
+    const container = document.createElement("div");
+    render(
+      renderUsageInsights(
+        { ...totals, input: 100, cacheRead: 300, cacheWrite: 600, output: 40, reasoning: 30 },
+        aggregates,
+        { durationCount: 0, avgDurationMs: 0, errorRate: 0 },
+        false,
+        false,
+        [],
+        1,
+        1,
+      ),
+      container,
+    );
+
+    const card = (title: string) =>
+      Array.from(container.querySelectorAll(".usage-summary-card"))
+        .find((el) => el.querySelector(".usage-summary-title")?.textContent?.includes(title))
+        ?.querySelector(".usage-summary-sub")
+        ?.textContent?.trim();
+    expect(card("Input Tokens")).toBe("300 cached · 700 uncached");
+    expect(card("Output Tokens")).toBe("30 reasoning · 10 final");
   });
 });
 

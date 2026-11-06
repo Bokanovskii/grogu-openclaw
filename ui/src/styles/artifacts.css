@@ -1,0 +1,142 @@
+.artifacts-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+}
+
+.artifacts-browser,
+.artifacts-preview {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.artifacts-browser {
+  padding: 8px;
+}
+
+.artifacts-preview {
+  padding: 16px 20px;
+}
+
+.artifacts-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 8px;
+  font-size: 13px;
+}
+
+.artifacts-crumb {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+}
+
+.artifacts-crumb:hover {
+  background: var(--bg-hover);
+}
+
+.artifacts-crumb--current {
+  color: inherit;
+  font-weight: 600;
+  cursor: default;
+}
+
+.artifacts-crumb-sep {
+  color: var(--muted);
+}
+
+.artifacts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.artifacts-entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.artifacts-entry:hover {
+  background: var(--bg-hover);
+}
+
+.artifacts-entry--selected {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
+
+.artifacts-entry__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-entry__meta,
+.artifacts-preview__meta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.artifacts-preview__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifacts-preview__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-preview__empty {
+  color: var(--muted);
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.artifacts-preview__text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
+.artifacts-preview__image {
+  max-width: 100%;
+}
+
+@media (max-width: 760px) {
+  .artifacts-layout {
+    grid-template-columns: 1fr;
+  }
+}

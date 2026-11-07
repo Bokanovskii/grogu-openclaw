@@ -824,11 +824,15 @@ describe("private worker trigger templates", () => {
     if (source === "messages") {
       return {
         seaglass: {
-          recentMessages: async (args: { offset: number }) => {
+          recentMessages: async (args: { offset: number; before_ts?: number }) => {
             calls.push(args);
-            const { rows, hasMore } = pageOf(sorted, args.offset);
+            // Like Seaglass, a returned before_ts pins the window so later arrivals never shift offsets.
+            const beforeTs = args.before_ts ?? messagesEpoch + (sorted[0]?.[1] ?? 0);
+            const inWindow = sorted.filter(([, t]) => messagesEpoch + t <= beforeTs);
+            const { rows, hasMore } = pageOf(inWindow, args.offset);
             return messagesResult(rows, {
               ...liveWindow,
+              beforeTs,
               offset: args.offset,
               hasMore,
               nextOffset: args.offset + rows.length,
@@ -870,17 +874,68 @@ describe("private worker trigger templates", () => {
       expect(deltaItems(result)).toHaveLength(250);
       expect(deltaItems(result)).toContainEqual(head.item(1249, 5000 - 249));
       expect(calls).toHaveLength(3);
+    },
+  );
 
-      // Past the trigger's tool budget, the delta is partial and says so.
-      const flood: Entry[] = Array.from({ length: 600 }, (_, i): Entry => [2000 + i, 9000 - i]);
-      const partial = await run(pagedMcp(source, [...flood, ...base], []), {
-        state: baseline.state,
-      });
-      // Gmail's `before:` cursor rereads each page's boundary second, so each extra page adds 99.
-      expect(deltaItems(partial)).toHaveLength(source === "gmail" ? 496 : 500);
-      expect(JSON.parse(String(partial.message))).toMatchObject({
-        uncertainty: "older_matches_not_observed",
-      });
+  it.each(["messages", "gmail"] as const)(
+    "%s: resumes a burst past the tool budget on later evaluations until every message is reported once",
+    async (source) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const { head, run, observe } = driver(source);
+      const baseline = await observe(base);
+      const flood: Entry[] = Array.from({ length: 1200 }, (_, i): Entry => [2000 + i, 9000 - i]);
+      const later: Entry[] = Array.from({ length: 30 }, (_, i): Entry => [4000 + i, 20000 - i]);
+      const reported: unknown[] = [];
+      const uncertainties: unknown[] = [];
+      let state = baseline.state;
+      for (let evaluation = 0; evaluation < 8; evaluation += 1) {
+        const mcp = pagedMcp(
+          source,
+          evaluation === 0 ? [...flood, ...base] : [...later, ...flood, ...base],
+          [],
+        );
+        if (evaluation === 1) {
+          // A failed older page is resumed, not skipped.
+          const service = Object.values(mcp)[0] as Record<
+            string,
+            (args: unknown) => Promise<unknown>
+          >;
+          const [name] = Object.keys(service);
+          const page = service[name];
+          let calls = 0;
+          service[name] = async (args) => {
+            calls += 1;
+            if (calls === 2) {
+              throw new Error("timeout");
+            }
+            return page(args);
+          };
+        }
+        const result = await run(mcp, { state });
+        expect(result).not.toHaveProperty("error");
+        state = result.state;
+        if (!result.fire) {
+          break;
+        }
+        const message = JSON.parse(String(result.message)) as {
+          kind: string;
+          uncertainty: unknown;
+        };
+        if (message.kind !== "source_delta") {
+          break;
+        }
+        reported.push(...deltaItems(result));
+        uncertainties.push(message.uncertainty);
+      }
+      const expected = [...later, ...flood].map(([n, t]) => head.item(n, t));
+      expect(reported).toHaveLength(expected.length);
+      expect(new Set(reported.map((item) => JSON.stringify(item))).size).toBe(expected.length);
+      expect(reported).toEqual(expect.arrayContaining(expected));
+      expect(uncertainties.at(0)).toBe("older_matches_pending");
+      expect(uncertainties.at(-1)).toBeNull();
+      expect(uncertainties).not.toContain("older_matches_not_observed");
+      expect(JSON.stringify(state)).not.toContain("gaps");
     },
   );
 

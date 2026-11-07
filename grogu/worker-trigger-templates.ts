@@ -241,6 +241,22 @@ const priorHead = (fingerprint, source) => {
     return null;
   }
 };
+const maxGaps = 4;
+// A gap is a stretch of a source a past evaluation could not page through within its tool budget:
+// the head it must reach (target), where paging resumes (floor/cursor), and the boundary ids already read (edge).
+const normalizeGaps = (value, source) => {
+  if (!Array.isArray(value)) return [];
+  const usable = usableKeys[source];
+  return value.flatMap((entry) => {
+    const gap = record(entry);
+    const target = record(gap?.target);
+    const cursor = gap?.cursor === null ? null : record(gap?.cursor);
+    if (!gap || !target || !Array.isArray(target.ids) || !target.ids.every(usable) || !(target.floor === null || Number.isFinite(target.floor))) return [];
+    if (!Array.isArray(gap.edge) || !gap.edge.every(usable) || !(gap.floor === null || Number.isFinite(gap.floor))) return [];
+    if (source === "gmail" ? !Number.isFinite(gap.floor) : !cursor || !epochSeconds(cursor.sinceTs) || !epochSeconds(cursor.beforeTs) || !Number.isSafeInteger(cursor.nextOffset) || cursor.nextOffset < 0) return [];
+    return [{ target: { ids: target.ids, floor: target.floor }, floor: gap.floor, cursor: cursor && { sinceTs: cursor.sinceTs, beforeTs: cursor.beforeTs, nextOffset: cursor.nextOffset }, edge: gap.edge }];
+  }).slice(-maxGaps);
+};
 const normalizeState = (value, nowMs, template) => {
   const loaded = record(value);
   const loadedSources = record(loaded?.sources) || {};
@@ -248,7 +264,8 @@ const normalizeState = (value, nowMs, template) => {
   for (const source of ["gmail", "messages"]) {
     const item = record(loadedSources[source]);
     if (item && typeof item.fingerprint === "string" && utf8Bytes(item.fingerprint) <= maxStateBytes / 2 && Number.isFinite(item.lastSuccessAt) && priorHead(item.fingerprint, source)) {
-      sources[source] = { fingerprint: item.fingerprint, lastSuccessAt: item.lastSuccessAt };
+      const gaps = normalizeGaps(item.gaps, source);
+      sources[source] = { fingerprint: item.fingerprint, lastSuccessAt: item.lastSuccessAt, ...(gaps.length > 0 ? { gaps } : {}) };
     }
   }
   const entries = Array.isArray(loaded?.continuations) ? loaded.continuations : [];
@@ -392,51 +409,96 @@ const olderPageArgs = (template, page) => {
     ? { ...template.args, since_ts: page.cursor.sinceTs, before_ts: page.cursor.beforeTs, offset: page.cursor.nextOffset }
     : null;
 };
-// A burst larger than one page must still be reported in full: page past a truncated head until it
-// overlaps the prior head (or falls below its floor), within the trigger's tool-call budget.
-const collectOlderRows = async (source, decoded, known, fetchOlderPage) => {
+// A row a scan toward a past head has reached: one that head held, or one older than its floor.
+const belowTarget = (source, target, row) => target.ids.has(identities[source](row)) || (target.floor !== null && Number.isFinite(stamps[source](row)) && stamps[source](row) < target.floor);
+// Pages older than the given page until reaching the target head, spending the evaluation's shared tool budget.
+// Stops incomplete on a failed page (resumed next time) or stalled when paging cannot advance.
+const scanOlder = async (source, page, target, seen, fetchOlderPage, budget) => {
   const identity = identities[source];
-  const stamp = stamps[source];
-  const reaches = (rows) => rows.some((row) => known.ids.has(identity(row)) || (known.floor !== null && Number.isFinite(stamp(row)) && stamp(row) < known.floor));
-  const seen = new Set(decoded.rows.map((row) => identity(row)));
   const older = [];
-  let page = decoded;
-  let reached = reaches(decoded.rows);
-  for (let pages = 0; !reached && page.coverage.truncated && pages < maxOlderPages; pages += 1) {
+  let reached = page.rows.some((row) => belowTarget(source, target, row));
+  while (!reached && page.coverage.truncated && budget.left > 0) {
+    budget.left -= 1;
     const next = await fetchOlderPage(page);
-    if (!next || next.error) return { older, complete: false };
+    if (!next) return { older, page, complete: false, stalled: true };
+    if (next.error) return { older, page, complete: false, stalled: false };
     const unseen = next.rows.filter((row) => !seen.has(identity(row)));
-    if (unseen.length === 0) return { older, complete: false };
+    if (unseen.length === 0) return { older, page, complete: false, stalled: true };
     for (const row of unseen) seen.add(identity(row));
     older.push(...unseen);
-    reached = reaches(unseen);
+    reached = unseen.some((row) => belowTarget(source, target, row));
     page = next;
   }
-  return { older, complete: reached || !page.coverage.truncated };
+  return { older, page, complete: reached || !page.coverage.truncated, stalled: false };
 };
+// Gmail's before: cursor rereads the page's oldest second, so those ids are carried to skip next time.
+const edgeIds = (source, page) => source !== "gmail" || !Number.isFinite(page.floor)
+  ? []
+  : page.rows.filter((row) => Math.floor(stamps.gmail(row) / 1000) === Math.floor(page.floor / 1000)).map((row) => identities.gmail(row));
 const evaluate = async (template, observation, previousState, nowMs, fetchOlderPage) => {
   const state = normalizeState(previousState, nowMs, template);
   const source = template.templateId === "gmail-metadata-v1" ? "gmail" : "messages";
   const decoded = source === "gmail" ? decodeGmail(observation, template.maxItems) : decodeMessages(observation, template.maxItems);
   if (decoded.error) return decoded;
   const identity = identities[source];
-  const stamp = stamps[source];
   const fingerprint = JSON.stringify({ v: 2, ids: decoded.items.map((item) => identity(item)), coverage: decoded.coverage, floor: decoded.floor });
   if (utf8Bytes(fingerprint) > maxStateBytes / 2) return failure("schema");
   const prior = record(state.sources[source]);
   const known = prior ? priorHead(prior.fingerprint, source) : null;
-  // Deduping keeps one arbitrary row per identity, so the floor and exposure read the raw rows instead.
-  // An unseen identity is exposed by a removal only when its row is positively older than a truncated prior head's floor.
+  const budget = { left: fetchOlderPage ? maxOlderPages : 0 };
+  const observedRows = [...decoded.rows];
+  // Deduping keeps one arbitrary row per identity, so freshness is decided on the raw rows instead.
+  // An unseen identity is exposed by a removal only when its row is positively older than a truncated target's floor.
   // Unreadable timestamps are never exposed and equal timestamps count as inside, so both fire.
-  const exposed = (row) => known.floor !== null && Number.isFinite(stamp(row)) && stamp(row) < known.floor;
-  const olderScan = known && decoded.coverage.truncated && fetchOlderPage
-    ? await collectOlderRows(source, decoded, known, fetchOlderPage)
-    : { older: [], complete: !decoded.coverage.truncated };
-  const observedRows = [...decoded.rows, ...olderScan.older];
-  const fresh = known ? new Set(observedRows.filter((row) => !known.ids.has(identity(row)) && !exposed(row)).map((row) => identity(row))) : new Set();
+  const fresh = new Set();
+  const markFresh = (rows, target) => {
+    for (const row of rows) if (!belowTarget(source, target, row)) fresh.add(identity(row));
+  };
+  let unobserved = false;
+  const gaps = [];
+  if (known) {
+    const headScan = decoded.coverage.truncated
+      ? await scanOlder(source, decoded, known, new Set(decoded.rows.map((row) => identity(row))), fetchOlderPage, budget)
+      : { older: [], page: decoded, complete: true, stalled: false };
+    observedRows.push(...headScan.older);
+    markFresh([...decoded.rows, ...headScan.older], known);
+    // Unread messages between this head and the last one become a gap, resumed by later evaluations.
+    if (!headScan.complete && (headScan.stalled || !fetchOlderPage)) unobserved = true;
+    else if (!headScan.complete) {
+      gaps.push({ target: { ids: [...known.ids], floor: known.floor }, floor: headScan.page.floor, cursor: headScan.page.cursor, edge: edgeIds(source, headScan.page) });
+    }
+  }
+  // Older gaps resume, oldest first, with whatever budget the head left.
+  const pending = [];
+  for (const gap of prior?.gaps ?? []) {
+    if (budget.left === 0) {
+      pending.push(gap);
+      continue;
+    }
+    const target = { ids: new Set(gap.target.ids), floor: gap.target.floor };
+    const start = { rows: [], floor: gap.floor, cursor: gap.cursor, coverage: { truncated: true } };
+    const scan = await scanOlder(source, start, target, new Set(gap.edge), fetchOlderPage, budget);
+    observedRows.push(...scan.older);
+    markFresh(scan.older, target);
+    if (scan.complete) continue;
+    if (scan.stalled) unobserved = true;
+    else pending.push(scan.page === start ? gap : { ...gap, floor: scan.page.floor, cursor: scan.page.cursor, edge: edgeIds(source, scan.page) });
+  }
+  gaps.unshift(...pending);
+  while (gaps.length > maxGaps) {
+    gaps.shift();
+    unobserved = true;
+  }
   const added = canonicalize(observedRows, identity).filter((item) => fresh.has(identity(item)));
   const changed = added.length > 0;
-  state.sources = { ...state.sources, [source]: { fingerprint, cursor: decoded.cursor, lastSuccessAt: nowMs } };
+  const withGaps = () => ({ ...state.sources, [source]: { fingerprint, cursor: decoded.cursor, lastSuccessAt: nowMs, ...(gaps.length > 0 ? { gaps } : {}) } });
+  state.sources = withGaps();
+  // Gaps that cannot fit the state budget are dropped oldest first, and the delta says so.
+  while (gaps.length > 0 && utf8Bytes(JSON.stringify(state)) > maxStateBytes) {
+    gaps.shift();
+    unobserved = true;
+    state.sources = withGaps();
+  }
   if (changed) {
     const id = source + ":" + nowMs + ":" + fingerprint.length;
     state.continuations = [...state.continuations.filter((entry) => entry.id !== id), { id, source, dueAt: nowMs + template.continuation.delayMs, expiresAt: nowMs + template.continuation.ttlMs, fires: 0 }]
@@ -446,7 +508,7 @@ const evaluate = async (template, observation, previousState, nowMs, fetchOlderP
   const nativeSweepDue = state.nextNativeSweepAt <= nowMs;
   let message;
   if (changed) {
-    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: added, uncertainty: olderScan.complete ? null : "older_matches_not_observed", nativeSourceSweep: nativeSweepDue });
+    message = JSON.stringify({ version: contractVersion, kind: "source_delta", source, cursor: decoded.cursor, coverage: decoded.coverage, items: added, uncertainty: unobserved ? "older_matches_not_observed" : gaps.length > 0 ? "older_matches_pending" : null, nativeSourceSweep: nativeSweepDue });
   } else if (dueIndex >= 0) {
     const due = state.continuations[dueIndex];
     const fires = due.fires + 1;

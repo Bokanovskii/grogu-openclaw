@@ -175,9 +175,17 @@ function createUsageRollupScan(params: RollupScanInput & { appendOnly: boolean }
             usageTotals.output += tokens.output;
             usageTotals.cacheRead += tokens.cacheRead;
             usageTotals.cacheWrite += tokens.cacheWrite;
-            const reasoning = Math.min(entry.usage.reasoningTokens ?? 0, tokens.output);
-            if (reasoning > 0) {
-              usageTotals.reasoning = reasoning;
+            if (entry.usage.reasoningTokens !== undefined) {
+              if (
+                entry.usage.output !== undefined &&
+                entry.usage.reasoningTokens <= tokens.output
+              ) {
+                usageTotals.reasoningReportedEntries = 1;
+              }
+              const reasoning = Math.min(entry.usage.reasoningTokens, tokens.output);
+              if (reasoning > 0) {
+                usageTotals.reasoning = reasoning;
+              }
             }
             usageTotals.totalTokens += tokens.totalTokens;
             const cost = entry.costBreakdown;

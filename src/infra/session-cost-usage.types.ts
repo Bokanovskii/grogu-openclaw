@@ -42,6 +42,8 @@ export type CostUsageTotals = {
   cacheWrite: number;
   /** Reasoning tokens reported by the provider; a subset of `output`. */
   reasoning?: number;
+  /** Usage records that explicitly reported a reasoning-token count, including zero. */
+  reasoningReportedEntries?: number;
   totalTokens: number;
   totalCost: number;
   // Cost breakdown by token type (from actual API data when available)
@@ -125,6 +127,8 @@ export type SessionDailyModelUsage = {
   tokens: number;
   cost: number;
   count: number;
+  /** Token categories for this day and model, when available. */
+  totals?: CostUsageTotals;
 };
 
 export type SessionMessageCounts = {

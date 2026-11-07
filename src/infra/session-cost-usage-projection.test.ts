@@ -91,6 +91,22 @@ function createSource(
 }
 
 describe("usage cache projections", () => {
+  it("requests a refresh for rollups created before reasoning coverage was recorded", async () => {
+    const file = createFile("old-reasoning-coverage");
+    const rows = [
+      createRow(file, [{ timestamp: dayStart, cost: 0 }], 100, USAGE_COST_ROLLUP_VERSION - 1),
+    ];
+    const result = await projectSessionCostSummaries({
+      ...createSource(rows, [file]),
+      sessions: [{ sessionId: "old-reasoning-coverage", sessionFile: file.filePath }],
+      files: [file],
+      pricingFingerprint,
+      dayBucket: utcDayBucket,
+    });
+    expect(result.summaries).toEqual([null]);
+    expect(result.staleSessionFiles).toEqual([file.sourcePath]);
+  });
+
   it("requests a refresh for rollups computed before pricing availability was preserved", async () => {
     const file = createFile("old-pricing");
     const rows = [createRow(file, [{ timestamp: dayStart, cost: 0 }], 100, 5)];

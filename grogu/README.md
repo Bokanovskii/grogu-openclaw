@@ -82,6 +82,33 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 Every command writes owner-only receipts to a new directory under the profile's
 `recoveryDir`.
 
+### Usage dashboard publisher
+
+The Usage widget is published by the existing Usage-only publisher, not by the
+Gateway UI build. After reviewing and committing the dashboard source, preview
+its installation from a clean checkout:
+
+```sh
+node grogu/usage-dashboard/publisher-install.mjs \
+  --source /absolute/path/to/clean/checkout \
+  --state /absolute/path/to/openclaw-state \
+  --core /absolute/path/to/installed/openclaw
+```
+
+Add `--apply` to install the content-addressed assets and switch the publisher
+under its existing lock. The installer does not run the publisher, change its
+job, or restart the Gateway; the existing scheduled publication picks up the
+change. Retain the returned `backupSha256` and `publisherSha256`. To restore
+that exact previous publisher, use the same `--state` and `--core` with
+`--rollback <backupSha256> --expected <publisherSha256> --apply`. Rollback
+refuses an unexpectedly changed publisher or backup.
+
+Daily input and reasoning categories require the compatible Gateway usage
+rollup. Earlier snapshots remain usable, but unavailable categories stay
+unknown until the corresponding runtime is deployed. That runtime rebuilds
+older usage rollups in the background to recover historical reasoning
+coverage; totals can be partial during the rebuild.
+
 The backup receipt records archive bytes and separate capture, verification,
 and digest timings. It preserves the complete online archive and workspace
 contract; phase facts identify the slow owner without publishing paths or

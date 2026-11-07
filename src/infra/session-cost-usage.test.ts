@@ -190,6 +190,9 @@ describe("session cost usage", () => {
       { date: "2026-02-05", tokens: 20, cost: 0.02, totalTokens: 20, totalCost: 0.02 },
     ]);
     expect(ranged?.modelUsage?.map((entry) => entry.model)).toEqual(["gpt-5.5"]);
+    expect(ranged?.dailyModelUsage).toMatchObject([
+      { date: "2026-02-05", model: "gpt-5.5", tokens: 20, totals: { totalTokens: 20 } },
+    ]);
 
     const upperBounded = await loadSessionCostSummary({
       agentId: "main",

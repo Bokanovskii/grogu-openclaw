@@ -213,10 +213,16 @@ export function createUsageAggregateAccumulator() {
         tokens: 0,
         cost: 0,
         count: 0,
+        ...(day.totals ? { totals: createEmptyCostUsageTotals() } : {}),
       };
       existing.tokens += day.tokens;
       existing.cost += day.cost;
       existing.count += day.count;
+      if (existing.totals && day.totals) {
+        addCostUsageTotals(existing.totals, day.totals);
+      } else {
+        delete existing.totals;
+      }
       dailyModels.set(key, existing);
     }
   }

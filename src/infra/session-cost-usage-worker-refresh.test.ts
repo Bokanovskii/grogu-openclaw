@@ -160,7 +160,7 @@ describe("paged SQLite usage rollups", () => {
       id: string,
       parentId: string | null,
       output: number,
-      reasoning: number,
+      reasoning?: number,
     ) => {
       const event = message(id, parentId, 1);
       const msg = event.message as Record<string, unknown>;
@@ -172,9 +172,14 @@ describe("paged SQLite usage rollups", () => {
     const result = await scan([
       { seq: 1, event: withReasoning("root", null, 50, 30) },
       { seq: 2, event: withReasoning("a", "root", 10, 99) },
+      { seq: 3, event: withReasoning("b", "a", 5, 0) },
+      { seq: 4, event: withReasoning("c", "b", 5) },
     ]);
     const buckets = Object.values(result.rollup.buckets);
     expect(buckets.reduce((sum, bucket) => sum + (bucket.totals.reasoning ?? 0), 0)).toBe(40);
-    expect(buckets.reduce((sum, bucket) => sum + bucket.totals.output, 0)).toBe(60);
+    expect(buckets.reduce((sum, bucket) => sum + bucket.totals.output, 0)).toBe(70);
+    expect(
+      buckets.reduce((sum, bucket) => sum + (bucket.totals.reasoningReportedEntries ?? 0), 0),
+    ).toBe(2);
   });
 });

@@ -174,6 +174,30 @@ describe("shared/usage-aggregates", () => {
     ]);
   });
 
+  it("merges daily model token categories without inventing legacy breakdowns", () => {
+    const accumulator = createUsageAggregateAccumulator();
+    const day = {
+      date: "2026-03-12",
+      provider: "fixture",
+      model: "model",
+      tokens: 10,
+      cost: 0,
+      count: 1,
+      totals: usage({ input: 4, output: 3, cacheRead: 2, cacheWrite: 1, totalTokens: 10 }),
+    };
+    const before = structuredClone(day);
+    accumulator.add({ usage: usage({ dailyModelUsage: [day] }) });
+    accumulator.add({ usage: usage({ dailyModelUsage: [day] }) });
+    expect(accumulator.finish().modelDaily).toMatchObject([
+      { tokens: 20, count: 2, totals: { input: 8, output: 6, cacheRead: 4, cacheWrite: 2 } },
+    ]);
+    expect(day).toEqual(before);
+    const { totals: _omitted, ...legacy } = day;
+    accumulator.add({ usage: usage({ dailyModelUsage: [legacy] }) });
+    expect(accumulator.finish().modelDaily).toMatchObject([{ tokens: 30, count: 3 }]);
+    expect(accumulator.finish().modelDaily?.[0]?.totals).toBeUndefined();
+  });
+
   it("merges overlapping daily buckets and uses weighted latency summaries", () => {
     const accumulator = createUsageAggregateAccumulator();
     const earlier = "2026-03-11";

@@ -295,11 +295,20 @@ function addDailyModelUsage(target: SessionDailyModelUsage, source: SessionDaily
   target.tokens += source.tokens;
   target.cost += source.cost;
   target.count += source.count;
+  if (target.totals && source.totals) {
+    addCostUsageTotals(target.totals, source.totals);
+  } else {
+    delete target.totals;
+  }
 }
 
 function createDailyModelAccumulator() {
   return createDatedRowsAccumulator<SessionDailyModelUsage>(addDailyModelUsage, {
     key: (row) => usageDailyModelIdentity(row.date, row.provider, row.model),
+    clone: (row) => ({
+      ...row,
+      ...(row.totals ? { totals: cloneCostUsageTotals(row.totals) } : {}),
+    }),
   });
 }
 
@@ -563,6 +572,7 @@ export function buildSessionCostSummaryFromRollup(params: {
         tokens: model.totals.totalTokens,
         cost: model.totals.totalCost,
         count: model.count,
+        totals: model.totals,
       })),
     );
 

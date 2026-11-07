@@ -121,6 +121,11 @@ export async function processCompletionsStream(
   if (options?.strictReasoningTags) {
     reasoningTagTextPartitioner.markStrict();
   }
+  // Opt-in for providers whose reasoning arrives only on a separate structured field: visible
+  // content after it is the answer, so it streams live instead of waiting for the terminal chunk.
+  const structuredReasoningStreaming =
+    model.params?.structuredReasoningStreaming === true && !options?.strictReasoningTags;
+  let sawStructuredReasoning = false;
   type ToolCallBlock = ToolCall & { partialArgs: string };
   let currentBlock: TextBlock | ThinkingBlock | ToolCallBlock | null = null;
   const directContent: { block: TextBlock | ThinkingBlock | null } = { block: null };
@@ -336,6 +341,7 @@ export async function processCompletionsStream(
   const flushReasoningTagTextPartitioner = (allowRecovery = true) => {
     const recoverUnclosed =
       allowRecovery &&
+      !sawStructuredReasoning &&
       output.stopReason !== "length" &&
       output.stopReason !== "error" &&
       output.stopReason !== "aborted";
@@ -375,6 +381,17 @@ export async function processCompletionsStream(
     currentTextSource = undefined;
   };
   const beginReasoning = (hasFollowingVisibleText: boolean, forceStrict = false) => {
+    // Ambiguous inline syntax already pending keeps the terminal barrier.
+    if (
+      structuredReasoningStreaming &&
+      forceStrict &&
+      !output.openclawDelivery?.textPhaseRequiresTerminal &&
+      !reasoningTagTextPartitioner.hasPending()
+    ) {
+      sawStructuredReasoning = true;
+      sealTextBeforeReasoning();
+      return;
+    }
     if (!output.openclawDelivery?.textPhaseRequiresTerminal) {
       output.openclawDelivery = {
         ...output.openclawDelivery,
@@ -493,9 +510,10 @@ export async function processCompletionsStream(
         if (contentDelta.kind === "text") {
           const parts = gemmaToolCallRecoverer?.push(contentDelta.text) ?? [contentDelta];
           for (const part of parts) {
-            const routedDeltas = hasReasoningThinking
-              ? reasoningTagTextPartitioner.push(part.text)
-              : reasoningTagTextPartitioner.pushVisible(part.text);
+            const routedDeltas =
+              hasReasoningThinking && !sawStructuredReasoning
+                ? reasoningTagTextPartitioner.push(part.text)
+                : reasoningTagTextPartitioner.pushVisible(part.text);
             for (const routedDelta of routedDeltas) {
               appendPartitionedVisibleDelta(routedDelta);
             }

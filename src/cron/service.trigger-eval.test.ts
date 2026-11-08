@@ -23,7 +23,7 @@ const { logger, makeStorePath } = setupCronServiceSuite({ prefix: "cron-trigger-
 type Evaluator = NonNullable<CronServiceDeps["evaluateCronTrigger"]>;
 type CronEventContext = Parameters<NonNullable<CronServiceDeps["onEvent"]>>[1];
 type IsolatedRunner = CronServiceDeps["runIsolatedAgentJob"];
-type ScriptRunner = NonNullable<CronServiceDeps["runScriptJob"]>;
+type FailureAlertSender = NonNullable<CronServiceDeps["sendCronFailureAlert"]>;
 
 function watcher(overrides: Partial<CronJobCreate> = {}): CronJobCreate {
   return {
@@ -59,8 +59,8 @@ async function createHarness(params: {
   cronFailureAlert?: NonNullable<CronServiceDeps["cronConfig"]>["failureAlert"];
   evaluateCronTrigger?: Evaluator;
   runIsolatedAgentJob?: IsolatedRunner;
-  runScriptJob?: ScriptRunner;
-  sendCronFailureAlert?: CronServiceDeps["sendCronFailureAlert"];
+  runScriptJob?: NonNullable<CronServiceDeps["runScriptJob"]>;
+  sendCronFailureAlert?: FailureAlertSender;
   sendCronWebhook?: CronServiceDeps["sendCronWebhook"];
 }) {
   const { storePath } = await makeStorePath();
@@ -497,7 +497,7 @@ describe("cron trigger evaluation", () => {
 
   it("dedupes access incidents across repeats and restart, then re-alerts after recovery", async () => {
     let outcome: AccessFailureKind | "recovered" = "auth";
-    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const sendCronFailureAlert = vi.fn<FailureAlertSender>(async () => undefined);
     const harness = await createHarness({
       evaluateCronTrigger: async () =>
         outcome === "recovered"
@@ -538,7 +538,7 @@ describe("cron trigger evaluation", () => {
 
   it("alerts beside auto-disable and overrides generic threshold and cooldown policy", async () => {
     let sourceFailureKind: CronTriggerSourceFailureKind = "auth";
-    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const sendCronFailureAlert = vi.fn<FailureAlertSender>(async () => undefined);
     const harness = await createHarness({
       cronFailureAlert: { enabled: true, after: 3, cooldownMs: 24 * 60 * 60_000 },
       evaluateCronTrigger: async () => triggerSourceFailure(sourceFailureKind),
@@ -574,7 +574,7 @@ describe("cron trigger evaluation", () => {
 
   it("reuses resolved routes and keeps other failure kinds quiet", async () => {
     let outcome: "auth" | "transient" | "untyped" = "auth";
-    const sendCronFailureAlert = vi.fn(async () => undefined);
+    const sendCronFailureAlert = vi.fn<FailureAlertSender>(async () => undefined);
     const sendCronWebhook = vi.fn(async () => ({ status: "delivered" as const }));
     const harness = await createHarness({
       evaluateCronTrigger: async () =>

@@ -100,6 +100,14 @@ execution, startup, or approval status. While answer text streams, the bounded
 live reasoning preview moves into the answer's collapsed reasoning disclosure
 instead of remaining in a second working row. Saved reasoning replaces that
 preview when the answer completes; stored transcript content is unchanged.
+
+The working indicator and turn recap mark estimated output counts with `~`.
+The count combines confirmed usage with estimates of streamed reasoning, text,
+and tool arguments. Provider totals replace each model call's estimate when
+available; missing usage leaves the count approximate. These display estimates
+never change billing or context accounting. Billed cost or placeholder zero
+counters alone do not turn an estimate into a confirmed count.
+
 **Keep commentary** in
 the chat view menu controls whether commentary stays visible after the run,
 not whether the active run’s narration survives a history refresh. Completed

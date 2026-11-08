@@ -10,7 +10,7 @@ import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts"
 const suite = createControlUiE2eSuite({ name: "Control UI reasoning visibility" });
 
 suite.define(() => {
-  it("animates Grogu continuously in the built UI while reasoning updates", async () => {
+  it("keeps Grogu animated as live output estimates grow and become exact", async () => {
     await suite.withPage(
       { viewport: { width: 1280, height: 900 }, reducedMotion: "no-preference" },
       async ({ page }) => {
@@ -21,6 +21,22 @@ suite.define(() => {
         const request = await gateway.waitForRequest("chat.send");
         const runId = requireString(requireRecord(request.params).idempotencyKey, "run id");
         const sprite = page.locator(".chat-grogu-eater__sprite");
+        const tokens = page.locator(".chat-working-indicator__tokens");
+        const captureProof = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
+        const proofDirectory = captureProof
+          ? createControlUiE2eArtifactDir("grogu-live-output-counter")
+          : undefined;
+        const captureCounter = async (name: string) => {
+          if (!proofDirectory) {
+            return;
+          }
+          const row = page.locator(".chat-working-indicator");
+          const frame = await takeControlUiScreenshotFrame(page, row, [sprite, tokens], {
+            elements: [row],
+            animations: "disabled",
+          });
+          await writeFile(path.join(proofDirectory, name), frame.elements[0]!.png);
+        };
         await sprite.waitFor();
         const originalSprite = await sprite.elementHandle();
         if (!originalSprite) {
@@ -48,18 +64,51 @@ suite.define(() => {
           .locator(".chat-working-indicator__status")
           .getByText("Waiting for a response…", { exact: true })
           .waitFor();
+        await gateway.emitGatewayEvent("agent", {
+          sessionKey: "main",
+          runId,
+          seq: 2,
+          stream: "usage",
+          data: { outputTokens: 1400 },
+          ts: Date.now(),
+        });
+        await tokens.getByText("1.4k output tokens", { exact: true }).waitFor();
         let reasoning = "";
         for (const [index, delta] of ["Reviewing", " evidence", " now."].entries()) {
           reasoning += delta;
           await gateway.emitGatewayEvent("agent", {
             sessionKey: "main",
             runId,
-            seq: index + 2,
+            seq: index * 2 + 3,
             stream: "thinking",
             data: { text: reasoning, delta },
             ts: Date.now(),
           });
           await page.getByText(reasoning, { exact: true }).waitFor();
+          if (index === 0) {
+            await captureCounter("counter-before.png");
+          }
+          const outputTokensEstimate = 1700 + index * 300;
+          await gateway.emitGatewayEvent("agent", {
+            sessionKey: "main",
+            runId,
+            seq: index * 2 + 4,
+            stream: "usage",
+            data: { outputTokens: 1400, outputTokensEstimate, modelProgress: true },
+            ts: Date.now(),
+          });
+          await tokens
+            .getByText(
+              index === 0
+                ? "~1.7k output tokens"
+                : index === 1
+                  ? "~2k output tokens"
+                  : "~2.3k output tokens",
+              {
+                exact: true,
+              },
+            )
+            .waitFor();
           expect(await originalSprite.evaluate((element) => element.isConnected)).toBe(true);
           expect(
             await sprite.evaluate((element) => {
@@ -73,6 +122,17 @@ suite.define(() => {
             }),
           ).toBe(true);
         }
+        await captureCounter("counter-after.png");
+        await gateway.emitGatewayEvent("agent", {
+          sessionKey: "main",
+          runId,
+          seq: 9,
+          stream: "usage",
+          data: { outputTokens: 2300 },
+          ts: Date.now(),
+        });
+        await tokens.getByText("2.3k output tokens", { exact: true }).waitFor();
+        expect(await originalSprite.evaluate((element) => element.isConnected)).toBe(true);
         const bite = sprite.locator(".chat-grogu-eater__pose--bite");
         await sprite.evaluate((element) => {
           for (const animation of element.getAnimations({ subtree: true })) {
@@ -81,7 +141,7 @@ suite.define(() => {
           }
         });
         expect(await bite.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
-        if (process.env.OPENCLAW_CAPTURE_UI_PROOF === "1") {
+        if (captureProof) {
           const directory = createControlUiE2eArtifactDir("grogu-eating-built-ui");
           const row = page.locator(".chat-working-indicator");
           const frame = await takeControlUiScreenshotFrame(page, row, [sprite], {

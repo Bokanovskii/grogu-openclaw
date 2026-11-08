@@ -247,7 +247,12 @@ export function updateChatRunProgressSnapshot(
 
   if (isUsage) {
     // Context-only updates must retain the run total already reported by completed responses.
-    removeWhere((candidate) => candidate.stream === "usage");
+    removeWhere(
+      (candidate) =>
+        candidate.stream === "usage" ||
+        (data.modelProgress === true &&
+          (candidate.stream === "run_status" || candidate.stream === "assistant")),
+    );
   } else if (isStartupStatus || isRetryStatus || isAssistant || isTool || isItem) {
     // Progress clears transient statuses; retry waits may begin after tools completed.
     removeWhere((candidate) => {
@@ -303,6 +308,13 @@ export function updateChatRunProgressSnapshot(
             progressText: data.progressText,
           }
         : { ...previousUsage?.data, ...data };
+  if (isUsage) {
+    // Progress belongs to this event; an authoritative count also clears its old estimate.
+    storedData.modelProgress = data.modelProgress;
+    if (typeof data.outputTokens === "number") {
+      storedData.outputTokensEstimate = data.outputTokensEstimate;
+    }
+  }
   if (isTool && mode === "full") {
     for (const field of toolFields) {
       storedData[field] = data[field];

@@ -40,7 +40,10 @@ import {
   type ChatThreadProps,
 } from "./chat-thread-interactions.ts";
 import { renderWorkGroupBrowserTabPreviews } from "./chat-tool-cards.ts";
-import { projectTranscriptActivity } from "./chat-transcript-activity.ts";
+import {
+  createTranscriptActivitySignature,
+  projectTranscriptActivity,
+} from "./chat-transcript-activity.ts";
 import { latestTranscriptAnnouncement } from "./chat-transcript-announcement.ts";
 import {
   isTranscriptGlobalAlias,
@@ -150,7 +153,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
         : undefined,
   } satisfies Parameters<typeof buildCachedChatItems>[0];
   const chatItems = buildCachedChatItems(chatItemsInput);
-  const { workingIndicator, activityRunId, activityGroupKey, runOutputTokens, runReasoning } =
+  const { workingIndicator, activityRunId, activityGroupKey, runOutputUsage, runReasoning } =
     projectTranscriptActivity(chatItems, props);
   const latestBrowserTabs = props.latestBrowserTabs;
   syncToolCardExpansionState(
@@ -351,7 +354,8 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     // Subagents the panel does not list still open as sessions, and have no list to show.
     onOpenSubagent: (subagents.listed && props.onOpenSubagent) || props.onOpenSession,
     onOpenSubagents: subagents.listed ? props.onOpenSubagents : undefined,
-    runOutputTokens,
+    runOutputTokens: runOutputUsage?.outputTokens,
+    runOutputTokensEstimated: runOutputUsage?.outputTokensEstimated,
     runReasoning,
     showReasoning,
     answerStreaming: chatItems.some((item) => item.kind === "stream" && item.isStreaming),
@@ -425,34 +429,14 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     } satisfies Parameters<typeof renderMessageGroup>[1];
   };
   // Working rows and live answers share bounded reasoning and usage facts.
-  const workingUsageKey = JSON.stringify([runOutputTokens, runReasoning, subagents.statusKey]);
-  const liveStatusSignature = (item: ChatRenderItem): string => {
-    if (item.kind === "stream-run") {
-      return item.parts.some((part) => part.kind === "reading-indicator") ? workingUsageKey : "";
-    }
-    if (item.kind !== "group" && item.kind !== "agent-run-frame") {
-      return "";
-    }
-    const recap = recapForGroup(item.key);
-    const recapKey = recap ? `${recap.runtimeMs}:${recap.outputTokens ?? ""}` : "";
-    const statusKey = `${recapKey}|${item.key === latestAssistantItemKey ? "latest-assistant" : ""}`;
-    if (item.kind === "agent-run-frame") {
-      const hasWorkingIndicator = item.parts.some(
-        (part) =>
-          part.kind === "stream-run" &&
-          part.parts.some((streamPart) => streamPart.kind === "reading-indicator"),
-      );
-      return `${hasWorkingIndicator ? workingUsageKey : ""}|${statusKey}`;
-    }
-    const continuation = continuations.get(item.key);
-    // Part keys stand in for the rest of the continuation: its remaining
-    // options mirror props that already invalidate every row through the
-    // shared render context.
-    const continuationKey = continuation
-      ? `${continuation.map((part) => part.key).join(" ")}${workingUsageKey}`
-      : "";
-    return `${continuationKey}|${statusKey}|${searchFiltering ? "search-result" : ""}`;
-  };
+  const workingUsageKey = JSON.stringify([runOutputUsage, runReasoning, subagents.statusKey]);
+  const liveStatusSignature = createTranscriptActivitySignature({
+    workingUsageKey,
+    recapForGroup,
+    latestAssistantItemKey,
+    continuations,
+    searchFiltering,
+  });
   const rowPresentationDependencies = (item: ChatRenderItem): readonly unknown[] => {
     const dependencies: unknown[] = [liveStatusSignature(item), streamGroupOptions.answerStreaming];
     for (const group of chatItemGroups(item)) {
@@ -654,7 +638,9 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     props.queuedMessageAction?.onAction,
     props.replyMessageAccess?.revision ?? 0,
     props.replyMessageAccess?.navigationId ?? "",
-    turnRecap === null ? "" : `${turnRecap.runtimeMs}:${turnRecap.outputTokens ?? ""}`,
+    turnRecap === null
+      ? ""
+      : `${turnRecap.runtimeMs}:${turnRecap.outputTokens ?? ""}:${Boolean(turnRecap.outputTokensEstimated)}`,
   ]);
   // Rebind disclosures to the current pane without repainting unchanged rows.
   state.transcriptRenderContext.onRequestUpdate = props.onRequestUpdate;

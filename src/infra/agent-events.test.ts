@@ -138,8 +138,12 @@ test("accumulates output usage across attempts and resets with run context", () 
   expect(usage(12)).toEqual({ outputTokens: 12 });
   registerAgentRunContext("run", { sessionKey: "main", lifecycleGeneration });
   usage(8);
+  const runContext = getAgentRunContext("run");
   clearAgentRunContext("run", lifecycleGeneration);
   registerAgentRunContext("run", { sessionKey: "main", lifecycleGeneration });
+  expect(
+    emitAgentRunOutputTokens({ runId: "run", lifecycleGeneration, outputTokens: 100, runContext }),
+  ).toBeUndefined();
   usage(3);
   const nextGeneration = rotateAgentEventLifecycleGeneration();
   claimAgentRunContext("run", { sessionKey: "main", lifecycleGeneration: nextGeneration });

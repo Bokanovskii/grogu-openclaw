@@ -1,4 +1,8 @@
 import { isProviderRefusalAssistantError } from "@openclaw/llm-core/diagnostics";
+import {
+  estimateStringChars,
+  estimateTokensFromChars,
+} from "@openclaw/normalization-core/cjk-chars";
 import { applyAssistantDeliveryDirectives } from "../config/sessions/transcript-assistant-delivery.js";
 import {
   emitAgentEvent,
@@ -63,6 +67,16 @@ function preserveAssistantUsage(message: AssistantMessage, pending: NormalizedUs
   Object.assign(message.usage.cost, pending.cost);
 }
 
+function readObservedOutputTokens(usage: NormalizedUsage | undefined): number | undefined {
+  // Transport zeros and billed cost alone do not establish an output-token receipt.
+  return usage?.output !== undefined &&
+    (usage.output > 0 ||
+      (usage.contextUsage?.state === "available" &&
+        usage.contextUsage.totalTokens === usage.contextUsage.promptTokens))
+    ? usage.output
+    : undefined;
+}
+
 /** Owns model facts at event ingress, independently of queued reply delivery. */
 export function createEmbeddedModelState(
   params: SubscribeEmbeddedAgentSessionParams,
@@ -75,6 +89,7 @@ export function createEmbeddedModelState(
   let completed: AssistantMessage | undefined;
   let successfulModelResponse = false;
   let publishedMessageModel: string | undefined;
+  let response: { id: symbol; chars: number } | undefined;
   const runContext = getAgentRunContext(params.runId);
 
   const publishMessageModel = (message: AssistantMessage, reset: boolean) => {
@@ -106,7 +121,10 @@ export function createEmbeddedModelState(
 
   const recordPendingUsage = (raw: Usage) => {
     const usage = normalizeUsage(raw);
-    if (!hasObservedModelUsage(usage)) {
+    if (
+      !usage ||
+      (!hasObservedModelUsage(usage) && readObservedOutputTokens(usage) === undefined)
+    ) {
       return;
     }
     const cost = usage.cost;
@@ -121,18 +139,19 @@ export function createEmbeddedModelState(
     pending = next;
   };
 
-  const recordModelUsage = (usage: NormalizedUsage | undefined) => {
-    if (!hasObservedModelUsage(usage)) {
-      return;
-    }
-    mergeUsageIntoAccumulator(totals, usage);
-    if (!hasNonzeroUsage(usage) || !params.lifecycleGeneration) {
+  const publishUsage = (
+    outputTokens: number,
+    update?: Parameters<typeof emitAgentRunOutputTokens>[0]["update"],
+  ) => {
+    if (!params.lifecycleGeneration) {
       return;
     }
     const data = emitAgentRunOutputTokens({
       runId: params.runId,
       lifecycleGeneration: params.lifecycleGeneration,
-      outputTokens: usage.output ?? 0,
+      outputTokens,
+      update,
+      runContext,
     });
     if (data && params.onAgentEvent) {
       runBestEffortCallback({
@@ -140,6 +159,18 @@ export function createEmbeddedModelState(
         log,
         callback: () => params.onAgentEvent?.({ stream: "usage", data }),
       });
+    }
+  };
+  const recordModelUsage = (usage: NormalizedUsage | undefined, responseId?: symbol) => {
+    if (!usage) {
+      return;
+    }
+    if (hasObservedModelUsage(usage)) {
+      mergeUsageIntoAccumulator(totals, usage);
+    }
+    const outputTokens = readObservedOutputTokens(usage);
+    if (outputTokens !== undefined && (outputTokens > 0 || responseId)) {
+      publishUsage(outputTokens, responseId ? { type: "complete", responseId } : undefined);
     }
   };
   const recordContextAccounting = (message: AssistantMessage, successful: boolean) =>
@@ -151,12 +182,17 @@ export function createEmbeddedModelState(
 
   return {
     captureModelEvent: (evt: AgentSessionEvent): void => {
+      if (evt.type === "turn_start") {
+        response = undefined;
+        return;
+      }
       if (evt.type === "compaction_end") {
         if (evt.outcome.status === "completed" && evt.outcome.willRetry) {
           // Retain the prior call only until the retry completes or reports its own usage.
           completed = undefined;
           retryUsage = lastUsage ?? retryUsage;
           lastUsage = undefined;
+          response = undefined;
         }
         return;
       }
@@ -178,6 +214,7 @@ export function createEmbeddedModelState(
       publishMessageModel(message, evt.type === "message_start");
       switch (evt.type) {
         case "turn_end":
+          response = undefined;
           // message_end may describe an async tool fragment, not a completed provider response.
           if (
             !successfulModelResponse &&
@@ -190,8 +227,25 @@ export function createEmbeddedModelState(
           return;
         case "message_start":
           pending = undefined;
+          response ??= { id: Symbol("provider-response"), chars: 0 };
           return;
         case "message_update":
+          if (
+            evt.assistantMessageEvent.type === "thinking_delta" ||
+            evt.assistantMessageEvent.type === "text_delta" ||
+            evt.assistantMessageEvent.type === "toolcall_delta"
+          ) {
+            const delta = evt.assistantMessageEvent.delta;
+            if (delta) {
+              response ??= { id: Symbol("provider-response"), chars: 0 };
+              response.chars += estimateStringChars(delta);
+              publishUsage(0, {
+                type: "estimate",
+                responseId: response.id,
+                outputTokens: estimateTokensFromChars(response.chars),
+              });
+            }
+          }
           // Capture the prepared message; core consumes done/error before message_end.
           if (evt.assistantMessageEvent.type === "text_end") {
             recordPendingUsage(message.usage);
@@ -203,7 +257,10 @@ export function createEmbeddedModelState(
           if (hasNonzeroUsage(pending)) {
             lastUsage = { ...pending };
           }
-          recordModelUsage(pending);
+          recordModelUsage(pending, response && response.chars > 0 ? response.id : undefined);
+          if (hasObservedModelUsage(pending) || message.stopReason !== "toolUse") {
+            response = undefined;
+          }
           runBestEffortCallback({
             label: "model usage observation",
             log,

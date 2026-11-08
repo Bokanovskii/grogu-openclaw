@@ -271,6 +271,15 @@ function handleUsageEvent(host: ToolStreamHost, payload: AgentEventPayload): boo
   if (outputTokens < 0) {
     return true;
   }
+  const rawEstimate = payload.data?.outputTokensEstimate;
+  if (
+    rawEstimate !== undefined &&
+    (typeof rawEstimate !== "number" || !Number.isFinite(rawEstimate) || rawEstimate < outputTokens)
+  ) {
+    return true;
+  }
+  const outputTokensEstimate =
+    typeof rawEstimate === "number" ? Math.floor(rawEstimate) : undefined;
   const current = host.chatRunUsageById?.get(payload.runId);
   if (current && payload.seq <= current.seq) {
     return true;
@@ -279,11 +288,18 @@ function handleUsageEvent(host: ToolStreamHost, payload: AgentEventPayload): boo
   // recovery snapshots must not overwrite newer live usage or erase the recap.
   const usageByRun = new Map(host.chatRunUsageById);
   usageByRun.delete(payload.runId);
-  usageByRun.set(payload.runId, { outputTokens, seq: payload.seq });
+  usageByRun.set(payload.runId, {
+    outputTokens,
+    ...(outputTokensEstimate !== undefined ? { outputTokensEstimate } : {}),
+    seq: payload.seq,
+  });
   for (const staleRunId of [...usageByRun.keys()].slice(0, -RUN_USAGE_LIMIT)) {
     usageByRun.delete(staleRunId);
   }
   host.chatRunUsageById = usageByRun;
+  if (outputTokensEstimate !== undefined && payload.data?.modelProgress === true) {
+    reconcileChatRunStartup(host, { state: "activity", runId: payload.runId, seq: payload.seq });
+  }
   return true;
 }
 

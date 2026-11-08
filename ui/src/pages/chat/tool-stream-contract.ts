@@ -42,7 +42,7 @@ export type ToolStreamEntry = {
   message: Record<string, unknown>;
 };
 
-export type RunOutputUsage = { outputTokens: number; seq: number };
+export type RunOutputUsage = { outputTokens: number; outputTokensEstimate?: number; seq: number };
 
 export type ProviderPolicyNotice = {
   runId: string;

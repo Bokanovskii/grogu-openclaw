@@ -18,10 +18,12 @@ import { renderGroguEater } from "./chat-grogu-eater.ts";
 import { selectWorkingClawSurprise } from "./chat-working-indicator-surprise.ts";
 
 // 0 is valid; only null/undefined means "unknown".
-function outputTokensLabel(outputTokens: number): string {
-  return outputTokens === 1
-    ? t("chat.turnRecap.tokensOne")
-    : t("chat.turnRecap.tokens", { count: formatCompactTokenCount(outputTokens) });
+function outputTokensLabel(outputTokens: number, estimated = false): string {
+  const label =
+    outputTokens === 1
+      ? t("chat.turnRecap.tokensOne")
+      : t("chat.turnRecap.tokens", { count: formatCompactTokenCount(outputTokens) });
+  return estimated ? `~${label}` : label;
 }
 
 export function renderChatWorkingIndicator(
@@ -43,6 +45,7 @@ export function renderChatWorkingIndicator(
     onOpenSubagents?: () => void;
     startupLabel?: string;
     outputTokens?: number | null;
+    outputTokensEstimated?: boolean;
     /** Tail of the run's live reasoning, shown as one scrolling line. */
     reasoning?: string;
     presentation?: "standalone" | "continuation";
@@ -115,8 +118,6 @@ export function renderChatWorkingIndicator(
     ${label}
   </button>`;
   const working = !waitingSubagents && !waitingApproval && !options.startupLabel;
-  // Providers report exact usage at response boundaries, not per text delta.
-  // Keep the latest count visible while the run continues through tools.
   const outputTokens = waitingSubagents ? null : options.outputTokens;
   // A wait counts from the handoff, which loaded history cannot always place.
   const startedAt = waitingSubagents ? waitingSubagents.startedAt : part.startedAt;
@@ -188,7 +189,7 @@ export function renderChatWorkingIndicator(
             ? html`
                 <span aria-hidden="true">·</span>
                 <span class="chat-working-indicator__tokens"
-                  >${outputTokensLabel(outputTokens)}</span
+                  >${outputTokensLabel(outputTokens, options.outputTokensEstimated)}</span
                 >
               `
             : working
@@ -232,7 +233,9 @@ export function renderTurnRecapRow(
   const duration =
     formatDurationLong(Math.max(1, Math.round(recap.runtimeMs / 1_000)) * 1_000) ?? "";
   const tokens =
-    typeof recap.outputTokens === "number" ? outputTokensLabel(recap.outputTokens) : null;
+    typeof recap.outputTokens === "number"
+      ? outputTokensLabel(recap.outputTokens, recap.outputTokensEstimated)
+      : null;
   return html`
     <div
       class="chat-turn-recap ${continuation ? "chat-turn-recap--continuation" : ""}"

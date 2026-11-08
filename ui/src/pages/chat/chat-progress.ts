@@ -269,7 +269,11 @@ export function resetWorkingProgress(): void {
   anonymousWorkingProgressId = 0;
 }
 
-export type TurnRecap = { runtimeMs: number; outputTokens: number | null };
+export type TurnRecap = {
+  runtimeMs: number;
+  outputTokens: number | null;
+  outputTokensEstimated?: boolean;
+};
 
 // The pane owns one watched run. Session-wide usage is a different fact and
 // may still describe the previous response when the terminal row arrives.
@@ -286,19 +290,23 @@ export type TurnRecapWatch = {
 type TurnRequest = { askedAt: number; runIds: readonly string[] };
 
 /** Output tokens across the runs of one answer; null unless every run has reported. */
-export function sumRunOutputTokens(
+export function sumRunOutputUsage(
   usageByRun: ReadonlyMap<string, RunOutputUsage> | undefined,
   runIds: readonly string[],
-): number | null {
+): Pick<TurnRecap, "outputTokens" | "outputTokensEstimated"> | null {
   let total = 0;
+  let estimated = false;
   for (const runId of runIds) {
     const usage = usageByRun?.get(runId);
     if (!usage) {
       return null;
     }
-    total += usage.outputTokens;
+    total += usage.outputTokensEstimate ?? usage.outputTokens;
+    estimated ||= usage.outputTokensEstimate !== undefined;
   }
-  return runIds.length > 0 ? total : null;
+  return runIds.length > 0
+    ? { outputTokens: total, ...(estimated ? { outputTokensEstimated: true } : {}) }
+    : null;
 }
 
 export function resolveTurnRecap(
@@ -336,10 +344,15 @@ export function resolveTurnRecap(
   if (!watch) {
     return null;
   }
-  const outputTokens =
-    sumRunOutputTokens(usageByRun, [...(watch.request?.runIds ?? []), watch.runId]) ??
-    watch.recap?.outputTokens ??
-    null;
+  const outputUsage = sumRunOutputUsage(usageByRun, [
+    ...(watch.request?.runIds ?? []),
+    watch.runId,
+  ]);
+  const outputTokens = outputUsage?.outputTokens ?? watch.recap?.outputTokens ?? null;
+  const estimated = outputUsage
+    ? outputUsage.outputTokensEstimated
+    : watch.recap?.outputTokensEstimated;
+  const usage = { outputTokens, ...(estimated ? { outputTokensEstimated: true } : {}) };
   if (row?.lastRunId === watch.runId) {
     const runtimeMs = row.runtimeMs;
     if (row.status === "done" && typeof runtimeMs === "number" && Number.isFinite(runtimeMs)) {
@@ -347,15 +360,19 @@ export function resolveTurnRecap(
       // ends are on the Gateway's clock; it never reports less than its last run.
       const sinceRequest =
         watch.request && typeof row.endedAt === "number" ? row.endedAt - watch.request.askedAt : 0;
-      watch.recap = { runtimeMs: Math.max(runtimeMs, sinceRequest), outputTokens };
+      watch.recap = { runtimeMs: Math.max(runtimeMs, sinceRequest), ...usage };
     } else if (row.status && row.status !== "done") {
       watch.recap = null;
     }
   }
   // Usage can arrive after terminal presentation. Keep accepting facts for
   // this exact run without borrowing another run's session-row counters.
-  if (watch.recap && watch.recap.outputTokens !== outputTokens) {
-    watch.recap = { ...watch.recap, outputTokens };
+  if (
+    watch.recap &&
+    (watch.recap.outputTokens !== outputTokens ||
+      Boolean(watch.recap.outputTokensEstimated) !== Boolean(estimated))
+  ) {
+    watch.recap = { runtimeMs: watch.recap.runtimeMs, ...usage };
   }
   return indicator || !watch.recap ? null : { ...watch.recap, runId: watch.runId };
 }

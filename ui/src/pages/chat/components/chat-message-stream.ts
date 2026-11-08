@@ -81,6 +81,7 @@ export type StreamGroupOptions = StreamMessageOptions & {
   onOpenSubagent?: (key: string) => void;
   onOpenSubagents?: () => void;
   runOutputTokens?: number | null;
+  runOutputTokensEstimated?: boolean;
   runReasoning?: string;
   showReasoning?: boolean;
   answerStreaming?: boolean;
@@ -140,6 +141,7 @@ export function renderStreamGroupPart(
       onOpenSubagents: opts.onOpenSubagents,
       startupLabel: opts.startupLabel,
       outputTokens: opts.runOutputTokens,
+      outputTokensEstimated: opts.runOutputTokensEstimated,
       reasoning: opts.runReasoning,
       presentation,
     });

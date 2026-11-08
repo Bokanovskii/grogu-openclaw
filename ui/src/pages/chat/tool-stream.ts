@@ -304,7 +304,11 @@ function handleReasoningEvent(host: ToolStreamHost, payload: AgentEventPayload):
   }
   const text = typeof payload.data?.text === "string" ? payload.data.text : "";
   const tail = text.replace(/\s+/gu, " ").trim().slice(-REASONING_TAIL_CHARS);
-  if (!tail || host.chatRunReasoningById?.get(payload.runId) === tail) {
+  if (!tail) {
+    return true;
+  }
+  reconcileChatRunStartup(host, { state: "activity", runId: payload.runId, seq: payload.seq });
+  if (host.chatRunReasoningById?.get(payload.runId) === tail) {
     return true;
   }
   const reasoningByRun = new Map(host.chatRunReasoningById);

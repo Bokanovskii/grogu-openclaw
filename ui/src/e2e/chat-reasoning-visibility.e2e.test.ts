@@ -37,16 +37,29 @@ suite.define(() => {
             ];
           }),
         ).toEqual(["4.2s", "infinite", "steps(1)"]);
-        for (const seq of [1, 2, 3]) {
+        await gateway.emitGatewayEvent("chat", {
+          sessionKey: "main",
+          runId,
+          seq: 1,
+          state: "status",
+          phase: "starting_model",
+        });
+        await page
+          .locator(".chat-working-indicator__status")
+          .getByText("Waiting for a response…", { exact: true })
+          .waitFor();
+        let reasoning = "";
+        for (const [index, delta] of ["Reviewing", " evidence", " now."].entries()) {
+          reasoning += delta;
           await gateway.emitGatewayEvent("agent", {
             sessionKey: "main",
             runId,
-            seq,
+            seq: index + 2,
             stream: "thinking",
-            data: { text: `Reviewing evidence ${seq}` },
+            data: { text: reasoning, delta },
             ts: Date.now(),
           });
-          await page.getByText(`Reviewing evidence ${seq}`, { exact: true }).waitFor();
+          await page.getByText(reasoning, { exact: true }).waitFor();
           expect(await originalSprite.evaluate((element) => element.isConnected)).toBe(true);
           expect(
             await sprite.evaluate((element) => {

@@ -227,7 +227,7 @@ describe("app-tool-stream startup status", () => {
     };
   }
 
-  it.each(["tool", "preamble", "assistant"])(
+  it.each(["tool", "preamble", "assistant", "thinking"])(
     "keeps retry waits transient and ordered across %s progress and delayed replay",
     (kind) => {
       const host = createHost({
@@ -252,7 +252,7 @@ describe("app-tool-stream startup status", () => {
       expect(host.chatRunId).toBe("run-1");
       expect(retryLabel()).toBe(retry.data.message);
 
-      handleAgentEvent(host, {
+      const progress: AgentEvent = {
         ...retry,
         seq: 4,
         stream: kind === "preamble" ? "item" : kind,
@@ -261,14 +261,17 @@ describe("app-tool-stream startup status", () => {
             ? { phase: "start", toolCallId: "tool-next", name: "read" }
             : kind === "preamble"
               ? { kind: "preamble", itemId: "resumed", progressText: "Continuing" }
-              : { text: "Continuing" },
-      });
+              : { text: "Continuing", delta: "Continuing" },
+      };
+      handleAgentEvent(host, progress);
       handleAgentEvent(host, retry);
       expect(retryLabel()).toBeUndefined();
       expect(host.chatRunId).toBe("run-1");
 
       handleAgentEvent(host, { ...retry, seq: 5 });
       expect(retryLabel()).toBe(retry.data.message);
+      handleAgentEvent(host, { ...progress, seq: 6 });
+      expect(retryLabel()).toBeUndefined();
     },
   );
 });

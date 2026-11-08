@@ -67,6 +67,30 @@ advertised effort, not a literal provider-native `ultra` value. For a model
 advertising only none, low, medium and high, Ultra uses high. Explicit request,
 session, model, agent and job choices remain in force.
 
+## Active-response budgets
+
+Grogu uses `agents.defaults.timeoutSeconds: 0` and
+`agents.defaults.subagents.runTimeoutSeconds: 0` to remove overall chat and
+child-session execution caps without reducing Sparky/Ultra. Model-backed
+automations also need an explicit `payload.timeoutSeconds: 0`; omitting it
+retains OpenClaw's separate 60-minute automation watchdog. The
+[workspace guidance](templates/workspace-grogu/AGENTS.md#active-response-budgets)
+requires this when Grogu creates or edits a model-backed automation, unless the
+owner requests a finite budget. Other OpenClaw installations and clients keep
+their existing defaults.
+
+These settings leave provider idle/no-model-progress protection, tool deadlines,
+settlement deadlines and cancellation intact. They apply to newly admitted runs;
+changing defaults does not rescue a run admitted with an earlier deadline.
+
+Administrative payload edits can retire a job's recorded local-origin provenance.
+For a job that requires that access, re-save its unchanged tool cap through a
+fresh authenticated local creator turn. Do not restore provenance directly from
+a backup or manufacture requester identity.
+When [Tool Search](../docs/tools/tool-search.md#structured-controls) is active,
+discover and invoke the scheduler through its catalog; a failed direct call to
+the deferred tool name does not establish that the capability is unavailable.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:

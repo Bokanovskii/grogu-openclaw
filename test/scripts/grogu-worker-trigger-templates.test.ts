@@ -73,7 +73,10 @@ type MessagesOptions = {
   beforeTs?: number;
 };
 
-function messagesResult(messages: unknown[], options: MessagesOptions = {}) {
+function messagesResult(
+  messages: unknown[],
+  options: MessagesOptions = {},
+): { content: [{ type: "text"; text: string }]; isError: false } {
   const offset = options.offset ?? 0;
   return {
     content: [
@@ -814,13 +817,23 @@ describe("private worker trigger templates", () => {
   );
 
   // Serves a newest-first source the way each connector pages it: Messages by offset, Gmail by `before:`.
-  function pagedMcp(source: Source, entries: readonly Entry[], calls: unknown[]) {
+  function pagedMcp(
+    source: Source,
+    entries: readonly Entry[],
+    calls: unknown[],
+    failOnCall?: number,
+  ) {
     const head = heads[source];
     const sorted = entries.toSorted((a, b) => b[1] - a[1]);
-    const pageOf = (rows: readonly Entry[], offset: number) => ({
-      rows: rows.slice(offset, offset + 100).map(([n, t]) => head.row(n, t)),
-      hasMore: rows.length > offset + 100,
-    });
+    const pageOf = (rows: readonly Entry[], offset: number) => {
+      if (calls.length === failOnCall) {
+        throw new Error("timeout");
+      }
+      return {
+        rows: rows.slice(offset, offset + 100).map(([n, t]) => head.row(n, t)),
+        hasMore: rows.length > offset + 100,
+      };
+    };
     if (source === "messages") {
       return {
         seaglass: {
@@ -894,24 +907,8 @@ describe("private worker trigger templates", () => {
           source,
           evaluation === 0 ? [...flood, ...base] : [...later, ...flood, ...base],
           [],
+          evaluation === 1 ? 2 : undefined,
         );
-        if (evaluation === 1) {
-          // A failed older page is resumed, not skipped.
-          const service = Object.values(mcp)[0] as Record<
-            string,
-            (args: unknown) => Promise<unknown>
-          >;
-          const [name] = Object.keys(service);
-          const page = service[name];
-          let calls = 0;
-          service[name] = async (args) => {
-            calls += 1;
-            if (calls === 2) {
-              throw new Error("timeout");
-            }
-            return page(args);
-          };
-        }
         const result = await run(mcp, { state });
         expect(result).not.toHaveProperty("error");
         state = result.state;

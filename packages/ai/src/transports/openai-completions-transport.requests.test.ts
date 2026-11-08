@@ -1,14 +1,139 @@
 import { createServer } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OpenAICompletionsOptions } from "../provider-options.js";
 import { streamSimpleOpenAICompletions } from "../providers/openai-completions.js";
 import type { AssistantMessage, Model, SimpleStreamOptions } from "../types.js";
+import { createZeroUsage } from "../usage.test-support.js";
 import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
 import { makeCompletionsModel } from "./openai-completions.test-support.js";
 
 const COLD_RUNNER_HTTP_TEST_TIMEOUT_MS = 300_000;
 
 describe("openai completions transport requests", () => {
+  it.each(["managed", "direct"] as const)(
+    "continues Sparky browser research after three screenshots without rewriting history (%s)",
+    async (mode) => {
+      const requests: unknown[] = [];
+      const server = createServer((request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          requests.push(JSON.parse(body));
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(
+            JSON.stringify({
+              id: "image-budget-response",
+              object: "chat.completion",
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: "Found the size." },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+            }),
+          );
+        });
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      vi.stubEnv("GROGU_PROFILE_FILE", "/synthetic/profile.json");
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          throw new Error("Missing loopback server address");
+        }
+        const model = makeCompletionsModel({
+          provider: "sparky",
+          input: ["text", "image"],
+          reasoning: false,
+          baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        });
+        const createStream =
+          mode === "managed"
+            ? createOpenAICompletionsTransportStreamFn()
+            : streamSimpleOpenAICompletions;
+        for (const attachedImages of [0, 1, 2]) {
+          const image = (data: string) => ({
+            type: "image" as const,
+            mimeType: "image/png",
+            data: Buffer.from(data).toString("base64"),
+          });
+          const context = {
+            messages: [
+              {
+                role: "user" as const,
+                timestamp: 1,
+                content: [
+                  { type: "text" as const, text: "Find my size." },
+                  ...Array.from({ length: attachedImages }, (_, i) => image(`attached-${i}`)),
+                ],
+              },
+              ...[1, 2, 3].flatMap((i) => [
+                {
+                  role: "assistant" as const,
+                  api: model.api,
+                  provider: model.provider,
+                  model: model.id,
+                  usage: createZeroUsage(),
+                  stopReason: "toolUse" as const,
+                  timestamp: i * 2,
+                  content: [
+                    {
+                      type: "toolCall" as const,
+                      id: `browser-${i}`,
+                      name: "browser",
+                      arguments: { action: "screenshot", targetId: "t2" },
+                    },
+                  ],
+                },
+                {
+                  role: "toolResult" as const,
+                  toolCallId: `browser-${i}`,
+                  toolName: "browser",
+                  timestamp: i * 2 + 1,
+                  isError: false,
+                  content: [{ type: "text" as const, text: `Page ${i}` }, image(`screenshot-${i}`)],
+                },
+              ]),
+            ],
+          };
+          const original = JSON.stringify(context);
+          const result = await createStream(model, context, { apiKey: "test-key" }).result();
+          expect(result.stopReason, result.errorMessage).toBe("stop");
+          expect(result.content).toEqual([
+            expect.objectContaining({ type: "text", text: "Found the size." }),
+          ]);
+          const payload = JSON.stringify(requests.at(-1));
+          expect(payload.match(/data:image\/png;base64,/g)).toHaveLength(2);
+          for (let i = 0; i < attachedImages; i++) {
+            expect(payload).toContain(Buffer.from(`attached-${i}`).toString("base64"));
+          }
+          for (const i of [1, 2, 3]) {
+            const encoded = Buffer.from(`screenshot-${i}`).toString("base64");
+            if (i > 1 + attachedImages) {
+              expect(payload).toContain(encoded);
+            } else {
+              expect(payload).not.toContain(encoded);
+            }
+            expect(payload).toContain(`Page ${i}`);
+          }
+          expect(JSON.stringify(context)).toBe(original);
+        }
+        expect(requests).toHaveLength(3);
+      } finally {
+        vi.unstubAllEnvs();
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    },
+  );
   it.each([
     {
       api: "openai-completions" as const,

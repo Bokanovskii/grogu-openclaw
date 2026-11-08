@@ -127,19 +127,20 @@ export function projectSparkyImageHistory(
   if (total <= 2) {
     return context;
   }
-  const currentStart = Math.max(
-    0,
-    context.messages.findLastIndex((message) => message.role === "user"),
-  );
-  const currentCount = context.messages
-    .slice(currentStart)
-    .reduce((count, message) => count + imageCount(message), 0);
+  const currentStart = context.messages.findLastIndex((message) => message.role === "user");
+  const currentUser = context.messages[currentStart];
+  const currentCount = currentUser ? imageCount(currentUser) : 0;
   if (currentCount > 2) {
     throw new SparkyImageLimitError(currentCount);
   }
   let remaining = total - 2;
   const messages = context.messages.map((message, index) => {
-    if (index >= currentStart || remaining === 0 || !Array.isArray(message.content)) {
+    if (
+      index === currentStart ||
+      remaining === 0 ||
+      message.role === "assistant" ||
+      !Array.isArray(message.content)
+    ) {
       return message;
     }
     let changed = false;
@@ -154,8 +155,7 @@ export function projectSparkyImageHistory(
         text: "[earlier image omitted from this request: Sparky accepts at most 2 images; reattach it if its pixels are needed]",
       };
     });
-    // SAFETY: Each replacement is a valid text content part and every untouched part retains its original type.
-    return changed ? ({ ...message, content } as typeof message) : message;
+    return changed ? { ...message, content } : message;
   });
   return { ...context, messages };
 }

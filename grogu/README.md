@@ -201,3 +201,9 @@ missing scope, revocation, and transient network/provider failure.
   answer (`REQUIRED_CHANNEL_QUEUE_MODES` in `policy.ts`).
 - Maintenance only targets the canonical loopback Gateway and never prints
   credentials (`operator.ts`).
+- Sparky requests keep at most two images without rewriting conversation history.
+  Images attached to the latest user message take priority; remaining slots keep
+  the newest historical or tool images. Older images are replaced with an
+  explicit omission notice in the request only. Browser research can therefore
+  continue after multiple screenshots. Attaching more than two images to one
+  user message still returns an actionable validation error.

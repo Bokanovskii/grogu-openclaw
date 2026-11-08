@@ -93,7 +93,10 @@
 
 .chat-grogu-eater__pose {
   opacity: 0;
-  animation: 4.2s step-end infinite;
+  /* Keep timing independent of the pose's name; minifiers discard unnamed shorthands. */
+  animation-duration: 4.2s;
+  animation-timing-function: step-end;
+  animation-iteration-count: infinite;
 }
 
 .chat-grogu-eater__pose--look {

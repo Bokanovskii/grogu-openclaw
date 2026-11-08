@@ -49,6 +49,7 @@ import {
   resetTranscriptSession,
 } from "./components/chat-thread-interactions.ts";
 import { activeQueuedMessageEdit } from "./queued-message-edit.ts";
+import { resetChatScroll, scheduleChatScroll } from "./scroll.ts";
 
 const COMPOSER_PREFILL_ATTENTION_DURATION_MS = 600;
 const COMPOSER_PREFILL_ATTENTION_CLASS = "agent-chat__input--prefill-attention";
@@ -459,6 +460,8 @@ export abstract class ChatPaneRetainedPresentation extends ChatPaneBoard {
       this.syncActiveBindings();
       const state = this.state;
       if (state) {
+        resetChatScroll(state);
+        scheduleChatScroll(state, true, false, { source: "manual" });
         this.unreadPatchGuard.beginActivation(state.sessionKey);
         void refreshChatMetadata(state, { automatic: true });
         void this.refreshTaskSuggestions({ automatic: true });

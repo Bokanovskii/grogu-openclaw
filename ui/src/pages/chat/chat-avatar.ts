@@ -117,7 +117,11 @@ export function renderChatAvatar(
   }
 
   if (normalized === "user" && userAvatarText) {
-    return html`<div class="chat-avatar ${className}" role="img" aria-label="${userName}">
+    return html`<div
+      class="chat-avatar ${className} chat-avatar--custom"
+      role="img"
+      aria-label="${userName}"
+    >
       ${userAvatarText}
     </div>`;
   }

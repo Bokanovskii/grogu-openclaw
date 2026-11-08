@@ -82,6 +82,8 @@ export type StreamGroupOptions = StreamMessageOptions & {
   onOpenSubagents?: () => void;
   runOutputTokens?: number | null;
   runReasoning?: string;
+  showReasoning?: boolean;
+  answerStreaming?: boolean;
   questionPrompts?: ReadonlyMap<string, QuestionPrompt>;
 };
 
@@ -122,6 +124,9 @@ export function renderStreamGroupPart(
   presentation: "standalone" | "continuation",
 ) {
   if (part.kind === "reading-indicator") {
+    if (opts.answerStreaming && part.waitingOn !== "subagents" && !opts.waitingApproval) {
+      return nothing;
+    }
     return renderChatWorkingIndicator(part, {
       groguEater: isGroguAgentName(opts.assistant?.name),
       mascot: opts.branding?.mascot,
@@ -145,7 +150,12 @@ export function renderStreamGroupPart(
   }
   const source = prepareChatMessageRender({
     role: "assistant",
-    content: [{ type: "text", text: part.text }],
+    content: [
+      ...(part.isStreaming && opts.runReasoning
+        ? [{ type: "thinking", thinking: opts.runReasoning }]
+        : []),
+      { type: "text", text: part.text },
+    ],
     timestamp: part.startedAt,
   });
   return renderGroupedMessage(
@@ -155,7 +165,7 @@ export function renderStreamGroupPart(
       ...opts,
       isStreaming: part.isStreaming,
       entryRef: opts.entryRefFor?.(part.key),
-      showReasoning: false,
+      showReasoning: opts.showReasoning === true,
       // Settled segments can be replied to without transcript IDs or footer actions.
       messageActions: resolveMessageActionDetails(source, {
         messageId: part.key,

@@ -353,6 +353,8 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     onOpenSubagents: subagents.listed ? props.onOpenSubagents : undefined,
     runOutputTokens,
     runReasoning,
+    showReasoning,
+    answerStreaming: chatItems.some((item) => item.kind === "stream" && item.isStreaming),
     questionPrompts,
   } satisfies StreamGroupOptions;
   const renderGroupOptions = (item: MessageGroup) => {
@@ -422,8 +424,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
       searchResult: searchFiltering,
     } satisfies Parameters<typeof renderMessageGroup>[1];
   };
-  // Only the working indicator shows live usage and subagent status, so rows
-  // without one keep memoizing across usage and child-roster patches.
+  // Working rows and live answers share bounded reasoning and usage facts.
   const workingUsageKey = JSON.stringify([runOutputTokens, runReasoning, subagents.statusKey]);
   const liveStatusSignature = (item: ChatRenderItem): string => {
     if (item.kind === "stream-run") {
@@ -453,7 +454,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     return `${continuationKey}|${statusKey}|${searchFiltering ? "search-result" : ""}`;
   };
   const rowPresentationDependencies = (item: ChatRenderItem): readonly unknown[] => {
-    const dependencies: unknown[] = [liveStatusSignature(item)];
+    const dependencies: unknown[] = [liveStatusSignature(item), streamGroupOptions.answerStreaming];
     for (const group of chatItemGroups(item)) {
       for (const source of group.messages) {
         if (source.replyTarget?.kind === "id") {

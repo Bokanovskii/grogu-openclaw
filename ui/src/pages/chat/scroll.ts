@@ -65,6 +65,21 @@ export function saveChatSessionScrollPosition(
   });
 }
 
+export function clearChatSessionScrollPosition(paneId: string, sessionKey: string): void {
+  const scrollTops = transcriptScrollTopByPane.get(paneId);
+  if (!scrollTops) {
+    return;
+  }
+  for (const key of scrollTops.keys()) {
+    if (areUiSessionKeysEquivalent(key, sessionKey)) {
+      scrollTops.delete(key);
+    }
+  }
+  if (scrollTops.size === 0) {
+    transcriptScrollTopByPane.delete(paneId);
+  }
+}
+
 export function captureChatSessionScrollPosition(target: {
   scrollHeight: number;
   scrollTop: number;

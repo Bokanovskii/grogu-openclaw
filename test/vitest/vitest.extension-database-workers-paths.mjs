@@ -1,6 +1,7 @@
 export const databaseWorkerExtensionTestRoots = [
   "extensions/logbook",
   "extensions/memory-core",
+  "extensions/spaces",
   "extensions/team-reports",
   "extensions/workboard",
 ];

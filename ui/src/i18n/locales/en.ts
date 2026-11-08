@@ -4357,8 +4357,9 @@ export const en: TranslationMap & {
       modelHelp:
         "Start typing to pick a known model, or enter a custom one. Routine jobs (summaries, triage, classification) run well on a lighter model — cheaper and faster than your default.",
       thinking: "Reasoning",
-      thinkingPlaceholder: "low",
-      thinkingHelp: "Use a suggested level or enter a provider-specific value.",
+      thinkingPlaceholder: "Default",
+      thinkingHelp:
+        "Leave blank to inherit the session or agent reasoning default, or choose an override.",
       failureAlerts: "Failure alerts",
       failureAlertInherit: "Inherit global setting",
       failureAlertDisabled: "Disable for this job",

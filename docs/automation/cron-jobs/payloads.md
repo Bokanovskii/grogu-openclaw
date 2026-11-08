@@ -49,6 +49,12 @@ The weekly Skill Workshop curator (declaration key `skill-collection-review:<age
 <ParamField path="--clear-thinking" type="boolean">
   On `automations edit`, removes the per-job thinking override. Cannot combine with `--thinking`.
 </ParamField>
+
+In the Control UI, a blank **Reasoning** field shows **Default** and stores no
+per-job override. Normal automation reasoning precedence applies, including
+saved session preferences and configured agent defaults; it does not select Low.
+To override that inheritance, enter a supported level such as `ultra`.
+
 <ParamField path="--light-context" type="boolean">
   Skip workspace bootstrap file injection.
 </ParamField>

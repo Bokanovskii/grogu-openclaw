@@ -245,8 +245,12 @@ class ArtifactsPage extends OpenClawLightDomElement {
           ? html`<select
               class="settings-select artifacts-toolbar__select"
               aria-label=${t("artifacts.agent")}
-              @change=${(event: Event) =>
-                this.selectAgent((event.target as HTMLSelectElement).value)}
+              @change=${(event: Event) => {
+                if (!(event.currentTarget instanceof HTMLSelectElement)) {
+                  throw new TypeError("Artifacts agent control must be a select element");
+                }
+                this.selectAgent(event.currentTarget.value);
+              }}
             >
               ${this.agents.map(
                 (agent) =>
@@ -261,7 +265,14 @@ class ArtifactsPage extends OpenClawLightDomElement {
         class="settings-select artifacts-toolbar__select"
         aria-label=${t("artifacts.sort")}
         @change=${(event: Event) => {
-          this.sort = (event.target as HTMLSelectElement).value as ArtifactSortMode;
+          if (!(event.currentTarget instanceof HTMLSelectElement)) {
+            throw new TypeError("Artifacts sort control must be a select element");
+          }
+          const mode = event.currentTarget.value;
+          if (mode !== "recent" && mode !== "name") {
+            throw new TypeError(`Invalid artifacts sort mode: ${mode}`);
+          }
+          this.sort = mode;
         }}
       >
         <option value="recent" ?selected=${this.sort === "recent"}>

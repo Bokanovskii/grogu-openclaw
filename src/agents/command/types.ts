@@ -130,7 +130,7 @@ export type AgentCommandOpts = {
   /** Trusted server-stamped authority for an explicitly capped scheduled run. */
   scheduledToolPolicy?: ScheduledToolPolicyContext;
   /** Host-authorized dashboard authoring without an originating inline renderer. */
-  pinnedWidgetAuthoring?: boolean;
+  inlineWidgetAuthoring?: boolean;
   /** Preserve the originating run's message-tool policy across internal continuation turns. */
   requireExplicitMessageTarget?: boolean;
   cliSessionBindingFacts?: CliSessionBindingFacts;
@@ -272,7 +272,7 @@ export const AGENT_COMMAND_PUBLIC_INGRESS_DEFAULTS = Object.freeze({
   mainRestartRecoveryOwnerLease: undefined,
   mainRestartRecoveryAdmitted: undefined,
   mainRestartRecoveryAttempt: undefined,
-  pinnedWidgetAuthoring: undefined,
+  inlineWidgetAuthoring: undefined,
   executionIdentityAdmission: undefined,
   operationalRunInstance: undefined,
   assertSourceCurrent: undefined,

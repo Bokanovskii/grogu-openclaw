@@ -431,7 +431,7 @@ export async function resolveGatewayScopedTools(
     disablePluginTools: params.disablePluginTools,
     agentDir: params.agentDir,
     authProfileStore: params.authProfileStore,
-    pinnedWidgetAuthoring: surface === "loopback" ? params.pinnedWidgetAuthoring : undefined,
+    inlineWidgetAuthoring: surface === "loopback" ? params.inlineWidgetAuthoring : undefined,
     sandboxed,
     pluginToolAllowlist: collectExplicitAllowlist(catalogPolicies),
     pluginToolDenylist: catalogDenylist,

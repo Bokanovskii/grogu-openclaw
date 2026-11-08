@@ -712,7 +712,7 @@ describe("Codex app-server dynamic tool build", () => {
     };
     Object.assign(params, {
       clientCaps: ["tool-events", "inline-widgets"],
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
       toolBindings: { browser: { kind: "tab", tabId: 7, target: "host" } },
       memberRoleIds: ["maintainer-role"],
       chatId: "native-chat-123",
@@ -786,7 +786,7 @@ describe("Codex app-server dynamic tool build", () => {
     const options = expectDefined(factory.mock.calls[0]?.[0], "constructed tool options");
     expect(options).toMatchObject({
       clientCaps: ["tool-events", "inline-widgets"],
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
       toolBindings: { browser: { kind: "tab", tabId: 7, target: "host" } },
       memberRoleIds: ["maintainer-role"],
       chatType: "direct",

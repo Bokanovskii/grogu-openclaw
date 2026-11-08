@@ -6,7 +6,7 @@ describe("buildEmbeddedAttemptToolRunContext", () => {
     const input = {
       clientCaps: ["inline-widgets"],
       gatewayUiCommandTarget: { connId: "requester-tab", profileId: "requester" },
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
       toolBindings: { browser: { kind: "tab", tabId: 7 } },
       memberRoleIds: ["maintainer-role"],
       approvalReviewerDeviceId: "reviewer-device",
@@ -26,7 +26,7 @@ describe("buildEmbeddedAttemptToolRunContext", () => {
     expect(context).toMatchObject({
       clientCaps: ["inline-widgets"],
       gatewayUiCommandTarget: input.gatewayUiCommandTarget,
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
       toolBindings: input.toolBindings,
       memberRoleIds: ["maintainer-role"],
       approvalReviewerDeviceId: "reviewer-device",

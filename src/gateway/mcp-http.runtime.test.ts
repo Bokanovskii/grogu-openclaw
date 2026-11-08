@@ -337,20 +337,20 @@ describe("McpLoopbackToolCache", () => {
     });
   });
 
-  it("keeps pinned widget authoring out of capless cached tool lists", async () => {
+  it("keeps inline source authoring out of unrelated capless cached tool lists", async () => {
     const cache = new McpLoopbackToolCache();
     const params = scopeParams();
-    resolveGatewayScopedTools.mockImplementation(({ pinnedWidgetAuthoring }) =>
-      scopedToolFixture(pinnedWidgetAuthoring ? ["dashboard", "show_widget"] : ["dashboard"]),
+    resolveGatewayScopedTools.mockImplementation(({ inlineWidgetAuthoring }) =>
+      scopedToolFixture(inlineWidgetAuthoring ? ["dashboard", "show_widget"] : ["dashboard"]),
     );
 
-    for (const pinnedWidgetAuthoring of [true, undefined, true, false]) {
+    for (const inlineWidgetAuthoring of [true, undefined, true, false]) {
       const result = await cache.resolve({
         ...params,
-        context: { ...params.context, pinnedWidgetAuthoring },
+        context: { ...params.context, inlineWidgetAuthoring },
       });
       expect(result.tools.map((tool) => tool.name)).toEqual(
-        pinnedWidgetAuthoring ? ["dashboard", "show_widget"] : ["dashboard"],
+        inlineWidgetAuthoring ? ["dashboard", "show_widget"] : ["dashboard"],
       );
     }
     expect(resolveGatewayScopedTools).toHaveBeenCalledTimes(2);

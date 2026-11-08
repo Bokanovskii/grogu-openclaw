@@ -311,7 +311,7 @@ export function buildEmbeddedCompactionRuntimeContext(
     messageChannel: params.messageChannel ?? undefined,
     messageProvider: params.messageProvider ?? undefined,
     clientCaps: afterTurn ? undefined : params.clientCaps,
-    pinnedWidgetAuthoring: afterTurn ? undefined : params.pinnedWidgetAuthoring,
+    inlineWidgetAuthoring: afterTurn ? undefined : params.inlineWidgetAuthoring,
     chatType: afterTurn ? undefined : (params.chatType ?? undefined),
     agentAccountId: params.agentAccountId ?? undefined,
     conversationRoutePeerId: afterTurn ? undefined : params.conversationRoutePeerId,

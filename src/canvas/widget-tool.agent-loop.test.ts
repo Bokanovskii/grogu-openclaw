@@ -94,6 +94,7 @@ async function runWidgetTurn(params: {
   const widgetTool = createShowWidgetTool({
     stateDir,
     sessionId: "widget-loop",
+    agentSessionKey: "agent:main:widget-loop",
     presenters: params.presenters,
     presenterContext: {},
   });
@@ -192,7 +193,7 @@ describe.each<{ surface: Surface }>([{ surface: "direct" }, { surface: "catalog"
     it("ends the turn after a successful final widget and its closing text", async () => {
       const { providerCalls, messages, widgetResult } = await runWidgetTurn({
         surface,
-        widgetArgs: { widget_code: "<p>A vs B</p>", final: true },
+        widgetArgs: { widget_code: "<p>A vs B</p>", report: null, final: true },
       });
 
       expect(providerCalls).toBe(1);

@@ -239,7 +239,7 @@ export function buildCliMcpGrantContext(params: {
     messageProvider,
     clientCaps: clientCaps.length > 0 ? clientCaps : undefined,
     gatewayUiCommandTarget: params.run.gatewayUiCommandTarget,
-    ...(params.run.pinnedWidgetAuthoring === true ? { pinnedWidgetAuthoring: true } : {}),
+    ...(params.run.inlineWidgetAuthoring === true ? { inlineWidgetAuthoring: true } : {}),
     currentChannelId,
     currentThreadTs: normalizeOptionalString(params.run.currentThreadTs),
     currentMessageId:

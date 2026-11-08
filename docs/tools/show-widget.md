@@ -17,8 +17,9 @@ For a pinned data report, provide a structured `report` with `pin: true`. Report
 The bundled `visualize` skill teaches both inline code explanations (architecture,
 execution traces, performance comparisons, and UI mockups) and persistent
 dashboard content. The `control-ui` skill owns session and board organization.
-Keep one-off visuals inline; pin for an explicit dashboard request or multiple
-non-code visualizations that belong together.
+Keep visuals inline by default, including comparisons, charts, and follow-up
+versions. Pin only when the user explicitly asks to save a dashboard. Several
+visualizations can share one self-contained HTML widget in chat.
 
 ## How widgets work
 
@@ -43,7 +44,17 @@ OpenClaw exposes `show_widget` only when the originating Gateway client declares
 
 An agent-turn automation bound to a persistent session and carrying a server-authored scheduled tool policy may explicitly allow `show_widget` without an inline client. That scheduled surface is pinned-only: every call requires `pin: true`, writes to the bound session dashboard, and cannot set `presentation.target`. Detached cron-run sessions, ordinary capless channel runs, and scheduled jobs without an explicit tool cap remain excluded. The originating-client capability remains mandatory for inline presentation.
 
-When the Gateway automatically resumes an interrupted Control UI turn after a restart, the recovered turn can also create or update pinned dashboard widgets without a connected browser. Recovery uses the same pinned-only surface: set `pin: true` and omit `presentation.target`. Inline previews still require a new turn from a client that declares `inline-widgets`. The resumed turn does not inherit a browser connection or device presentation rights.
+When the Gateway resumes an interrupted Control UI turn after a restart, the
+admitted recovery can publish an HTML artifact back into its original chat.
+Omit `pin` (or set it to `false`); the widget appears when the chat reconnects
+and remains available through history reload. This does not claim a live browser
+connection or grant device presentation rights. Explicit dashboard saves remain
+available with `pin: true`; recovery never requires pinning just to finish an
+inline answer. Ordinary capless channel or HTTP runs do not gain this capability.
+
+For a follow-up revision, publish the updated HTML in the new chat turn.
+Previous inline documents remain unchanged; reusing a dashboard name is not
+necessary and does not turn the revision into a dashboard.
 
 A `status: "pinned"` tool result means the widget is on the session dashboard. Open that dashboard tab in the Control UI, or use `dashboard` with `action: "focus_tab"` and the saved widget's `tabId` when the tool is available. Widget hosting URLs are internal rendering resources and should not be opened in the Browser panel to substitute for widget presentation.
 
@@ -159,7 +170,7 @@ The core tool requires `title` and one content input: `widget_code` for HTML or 
 </ParamField>
 
 <ParamField path="report" type="object">
-  Structured native report with a `blocks` array. Requires `pin: true`. Omit `widget_code`, `kind`, and `capabilities`. Device presentation is unavailable. Maximum 8KB of UTF-8 JSON. See [Native dashboard reports](#native-dashboard-reports).
+  Structured native report with a `blocks` array. Requires `pin: true`. For an HTML widget, omit this field or set it to `null`. For a report, omit `widget_code`, `kind`, and `capabilities`. Device presentation is unavailable. Maximum 8KB of UTF-8 JSON. See [Native dashboard reports](#native-dashboard-reports).
 </ParamField>
 
 Discord also accepts optional `button_label` text for the Activity launch button. The Canvas schema intentionally omits this Discord-only field.

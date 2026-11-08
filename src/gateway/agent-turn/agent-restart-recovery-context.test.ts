@@ -67,10 +67,10 @@ describe("resolveAgentRestartRecoveryContext", () => {
     },
   );
 
-  it("preserves WebChat policy context and pinned authoring for an admitted Control UI recovery", () => {
+  it("preserves WebChat policy and inline source publication for an admitted Control UI recovery", () => {
     expect(resolveAgentRestartRecoveryContext(matchingUiParams)).toEqual({
       messageChannel: "webchat",
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
     });
     expect(
       resolveAgentRestartRecoveryContext({

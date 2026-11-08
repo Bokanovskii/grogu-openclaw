@@ -177,7 +177,7 @@ describe("buildEmbeddedCompactionRuntimeContext", () => {
   it("preserves sender and current message routing for compaction", () => {
     const routing = {
       sessionKey: "agent:main:thread:1",
-      pinnedWidgetAuthoring: true,
+      inlineWidgetAuthoring: true,
       messageChannel: "slack",
       messageProvider: "slack",
       chatType: "channel",

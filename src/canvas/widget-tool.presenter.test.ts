@@ -134,7 +134,7 @@ describe("scheduled show_widget", () => {
       sessionId: "scheduled-board-only",
       agentSessionKey: "agent:main:dashboard:scheduled",
       inlineClientAvailable: false,
-      pinnedOnly: true,
+      publicationMode: "pinned-only",
       callGateway,
     });
     const schema = tool.parameters as {
@@ -229,9 +229,6 @@ describe("show_widget script syntax gate", () => {
     registerTestWidgetContentKind("diagram", () => "<p>Rendered diagram</p>");
     const stateDir = tempDirs.make("openclaw-widget-syntax-");
     const tool = createShowWidgetTool({ stateDir, sessionId: "registered-syntax" });
-    expect(tool.description).toContain(
-      "Keep one-off visualizations inline; pin for explicit dashboard requests or multiple non-code visualizations.",
-    );
     expect(tool.description).toContain('Default videos to controls playsinline preload="auto"');
     expect(tool.description).toContain("do not autoplay");
     const result = await tool.execute("registered", {

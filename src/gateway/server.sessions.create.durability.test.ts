@@ -536,7 +536,7 @@ test.for([
     dispatch.start.mockClear();
     agentCommandMock.mockImplementation(async (raw) => {
       const options = raw as AgentCommandGatewayIngressOpts;
-      expect(options.pinnedWidgetAuthoring).toBe(mode === "webchat" ? true : undefined);
+      expect(options.inlineWidgetAuthoring).toBe(mode === "webchat" ? true : undefined);
       const entry = expectDefined(
         loadSessionEntry({ agentId: "main", sessionKey: key, storePath }),
         "session at execution",

@@ -104,7 +104,8 @@ describe("openai completions transport requests", () => {
             ],
           };
           const original = JSON.stringify(context);
-          const result = await createStream(model, context, { apiKey: "test-key" }).result();
+          const stream = await createStream(model, context, { apiKey: "test-key" });
+          const result = await stream.result();
           expect(result.stopReason, result.errorMessage).toBe("stop");
           expect(result.content).toEqual([
             expect.objectContaining({ type: "text", text: "Found the size." }),

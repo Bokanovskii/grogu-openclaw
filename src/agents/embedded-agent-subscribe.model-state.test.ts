@@ -534,7 +534,7 @@ describe("subscribeEmbeddedAgentSession model state", () => {
         total: 0,
         contextUsage: { state: "unavailable" },
         cost: { total: 0 },
-      },
+      } satisfies NormalizedUsage,
       contextTokens: undefined,
     },
     {
@@ -552,7 +552,7 @@ describe("subscribeEmbeddedAgentSession model state", () => {
         total: 7,
         contextUsage: { state: "available", promptTokens: 7, totalTokens: 7 },
         cost: { total: 0 },
-      },
+      } satisfies NormalizedUsage,
       contextTokens: 7,
     },
   ])(

@@ -55,6 +55,18 @@ Fixed-command helpers that validate research checkpoints use the maintained
 `dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
 hashed chunk or an operator-created dist patch.
 
+## Thinking defaults
+
+Grogu's Sparky utility completions inherit the agent, model and global thinking
+defaults from their admitted native configuration, unless a caller explicitly
+selects an effort. Activity recaps no longer force thinking off. Other providers
+and installations without a private Grogu profile keep their existing behavior.
+
+`agents.defaults.thinkingDefault: "ultra"` selects the provider's highest
+advertised effort, not a literal provider-native `ultra` value. For a model
+advertising only none, low, medium and high, Ultra uses high. Explicit request,
+session, model, agent and job choices remain in force.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:

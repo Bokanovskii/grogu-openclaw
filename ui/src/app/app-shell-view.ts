@@ -366,7 +366,7 @@ export function renderApplicationShell(host: ShellViewHost) {
   const workspace = html`
     ${renderShellLazyOverlays(host, desktopPanelAvailable, custodianPanelAvailable, nativeEmbed)}
     <div
-      class="shell ${chatLikeRoute ? "shell--chat" : ""} ${
+      class="shell ${chatLikeRoute ? "shell--chat" : ""} ${sessionRoute ? "shell--conversation" : ""} ${
         navCollapsed ? "shell--nav-collapsed" : ""
       } ${mobileNavLayout ? "shell--mobile-nav" : ""} ${
         mergedChatChrome ? "shell--merged-chat-chrome" : ""

@@ -28,6 +28,11 @@ and **Circle**. Square preserves the full image; rounded and circular icons use 
 centered crop. The choice is saved with your tab-icon preference, and activity
 badges remain visible on every shape.
 
+Chat uses the available pane width with responsive side gutters and a solid
+background in the current theme's color. **Settings → Appearance → Chat message
+max width** can constrain the conversation and composer to a narrower column;
+existing saved widths remain in effect. Other pages retain their theme artwork.
+
 After a Gateway restart, an agent may need a few minutes to prepare its database. The chat view shows "Starting up" and the sidebar stays quiet while preparation is pending. Both reload automatically when the agent is ready; an actual preparation failure still shows its diagnostic and repair instructions.
 
 Automatic read acknowledgements and identity refreshes pause while the Gateway reports a restart or suspension. Pending read acknowledgements are shared across repeated session updates. If an acknowledgement is rejected, later updates respect the server's retry delay and use randomized backoff instead of immediately sending another patch.

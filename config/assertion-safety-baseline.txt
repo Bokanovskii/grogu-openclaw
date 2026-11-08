@@ -1482,7 +1482,7 @@ src/agents/tools/pdf-native-providers.ts	2
 src/agents/tools/portal-tool.ts	1
 src/agents/tools/screen-tool.ts	1
 src/agents/tools/session-status-tool.ts	5
-src/agents/tools/sessions-history-tool.ts	3
+src/agents/tools/sessions-history-tool.ts	1
 src/agents/tools/sessions-list-tool.ts	4
 src/agents/tools/sessions-search-tool.ts	1
 src/agents/tools/sessions-spawn-tool.ts	5

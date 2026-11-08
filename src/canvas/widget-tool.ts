@@ -5,6 +5,7 @@ import type { Result } from "@openclaw/normalization-core/result";
 import { Type } from "typebox";
 import type { BoardWidgetPutResult } from "../../packages/gateway-protocol/src/index.js";
 import { WIDGET_HTML_MAX_UTF8_BYTES } from "../../packages/gateway-protocol/src/schema/canvas.js";
+import type { AgentToolResult } from "../agents/runtime/index.js";
 import { optionalStringEnum } from "../agents/schema/string-enum.js";
 import { type AnyAgentTool, jsonResult, readToolStringParam } from "../agents/tools/common.js";
 import {
@@ -53,6 +54,8 @@ export function hasRegisteredShowWidgetKinds(): boolean {
   return listBoardWidgetContentKinds(currentPluginRegistry()).length > 0;
 }
 
+const WIDGET_CLOSING_TEXT_MAX_CHARS = 2_000;
+
 function createShowWidgetToolSchema(
   kinds: readonly string[],
   presenters: readonly Exclude<WidgetPresenter, { target: "current_channel" }>[],
@@ -91,6 +94,23 @@ function createShowWidgetToolSchema(
           "Stable dashboard widget name; reuse the same name with pin=true and new report data or widget_code to update",
       }),
     ),
+    ...(pinnedOnly
+      ? {}
+      : {
+          final: Type.Optional(
+            Type.Boolean({
+              description:
+                "Set true when this widget completes your answer; a successful show then ends the turn. Omit for widgets followed by more work.",
+            }),
+          ),
+          closing_text: Type.Optional(
+            Type.String({
+              maxLength: WIDGET_CLOSING_TEXT_MAX_CHARS,
+              description:
+                "With final=true: brief plain text or Markdown shown after the widget as your closing reply. Add what the widget does not say; do not restate it.",
+            }),
+          ),
+        }),
     pin: pinnedOnly
       ? Type.Literal(true, {
           description: "Required: this surface can only author pinned widgets",
@@ -324,6 +344,8 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
     ...(currentChannelPresenter || pinnedOnly
       ? {}
       : { requiredClientCaps: SHOW_WIDGET_REQUIRED_CLIENT_CAPS }),
+    // A final widget's closing_text is delivered by the host after the widget.
+    canDeliverSourceReply: true,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const requestedKind = readToolStringParam(params, "kind");
@@ -333,6 +355,10 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
           trim: false,
         }) ?? "";
       const rawReport = asOptionalRecord(params.report);
+      const closingText = readToolStringParam(params, "closing_text");
+      if (closingText && params.final !== true) {
+        throw new WidgetHtmlInputError("closing_text requires final=true");
+      }
       const isReport =
         params.report !== undefined &&
         params.report !== null &&
@@ -524,16 +550,34 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
           inputName: "widget document after wrapping",
         });
       }
+      // Terminal only after a fully successful show; pending or rejected grants still need follow-up.
+      const endsTurn =
+        !pinnedOnly &&
+        params.final === true &&
+        capabilityState !== "pending" &&
+        capabilityState !== "rejected";
+      // A closing note rides the tool-authored source reply: the host delivers it after
+      // the widget and ends the turn only when it actually captured the note. Calls the
+      // owner cannot deliver (Code Mode programs) continue to the model instead of
+      // ending with the note lost, so only a note-less final sets terminate.
+      const withTerminal = <T extends object>(result: AgentToolResult<T>) =>
+        !endsTurn
+          ? result
+          : closingText
+            ? { ...result, details: { ...result.details, sourceReply: { text: closingText } } }
+            : { ...result, terminate: true as const };
       if (!hasPresentationRoute) {
-        return jsonResult({
-          status:
-            capabilityState === "pending" || capabilityState === "rejected"
-              ? capabilityState
-              : "pinned",
-          boardWidgetName: pinnedWidgetName,
-          capabilityState,
-          text: `Widget ${pinnedText}. Open this dashboard tab in Control UI to view it.`,
-        });
+        return withTerminal(
+          jsonResult({
+            status:
+              capabilityState === "pending" || capabilityState === "rejected"
+                ? capabilityState
+                : "pinned",
+            boardWidgetName: pinnedWidgetName,
+            capabilityState,
+            text: `Widget ${pinnedText}. Open this dashboard tab in Control UI to view it.`,
+          }),
+        );
       }
       let document: Awaited<ReturnType<typeof createCanvasDocument>> | undefined;
       const hostDocument = async () =>
@@ -573,17 +617,19 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
       if (presentationAttempt?.ok && presentationAttempt.value.kind === "message") {
         const receipt = presentationAttempt.value.receipt;
         const messageId = receipt.primaryPlatformMessageId ?? receipt.platformMessageIds[0];
-        return jsonResult({
-          kind: "widget",
-          presentation: {
-            target: "current_channel",
-            title,
-            receipt,
-          },
-          ...(pinnedWidgetName ? { boardWidgetName: pinnedWidgetName } : {}),
-          ...(capabilityState ? { capabilityState } : {}),
-          text: `Widget presented in the current channel${messageId ? ` as message ${messageId}` : ""}${pinnedText ? `; ${pinnedText}` : ""}`,
-        });
+        return withTerminal(
+          jsonResult({
+            kind: "widget",
+            presentation: {
+              target: "current_channel",
+              title,
+              receipt,
+            },
+            ...(pinnedWidgetName ? { boardWidgetName: pinnedWidgetName } : {}),
+            ...(capabilityState ? { capabilityState } : {}),
+            text: `Widget presented in the current channel${messageId ? ` as message ${messageId}` : ""}${pinnedText ? `; ${pinnedText}` : ""}`,
+          }),
+        );
       }
 
       if (presentationAttempt && !presentationAttempt.ok && !inlineAvailable) {
@@ -615,7 +661,7 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
         : presentationAttempt && !presentationAttempt.ok
           ? `; ${widgetPresentationFailureText(presentationAttempt.error, true)}`
           : "";
-      return jsonResult({
+      const hostedResult = jsonResult({
         kind: "canvas",
         ...(capabilityState ? { capabilityState } : {}),
         presentation: {
@@ -633,6 +679,10 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
         },
         text: `Widget hosted at ${hosted.entryUrl}${pinnedText ? `; ${pinnedText}` : ""}${presentationText}`,
       });
+      // A failed requested destination falls back inline; the model must still report that.
+      return presentationAttempt && !presentationAttempt.ok
+        ? hostedResult
+        : withTerminal(hostedResult);
     },
   };
 }

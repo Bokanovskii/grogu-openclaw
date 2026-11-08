@@ -55,6 +55,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/gateway-ssh-upload-signal.test.ts",
   "src/gateway/gateway.chat-redaction.test.ts",
   "src/gateway/gateway.continuation-skip-bootstrap.integration.test.ts",
+  "src/gateway/gateway.show-widget-closing-note.test.ts",
   "src/gateway/github-personal-publication-outcomes.test.ts",
   "src/gateway/github-personal-publication.lifecycle.test.ts",
   "src/gateway/github-personal-publication.test.ts",

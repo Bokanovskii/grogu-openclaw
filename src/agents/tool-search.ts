@@ -4,6 +4,7 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { HookContext } from "./agent-tools.before-tool-call.js";
+import { extractToolAuthoredSourceReplyPayload } from "./embedded-agent-messaging-extraction.js";
 import type { AgentToolResult, AgentToolUpdateCallback } from "./runtime/index.js";
 import {
   attachInternalToolResultContentSource,
@@ -314,6 +315,8 @@ export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[
       name: TOOL_CALL_RAW_TOOL_NAME,
       label: "Tool Call",
       description: "Call an exact Tool Search result id or name through OpenClaw.",
+      // Only a reply from a target whose own author declared this capability is promoted.
+      canDeliverSourceReply: true,
       parameters: Type.Object({
         id: Type.String({ description: "Tool search result id or tool name." }),
         args: Type.Optional(
@@ -362,9 +365,20 @@ export function createToolSearchTools(ctx: ToolSearchToolContext): AnyAgentTool[
           const failureKind = resolveToolResultFailureKind(callResult.result);
           // Keep the model-visible `{ tool, result }` envelope stable while the
           // outer lifecycle reads its own canonical failure marker from details.
+          if (failureKind) {
+            return copyInternalToolResultState(controlResult, {
+              ...controlResult,
+              details: { ...callResult, status: failureKind },
+            });
+          }
+          // A capable target's finished reply is delivered once, under this outer call,
+          // by the same owner that delivers direct calls; nested calls are never captured.
+          const sourceReply = runtime.isSourceReplyCapableResult(callResult.result)
+            ? extractToolAuthoredSourceReplyPayload(callResult.result)
+            : undefined;
           return copyInternalToolResultState(controlResult, {
             ...controlResult,
-            details: failureKind ? { ...callResult, status: failureKind } : callResult,
+            details: sourceReply ? { ...callResult, sourceReply } : callResult,
           });
         } catch (error) {
           throw formatToolSearchControlError(error, runtime, toolCallId, signal ?? ctx.abortSignal);

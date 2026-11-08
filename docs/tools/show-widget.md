@@ -185,6 +185,22 @@ operator before retrying. The inline preview does not inherit dashboard grants.
 
 If current-channel presentation fails, core falls back inline only when the originating client actually supports inline widgets. Otherwise the tool fails visibly. When `pin: true` succeeded before presentation failed, the result is explicitly partial and names the durable board widget. Presentation failure never rolls back that unrelated board state.
 
+### End the turn with a widget
+
+Set `final: true` when the widget completes the answer. Add a brief `closing_text` (plain text or Markdown, up to 2,000 characters) for anything the widget does not already say. When the show fully succeeds, the turn ends there and the model is not called again:
+
+- With `closing_text`, OpenClaw shows the widget, then delivers the note once as the assistant reply. The note is recorded after the widget in the transcript.
+- Without `closing_text`, any text the model wrote before the call is delivered once, above the widget.
+
+`closing_text` requires `final: true`. The turn continues normally when:
+
+- `final` is omitted (the default);
+- the widget fails validation or presentation, including an inline fallback after a failed channel or device presentation, or a partial result;
+- dashboard capabilities are `pending` or `rejected`, because the operator still needs to act;
+- another tool in the same batch does not end the turn. A delivered `closing_text` ends the turn after the whole batch settles, like other [tool-authored replies](/plugins/tool-plugins#deliver-the-reply-directly).
+
+On the embedded OpenClaw runtime, `closing_text` is delivered the same way whether the model calls `show_widget` directly or through the Tool Search `tool_call` control. The Codex harness follows its separate [direct-only delivery rule](/plugins/tool-plugins#deliver-the-reply-directly) instead; where that rule does not deliver the note, the turn continues. A call made from inside a Code Mode program returns to that program, so its note is never delivered and the turn continues with the model writing the reply itself. If a host cannot deliver the note, the turn also continues rather than dropping it. The pinned-only scheduled surface does not offer `final` or `closing_text`.
+
 ## Native dashboard reports
 
 Use a report for a pinned summary made of text, metrics, tables, simple charts, and links. Provide the report object directly in `report`:

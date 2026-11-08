@@ -348,6 +348,70 @@ describe("terminal resolution", () => {
     },
   );
 
+  it.each([false, true])(
+    "delivers closing text written before a terminal tool batch once (error=%s)",
+    async (isError) => {
+      const closingText = "Summary above; the comparison widget has the details.";
+      const terminalCall = {
+        type: "toolCall" as const,
+        id: "widget-call",
+        name: "show_widget",
+        arguments: { title: "Comparison", widget_code: "<p>ok</p>", final: true },
+      };
+      const assistant = buildEmbeddedRunnerAssistant({
+        stopReason: "toolUse",
+        content: [{ type: "text", text: closingText }, terminalCall],
+      });
+      const attempt = makeEmbeddedRunnerAttempt({
+        assistantTexts: [closingText],
+        toolMetas: [
+          {
+            toolName: terminalCall.name,
+            toolCallId: terminalCall.id,
+            ...(isError ? { isError: true } : { terminate: true }),
+          },
+        ],
+        lastToolError: isError ? { toolName: terminalCall.name, error: "failed" } : undefined,
+        itemLifecycle: { startedCount: 1, completedCount: 1, activeCount: 0 },
+        messagesSnapshot: [
+          { role: "user", content: [{ type: "text", text: "Compare them." }], timestamp: 0 },
+          assistant,
+          {
+            role: "toolResult",
+            toolCallId: terminalCall.id,
+            toolName: terminalCall.name,
+            content: [{ type: "text", text: isError ? "failed" : "Widget hosted" }],
+            isError,
+            timestamp: 0,
+          },
+        ],
+        lastAssistant: assistant,
+        currentAttemptAssistant: assistant,
+      });
+      const input = makeTerminalInput({
+        attempt,
+        attemptAssistant: assistant,
+        payloadsWithToolMedia: [{ text: closingText }],
+        replayState: { hadPotentialSideEffects: true, replayInvalid: false },
+      });
+
+      const resolved = await resolveEmbeddedRunTerminal(input);
+
+      expect(input.sessionPromptState.activateInternalPrompt).not.toHaveBeenCalled();
+      expect(resolved.action).toBe("complete");
+      if (resolved.action !== "complete") {
+        return;
+      }
+      if (isError) {
+        expect(resolved.result.meta.intentionalTerminalCompletion).toBeUndefined();
+      } else {
+        expect(resolved.result.meta.intentionalTerminalCompletion).toBe("tool-batch");
+        expect(resolved.result.meta.error).toBeUndefined();
+        expect(resolved.result.payloads).toEqual([{ text: closingText }]);
+      }
+    },
+  );
+
   it("keeps a length-stopped silent cron result silent", async () => {
     // The only payload is the synthesized silent result of a successful tool and
     // the assistant produced no prose, so there is no partial reply to label; a

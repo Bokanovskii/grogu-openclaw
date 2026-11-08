@@ -13,6 +13,7 @@ import { resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
 import { formatDurationLong } from "../../../lib/format-duration.ts";
 import { renderChatAvatar } from "../chat-avatar.ts";
 import type { ChatSubagentWait } from "../chat-subagent-wait.ts";
+import { isGroguAgentName } from "./chat-grogu-eater.ts";
 import { renderGroupedMessage } from "./chat-message-bubble.ts";
 import { prepareChatMessageRender, resolveMessageActionDetails } from "./chat-message-markdown.ts";
 import { renderChatTimestamp } from "./chat-message-timestamp.ts";
@@ -122,6 +123,7 @@ export function renderStreamGroupPart(
 ) {
   if (part.kind === "reading-indicator") {
     return renderChatWorkingIndicator(part, {
+      groguEater: isGroguAgentName(opts.assistant?.name),
       mascot: opts.branding?.mascot,
       workingIndicator: opts.branding?.workingIndicator,
       workingPhrases: opts.branding?.workingPhrases,

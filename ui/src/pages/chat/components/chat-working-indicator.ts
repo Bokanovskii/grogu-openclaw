@@ -14,6 +14,7 @@ import { formatDurationLong } from "../../../lib/format-duration.ts";
 import { formatCompactTokenCount } from "../../../lib/format.ts";
 import type { TurnRecap } from "../chat-progress.ts";
 import type { ChatSubagentWait } from "../chat-subagent-wait.ts";
+import { renderGroguEater } from "./chat-grogu-eater.ts";
 import { selectWorkingClawSurprise } from "./chat-working-indicator-surprise.ts";
 
 // 0 is valid; only null/undefined means "unknown".
@@ -26,6 +27,8 @@ function outputTokensLabel(outputTokens: number): string {
 export function renderChatWorkingIndicator(
   part: Extract<ChatItem, { kind: "reading-indicator" }>,
   options: {
+    /** Grogu works as himself in place of the claw and eats the reasoning stream. */
+    groguEater?: boolean;
     mascot?: ThemeMascot;
     workingIndicator?: ThemeWorkingIndicator;
     workingPhrases?: readonly string[];
@@ -117,33 +120,47 @@ export function renderChatWorkingIndicator(
   const outputTokens = waitingSubagents ? null : options.outputTokens;
   // A wait counts from the handoff, which loaded history cannot always place.
   const startedAt = waitingSubagents ? waitingSubagents.startedAt : part.startedAt;
-  // The animated claw stays decorative; the text status exposes progress without
-  // announcing every elapsed-time tick to screen readers.
+  const reasoning = working ? options.reasoning : undefined;
+  // Theme indicators other than the claw stay the theme's choice.
+  const groguEater = indicator === "claw" && options.groguEater;
+  // The animated eater stays decorative; the text status exposes progress without
+  // announcing every elapsed-time tick to screen readers. Live reasoning sits
+  // between the eater and the status so the eater consumes it from the start
+  // side while elapsed time and token counts stay at the end.
   return html`
     <div
-      class="chat-working-indicator ${continuation ? "chat-working-indicator--continuation" : ""} ${waitingSubagents ? "chat-working-indicator--subagents" : ""}"
+      class="chat-working-indicator ${continuation ? "chat-working-indicator--continuation" : ""} ${waitingSubagents ? "chat-working-indicator--subagents" : ""} ${reasoning ? "chat-working-indicator--reasoning" : ""}"
       role="status"
       aria-live="off"
     >
       ${
         continuation || indicator === "none"
           ? nothing
-          : html`
-              <div
-                class="chat-bubble chat-reading-indicator ${
-                  neutral
-                    ? "chat-reading-indicator--neutral"
-                    : indicator === "brand"
-                      ? "chat-reading-indicator--brand"
-                      : selectWorkingClawSurprise(part.key, {
-                          eligible: !waitingApproval && !waitingSubagents,
-                        })
-                }"
-                aria-hidden="true"
-              >
-                ${neutral ? html`<span></span><span></span><span></span>` : indicator === "brand" ? renderThemeBrandIcon() : icons.claw}
-              </div>
-            `
+          : groguEater
+            ? renderGroguEater(Boolean(reasoning))
+            : html`
+                <div
+                  class="chat-bubble chat-reading-indicator ${
+                    neutral
+                      ? "chat-reading-indicator--neutral"
+                      : indicator === "brand"
+                        ? "chat-reading-indicator--brand"
+                        : selectWorkingClawSurprise(part.key, {
+                            eligible: !waitingApproval && !waitingSubagents,
+                          })
+                  }"
+                  aria-hidden="true"
+                >
+                  ${neutral ? html`<span></span><span></span><span></span>` : indicator === "brand" ? renderThemeBrandIcon() : icons.claw}
+                </div>
+              `
+      }
+      ${
+        reasoning
+          ? html`<span class="chat-working-indicator__reasoning" aria-hidden="true"
+              ><span class="chat-working-indicator__reasoning-text">${reasoning}</span></span
+            >`
+          : nothing
       }
       <span class="chat-working-indicator__status">
         ${
@@ -198,15 +215,6 @@ export function renderChatWorkingIndicator(
             : nothing
         }
       </span>
-      ${
-        working && options.reasoning
-          ? html`<span class="chat-working-indicator__reasoning" aria-hidden="true"
-              ><span class="chat-working-indicator__reasoning-text"
-                >${options.reasoning}</span
-              ></span
-            >`
-          : nothing
-      }
     </div>
     ${options.subagentActivity ?? nothing}
   `;

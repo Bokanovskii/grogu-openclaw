@@ -162,7 +162,7 @@ it("keeps native reasoning closed and independently expandable beside visible an
   renderAssistantMessage(message);
   const reasoning = expectElement(view, "details.chat-thinking", HTMLDetailsElement);
   expect(reasoning.open).toBe(false);
-  expect(reasoning.querySelector("summary")?.textContent).toBe("Reasoning");
+  expect(reasoning.querySelector("summary")?.textContent?.trim()).toBe("Reasoning");
   expect(reasoning.textContent).toContain("Checking the evidence.");
   expect(view.querySelector(".chat-text")?.textContent).toContain("The answer stays visible.");
   reasoning.open = true;

@@ -91,14 +91,26 @@ suite.define(() => {
         if (effectiveReasoningLevel === "on") {
           expect(await reasoning.getAttribute("open")).toBeNull();
           expect(await reasoning.locator("pre code").isVisible()).toBe(false);
-          await reasoning.locator("summary").click();
+          await reasoning.locator("summary").press(reload ? "Enter" : "Space");
           expect(await reasoning.locator("pre code").isVisible()).toBe(true);
           expect(await reasoning.locator("pre code").allTextContents()).toEqual([code]);
           expect(await reasoning.locator("p").allTextContents()).toEqual([
-            "Reasoning:",
             reasoningText,
             conclusion,
           ]);
+          // The disclosure is an unboxed row whose chevron stays inside the reasoning column.
+          const chrome = await reasoning.evaluate((details) => {
+            const box = details.getBoundingClientRect();
+            const chevron = details.querySelector("summary .chat-tool-row__chevron");
+            const mark = chevron?.getBoundingClientRect();
+            return {
+              border: getComputedStyle(details).borderStyle,
+              chevronInside: mark !== undefined && mark.left >= box.left && mark.right <= box.right,
+            };
+          });
+          expect(chrome).toEqual({ border: "none", chevronInside: true });
+          await reasoning.locator("summary").click();
+          expect(await reasoning.getAttribute("open")).toBeNull();
         }
         expect(await answer.isVisible()).toBe(true);
       }

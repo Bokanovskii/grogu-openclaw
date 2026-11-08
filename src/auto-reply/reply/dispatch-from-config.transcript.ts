@@ -1,7 +1,11 @@
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
+import type { SessionLifecycleRevisionExpectation } from "../../config/sessions/session-transcript-turn-lifecycle.types.js";
 import type { SessionTranscriptDeliveryMirror } from "../../config/sessions/transcript-mirror.js";
-import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.js";
+import {
+  appendAssistantMessageToSessionTranscript,
+  type SessionTranscriptAppendResult,
+} from "../../config/sessions/transcript.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
@@ -13,7 +17,7 @@ import {
 import type { ReplyDispatcher } from "./reply-dispatcher.types.js";
 
 type TranscriptMirror = NonNullable<ReplyPayloadMetadata["sourceReplyTranscriptMirror"]> & {
-  expectedLifecycleRevision?: string;
+  expectedLifecycleRevision?: SessionLifecycleRevisionExpectation;
   expectedWriterRunId?: string;
   storePath?: string;
   preferText?: boolean;
@@ -35,10 +39,11 @@ function transcriptMirrorExpectations(mirror: TranscriptMirror) {
 export async function mirrorDeliveredReplyToTranscript(params: {
   metadata?: TranscriptMirror;
   cfg: OpenClawConfig;
-}): Promise<void> {
+  assertCurrent?: () => void;
+}): Promise<SessionTranscriptAppendResult | undefined> {
   const mirror = params.metadata;
   if (!mirror || mirror.transcriptOwner) {
-    return;
+    return undefined;
   }
   try {
     const result = await appendAssistantMessageToSessionTranscript({
@@ -53,14 +58,17 @@ export async function mirrorDeliveredReplyToTranscript(params: {
       updateMode: "inline",
       config: params.cfg,
       beforeMessageWrite: runAgentHarnessBeforeMessageWriteHook,
+      assertCurrent: params.assertCurrent,
     });
     if (!result.ok) {
       logVerbose(`dispatch-from-config: transcript mirror skipped: ${result.reason}`);
     }
+    return result;
   } catch (error) {
     logVerbose(
       `dispatch-from-config: transcript mirror failed after delivery: ${formatErrorMessage(error)}`,
     );
+    return { ok: false, reason: formatErrorMessage(error) };
   }
 }
 

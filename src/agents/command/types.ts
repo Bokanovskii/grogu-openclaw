@@ -129,7 +129,7 @@ export type AgentCommandOpts = {
   toolsAllowIsDefault?: boolean;
   /** Trusted server-stamped authority for an explicitly capped scheduled run. */
   scheduledToolPolicy?: ScheduledToolPolicyContext;
-  /** Host-authorized dashboard authoring without an originating inline renderer. */
+  /** Host-authorized original-chat widget/reply publication during Control UI recovery. */
   inlineWidgetAuthoring?: boolean;
   /** Preserve the originating run's message-tool policy across internal continuation turns. */
   requireExplicitMessageTarget?: boolean;

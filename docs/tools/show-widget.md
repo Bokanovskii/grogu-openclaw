@@ -51,6 +51,11 @@ and remains available through history reload. This does not claim a live browser
 connection or grant device presentation rights. Explicit dashboard saves remain
 available with `pin: true`; recovery never requires pinning just to finish an
 inline answer. Ordinary capless channel or HTTP runs do not gain this capability.
+With `final: true` and `closing_text`, the recovered widget's closing reply is
+also saved once in that original chat, after the tool result, without another
+model request. Publication retains the admitted session and writer guards;
+failure to save the reply is reported instead of treating the missing note as
+successful delivery.
 
 For a follow-up revision, publish the updated HTML in the new chat turn.
 Previous inline documents remain unchanged; reusing a dashboard name is not

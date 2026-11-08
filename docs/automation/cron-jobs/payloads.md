@@ -260,6 +260,11 @@ The script may return an object with these optional fields:
 
 Throws, timeouts, exhausted tool budgets, invalid results, and `nextCheck` without pacing are normal automation run errors: they enter run history, backoff, and failure-alert handling without persisting returned state.
 
+A truncated returned or logged JSON result is also an `output_limit_exceeded`
+error, not an empty successful completion. The result and diagnostic output
+share the owning agent's Code Mode `maxOutputBytes` budget; return a smaller
+complete result. This does not undo tool actions already performed by the script.
+
 Plugin reloads invalidate cached script preparation. If a plugin retires during setup,
 OpenClaw refreshes the tools once before starting the script, within the original
 deadline. A failure after the script starts never triggers this setup retry.

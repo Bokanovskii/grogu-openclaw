@@ -10,6 +10,34 @@ import type {
 
 const MAX_TRIGGER_STATE_BYTES = 16 * 1024;
 
+function isTruncatedScriptOutput(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.truncated === true &&
+    typeof value.prefix === "string" &&
+    typeof value.omittedBytes === "number"
+  );
+}
+
+function scriptOutputFailure(
+  result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
+  candidate: unknown,
+  label: string,
+) {
+  // A prefix is diagnostic text, never a complete decision or a reason to settle earlier JSON.
+  if (
+    isTruncatedScriptOutput(result.value) ||
+    isTruncatedScriptOutput(candidate) ||
+    (candidate === undefined && result.output.some(isTruncatedScriptOutput))
+  ) {
+    return scriptFailure(
+      `${label} result was truncated; return a smaller complete result`,
+      "output_limit_exceeded",
+    );
+  }
+  return undefined;
+}
+
 function scriptResultCandidate(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
   condition = false,
@@ -57,6 +85,10 @@ export function parseTriggerResult(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
 ): CronTriggerEvaluationResult {
   const candidate = scriptTriggerCandidate(result);
+  const outputFailure = scriptOutputFailure(result, candidate, "cron trigger");
+  if (outputFailure) {
+    return outputFailure;
+  }
   if (
     isRecord(candidate) &&
     isRecord(candidate.error) &&
@@ -144,6 +176,10 @@ export function parseScriptPayloadResult(
   result: Extract<CodeModeHeadlessResult, { status: "completed" }>,
 ): CronScriptPayloadExecutionResult {
   const candidate = scriptResultCandidate(result);
+  const outputFailure = scriptOutputFailure(result, candidate, "cron script payload");
+  if (outputFailure) {
+    return outputFailure;
+  }
   if (!isRecord(candidate)) {
     return scriptFailure("cron script payload must return an object");
   }

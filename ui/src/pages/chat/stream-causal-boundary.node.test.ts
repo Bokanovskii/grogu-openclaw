@@ -23,11 +23,12 @@ describe("blank history status snapshots", () => {
 
   it("protects pending text belonging to this run, not persisted or other-run segments", () => {
     const segment: ChatStreamSegment = { text: "Saved answer.", ts: 1, runId: "run" };
-    for (const current of [
+    const segments: ChatStreamSegment[] = [
       segment,
       { ...segment, persisted: true },
       { ...segment, runId: "other" },
-    ]) {
+    ];
+    for (const current of segments) {
       const state = { chatRunId: "run", chatStream: null, chatStreamSegments: [current] };
       replaceChatStreamFromHistorySnapshot(state, "");
       expect(state.chatStream).toBe(current === segment ? null : "");

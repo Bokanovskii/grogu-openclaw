@@ -39,10 +39,7 @@ it("projects one native document slot from duplicate answer embeds and its tool 
     { preview: { viewId: "cv_fixture", sandbox: "scripts" } },
   ]);
   expect(
-    blocks
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("\n"),
+    blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"),
   ).toContain("The first part. \nThe second part.");
   expect({ messages, toolMessages }).toEqual(before);
   expect(

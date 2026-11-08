@@ -3823,6 +3823,8 @@ export const en: TranslationMap & {
       dictationFinalizing: "Finishing dictation…",
       dictationListening: "Listening…",
       dictationStopAndKeep: "Stop and keep text",
+      dictationNoSpeech: "No speech was detected. Try another recording.",
+      dictationTimedOut: "Dictation timed out. Try a shorter recording.",
       dictationProviderUnavailable:
         "No transcription provider is configured for dictation. Choose one in Settings to dictate.",
       realtimeTalkCancellationRejected: "Realtime output cancellation was not accepted.",
@@ -3833,7 +3835,7 @@ export const en: TranslationMap & {
       selectedCameraUnavailable:
         "The selected camera is unavailable. Choose another camera or System default.",
       startVoiceInput: "Start voice input",
-      voiceGestureHint: "Tap to talk · Hold to start dictation",
+      voiceGestureHint: "Tap to dictate · Hold to start dictation",
       stillListening: "Still listening",
       stopVoiceInput: "Stop voice input",
       systemDefaultMicrophone: "System default",

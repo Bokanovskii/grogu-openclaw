@@ -332,6 +332,7 @@ export const TalkSessionSteerParamsSchema = closedObject({
 
 export const TalkSessionCloseParamsSchema = closedObject({
   sessionId: NonEmptyString,
+  discard: Type.Optional(Type.Boolean()),
 });
 
 export const TalkCatalogParamsSchema = closedObject({
@@ -398,6 +399,7 @@ export const TalkSessionCreateResultSchema = closedObject({
   brain: TalkBrainSchema,
   relaySessionId: Type.Optional(NonEmptyString),
   transcriptionSessionId: Type.Optional(NonEmptyString),
+  finalTranscriptTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 * 60 * 1000 })),
   handoffId: Type.Optional(NonEmptyString),
   roomId: Type.Optional(NonEmptyString),
   roomUrl: Type.Optional(NonEmptyString),

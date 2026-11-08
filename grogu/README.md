@@ -161,6 +161,72 @@ Production app audience avoids testing-mode seven-day expiry, but refresh
 tokens can still be revoked; a low-frequency health check must distinguish
 missing scope, revocation, and transient network/provider failure.
 
+## Local microphone input
+
+The [local voice plugin](plugins/grogu-local-voice/README.md) uses an installed
+whisper.cpp executable and model through the existing transcription relay.
+Tap the microphone, speak, stop, edit the transcript, and send it to the same chat.
+Sparky remains the reasoning model. The plugin does not upload audio or download a model.
+The operator must approve its live installation and configuration after source review.
+
+The [Apple News skill](templates/workspace-grogu/skills/apple-news/SKILL.md) guides
+bounded research through normal app controls and the existing subscription.
+It distinguishes articles read in News from public-source evidence and blocked app access.
+It creates original source-linked notes, not an article archive.
+
+## Prepare a separate Grogu browser app
+
+Chrome owns profile creation, web-app installation, and app shortcuts.
+Keep the existing Safari `Grogu.app` and Safari as the OS default browser.
+Use Chrome's maintained app owner instead of building a replacement launcher.
+
+A Chrome profile keeps its browser data separate from other profiles.
+Use a new Grogu-only profile without Google sign-in or synchronization.
+Do not attach automation to a personal Chrome profile or copy browser credentials.
+Do not register the app to start at login.
+
+Source approval does not authorize profile creation, app installation, or
+persistent account access. Before those actions, obtain one confirmation for
+creating the unsigned-in Grogu profile and installing `Grogu Chrome`.
+If the approved UI tool cannot reach that profile without opening a personal
+profile, stop and have the owner expose the profile chooser.
+Do not bypass the tool with shell launch, focus commands, or browser debugging.
+
+After that confirmation, use the supported Chrome UI:
+
+1. Create a new profile through Chrome's profile chooser.
+2. Name the profile `Grogu` without enabling Google sign-in or synchronization.
+3. In that profile, open the same credential-free Control UI URL as the old app.
+4. Use Chrome's web-app installation UI to name the app `Grogu Chrome`.
+5. If an app shortcut is needed, open `chrome://apps` in that profile.
+6. Select **Create shortcut** for the installed app.
+7. Make sure that the shortcut opens a separate window in the Grogu profile.
+
+A website shortcut alone does not prove standalone app installation.
+If Chrome does not offer web-app installation for that URL, report the missing
+action instead of creating a script wrapper. Sign in or pair with Grogu through
+its normal flow only after account-access approval.
+Keep that authorization separate from Google account sign-in.
+
+Make sure that relaunch reaches the same Gateway and preserves the dedicated
+profile. Make sure that external links follow the intended browser behavior.
+Chrome can keep external links in Chrome even when Safari is the OS default.
+Rollback uses the unchanged Safari app. Do not delete profiles with owner data.
+Browser choice does not change the reasoning model. Sparky remains unchanged.
+
+Compare scrolling before selecting a browser workaround. Use the same served
+build, conversation, widget, and window size in Safari and dedicated Chrome.
+Test inner widget scrolling, outer transcript scrolling, resize, focus changes,
+returning from a hidden window, and relaunch. Record exact disappearing or
+returning content before changing overflow, resize, or visibility code.
+A UI tool's refusal to scroll is a tool limit, not proof of a browser defect.
+Do not claim Chromium-only support from a Chromium test lane.
+
+See [Chrome's profile guide](https://support.google.com/chrome/answer/2364824),
+[web-app guide](https://support.google.com/chrome/answer/9658361),
+[website-shortcut guide](https://support.google.com/chrome/answer/15085120),
+and the [Control UI guide](../docs/web/control-ui.md).
+
 ## Taking in upstream releases
 
 1. `grogu-upstream.yml` runs daily (or on dispatch) in the private repository.

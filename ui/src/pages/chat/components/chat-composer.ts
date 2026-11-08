@@ -262,6 +262,8 @@ export function renderChatComposer(props: ChatComposerProps) {
     if (!canSubmitDraft(draft)) {
       return;
     }
+    state.dictation?.discardPendingTranscript();
+    state.dictationSelection = null;
     state.composerComposing = false;
     state.composingDraft = null;
     commitComposerDraft(props, draft);
@@ -481,12 +483,13 @@ export function renderChatComposer(props: ChatComposerProps) {
         },
         onOpenTalkSettings: props.onOpenTalkSettings,
         onOpenDictationSettings: props.onOpenDictationSettings,
+        onStartRealtimeTalk: startRealtimeTalk,
       })
     : nothing;
   const dictationOptions = {
     client: props.gatewayClient ?? null,
     connected: props.connected,
-    enabled: props.composerHoldToRecord !== false,
+    enabled: true,
     dictationAvailable: devicePicker.dictationStatus === "ready",
     realtimeTalkActive: props.realtimeTalkActive === true,
     onCommit: (transcript: string, late?: true) => {
@@ -547,20 +550,14 @@ export function renderChatComposer(props: ChatComposerProps) {
       requestUpdate();
     },
     onDictationUnavailable: devicePicker.handleOpen,
-    // With an initial empty composer, this button retains the existing
-    // send-after-typing behavior until the host rerenders the primary actions.
-    // Once a draft is rendered, the separate voice control starts Talk directly.
-    onTap:
-      visibleDraft.trim() || props.attachments?.length
-        ? startRealtimeTalk
-        : handleVoicePrimaryAction,
+    onTap: () => {
+      handleDictationStart();
+      state.dictation?.startDirect();
+    },
   };
   state.dictation ??= new ComposerDictationController(dictationOptions);
   state.dictation.update(dictationOptions);
-  const dictation =
-    props.onToggleRealtimeTalk && props.composerHoldToRecord !== false
-      ? state.dictation
-      : undefined;
+  const dictation = props.onToggleRealtimeTalk ? state.dictation : undefined;
   const handleDictationStart = (event?: PointerEvent) => {
     if (state.dictationError) {
       state.dictationError = null;
@@ -611,7 +608,7 @@ export function renderChatComposer(props: ChatComposerProps) {
     onToggleCamera: props.onToggleRealtimeCamera,
     microphonePicker,
     dictation,
-    onDictationPointerDown: handleDictationStart,
+    onDictationPointerDown: props.composerHoldToRecord !== false ? handleDictationStart : undefined,
     onDirectDictationStart: handleDictationStart,
     onPrimaryActionPointerDown: (event) =>
       preserveComposerFocusOnPrimaryAction(event, state.composerTextarea),

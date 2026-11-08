@@ -34,6 +34,10 @@ export type RealtimeTranscriptionSessionCreateRequest = RealtimeTranscriptionSes
 export type RealtimeTranscriptionSession = {
   connect(): Promise<void>;
   sendAudio(audio: Buffer): void;
+  /** Buffered providers finish accepted audio here; close cancels their pending work. */
+  finish?(): Promise<void>;
+  /** Bound for finish, including process shutdown. Streaming providers keep the relay default. */
+  finalizationTimeoutMs?: number;
   close(): void;
   isConnected(): boolean;
 };

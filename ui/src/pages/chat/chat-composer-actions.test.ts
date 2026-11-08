@@ -352,7 +352,7 @@ describe("renderChatComposer controls", () => {
       talk.click();
       expect(onToggleRealtimeTalk).not.toHaveBeenCalled();
       expect(talk.disabled).toBe(true);
-      expect(microphone.disabled).toBe(!composerHoldToRecord);
+      expect(microphone.disabled).toBe(false);
       expect(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(false);
     },
   );

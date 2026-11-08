@@ -1,6 +1,6 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": { "rootDir": ".." },
-  "include": ["*.ts", "*.mts"],
+  "include": ["*.ts", "*.mts", "plugins/grogu-local-voice/*.ts", "../src/types/*.d.ts"],
   "exclude": ["**/*.test.ts"]
 }

@@ -30,3 +30,11 @@
 - Distinguish an empty result from collector or authorization failure. Gmail
   401/invalid-grant and 403/missing-scope are authorization blockers; do not
   start consent or broaden scopes automatically.
+
+## Source-linked News research
+
+- For a question that benefits from Apple News, read
+  [the Apple News skill](skills/apple-news/SKILL.md).
+- Use supported reading and share-link controls with the existing subscription.
+- Return original, source-linked notes. Keep app-access limits separate from
+  public-source evidence.

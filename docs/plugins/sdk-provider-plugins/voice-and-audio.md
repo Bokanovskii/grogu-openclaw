@@ -120,6 +120,19 @@ Register each capability inside `register(api)` alongside your existing
     filenames, including AAC uploads that need an M4A-style filename for
     compatible transcription APIs.
 
+    A buffered local provider can implement `finish(): Promise<void>` on its
+    transcription session. The promise settles after its final transcript and
+    temporary-file cleanup. `close()` must cancel pending work instead of
+    starting transcription. Declare `finalizationTimeoutMs` to bound that work.
+    The Gateway retains the owning relay while `finish()` runs and returns
+    `finalTranscriptTimeoutMs` to the browser. Streaming providers that omit
+    these fields retain their existing five-second close drain.
+
+    `talk.session.close` accepts `discard: true` for transcription sessions.
+    This cancels capture processing without finalizing audio, including an
+    already pending local `finish()`. Connection cleanup follows the same
+    cancellation path. Unsupported session modes reject `discard` explicitly.
+
     Official plugins can use the private `blob-runtime` helper
     `bufferToBlobPart(buffer)` for other multipart uploads. Pass it directly to
     `new Blob(...)` to preserve the Buffer range without an intermediate copy;

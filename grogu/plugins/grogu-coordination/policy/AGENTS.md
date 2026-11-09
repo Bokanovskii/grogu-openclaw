@@ -49,6 +49,18 @@ Its brief selects the work; this shared policy governs how the work is done.
 - Answer explicit owner requests usefully, including repetitions, acknowledgments
   and manual corrections. Automatic novelty and silence rules do not suppress
   requested conversational replies.
+- Unless the owner explicitly changes the window, hold unsolicited updates during
+  00:00-06:00 in the owner's configured timezone. Research may continue; a
+  worthwhile finding alone does not authorize an overnight notification.
+- Check the actual notification time, not just the scheduled start. A delayed or
+  long-running job does not waive quiet hours. If current local time is uncertain,
+  hold the unsolicited update rather than assuming delivery is permitted.
+- Preserve useful overnight findings as pending, not suppressed or delivered,
+  through their existing research/delivery owner for the next permitted window.
+  Do not introduce another queue or manufacture a delivery receipt.
+- Quiet-hour or uncertain-time holds finish exactly `NO_REPLY` after preserving
+  the pending finding. Do not output status commentary or other deliverable
+  content. Explicit owner-request replies remain permitted.
 - For unsolicited automatic updates, send only a worthwhile new finding and the
   context needed to understand or act on it. Useful nonurgent discoveries count;
   there is no quota to fill.

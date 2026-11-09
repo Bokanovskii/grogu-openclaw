@@ -64,6 +64,13 @@ test("supplies the complete canonical policy to selected agents without replacin
   for (const agentId of configuration.agentIds) {
     const result = host.prompt({ agentId });
     assert(result.appendSystemContext.startsWith(`${canonical}\n\n`));
+    assert.match(result.appendSystemContext, /00:00-06:00/);
+    assert.match(result.appendSystemContext, /actual notification time/);
+    assert.match(result.appendSystemContext, /pending.*not.*delivered/);
+    assert.match(
+      result.appendSystemContext,
+      /Quiet-hour or uncertain-time holds finish exactly `NO_REPLY`/,
+    );
     assert.equal(result.systemPrompt, undefined);
     assert.equal(result.toolsAllow, undefined);
     assert.equal(result.prependContext, undefined);

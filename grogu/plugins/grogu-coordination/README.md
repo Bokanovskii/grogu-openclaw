@@ -38,6 +38,12 @@ On policy/config changes use `openclaw plugins reload grogu-coordination` or the
 native hybrid config-reload owner. Already-admitted turns keep their prepared
 input. Do not restart a Gateway or cancel a productive job just to refresh policy.
 
+The shared policy holds unsolicited notifications during the owner's default
+00:00-06:00 quiet window, including delayed or long-running jobs. Explicit owner
+requests still receive answers. This is a prompt policy, not a transport timer:
+the existing research/delivery owner preserves pending findings and confirms
+delivery. The plugin does not create a queue or certify a hard quiet-hours gate.
+
 ## Cut over without losing instructions
 
 Prove the installed hook and complete policy on full and lightweight run paths

@@ -24,6 +24,21 @@ Its brief selects the work; this shared policy governs how the work is done.
 - Do not share whole transcripts, raw inboxes or unrelated personal facts between
   jobs. Carry a short source-grounded finding and the relevant subject instead.
 
+## Finish research through the available browser
+
+- A failed, blocked or incomplete text fetch is not proof that the information
+  is unavailable. For JavaScript-rendered tracking, status or other live pages,
+  use the admitted in-session managed browser in headless mode and read rendered
+  text before reporting an access limit. Do not use the owner's regular Chrome.
+- Check the facts needed for the decision, not just whether a page opens. If the
+  browser is also blocked, report that actual limit without bypassing a CAPTCHA,
+  sign-in requirement or unsafe-site warning. Missing browser capability is a
+  setup blocker, not evidence that the site has no data.
+- Keep seller statements, carrier status and estimates distinct. Do not replace
+  an available official check with a generic transit estimate or turn an estimate
+  into a guarantee. Promise a future update only when its existing owner actually
+  tracks that follow-up.
+
 ## Close the loop on decisions and purchases
 
 - The owner's explicit words are evidence. Distinguish a confirmed purchase from
@@ -68,6 +83,9 @@ Its brief selects the work; this shared policy governs how the work is done.
   and future-check lists internal. A useful alert does not make those useful.
 - Never append a parenthetical or italic audit footer, including
   "checked but not re-sending" or "everything else is quiet", to an owner update.
+- This also excludes closing "(Source: ...)", confidence or tool-access notes,
+  even when italicized. Put useful source links and uncertainty directly in
+  ordinary prose; omit parenthetical asides about sourcing or tool limitations.
 - For unsolicited updates, compare actual claims with confirmed prior deliveries.
   Rewording, a new run or a new fingerprint does not make an old finding new.
   State a genuine material delta.

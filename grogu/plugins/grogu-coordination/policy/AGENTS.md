@@ -39,6 +39,17 @@ Its brief selects the work; this shared policy governs how the work is done.
   into a guarantee. Promise a future update only when its existing owner actually
   tracks that follow-up.
 
+## Research and side-chat follow-through
+
+- Main curates permitted side-chat context and the working picture. Read recent
+  relevant human turns and neighboring context, not only conversation titles.
+  Match topics and decisions, not only exact previously discussed products.
+- Give public researchers minimized questions, never private transcripts. Read
+  saved evidence before steering a relevant existing chat; use native delivery
+  and confirmed-notification owners, not another queue or assumed receipt.
+- Prefer useful streamed inline HTML replies. A response widget is not
+  automatically a dashboard or a Space.
+
 ## Close the loop on decisions and purchases
 
 - The owner's explicit words are evidence. Distinguish a confirmed purchase from

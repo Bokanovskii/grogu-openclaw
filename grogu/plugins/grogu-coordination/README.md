@@ -7,12 +7,29 @@ workspace files or saved job messages.
 
 The plugin uses the public `before_prompt_build` system-context contract. It
 does not replace the base prompt, change tools, read transcripts or private
-sources, execute tasks, send messages, or write state. Its small in-memory view
+sources, send messages, or maintain a work ledger. Its small in-memory view
 contains only configured team roles and observed native cron activity. Changing
 observations go in request context, not the stable system prefix. Scheduler
 identity, reconciliation and plugin disposal retire observations. Removed
 bindings reject late terminal acknowledgments; only a current matching addition
 or reconciliation re-admits them. Missing observations are explicitly unknown.
+
+With one configured `intake` role, that role's agent owns Main coordination.
+Accepted inbound side-chat events for the same agent and successful source-job
+completions nudge its existing Main through native system events and guarded
+event wakes. Main itself, unrelated agents and incognito conversations do not
+produce side-chat nudges. Failed, disabled, removed or superseded source jobs
+do not manufacture successful-work hints.
+
+The pending hint is coalesced, not a second queue or durable checkpoint. It
+contains only a session/message or job/run reference, never message bodies,
+research summaries, sender metadata or private inbox text. Main must discover
+all relevant new permitted sources, not only the latest reference. Canonical
+transcripts, saved findings, intake progress and delivery receipts retain their
+existing owners; periodic intake/research reconciliation remains necessary after
+a restart or a refused wake. A wake is not proof that Main ran or sent anything.
+No `intake` binding keeps the plugin policy-only; multiple intake owners are
+rejected instead of choosing one arbitrarily.
 
 ## Configure the existing roles
 
@@ -34,9 +51,12 @@ Every job agent must be in `agentIds`; ids must be unique. Preserve
 existing activation, schedules, source scopes, delivery routes, Sparky/Ultra and
 zero execution budgets.
 
-On policy/config changes use `openclaw plugins reload grogu-coordination` or the
-native hybrid config-reload owner. Already-admitted turns keep their prepared
-input. Do not restart a Gateway or cancel a productive job just to refresh policy.
+On policy/config changes use `openclaw plugins reload grogu-coordination` for a
+package registered through the native installer. A raw `plugins.load.paths`
+entry alone is not authoritative package-install metadata; do not fabricate
+that record to make maintenance pass. Preserve the active generation if reload
+cannot settle admitted work. Already-admitted turns keep their prepared input.
+Do not restart a Gateway or cancel a productive job just to refresh policy.
 
 The shared policy holds unsolicited notifications during the owner's default
 00:00-06:00 quiet window, including delayed or long-running jobs. Explicit owner

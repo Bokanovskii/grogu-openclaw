@@ -24,7 +24,13 @@ function register(config = configuration) {
   let scheduler = {};
   plugin.register({
     registrationMode: "full",
+    config: {},
     pluginConfig: config,
+    runtime: {
+      system: {
+        enqueueSystemEvent: () => false,
+      },
+    },
     on(name, handler) {
       hooks.set(name, handler);
     },
@@ -206,6 +212,17 @@ test("retires observations on scheduler reconciliation, removal and plugin dispo
 });
 
 test("requires unique job ids and explicit membership instead of widening the agent scope", () => {
+  assert.throws(
+    () =>
+      register({
+        ...configuration,
+        jobs: [
+          ...configuration.jobs,
+          { id: "other-intake", agentId: "assistant", label: "Other intake", role: "intake" },
+        ],
+      }),
+    /one intake owner/,
+  );
   assert.throws(
     () => register({ ...configuration, jobs: [...configuration.jobs, configuration.jobs[0]] }),
     /unique ids/,

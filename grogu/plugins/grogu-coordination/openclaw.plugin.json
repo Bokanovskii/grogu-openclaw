@@ -1,7 +1,7 @@
 {
   "id": "grogu-coordination",
   "name": "Grogu shared policy",
-  "description": "Shared assistant instructions and bounded cooperating-job observations.",
+  "description": "Shared assistant policy, bounded job observations and native Main coordination.",
   "activation": {
     "onStartup": true
   },

@@ -74,7 +74,7 @@ Grogu uses `agents.defaults.timeoutSeconds: 0` and
 child-session execution caps without reducing Sparky/Ultra. Model-backed
 automations also need an explicit `payload.timeoutSeconds: 0`; omitting it
 retains OpenClaw's separate 60-minute automation watchdog. The
-[workspace guidance](templates/workspace-grogu/AGENTS.md#active-response-budgets)
+[shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#preserve-privacy-authority-and-progress)
 requires this when Grogu creates or edits a model-backed automation, unless the
 owner requests a finite budget. Other OpenClaw installations and clients keep
 their existing defaults.
@@ -90,6 +90,18 @@ a backup or manufacture requester identity.
 When [Tool Search](../docs/tools/tool-search.md#structured-controls) is active,
 discover and invoke the scheduler through its catalog; a failed direct call to
 the deferred tool name does not establish that the capability is unavailable.
+
+## Owner notification content
+
+The [shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#send-useful-updates-not-operational-commentary)
+keeps deduplication decisions, suppressed topics and routine check commentary
+out of owner messages, including when a genuine alert is being sent. The
+[coordination plugin](plugins/grogu-coordination/README.md) supplies that policy
+through the existing stable system-context hook, including lightweight jobs
+that skip workspace bootstrap. Verify the installed cutover before removing
+temporary saved-payload copies. Already-admitted turns keep their prior inputs.
+Preserve source-backed findings, useful links and exact `NO_REPLY` on quiet
+unattended scans; explicit owner requests still receive useful answers.
 
 ## Commands
 

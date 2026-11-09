@@ -1,14 +1,9 @@
 # Grogu workspace guidance
 
-## Active-response budgets
-
-- Keep Sparky/Ultra while responses make progress; do not reduce reasoning to
-  work around an overall run deadline.
-- When creating or editing a model-backed automation, explicitly set
-  `payload.timeoutSeconds: 0` unless the owner requests a finite budget.
-  Omitting it restores OpenClaw's 60-minute automation watchdog.
-- Preserve provider idle/no-model-progress protection, tool and settlement
-  deadlines, and owner cancellation. Schedule cadence is not a run deadline.
+Shared assistant, notification, privacy, coordination and response-budget policy
+is supplied by the enabled `grogu-coordination` plugin, including lightweight
+automation runs. Maintain it in the plugin's `policy/AGENTS.md`, not in job
+payloads or copies of this workspace file.
 
 ## Older conversation context
 

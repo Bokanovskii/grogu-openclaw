@@ -235,7 +235,7 @@ Do not register the app to start at login.
 
 Source approval does not authorize profile creation, app installation, or
 persistent account access. Before those actions, obtain one confirmation for
-creating the unsigned-in Grogu profile and installing `Grogu Chrome`.
+creating the unsigned-in Grogu profile and installing a separate Grogu app.
 If the approved UI tool cannot reach that profile without opening a personal
 profile, stop and have the owner expose the profile chooser.
 Do not bypass the tool with shell launch, focus commands, or browser debugging.
@@ -245,10 +245,14 @@ After that confirmation, use the supported Chrome UI:
 1. Create a new profile through Chrome's profile chooser.
 2. Name the profile `Grogu` without enabling Google sign-in or synchronization.
 3. In that profile, open the same credential-free Control UI URL as the old app.
-4. Use Chrome's web-app installation UI to name the app `Grogu Chrome`.
+4. Use Chrome's web-app installation UI to install the app.
 5. If an app shortcut is needed, open `chrome://apps` in that profile.
 6. Select **Create shortcut** for the installed app.
 7. Make sure that the shortcut opens a separate window in the Grogu profile.
+
+If Chrome offers a name field, use `Grogu Chrome`.
+Otherwise, keep Chrome's installed name, such as `OpenClaw Control`, and record that name.
+Do not edit generated app metadata or replace the Safari app to force a name.
 
 A website shortcut alone does not prove standalone app installation.
 If Chrome does not offer web-app installation for that URL, report the missing

@@ -19,6 +19,9 @@ Where a finished run sends its output, what happens when a run or a delivery fai
 | `webhook`  | POST finished event payload to a URL                                |
 | `none`     | No runner fallback delivery                                         |
 
+Isolated agent runs exclude diagnostic reasoning from automatic delivery and run
+summaries. Saved thinking and explicitly enabled reasoning views are unchanged.
+
 A successful primary webhook run with no nonblank summary intentionally skips the POST and records `deliverySuppressionReason: "empty"`, matching announce delivery's optional-output contract. Execution errors still send the error event even without a summary.
 
 Primary webhooks record delivery after an HTTP 2xx acknowledgment. An HTTP rejection

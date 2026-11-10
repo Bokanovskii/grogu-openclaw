@@ -1,13 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { createPluginNpmPublicationReadback } from "../../scripts/plugin-npm-publication-readback.mjs";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { createPluginNpmPublicationReadback as CreateReadback } from "../../scripts/plugin-npm-publication-readback.mjs";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import {
   createNpmPublicationReadbackFixture,
   packageName,
+  prepareNpmPublicationReadbackTooling,
   version,
 } from "./plugin-npm-publication-readback.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const toolingDirs = useAutoCleanupTempDirTracker(afterAll);
+let createPluginNpmPublicationReadback: typeof CreateReadback;
+beforeAll(async () => {
+  ({ createPluginNpmPublicationReadback } = await prepareNpmPublicationReadbackTooling(
+    toolingDirs.make("npm-parent-readback-tooling-"),
+  ));
+});
 const fixture = (mode = "direct", fault = "none", distTagVersion?: string) =>
   createNpmPublicationReadbackFixture(
     tempDirs.make("npm-parent-readback-"),
@@ -66,6 +74,7 @@ describe("parent plugin npm publication readback", () => {
     ["direct", "source", "approved package or source"],
     ["direct", "attempt", "producer-attempt binding"],
     ["direct", "artifact", "immutable publication tuple"],
+    ["direct", "publisher-policy", "does not canonically bind"],
     ["direct", "none", "release version", version, "2026.9.2-beta.2"],
     ["direct", "no-publish", "differs from the prepared version", "2026.9.1-beta.1"],
     ["direct", "none", "differs from the prepared version", "2026.9.2-beta.2"],

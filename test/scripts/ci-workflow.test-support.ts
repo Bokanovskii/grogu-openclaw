@@ -6,6 +6,7 @@ import { runInNewContext } from "node:vm";
 import { parse } from "yaml";
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { resolveWorkflowBash } from "../helpers/workflow-bash.js";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 export const CHECKOUT_V6 = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 export const CACHE_V5 = "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
@@ -37,7 +38,7 @@ export type WorkflowStep = {
 
 export const readCiWorkflow = (() => {
   // The checked-in workflow is fixed for this suite; clones keep fixture mutations local.
-  const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8"));
+  const workflow = parse(readWorkflowSource(".github/workflows/ci.yml").toString("utf8"));
   return () => structuredClone(workflow);
 })();
 
@@ -337,26 +338,30 @@ export function readAndroidToolchainAction() {
 }
 
 export function readBuildArtifactsTestboxWorkflow() {
-  return parse(readFileSync(".github/workflows/ci-build-artifacts-testbox.yml", "utf8"));
+  return readWorkflow(".github/workflows/ci-build-artifacts-testbox.yml");
 }
 
 export function readMaturityScorecardWorkflow() {
-  return parse(readFileSync(MATURITY_SCORECARD_WORKFLOW, "utf8"));
+  return readWorkflow(MATURITY_SCORECARD_WORKFLOW);
 }
 
 export function readReleaseChecksWorkflow() {
-  return parse(readFileSync(".github/workflows/openclaw-release-checks.yml", "utf8"));
+  return readWorkflow(".github/workflows/openclaw-release-checks.yml");
 }
 
 export function readWorkflow(filePath: string) {
-  return parse(readFileSync(filePath, "utf8"));
+  return parse(readWorkflowSource(filePath).toString("utf8"));
 }
 
 export function readTrackedText(relativePath: string): string {
-  if (existsSync(relativePath)) {
-    return readFileSync(relativePath, "utf8");
+  try {
+    return readWorkflowSource(relativePath).toString("utf8");
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+    return execFileSync("git", ["show", `:${relativePath}`], { encoding: "utf8" });
   }
-  return execFileSync("git", ["show", `:${relativePath}`], { encoding: "utf8" });
 }
 
 export function runGit(cwd: string, args: string[]): string {

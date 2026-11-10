@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { expectDefined } from "@openclaw/normalization-core";
 import JSZip from "jszip";
 import * as tar from "tar";
 import { expect } from "vitest";
+import { collectRuntimeImportClosure } from "../../scripts/lib/runtime-import-closure.mts";
 import {
   createPluginPublicationArtifact,
   verifyPluginPublicationArtifact,
 } from "../../scripts/plugin-publication-artifact.mjs";
 import { writePublishablePluginFixture } from "../helpers/publishable-plugin-fixture.js";
+import { prepareCopiedSourceModules } from "./copied-source-modules.test-support.js";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 export const sourceSha = "b".repeat(40);
 export const workflowSha = "a".repeat(40);
 const repository = "openclaw/openclaw";
@@ -18,6 +22,37 @@ export const packageName = "@openclaw/demo";
 export const version = "2026.9.2-beta.1";
 const publisherName = `Publish plugin npm package (${packageName})`;
 const preflightName = `Preflight plugin npm package (${packageName})`;
+
+export async function prepareNpmPublicationReadbackTooling(
+  root: string,
+  { includePublishCli = false }: { includePublishCli?: boolean } = {},
+): Promise<
+  typeof import("../../scripts/plugin-npm-publication-readback.mjs") & { publishCliPath: string }
+> {
+  const entry = "scripts/plugin-npm-publication-readback.mjs";
+  const entries = [entry, ...(includePublishCli ? ["scripts/release-verify-publish.ts"] : [])];
+  const files = new Set([
+    ...collectRuntimeImportClosure(process.cwd(), entries),
+    "package.json",
+    "tsconfig.json",
+    "pnpm-workspace.yaml",
+  ]);
+  for (const file of files) {
+    const target = join(root, file);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(file, target);
+  }
+  symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
+  const workflow = join(root, workflowPath);
+  mkdirSync(dirname(workflow), { recursive: true });
+  writeFileSync(workflow, readWorkflowSource(workflowPath));
+  // Compile once per suite. The real verifier still reads its co-located active workflow.
+  await prepareCopiedSourceModules(root, entries);
+  const readback = await import(
+    pathToFileURL(join(root, "scripts/plugin-npm-publication-readback.js")).href
+  );
+  return { ...readback, publishCliPath: join(root, "scripts/release-verify-publish.js") };
+}
 
 async function zip(entries: Record<string, Buffer>) {
   const archive = new JSZip();
@@ -95,7 +130,10 @@ export async function createNpmPublicationReadbackFixture(
     publisherPolicy: {
       schema: "openclaw.plugin-npm-publisher-policy/v1",
       policyId: "plugin-npm-release-workflow",
-      sha256: createHash("sha256").update(readFileSync(workflowPath)).digest("hex"),
+      sha256:
+        fault === "publisher-policy"
+          ? "0".repeat(64)
+          : createHash("sha256").update(readWorkflowSource(workflowPath)).digest("hex"),
     },
   };
   const created = createPluginPublicationArtifact({ ...common, artifactDir });

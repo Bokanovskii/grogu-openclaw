@@ -1,23 +1,28 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { createPluginNpmPublicationReadback } from "../../scripts/plugin-npm-publication-readback.mjs";
-import { scriptProcessEntrypoints } from "../../scripts/script-process-runtime.test-support.js";
-import {
-  resolveRuntimeWorkerArgv,
-  resolveRuntimeWorkerUrl,
-} from "../../src/infra/runtime-worker-url.js";
+import { pathToFileURL } from "node:url";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { resolveRuntimeWorkerArgv } from "../../src/infra/runtime-worker-url.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import {
   createNpmPublicationReadbackFixture,
   packageName,
+  prepareNpmPublicationReadbackTooling,
   sourceSha,
   version,
   workflowSha,
 } from "./plugin-npm-publication-readback.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const toolingDirs = useAutoCleanupTempDirTracker(afterAll);
+let tooling: Awaited<ReturnType<typeof prepareNpmPublicationReadbackTooling>>;
+beforeAll(async () => {
+  tooling = await prepareNpmPublicationReadbackTooling(
+    toolingDirs.make("parent-publish-cli-tooling-"),
+    { includePublishCli: true },
+  );
+});
 
 describe("full parent publication verifier entrypoint", () => {
   it.each([
@@ -29,9 +34,9 @@ describe("full parent publication verifier entrypoint", () => {
   ])("gates release success on qualified plugin readback: %s", async (fault) => {
     const root = tempDirs.make("parent-publish-cli-");
     const fixture = await createNpmPublicationReadbackFixture(root, "direct", fault);
-    const readback = await createPluginNpmPublicationReadback(fixture.options).catch(
-      () => undefined,
-    );
+    const readback = await tooling
+      .createPluginNpmPublicationReadback(fixture.options)
+      .catch(() => undefined);
     await readback?.verify(packageName, version, "beta").catch(() => undefined);
     writeFileSync(join(root, "gh-responses.json"), JSON.stringify(fixture.ghResponses));
     writeFileSync(join(root, "transfers.json"), JSON.stringify(fixture.transferResponses));
@@ -76,17 +81,14 @@ globalThis.fetch = async (url) => {
 };
 `,
     );
+    const workerArgv = resolveRuntimeWorkerArgv(pathToFileURL(tooling.publishCliPath));
     const result = spawnSync(
       process.execPath,
       [
-        ...resolveRuntimeWorkerArgv(
-          resolveRuntimeWorkerUrl(scriptProcessEntrypoints.releaseVerifyPublish),
-        ).slice(0, -1),
+        ...workerArgv.slice(0, -1),
         "--import",
         preload,
-        ...resolveRuntimeWorkerArgv(
-          resolveRuntimeWorkerUrl(scriptProcessEntrypoints.releaseVerifyPublish),
-        ).slice(-1),
+        ...workerArgv.slice(-1),
         version,
         "--release-sha",
         sourceSha,

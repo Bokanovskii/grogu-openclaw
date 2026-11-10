@@ -1,5 +1,14 @@
-import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import {
+  cpSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 export function createIndependentPrFixtureEnv(
   parentEnv: NodeJS.ProcessEnv = process.env,
@@ -23,8 +32,13 @@ export function copyPrWrapperSources(destination: string): string[] {
     ...readFileSync("scripts/pr-lib/wrapper-components.txt", "utf8").trim().split("\n"),
   ];
   for (const component of components) {
-    mkdirSync(dirname(join(destination, component)), { recursive: true });
-    cpSync(component, join(destination, component), { recursive: true });
+    const target = join(destination, component);
+    mkdirSync(dirname(target), { recursive: true });
+    if (component.startsWith(".github/workflows/")) {
+      writeFileSync(target, readWorkflowSource(component));
+    } else {
+      cpSync(component, target, { recursive: true });
+    }
   }
   return components;
 }

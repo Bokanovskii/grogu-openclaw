@@ -25,6 +25,7 @@ import {
   preparePerformanceFixture,
   type PerformanceFixtureOptions,
 } from "./openclaw-performance-workflow.test-support.js";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 type Step = {
   name?: string;
@@ -104,7 +105,8 @@ function stepEnvironment(step: Step, supplied: Record<string, string>) {
 }
 
 function readWorkflowStep({ file, job, step: name }: WorkflowTarget): Step & { run: string } {
-  const parsed = workflowInputs.get(file) ?? (parse(readFileSync(file, "utf8")) as WorkflowInput);
+  const parsed =
+    workflowInputs.get(file) ?? (parse(readWorkflowSource(file).toString("utf8")) as WorkflowInput);
   workflowInputs.set(file, parsed);
   const step = parsed.jobs[job]?.steps.find((entry) => entry.name === name);
   if (!step?.run) {

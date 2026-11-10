@@ -10,6 +10,7 @@ import {
   inspectManagedProcessGroup,
   terminateManagedChild,
 } from "../../scripts/lib/managed-child-process.mts";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 type Step = { name?: string; run?: string; env?: Record<string, string | number> };
 const processRecord = z.object({
@@ -46,7 +47,7 @@ type CloseResult = { code: number | null; signal: NodeJS.Signals | null };
 export const ciCheckoutFixture = fileURLToPath(
   new URL("./fixtures/ci-platform-checkout.mjs", import.meta.url),
 );
-const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8")) as {
+const workflow = parse(readWorkflowSource(".github/workflows/ci.yml").toString("utf8")) as {
   jobs: Record<string, { steps: Step[] }>;
 };
 

@@ -31,6 +31,11 @@ a restart or a refused wake. A wake is not proof that Main ran or sent anything.
 No `intake` binding keeps the plugin policy-only; multiple intake owners are
 rejected instead of choosing one arbitrarily.
 
+Guarded hook events still need Main's native heartbeat admission. A disabled
+cadence is not a guarantee that every event source can wake an unenrolled agent.
+Verify that owner before claiming automatic follow-through; do not disguise a
+hint as an immediate/manual wake to bypass its guards.
+
 Main needs admitted conversation history, not only a session inventory. An
 explicit `sessions_history` allowlist entry does not override a global or
 per-agent deny. Verify the effective Main surface before claiming human-context
@@ -80,6 +85,13 @@ The shared policy holds unsolicited notifications during the owner's default
 requests still receive answers. This is a prompt policy, not a transport timer:
 the existing research/delivery owner preserves pending findings and confirms
 delivery. The plugin does not create a queue or certify a hard quiet-hours gate.
+
+The same policy owns brevity for every owner-facing text, not just one watch:
+one to three short sentences total, normally 30-60 words. Ledger work, selection
+reasoning, rejected items and unchanged checks stay internal. Historical notices
+and confirmed-delivery receipts remain factual records, not formatting examples;
+never rewrite them to hide a bad prior message. Job briefs keep their source and
+qualification rules without copying a competing text-format policy.
 
 ## Cut over without losing instructions
 

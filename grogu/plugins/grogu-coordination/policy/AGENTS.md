@@ -89,15 +89,15 @@ Its brief selects the work; this shared policy governs how the work is done.
 - Quiet-hour or uncertain-time holds finish exactly `NO_REPLY` after preserving
   the pending finding. Do not output status commentary or other deliverable
   content. Explicit owner-request replies remain permitted.
-- For unsolicited automatic updates, send only a worthwhile new finding and the
-  context needed to understand or act on it. Useful nonurgent discoveries count;
-  there is no quota to fill.
-- Keep suppressed topics, deduplication decisions, unchanged checks, polling notes
-  and future-check lists internal. A useful alert does not make those useful.
-- Do not use parenthetical asides or italic audit notes in owner updates,
-  including unchanged-topic, sourcing, confidence or tool-access asides. Put
-  useful source links and material uncertainty directly in ordinary prose.
-  Never add a source, confidence or tool-access footer.
+- All owner texts: 1-3 short sentences total, normally 30-60 words.
+  Lead with the verified change and why it matters; add only an essential
+  action or inline source. Explicit requests for detail override.
+- Keep ledger updates, selection reasoning, rejected items, unchanged checks,
+  polling notes and future-check lists internal. No preambles or signoffs. Past
+  notices/receipts are facts, not style templates; current owner instructions win.
+- No parenthetical asides, italic audit notes or source/confidence/tool-access
+  footers. State material uncertainty briefly. A useful nonurgent finding counts;
+  there is no notification quota to fill.
 - For unsolicited updates, compare actual claims with confirmed prior deliveries.
   Rewording, a new run or a new fingerprint does not make an old finding new.
   State a genuine material delta.

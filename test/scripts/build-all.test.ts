@@ -111,6 +111,45 @@ function buildCacheFixture(cache: Partial<BuildCache> = {}, label = "cached") {
 }
 
 describe("resolveBuildAllStep", () => {
+  it("honors the package UI build entry with the selected Node absent from PATH", () => {
+    const root = tempDirs.make("package-ui-build-");
+    const receipt = path.join(root, "ui-receipt.json");
+    writeFixture(
+      root,
+      "package.json",
+      JSON.stringify({ scripts: { "ui:build": "node selected-ui.cjs" } }),
+    );
+    writeFixture(
+      root,
+      "scripts/ui.js",
+      `require("node:fs").writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({source:"legacy"}));`,
+    );
+    writeFixture(
+      root,
+      "selected-ui.cjs",
+      `require("node:fs").writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({source:"selected",node:process.execPath,commit:process.env.GIT_COMMIT}));`,
+    );
+    const env: NodeJS.ProcessEnv = { ...process.env, GIT_COMMIT: "a".repeat(40) };
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+    env[pathKey] = "";
+    const invocation = resolveBuildAllStep(getBuildAllStep("ui:build"), {
+      env,
+      nodeExecPath: testNodeExecPath,
+    });
+    const result = spawnSync(invocation.command, invocation.args, {
+      ...invocation.options,
+      cwd: root,
+      stdio: "pipe",
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(fs.readFileSync(receipt, "utf8"))).toEqual({
+      source: "selected",
+      node: fs.realpathSync(testNodeExecPath),
+      commit: "a".repeat(40),
+    });
+  });
+
   it("pins one generated timestamp across every child build", () => {
     const commit = "0123456789abcdef0123456789abcdef01234567";
     const buildEnv = resolveBuildAllEnvironment(

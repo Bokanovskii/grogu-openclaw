@@ -6,6 +6,7 @@ import { startupCorpusTestFiles } from "../../test/vitest/vitest.startup-corpus-
 import { fullSuiteVitestShards } from "../../test/vitest/vitest.test-shards.mjs";
 import { uiE2eRealGatewayTestFiles } from "../../test/vitest/vitest.ui-paths.mjs";
 import { ensureKyselyTypes } from "../generate-kysely-types.mts";
+import { resolvePathEnvKey } from "../windows-cmd-helpers.mjs";
 import { runManagedCommand } from "./managed-child-process.mts";
 import { resolveRepoRoot } from "./repo-root.mjs";
 
@@ -570,11 +571,15 @@ export async function prepareVitestRuntime(
     return 0;
   }
   console.error("[test] preparing matching Control UI assets before Vitest workers");
+  const pathKey = resolvePathEnvKey(env);
   const code = await runManagedCommand({
     bin: process.execPath,
-    args: ["scripts/ui.js", "build"],
+    args: ["--run", "ui:build"],
     cwd,
-    env,
+    env: {
+      ...env,
+      [pathKey]: `${path.dirname(process.execPath)}${path.delimiter}${env[pathKey] ?? ""}`,
+    },
     signal: options.signal,
   });
   if (code !== 0) {

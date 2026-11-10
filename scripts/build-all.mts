@@ -46,6 +46,7 @@ import {
   listTsdownOutputRoots,
   resolveTsdownBuildPlan,
 } from "./tsdown-build.mts";
+import { resolvePathEnvKey } from "./windows-cmd-helpers.mjs";
 
 const nodeBin = resolveNodeRuntimeExecutable() ?? process.execPath;
 
@@ -157,7 +158,7 @@ export const BUILD_ALL_STEPS: BuildAllStep[] = [
   },
   tsxStep("check-plugin-sdk-exports", "scripts/check-plugin-sdk-exports.mts"),
   {
-    ...nodeStep("ui:build", ["scripts/ui.js", "build"]),
+    ...nodeStep("ui:build", ["--run", "ui:build"]),
     // No build-all cache: ui/vite.config.ts derives the Control UI build ID
     // from package.json, git HEAD, and OPENCLAW_CONTROL_UI_BUILD_ID env, so a
     // file-input signature cannot exactly invalidate generated assets and a
@@ -422,13 +423,22 @@ function resolveBuildAllTsdownPlan(
 }
 
 export function resolveBuildAllStep(step: BuildAllStep, params: BuildAllStepParams = {}) {
-  const env = step.env
+  let env = step.env
     ? Object.assign({}, params.env ?? process.env, step.env)
     : (params.env ?? process.env);
+  const command = params.nodeExecPath ?? nodeBin;
+  if (step.args[0] === "--run") {
+    // Package scripts resolve `node` through PATH, even when this runner uses an absolute binary.
+    const pathKey = resolvePathEnvKey(env);
+    env = {
+      ...env,
+      [pathKey]: `${path.dirname(command)}${path.delimiter}${env[pathKey] ?? ""}`,
+    };
+  }
   const assetArgs =
     params.deferIsolatedAssets && step.label === "plugins:assets:build" ? ["--defer-isolated"] : [];
   return {
-    command: params.nodeExecPath ?? nodeBin,
+    command,
     args: [...step.args, ...assetArgs],
     options: {
       stdio: "inherit",

@@ -7,8 +7,12 @@ import {
 import { cronStoreKey } from "../../cron/store/key.js";
 import { readCronRunRecords } from "../../cron/store/read-only.js";
 import type { CronRunRecord } from "../../cron/store/run-history.types.js";
-import { parseAgentSessionKey } from "../../routing/session-key.js";
-import { cronJobMatchesCallerScope, readCronCallerScope } from "./cron-caller-scope.js";
+import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
+import {
+  cronJobMatchesCallerReadScope,
+  readCronCallerScope,
+  type CronCallerScope,
+} from "./cron-caller-scope.js";
 import {
   assertCronReadCurrent,
   resolveCronJobId,
@@ -68,29 +72,49 @@ export const cronRunsHandler: GatewayRequestHandler = async (options) => {
   };
   try {
     if (scope === "all") {
-      if (readCronCallerScope(client)) {
-        respondInvalidCronParams(respond, "cron.runs", "scope all is not allowed by caller scope");
+      const admittedCallerScope = readCronCallerScope(client);
+      admittedCallerScope?.manageAll?.();
+      const readCallerScope = admittedCallerScope?.manageAll ? undefined : admittedCallerScope;
+      if (readCallerScope && p.agentId && normalizeAgentId(p.agentId) !== readCallerScope.agentId) {
+        respondInvalidCronParams(respond, "cron.runs", "agentId outside caller scope");
         return;
       }
       const listedJobs = await context.cron.list({ includeDisabled: true });
       const storeKey = cronStoreKey(context.cronStorePath);
       const records = await readCronRunRecords(storeKey);
       assertCurrent(storeKey);
-      const currentJobs = () =>
+      const currentJobs = (callerScope: CronCallerScope | undefined) =>
         filterCronRunLogJobsByAgent(
           listedJobs.flatMap(({ id }) => {
             const job = context.cron.getJob(id);
-            return job ? [job] : [];
+            return job &&
+              cronJobMatchesCallerReadScope({
+                job,
+                callerScope,
+                defaultAgentId: context.cron.getDefaultAgentId(),
+              })
+              ? [job]
+              : [];
           }),
           p.agentId,
           context.cron.getDefaultAgentId(),
         );
       for (;;) {
         assertCurrent(storeKey);
-        if (readCronCallerScope(client)) {
+        const currentCallerScope = readCronCallerScope(client);
+        currentCallerScope?.manageAll?.();
+        const currentReadCallerScope = currentCallerScope?.manageAll
+          ? undefined
+          : currentCallerScope;
+        if (
+          currentReadCallerScope?.agentId !== readCallerScope?.agentId ||
+          currentReadCallerScope?.accountId !== readCallerScope?.accountId ||
+          currentReadCallerScope?.sessionKey !== readCallerScope?.sessionKey ||
+          currentReadCallerScope?.currentJobId !== readCallerScope?.currentJobId
+        ) {
           throw new Error("Cron history scope changed; retry the request");
         }
-        const jobs = currentJobs();
+        const jobs = currentJobs(currentReadCallerScope);
         const pendingJobs = visibilityRead.prepare(
           jobs.map((job) => cronJobVisibilityTarget(job, context.cron.getDefaultAgentId())),
         );
@@ -108,7 +132,10 @@ export const cronRunsHandler: GatewayRequestHandler = async (options) => {
           ...cronRunLogPageFilters(p),
           agentId: p.agentId,
           jobNameById: Object.fromEntries(visibleJobs.map((job) => [job.id, job.name])),
-          entryFilter: visibility ? (entry) => visibleIds.has(entry.jobId) : undefined,
+          entryFilter:
+            currentReadCallerScope || visibility
+              ? (entry) => visibleIds.has(entry.jobId)
+              : undefined,
         };
         const pendingRecords =
           visibility &&
@@ -120,11 +147,12 @@ export const cronRunsHandler: GatewayRequestHandler = async (options) => {
         assertCurrent(storeKey);
         const page = projectCronRunHistoryPage(records, {
           ...pageOptions,
-          entryFilter: visibility
-            ? (entry) =>
-                visibleIds.has(entry.jobId) &&
-                (!entry.sessionKey || visibility(entry.sessionKey, p.agentId))
-            : undefined,
+          entryFilter:
+            currentReadCallerScope || visibility
+              ? (entry) =>
+                  visibleIds.has(entry.jobId) &&
+                  (!entry.sessionKey || !visibility || visibility(entry.sessionKey, p.agentId))
+              : undefined,
         });
         respond(true, page, undefined);
         return;
@@ -142,14 +170,16 @@ export const cronRunsHandler: GatewayRequestHandler = async (options) => {
       const readCurrentJob = () => {
         assertCurrent(storeKey);
         const callerScope = readCronCallerScope(client);
+        callerScope?.manageAll?.();
         const job = context.cron.getJob(jobId);
         const visibility = visibilityRead.resolve();
         const defaultAgentId = context.cron.getDefaultAgentId();
+        const restrictedCallerScope = callerScope?.manageAll ? undefined : callerScope;
         const matchedJob =
           job &&
           filterCronRunLogJobsByAgent([job], p.agentId, defaultAgentId).length > 0 &&
           cronJobIsVisible(job, visibility, defaultAgentId) &&
-          cronJobMatchesCallerScope({
+          cronJobMatchesCallerReadScope({
             job,
             callerScope,
             defaultAgentId,
@@ -158,7 +188,7 @@ export const cronRunsHandler: GatewayRequestHandler = async (options) => {
             ? job
             : undefined;
         // Operator history survives deletion; scoped reads need a live matching owner.
-        if ((callerScope || p.agentId || visibility) && !matchedJob) {
+        if ((restrictedCallerScope || p.agentId || visibility) && !matchedJob) {
           respondCronJobNotFound(respond, jobId);
           return undefined;
         }

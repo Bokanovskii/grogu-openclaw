@@ -13,7 +13,9 @@ import { resolveSessionStoreIdentity } from "../session-store-key.js";
 import { resolveCronJobOwnerAgentId } from "./cron-caller-scope.js";
 import type { GatewayClient } from "./types.js";
 
-type CronSessionVisibility = (sessionKey: string, agentId?: string) => boolean;
+type CronSessionVisibility = ((sessionKey: string, agentId?: string) => boolean) & {
+  allowsUnbound?: boolean;
+};
 
 function resolveCronEntryFilter(client: GatewayClient | null, cfg: OpenClawConfig) {
   const identity = client?.internal?.agentRuntimeIdentity;
@@ -21,7 +23,9 @@ function resolveCronEntryFilter(client: GatewayClient | null, cfg: OpenClawConfi
     return undefined;
   }
   const sharing = prepareProjectedSessionSharing({ client, cfg, isMember: () => false });
-  return sharing.sessionCap === "none" ? sharing.entryFilter : undefined;
+  return sharing.entryFilter
+    ? Object.assign(sharing.entryFilter, { allowsUnbound: sharing.sessionCap !== "none" })
+    : undefined;
 }
 
 type CronVisibilityTarget = { sessionKey: string; agentId?: string };
@@ -67,19 +71,23 @@ export function createCronSessionVisibility(
       })();
     },
     resolve(): CronSessionVisibility | undefined {
-      if (!resolveCronEntryFilter(client, getConfig())) {
+      const entryFilter = resolveCronEntryFilter(client, getConfig());
+      if (!entryFilter) {
         return undefined;
       }
-      return (sessionKey, agentId) => {
-        const cfg = getConfig();
-        const filter = resolveCronEntryFilter(client, cfg);
-        if (!filter) {
-          return true;
-        }
-        const { key } = keyFor({ sessionKey, agentId }, cfg);
-        const target = reads.get(key)?.readCurrent(cfg).target;
-        return Boolean(target && filter(target.canonicalKey, target.entry));
-      };
+      return Object.assign(
+        (sessionKey: string, agentId?: string) => {
+          const cfg = getConfig();
+          const filter = resolveCronEntryFilter(client, cfg);
+          if (!filter) {
+            return true;
+          }
+          const { key } = keyFor({ sessionKey, agentId }, cfg);
+          const target = reads.get(key)?.readCurrent(cfg).target;
+          return Boolean(target && filter(target.canonicalKey, target.entry));
+        },
+        { allowsUnbound: entryFilter.allowsUnbound },
+      );
     },
     release() {
       for (const read of reads.values()) {
@@ -115,5 +123,5 @@ export function cronJobIsVisible(
     return true;
   }
   const target = cronJobVisibilityTarget(job, defaultAgentId);
-  return Boolean(target && visibility(target.sessionKey, target.agentId));
+  return target ? visibility(target.sessionKey, target.agentId) : visibility.allowsUnbound === true;
 }

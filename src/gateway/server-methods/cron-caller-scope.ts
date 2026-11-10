@@ -364,6 +364,48 @@ export function cronJobMatchesCallerScope(params: {
   return cronPatchSessionRefsMatchCaller(params.job, params.callerScope);
 }
 
+export function cronJobMatchesCallerReadScope(params: {
+  job: CronJob;
+  callerScope: CronCallerScope | undefined;
+  defaultAgentId?: string;
+  allowCurrentJob?: boolean;
+}): boolean {
+  if (cronJobMatchesCallerScope(params)) {
+    return true;
+  }
+  const { job, callerScope, defaultAgentId } = params;
+  if (
+    !callerScope?.sessionKey ||
+    callerScope.manageAll ||
+    isOperatorCommandCronJob(job) ||
+    job.scheduledToolPolicy?.mode === "trusted"
+  ) {
+    return false;
+  }
+  const ownerSessionKey = job.owner?.sessionKey?.trim();
+  const ownerAccountId = job.owner?.accountId?.trim();
+  if (
+    !ownerSessionKey ||
+    !ownerAccountId ||
+    normalizeAccountId(ownerAccountId) !== callerScope.accountId
+  ) {
+    return false;
+  }
+  const normalizedOwnerAccountId = normalizeAccountId(ownerAccountId);
+  const policy = job.scheduledToolPolicy;
+  if (
+    policy?.mode === "account" &&
+    (ownerSessionKey !== policy.ownerSessionKey ||
+      normalizedOwnerAccountId !== normalizeAccountId(policy.ownerAccountId) ||
+      normalizeAccountId(policy.ownerAccountId) !== callerScope.accountId)
+  ) {
+    return false;
+  }
+  const ownerAgentId =
+    resolveCronJobOwnerAgentId(job) ?? tryResolveCronJobEffectiveAgentId(job, defaultAgentId);
+  return ownerAgentId === callerScope.agentId && cronPatchSessionRefsMatchCaller(job, callerScope);
+}
+
 export function cronJobMatchesDeclarationScope(params: {
   job: CronJob;
   input: CronJobCreate;

@@ -7,7 +7,7 @@ import type { CronJob } from "../../cron/types.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import {
-  cronJobMatchesCallerScope,
+  cronJobMatchesCallerReadScope,
   readCronCallerScope,
   resolveCronJobOwnerAgentId,
 } from "./cron-caller-scope.js";
@@ -77,7 +77,7 @@ export const cronListHandler = createPreparedReadHandler((options) => {
           const currentScope = scope?.manageAll ? undefined : scope;
           const currentDefault = context.cron.getDefaultAgentId();
           return (
-            cronJobMatchesCallerScope({
+            cronJobMatchesCallerReadScope({
               job,
               callerScope: currentScope,
               defaultAgentId: currentDefault,
@@ -119,9 +119,13 @@ export const cronListHandler = createPreparedReadHandler((options) => {
         const assertPageCurrent = () => {
           assertCronReadCurrent(options);
           const currentScope = readCronCallerScope(client);
+          const currentReadScope = currentScope?.manageAll ? undefined : currentScope;
           // The filtered total belongs to this scope, even when its visible page is empty.
           if (
-            Boolean(currentScope && !currentScope.manageAll) !== Boolean(callerScope) ||
+            currentReadScope?.agentId !== callerScope?.agentId ||
+            currentReadScope?.accountId !== callerScope?.accountId ||
+            currentReadScope?.sessionKey !== callerScope?.sessionKey ||
+            currentReadScope?.currentJobId !== callerScope?.currentJobId ||
             Boolean(visibilityRead.resolve()) !== Boolean(cronVisibility)
           ) {
             throw new Error("Cron list visibility changed; refresh the page");

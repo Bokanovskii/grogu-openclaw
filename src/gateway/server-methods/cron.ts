@@ -222,6 +222,7 @@ export const cronHandlers: GatewayRequestHandlers = {
     validateCronGetParams,
     ({ respond }, { job }) => respond(true, cronJobReadView(job), undefined),
     {
+      accessMode: "read",
       allowCurrentJob: true,
       checkVisibility: true,
       // Shipped CLI matchers parse this wording for name lookup fallback.

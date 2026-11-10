@@ -25,6 +25,87 @@ const invokeCron = createCronTestInvoker(cronHandlers, getRuntimeConfig);
 const createCronContext = (job: CronJob) => createCronTestContext(job, getRuntimeConfig);
 
 describe("cron scratch read authority", () => {
+  it("allows same-account cross-session scratch reads without allowing writes", async () => {
+    const { storePath } = await makeStorePath();
+    const cron = new CronService({
+      scheduler: createTestGatewayScheduler(),
+      nowMs: () => Date.now(),
+      storePath,
+      cronEnabled: true,
+      defaultAgentId: "main",
+      log: cronLogger,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob: async () => ({ status: "skipped" }),
+    });
+    try {
+      const owner = { agentId: "ops", sessionKey: "agent:ops:creator", accountId: "work" };
+      const scheduledToolPolicy = {
+        version: 1 as const,
+        mode: "account" as const,
+        ownerSessionKey: owner.sessionKey,
+        ownerAccountId: owner.accountId,
+      };
+      const job = await cron.add(
+        {
+          id: "scratch-read-shared",
+          name: "scratch read shared",
+          agentId: "ops",
+          owner,
+          enabled: false,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "synthetic event", toolsAllow: ["read"] },
+        },
+        { scheduledToolPolicy },
+      );
+      await cron.writeScratch(job.id, {
+        content: "same-account scratch",
+        expectedRevision: 0,
+      });
+      const context = createCronContext(job);
+      context.cron.readJob.mockImplementation((id) => cron.readJob(id));
+      context.cron.getJob.mockImplementation((id) => cron.getJob(id));
+      context.cron.readScratch.mockImplementation((...args) => cron.readScratch(...args));
+      const reader = callerClient("ops", owner.accountId, "agent:ops:reader");
+
+      const read = await invokeCron(
+        "cron.scratch.get",
+        { id: job.id },
+        { context, client: reader },
+      );
+      expect(read.respond).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({
+          currentRevision: 1,
+          scratch: expect.objectContaining({ content: "same-account scratch" }),
+        }),
+        undefined,
+      );
+
+      const wrongAccountReader = callerClient("ops", "personal", "agent:ops:reader");
+      context.cron.readScratch.mockClear();
+      const crossAccountRead = await invokeCron(
+        "cron.scratch.get",
+        { id: job.id },
+        { context, client: wrongAccountReader },
+      );
+      expect(crossAccountRead.respond).toHaveBeenCalledWith(false, undefined, expect.any(Object));
+      expect(context.cron.readScratch).not.toHaveBeenCalled();
+
+      const write = await invokeCron(
+        "cron.scratch.set",
+        { id: job.id, content: "must remain private", expectedRevision: 1 },
+        { context, client: reader },
+      );
+      expect(write.respond).toHaveBeenCalledWith(false, undefined, expect.any(Object));
+      expect(context.cron.writeScratch).not.toHaveBeenCalled();
+    } finally {
+      cron.stop();
+    }
+  });
+
   it.each(["caller closes after read", "owner transfers before read"] as const)(
     "withholds private scratch when %s",
     async (change) => {

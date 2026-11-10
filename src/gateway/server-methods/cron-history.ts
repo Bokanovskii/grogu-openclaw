@@ -12,7 +12,7 @@ import { cronStoreKey } from "../../cron/store/key.js";
 import { readCronRunHistoryBinding } from "../../cron/store/read-only.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
-import { cronJobMatchesCallerScope, readCronCallerScope } from "./cron-caller-scope.js";
+import { cronJobMatchesCallerReadScope, readCronCallerScope } from "./cron-caller-scope.js";
 import { assertCronReadCurrent } from "./cron-job-access.js";
 import {
   createCronSessionVisibility,
@@ -54,13 +54,15 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
   const assertAllowed = (sessionKey?: string, agentId?: string) => {
     assertCronReadCurrent(opts);
     const callerScope = readCronCallerScope(client);
+    callerScope?.manageAll?.();
     const visibility = sessionVisibility.resolve();
     const job = context.cron.getJob(params.id);
     const defaultAgentId = context.cron.getDefaultAgentId();
+    const restrictedCallerScope = callerScope?.manageAll ? undefined : callerScope;
     if (
-      (callerScope || visibility) &&
+      (restrictedCallerScope || visibility) &&
       (!job ||
-        !cronJobMatchesCallerScope({
+        !cronJobMatchesCallerReadScope({
           job,
           callerScope,
           defaultAgentId,

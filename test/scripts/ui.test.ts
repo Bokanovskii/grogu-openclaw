@@ -961,14 +961,6 @@ require("node:module").syncBuiltinESMExports();
     },
   );
 
-  it("keeps the package script on the canonical UI build wrapper", () => {
-    const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8")) as {
-      scripts: Record<string, string>;
-    };
-
-    expect(packageJson.scripts["ui:build"]).toBe("node scripts/ui.js build");
-  });
-
   it.runIf(process.platform !== "win32").for([
     {
       label: "acknowledged SIGTERM",

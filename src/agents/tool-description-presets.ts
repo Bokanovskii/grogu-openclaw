@@ -87,6 +87,7 @@ export function describeSessionsHistoryTool(options?: SessionLinkDescriptionOpti
   return [
     "Read sanitized visible-session history.",
     "Before reply/debug/resume. Use messageId for anchored history; sessionId selects its transcript and requires messageId. Omit both for the latest tail. offset pages unanchored history and is ignored with messageId. limit bounds either mode. Include tool messages with includeTools.",
+    'For complete stored visible text, supply messageId and textCursor="start", then copy textPage.nextCursor unchanged with the same target until hasMore=false. Pages identify their field and UTF-16 offset; concatenate per field. Redaction precedes slicing; changed text requires discarding old pages and restarting. Replay/private payloads stay omitted.',
     "pendingInputs are accepted inputs outside model history; page with pendingBefore=nextBefore. Cancelled/interrupted inputs never replay automatically. Lower limit for richer pending previews.",
     ...(options?.sessionLinkBase ? [describeSessionLinkRule(options.sessionLinkBase)] : []),
   ].join(" ");

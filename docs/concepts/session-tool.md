@@ -102,6 +102,36 @@ The returned view is intentionally bounded and redacted:
 - returned messages are capped at 80 KB; older rows can be dropped or an oversized row replaced with `[sessions_history omitted: message too large]`
 - the tool reports summary flags such as `truncated`, `droppedMessages`, `contentTruncated`, `contentRedacted`, `bytes`, and pagination metadata
 
+To recover a preview's text tail, pass the same `sessionKey`, its `messageId`,
+and `textCursor: "start"`. Include `sessionId` from the history or search result
+to retain its physical transcript identity, and `includeTools: true` for tool
+results. This selects a single-message text response instead of a history
+window; `limit`, `offset`, and `pendingBefore` do not paginate its text.
+
+Each response contains `textPage.field`, `textPage.offset`, `textPage.text`,
+and `textPage.totalChars`, plus the selected `sessionId` and `messageId`.
+With `includeTools: true`, visible nested tool-result `content` is included,
+whether stored as a string or text blocks. Nested previews receive the same
+redaction and text cap. Without it, nested and alternate tool results are omitted.
+Pages contain at most 4,000 UTF-16 code units without splitting surrogate pairs;
+the complete response stays within 80 KiB. Concatenate pages separately for
+each field, preserving whitespace and line endings. While `hasMore` is true,
+copy `textPage.nextCursor` unchanged into `textCursor` with the same target.
+Missing `nextCursor` and `hasMore: false` mean all visible text fields were read.
+This works for retained transcript messages and currently retained
+`pending:<input-id>` messages; it does not replay pending inputs.
+
+Every page reapplies session access and the existing selected-message reader.
+A cursor binds the canonical agent/session/message, physical transcript, and
+redacted text snapshot; it is not authority. If text changes, discard prior
+pages and restart with `"start"` rather than combining snapshots.
+Redaction applies to each complete field before slicing, even with logging
+redaction disabled. Private details, usage/cost objects, reasoning replay,
+signatures, tool-call argument buffers, and inline image data remain omitted.
+Ordinary thinking text remains available. The Gateway's existing
+8,000,000-character per-field and transport limits still apply; a source that
+exceeds them returns an explicit error, not a terminal partial-text success.
+
 This is structured history, not the plain-text rendering used by [`/subagents log`](/tools/subagents#slash-command). `sessions_history` does not apply that command's assistant prose sanitizer: reasoning tags, `<relevant-memories>` / `<relevant_memories>` scaffolding, plain-text tool-call XML (including malformed MiniMax XML), downgraded tool markers, and model control tokens can remain in returned message text. `includeTools` controls tool-result messages, not those embedded text forms.
 
 Use the returned **session key** (like `"main"`) with `sessions_history`, `sessions_send`, and `session_status`. To reopen a search hit, also pass its `messageId` and `sessionId` to `sessions_history`; see [Session search](/concepts/session-search). Outside anchored recall, use the durable `sessionId` as the lifecycle identity described above.

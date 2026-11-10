@@ -1,20 +1,41 @@
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { NESTED_TOOL_ACTIVITY_CUSTOM_TYPE } from "../../sessions/nested-tool-activity.js";
 import { extractAssistantTextForPhase } from "../../shared/chat-message-content.js";
 import { sanitizeAssistantVisibleTextWithProfile } from "../../shared/text/assistant-visible-text.js";
+import { isToolResultBlockType } from "../../shared/tool-block-contract.js";
 import { sanitizeUserFacingText } from "../embedded-agent-helpers/sanitize-user-facing-text.js";
 import { renderUserFacingText } from "../embedded-agent-helpers/user-facing-text.js";
 
 export function stripToolMessages(messages: unknown[]): unknown[] {
-  return messages.filter((msg) => {
-    if (!msg || typeof msg !== "object") {
-      return true;
+  return messages.flatMap((msg) => {
+    const record = asOptionalRecord(msg);
+    if (!record) {
+      return [msg];
     }
-    const { role, customType } = msg as { role?: unknown; customType?: unknown };
-    return (
-      role !== "toolResult" &&
-      role !== "tool" &&
-      !(role === "custom" && customType === NESTED_TOOL_ACTIVITY_CUSTOM_TYPE)
-    );
+    const { role, customType } = record;
+    if (
+      role === "tool" ||
+      role === "function" ||
+      isToolResultBlockType(role) ||
+      isToolResultBlockType(record.type) ||
+      (role === "custom" && customType === NESTED_TOOL_ACTIVITY_CUSTOM_TYPE)
+    ) {
+      return [];
+    }
+    if (!Array.isArray(record.content)) {
+      return [msg];
+    }
+    const originalContent = record.content;
+    const content = stripToolMessages(originalContent);
+    if (
+      content.length === originalContent.length &&
+      content.every((block, i) => block === originalContent[i])
+    ) {
+      return [msg];
+    }
+    return content.length > 0 || (typeof record.text === "string" && record.text.length > 0)
+      ? [{ ...record, content }]
+      : [];
   });
 }
 

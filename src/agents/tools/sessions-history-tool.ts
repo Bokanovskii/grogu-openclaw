@@ -1,19 +1,19 @@
 import { asPositiveSafeInteger } from "@openclaw/normalization-core/number-coercion";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { Type } from "typebox";
+import { CHAT_MESSAGE_MAX_CHARS } from "../../../packages/gateway-protocol/src/schema/chat-history-constants.js";
 import {
   ChatHistoryParamsSchema,
   ChatPendingInputsPageSchema,
   type ChatHistoryDeltaResult,
   type ChatPendingInputsPage,
+  type ChatMessageGetResult,
 } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { capArrayByJsonBytes } from "../../gateway/session-transcript-readers.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
-import { redactToolPayloadText } from "../../logging/redact.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
-import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSessionAgentId, resolveSessionAgentIds } from "../agent-scope.js";
 import { requesterProfileSchema } from "../schema/typebox.js";
 import {
@@ -50,6 +50,12 @@ import {
   resolveVisibleSessionReference,
   shouldResolveSessionIdInput,
 } from "./sessions-helpers.js";
+import {
+  prepareSessionsHistoryTextRead,
+  sanitizeHistoryMessage,
+  SessionsHistoryTextCursorSchema,
+  SessionsHistoryTextOutputSchema,
+} from "./sessions-history-text.js";
 
 const SessionsHistoryToolSchema = Type.Object({
   user: requesterProfileSchema(),
@@ -68,12 +74,14 @@ const SessionsHistoryToolSchema = Type.Object({
       "Transcript session id that owns messageId. Requires messageId; omit for the latest tail.",
   }),
   includeTools: Type.Optional(Type.Boolean()),
+  textCursor: SessionsHistoryTextCursorSchema,
 });
 
 const SessionsHistoryOutputSchema = Type.Union([
   Type.Object(
     {
       sessionKey: Type.String(),
+      sessionId: Type.Optional(Type.String()),
       messages: Type.Array(Type.Unknown()),
       truncated: Type.Boolean(),
       droppedMessages: Type.Boolean(),
@@ -90,6 +98,7 @@ const SessionsHistoryOutputSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
+  SessionsHistoryTextOutputSchema,
   Type.Object(
     {
       status: Type.Union([Type.Literal("error"), Type.Literal("forbidden")]),
@@ -100,7 +109,6 @@ const SessionsHistoryOutputSchema = Type.Union([
 ]);
 
 const SESSIONS_HISTORY_MAX_BYTES = 80 * 1024;
-const SESSIONS_HISTORY_TEXT_MAX_CHARS = 4000;
 const SESSIONS_HISTORY_PENDING_MAX_BYTES = 4096;
 type ChatHistoryPaginationMetadata = Partial<
   Record<"offset" | "nextOffset" | "totalMessages", number> & {
@@ -108,62 +116,8 @@ type ChatHistoryPaginationMetadata = Partial<
     windowReset: boolean;
   }
 >;
-
-function sanitizeHistoryMessage(
-  message: unknown,
-  maxChars = SESSIONS_HISTORY_TEXT_MAX_CHARS,
-): {
-  message: unknown;
-  truncated: boolean;
-  redacted: boolean;
-} {
-  if (!message || typeof message !== "object") {
-    return { message, truncated: false, redacted: false };
-  }
-  const entry = { ...(message as Record<string, unknown>) };
-  let truncated = false;
-  let redacted = false;
-  const sanitizeText = (text: string) => {
-    // Tool output stays redacted even when general-purpose log redaction is disabled.
-    const sanitized = redactToolPayloadText(text);
-    redacted ||= sanitized !== text;
-    if (sanitized.length <= maxChars) {
-      return sanitized;
-    }
-    truncated = true;
-    return `${truncateUtf16Safe(sanitized, maxChars)}\n…(truncated)…`;
-  };
-  // Tool result details often contain very large nested payloads.
-  for (const field of ["details", "usage", "cost"]) {
-    if (field in entry) {
-      delete entry[field];
-      truncated = true;
-    }
-  }
-
-  if (typeof entry.content === "string") {
-    entry.content = sanitizeText(entry.content);
-  } else if (Array.isArray(entry.content)) {
-    entry.content = entry.content.map((block: unknown) => {
-      if (!block || typeof block !== "object") {
-        return block;
-      }
-      const content = { ...(block as Record<string, unknown>) };
-      const fields =
-        content.type === "thinking" ? ["text", "thinking", "partialJson"] : ["text", "partialJson"];
-      for (const field of fields) {
-        if (typeof content[field] === "string") {
-          content[field] = sanitizeText(content[field]);
-        }
-      }
-      return content;
-    });
-  }
-  if (typeof entry.text === "string") {
-    entry.text = sanitizeText(entry.text);
-  }
-  return { message: entry, truncated, redacted };
-}
+type ChatHistoryReadResult = Pick<ChatHistoryDeltaResult, "messages" | "pendingInputs"> &
+  ChatHistoryPaginationMetadata & { sessionId?: string };
 
 function boundPendingInputs(page: ChatPendingInputsPage) {
   // Pending input is context for an intentional next action, never executable
@@ -364,8 +318,14 @@ export function createSessionsHistoryTool(opts?: {
       const pendingBefore = readPositiveIntegerParam(params, "pendingBefore");
       const messageId = readToolStringParam(params, "messageId");
       const sessionId = readToolStringParam(params, "sessionId");
+      const textCursor = readToolStringParam(params, "textCursor", {
+        required: params.textCursor !== undefined,
+      });
       if (sessionId && !messageId) {
         throw new ToolInputError("sessionId requires messageId");
+      }
+      if (textCursor && !messageId) {
+        throw new ToolInputError("textCursor requires messageId");
       }
       // Keep redundant model arguments out of the strict Gateway pagination contract.
       const paginationOffset = messageId ? undefined : offset;
@@ -475,16 +435,70 @@ export function createSessionsHistoryTool(opts?: {
         });
       }
 
+      if (textCursor && messageId) {
+        const read = prepareSessionsHistoryTextRead({
+          textCursor,
+          agentId: targetAgentId,
+          sessionKey: resolvedKey,
+          displayKey,
+          messageId,
+          sessionId,
+          includeTools,
+          maxBytes: SESSIONS_HISTORY_MAX_BYTES,
+          ...(opts?.sessionLinkBase
+            ? { sessionLinkRule: describeSessionLinkRule(opts.sessionLinkBase) }
+            : {}),
+        });
+        return jsonResult(
+          await runWithScopedSessionAccess({
+            cfg,
+            agentId: targetAgentId,
+            expectedSessionId: access.expectedSessionId,
+            targetSessionKey: resolvedKey,
+            run: async () => {
+              const physicalSessionId =
+                read.sessionId ??
+                (
+                  await gatewayCall<Pick<ChatHistoryReadResult, "sessionId">>({
+                    method: "chat.history",
+                    params: {
+                      sessionKey: resolvedKey,
+                      agentId: targetAgentId,
+                      messageId,
+                      limit: 1,
+                    },
+                  })
+                ).sessionId;
+              if (!physicalSessionId) {
+                return {
+                  status: "error",
+                  error:
+                    "No retained transcript selected; refresh history or select another visible message.",
+                };
+              }
+              const response = await gatewayCall<ChatMessageGetResult>({
+                method: "chat.message.get",
+                params: {
+                  sessionKey: resolvedKey,
+                  agentId: targetAgentId,
+                  sessionId: physicalSessionId,
+                  messageId,
+                  maxChars: CHAT_MESSAGE_MAX_CHARS,
+                },
+              });
+              return read.finish(response, physicalSessionId);
+            },
+          }),
+        );
+      }
+
       const result = await runWithScopedSessionAccess({
         cfg,
         agentId: targetAgentId,
         expectedSessionId: access.expectedSessionId,
         targetSessionKey: resolvedKey,
         run: async () =>
-          await gatewayCall<
-            Pick<ChatHistoryDeltaResult, "messages" | "pendingInputs"> &
-              ChatHistoryPaginationMetadata
-          >({
+          await gatewayCall<ChatHistoryReadResult>({
             method: "chat.history",
             params: {
               sessionKey: resolvedKey,
@@ -524,6 +538,7 @@ export function createSessionsHistoryTool(opts?: {
       });
       return jsonResult({
         sessionKey: displayKey,
+        ...(result?.sessionId ? { sessionId: result.sessionId } : {}),
         messages: hardened.items,
         truncated: droppedMessages || contentTruncated || hardened.hardCapped,
         droppedMessages: droppedMessages || hardened.hardCapped,

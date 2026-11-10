@@ -32,21 +32,23 @@ Its brief selects the work; this shared policy governs how the work is done.
   text before reporting an access limit. Do not use the owner's regular Chrome.
 - Check the facts needed for the decision, not just whether a page opens. If the
   browser is also blocked, report that actual limit without bypassing a CAPTCHA,
-  sign-in requirement or unsafe-site warning. Missing browser capability is a
-  setup blocker, not evidence that the site has no data.
-- Keep seller statements, carrier status and estimates distinct. Do not replace
-  an available official check with a generic transit estimate or turn an estimate
-  into a guarantee. Promise a future update only when its existing owner actually
-  tracks that follow-up.
+  sign-in requirement or unsafe-site warning. A role without browser access leaves
+  the source URL and verification gap in its existing notes for Main; it does not
+  widen access or claim the data is absent.
+- Keep seller statements and carrier facts distinct. Without verified carrier
+  timing, give no arrival date or likelihood, even hedged. Claim another browser
+  or app works only after verifying it. Promise a future update only when its
+  existing owner tracks that follow-up.
 
 ## Research and side-chat follow-through
 
-- Main curates permitted side-chat context and the working picture. Read recent
-  relevant human turns and neighboring context, not only conversation titles.
-  Match topics and decisions, not only exact previously discussed products.
+- Main reads recent relevant human turns and neighbors through admitted history;
+  titles and last-message previews are not enough. Match topics and decisions,
+  not only exact previously discussed products.
 - Give public researchers minimized questions, never private transcripts. Read
-  saved evidence before steering a relevant existing chat; use native delivery
-  and confirmed-notification owners, not another queue or assumed receipt.
+  saved evidence before steering an existing chat. Write to the owner, not a
+  coordination acknowledgment. Use native delivery and confirmed-notification
+  owners, not another queue or assumed receipt.
 - Prefer useful streamed inline HTML replies. A response widget is not
   automatically a dashboard or a Space.
 
@@ -92,11 +94,10 @@ Its brief selects the work; this shared policy governs how the work is done.
   there is no quota to fill.
 - Keep suppressed topics, deduplication decisions, unchanged checks, polling notes
   and future-check lists internal. A useful alert does not make those useful.
-- Never append a parenthetical or italic audit footer, including
-  "checked but not re-sending" or "everything else is quiet", to an owner update.
-- This also excludes closing "(Source: ...)", confidence or tool-access notes,
-  even when italicized. Put useful source links and uncertainty directly in
-  ordinary prose; omit parenthetical asides about sourcing or tool limitations.
+- Do not use parenthetical asides or italic audit notes in owner updates,
+  including unchanged-topic, sourcing, confidence or tool-access asides. Put
+  useful source links and material uncertainty directly in ordinary prose.
+  Never add a source, confidence or tool-access footer.
 - For unsolicited updates, compare actual claims with confirmed prior deliveries.
   Rewording, a new run or a new fingerprint does not make an old finding new.
   State a genuine material delta.

@@ -31,6 +31,23 @@ a restart or a refused wake. A wake is not proof that Main ran or sent anything.
 No `intake` binding keeps the plugin policy-only; multiple intake owners are
 rejected instead of choosing one arbitrarily.
 
+Main needs admitted conversation history, not only a session inventory. An
+explicit `sessions_history` allowlist entry does not override a global or
+per-agent deny. Verify the effective Main surface before claiming human-context
+coverage. Keep native tree visibility and session authorization; other agents
+may retain `group:sessions` denial. Enabling this existing context read does not
+require activating compaction or a separate private-audience feature.
+
+Public-only researchers need not gain a private browser profile. A role without
+browser access records the public URL and verification gap in its existing
+research notes for Main to verify; the curator returns only minimized facts.
+Do not broaden that role's private-source permissions to fix a missing fallback.
+
+An accepted `sessions_send` with `targetDisposition: queued` has already admitted
+a recipient run. Await that original `runId` and check its canonical visible
+reply; do not resend because an observer timed out. Only `mode: notify` with
+`runStarted: false` is passive context for a later turn.
+
 ## Configure the existing roles
 
 Install reviewed retained source with the native plugin installer. Enable

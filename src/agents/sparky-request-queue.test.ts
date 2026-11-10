@@ -5,6 +5,7 @@ import { makeProviderModelFixture } from "./test-helpers/provider-model-fixture.
 const model = makeProviderModelFixture({
   id: "synthetic",
   provider: "sparky",
+  api: "openai-completions",
   baseUrl: "https://queue.example.invalid/v1",
 });
 const flush = async () => {

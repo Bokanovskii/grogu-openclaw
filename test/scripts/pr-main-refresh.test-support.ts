@@ -8,16 +8,24 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll } from "vitest";
 import { copyTreeCloseOnExec } from "../helpers/close-on-exec-copy.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { createPrivateHandoffStoreFixture } from "./pr-private-handoff.test-support.js";
 import { copyPrWrapperSources, linkPrWrapperDependencies } from "./pr-wrapper.test-support.js";
+import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 const templateDirs = useAutoCleanupTempDirTracker(afterAll);
-const fixtureTemplates = new Map<boolean, ReturnType<typeof createMainRefreshTemplate>>();
+const fixtureTemplates = new Map<string, ReturnType<typeof createMainRefreshTemplate>>();
+
+export const hostedVerifierWorkflowSources = [
+  ".github/workflows/ci-check-testbox.yml",
+  ".github/workflows/ci-check-arm-testbox.yml",
+  ".github/workflows/ci-build-artifacts-testbox.yml",
+  ".github/workflows/workflow-sanity.yml",
+] as const;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, `'\\''`)}'`;
@@ -52,7 +60,11 @@ function createFixtureGit(root: string) {
   return { env, realGit, git, handoff };
 }
 
-function createMainRefreshTemplate(directory: string, perWorktreeConfig: boolean) {
+function createMainRefreshTemplate(
+  directory: string,
+  perWorktreeConfig: boolean,
+  archivedWorkflowSources: readonly string[],
+) {
   const root = realpathSync(directory);
   const canonical = join(root, "canonical");
   const origin = join(root, "origin.git");
@@ -69,6 +81,11 @@ function createMainRefreshTemplate(directory: string, perWorktreeConfig: boolean
   cpSync(join(process.cwd(), ".github", "workflows"), join(canonical, ".github", "workflows"), {
     recursive: true,
   });
+  for (const workflowPath of archivedWorkflowSources) {
+    const target = join(canonical, workflowPath);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, readWorkflowSource(workflowPath));
+  }
   writeFileSync(join(canonical, "package.json"), '{"type":"module"}\n');
   cpSync(join(process.cwd(), "tsconfig.json"), join(canonical, "tsconfig.json"));
   writeFileSync(join(canonical, ".gitignore"), ".worktrees/\n.local/\nnode_modules\n");
@@ -110,18 +127,22 @@ export function createMainRefreshFixture(
     perWorktreeConfig?: boolean;
     partialCloneFilter?: string;
     precreateWorktree?: boolean;
+    archivedWorkflowSources?: readonly string[];
   } = {},
 ) {
   // Existing regression fixtures retain worktreeConfig; acceleration starts with
   // a distinct pristine fixture, never a shared-config reset after sparse use.
   const perWorktreeConfig = options.perWorktreeConfig !== false;
-  let template = fixtureTemplates.get(perWorktreeConfig);
+  const archivedWorkflowSources = (options.archivedWorkflowSources ?? []).toSorted();
+  const templateKey = `${perWorktreeConfig}:${JSON.stringify(archivedWorkflowSources)}`;
+  let template = fixtureTemplates.get(templateKey);
   if (!template) {
     template = createMainRefreshTemplate(
       templateDirs.make("openclaw-pr-main-refresh-template-"),
       perWorktreeConfig,
+      archivedWorkflowSources,
     );
-    fixtureTemplates.set(perWorktreeConfig, template);
+    fixtureTemplates.set(templateKey, template);
   }
   const root = realpathSync(directory);
   const canonical = join(root, "canonical");

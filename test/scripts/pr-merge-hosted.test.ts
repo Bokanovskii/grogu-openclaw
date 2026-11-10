@@ -2,7 +2,10 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
-import { createMainRefreshFixture } from "./pr-main-refresh.test-support.js";
+import {
+  createMainRefreshFixture,
+  hostedVerifierWorkflowSources,
+} from "./pr-main-refresh.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterAll);
 const outcomeRef = "refs/openclaw/pr-merge-outcomes/42";
@@ -13,7 +16,9 @@ describePosix("native hosted merge handoff", () => {
   let preparedGates: string;
 
   beforeAll(() => {
-    f = createMainRefreshFixture(tempDirs.make("openclaw-pr-merge-hosted-"));
+    f = createMainRefreshFixture(tempDirs.make("openclaw-pr-merge-hosted-"), {
+      archivedWorkflowSources: hostedVerifierWorkflowSources,
+    });
     f.configure({ hostedCi: "release" });
     const prepare = f.run("prepare-run");
     expect(prepare.status, prepare.stdout + prepare.stderr).toBe(0);
@@ -180,7 +185,9 @@ describePosix("native pending GitHub merge handoff", () => {
   let pendingGates: string;
 
   beforeAll(() => {
-    f = createMainRefreshFixture(tempDirs.make("openclaw-pr-merge-pending-"));
+    f = createMainRefreshFixture(tempDirs.make("openclaw-pr-merge-pending-"), {
+      archivedWorkflowSources: hostedVerifierWorkflowSources,
+    });
     delete f.env.OPENCLAW_TESTBOX;
     f.env.OPENCLAW_PR_GATES_REMOTE = "github";
     f.configure({

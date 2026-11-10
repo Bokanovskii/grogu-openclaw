@@ -16,11 +16,21 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { assertFixtureProcessGroupStopped } from "./exited-descendant-reaper.test-support.js";
-import { createMainRefreshFixture } from "./pr-main-refresh.test-support.js";
+import {
+  createMainRefreshFixture,
+  hostedVerifierWorkflowSources,
+} from "./pr-main-refresh.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const describePosix = process.platform === "win32" ? describe.skip : describe;
-const fixture = () => createMainRefreshFixture(tempDirs.make("openclaw-pr-main-refresh-"));
+const fixture = (withHostedVerifierWorkflows = false) => {
+  const directory = tempDirs.make("openclaw-pr-main-refresh-");
+  return withHostedVerifierWorkflows
+    ? createMainRefreshFixture(directory, {
+        archivedWorkflowSources: hostedVerifierWorkflowSources,
+      })
+    : createMainRefreshFixture(directory);
+};
 
 function recoverFixtureLock(f: ReturnType<typeof fixture>, oid: string) {
   const pgid = Number(/^pgid=(\d+)$/m.exec(f.git(f.canonical, "cat-file", "blob", oid))?.[1]);
@@ -164,7 +174,7 @@ describePosix("native PR main refresh boundaries", () => {
     "prepare-sync-head",
     "merge-verify",
   ])("%s acquires the authenticated head despite a stale pull ref", (command) => {
-    const f = fixture();
+    const f = fixture(command === "prepare-run" || command === "merge-verify");
     if (command === "prepare-sync-head" || command === "merge-verify") {
       f.seedPreparedMerge();
     }
@@ -364,7 +374,7 @@ describePosix("native PR main refresh boundaries", () => {
   });
 
   it("completes supervised prepare with three fresh checkpoints and exact stamps", () => {
-    const f = fixture();
+    const f = fixture(true);
     const result = f.run("prepare-run");
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain("prepare-run complete for PR #42");
@@ -410,7 +420,7 @@ describePosix("native PR main refresh boundaries", () => {
   });
 
   it("retains the publication receipt and releases the drained lock on mismatched receipt ownership", () => {
-    const f = fixture();
+    const f = fixture(true);
     const prepare = f.run("prepare-run");
     expect(prepare.status, prepare.stdout + prepare.stderr).toBe(0);
     const receiptPath = join(f.local, "prep.env");
@@ -426,7 +436,7 @@ describePosix("native PR main refresh boundaries", () => {
   });
 
   it("retires prior publication evidence only after a fresh reviewed preparation", () => {
-    const f = fixture();
+    const f = fixture(true);
     const firstPrepare = f.run("prepare-run");
     expect(firstPrepare.status, firstPrepare.stdout + firstPrepare.stderr).toBe(0);
     f.git(f.worktree, "commit", "--allow-empty", "-qm", "reviewed fixup");
@@ -514,7 +524,7 @@ ${readFileSync(gitShim, "utf8")}
   });
 
   it("completes supervised merge with two checkpoints and releases its exact lock after cleanup", () => {
-    const f = fixture();
+    const f = fixture(true);
     f.seedPreparedMerge();
     const before = f.events().length;
     const result = f.run("merge-run");
@@ -544,7 +554,7 @@ ${readFileSync(gitShim, "utf8")}
   it.each([2, 3])(
     "releases the drained operation lock when checkpoint %s fails after preparation mutated state",
     (checkpoint) => {
-      const f = fixture();
+      const f = fixture(checkpoint === 3);
       f.configure({ failFetchAt: checkpoint });
       const result = f.run("prepare-run");
       expect(result.status).toBe(1);
@@ -558,7 +568,7 @@ ${readFileSync(gitShim, "utf8")}
   );
 
   it("refreshes gate and publication snapshots when a newly reviewed head rebuilds preparation", () => {
-    const f = fixture();
+    const f = fixture(true);
     const prepare = f.run("prepare-run");
     expect(prepare.status, prepare.stdout + prepare.stderr).toBe(0);
     f.configure({ metadata: { ...f.metadata, headRefOid: f.sameTreeHead } });
@@ -593,7 +603,7 @@ ${readFileSync(gitShim, "utf8")}
   });
 
   it("keeps nested preparation coherent and refreshes after hosted gates", () => {
-    const f = fixture();
+    const f = fixture(true);
     f.configure({ moveAfterFirstFetch: true, moveAtGate: true });
     const result = f.run("prepare-run", "bash", f.worktree);
     expect(result.status, result.stdout + result.stderr).toBe(0);
@@ -628,7 +638,7 @@ ${readFileSync(gitShim, "utf8")}
   });
 
   it("keeps hosted membership on the gate snapshot when the API base advances only in the remote", () => {
-    const f = fixture();
+    const f = fixture(true);
     const remoteOnlyBase = f.git(
       f.origin,
       "-c",
@@ -1155,7 +1165,7 @@ read -r release < "$OPENCLAW_TEST_FETCH_HOLD"
   ])(
     "evaluates $name in C locale without changing its caller",
     ({ preparedPaths, mainPaths, overlaps }) => {
-      const f = fixture();
+      const f = fixture(true);
       const commitPaths = (base: string, paths: string[], label: string) => {
         f.git(f.canonical, "checkout", "--detach", base);
         for (const path of paths) {
@@ -1279,7 +1289,7 @@ printf 'caller-locale=%s\\n' "$LC_ALL"
       'sed() { if [ "${DRIFT_FAULT_ACTIVE:-}" = 1 ] && [ "$1" = -n ]; then return 1; fi; command sed "$@"; }',
     ],
   ])("rejects drift %s failure before merge intent or dispatch", (faultName, fault) => {
-    const f = fixture();
+    const f = fixture(true);
     f.seedPreparedMerge();
     f.configure({ moveAtChecks: true });
     if (faultName === "commit read") {

@@ -806,7 +806,7 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
   font-size: var(--font-size-sm, 0.8125rem);
   font-style: italic;
   white-space: nowrap;
-  mask-image: linear-gradient(to right, transparent, #000 3rem);
+  mask-image: linear-gradient(to right, transparent, black 3rem);
 }
 
 .chat-working-indicator__reasoning-text {

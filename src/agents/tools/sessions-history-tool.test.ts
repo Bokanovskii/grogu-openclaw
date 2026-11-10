@@ -8,13 +8,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ChatHistoryParamsSchema,
   ChatPendingInputsPageSchema,
+  type ChatMessageGetResult,
 } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSessionVisibilityChecker } from "../../plugin-sdk/session-visibility.js";
 import { deleteTestEnvValue, setTestEnvValue } from "../../test-utils/env.js";
 import { describeSessionLinkRule } from "../tool-description-presets.js";
-import { compactToolOutputHint } from "../tool-schema-hints.js";
 import {
   type CallGatewayRequest,
   readHistoryDetails,
@@ -65,6 +65,21 @@ function createHistoryToolWithMessage(content: unknown, sessionLinkBase?: string
             },
           ],
         } as T;
+      }
+      return {} as T;
+    },
+  });
+}
+
+function createTextHistoryTool(read: () => ChatMessageGetResult) {
+  return createSessionsHistoryTool({
+    config: {},
+    callGateway: async <T>(request: CallGatewayRequest): Promise<T> => {
+      if (request.method === "chat.history") {
+        return { sessionId: "selected-session", messages: [] } as T;
+      }
+      if (request.method === "chat.message.get") {
+        return read() as T;
       }
       return {} as T;
     },
@@ -127,10 +142,140 @@ describe("sessions_history redaction", () => {
     expect(Value.Check(tool.outputSchema!, { ...readHistoryDetails(result), pendingInputs })).toBe(
       true,
     );
-    expect(compactToolOutputHint(tool.outputSchema)).toBe(
-      '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
-    );
   });
+
+  it("redacts whole fields before text paging and omits private structured payloads", async () => {
+    useLoggingConfig("text-redaction-off.json", { redactSensitive: "off" });
+    const secret = `sk-proj-${"Q".repeat(96)}`;
+    const message = {
+      role: "toolResult",
+      content: [
+        { type: "text", text: `${"p".repeat(3988)} ${secret}\r\nFIELD_END` },
+        {
+          type: "thinking",
+          text: "visible text",
+          thinking: "visible reasoning",
+          partialJson: '{"partial":"literal"}',
+          signature: "PRIVATE_SIGNATURE",
+        },
+        {
+          type: "toolResult",
+          content: [{ type: "text", text: `NESTED ${secret} NESTED_END` }],
+          details: "PRIVATE_NESTED_DETAILS",
+        },
+      ],
+      text: "TOP_LEVEL_END",
+      details: "PRIVATE_DETAILS",
+      usage: { private: "PRIVATE_USAGE" },
+      cost: "PRIVATE_COST",
+      __openclaw: { id: "selected-message" },
+    };
+    const tool = createTextHistoryTool(() => ({ ok: true, message }));
+    const args = { sessionKey: "main", messageId: "selected-message", textCursor: "start" };
+    await expect(tool.execute("without-tools", args)).rejects.toThrow("includeTools: true");
+    type TextPage = { field: string; text: string; nextCursor?: string };
+    const fields = new Map<string, string>();
+    const pages: unknown[] = [];
+    let textCursor: string | undefined = "start";
+    for (let index = 0; textCursor && index < 8; index++) {
+      const result = await tool.execute(`redacted-${index}`, {
+        ...args,
+        includeTools: true,
+        textCursor,
+      });
+      expect(Value.Check(tool.outputSchema!, result.details)).toBe(true);
+      expect(result.details).toHaveProperty("contentRedacted", true);
+      pages.push(result.details);
+      const page = readHistoryDetails(result).textPage as TextPage;
+      fields.set(page.field, (fields.get(page.field) ?? "") + page.text);
+      textCursor = page.nextCursor;
+    }
+    expect(textCursor).toBeUndefined();
+    expect(fields.get("content[0].text")).toMatch(/\r\nFIELD_END$/);
+    expect(fields.get("content[0].text")).toMatch(new RegExp(`^${"p".repeat(3988)} `));
+    expect(fields.get("content[1].text")).toBe("visible text");
+    expect(fields.get("content[1].thinking")).toBe("visible reasoning");
+    expect(fields.get("content[1].partialJson")).toBe('{"partial":"literal"}');
+    expect(fields.get("text")).toBe("TOP_LEVEL_END");
+    expect(fields.get("content[2].content[0].text")).toMatch(/^NESTED .* NESTED_END$/);
+    const encoded = JSON.stringify(pages);
+    expect(encoded).not.toContain("Q".repeat(16));
+    expect(encoded).not.toContain("PRIVATE_");
+    expect(encoded).not.toContain("(truncated)");
+    expect(message.content[0]?.text).toContain(secret);
+  });
+
+  it("rejects invalid or mismatched continuations and refuses changed text snapshots", async () => {
+    let content = `${"p".repeat(3999)}😀 ORIGINAL_END`;
+    const tool = createTextHistoryTool(() => ({
+      ok: true,
+      message: {
+        role: "assistant",
+        content: [{ type: "toolResult", content }],
+        __openclaw: { id: "selected-message" },
+      },
+    }));
+    const args = { sessionKey: "main", messageId: "selected-message", includeTools: true };
+    await expect(
+      tool.execute("missing-message", { sessionKey: "main", textCursor: "start" }),
+    ).rejects.toThrow("textCursor requires messageId");
+    for (const textCursor of ["", "not/valid", "e30"]) {
+      await expect(tool.execute("invalid", { ...args, textCursor })).rejects.toThrow();
+    }
+    const first = await tool.execute("first", { ...args, textCursor: "start" });
+    const { nextCursor } = readHistoryDetails(first).textPage as { nextCursor: string };
+    expect(nextCursor).toEqual(expect.any(String));
+    for (const target of [
+      { messageId: "another-message" },
+      { sessionId: "another-physical-session" },
+    ]) {
+      await expect(
+        tool.execute("wrong-target", { ...args, ...target, textCursor: nextCursor }),
+      ).rejects.toThrow("belongs to another message or transcript");
+    }
+    content = `${"p".repeat(3999)}😀 REPLACED_END`;
+    await expect(tool.execute("stale", { ...args, textCursor: nextCursor })).rejects.toThrow(
+      "Message text changed; discard prior pages",
+    );
+    const restarted = await tool.execute("restart", { ...args, textCursor: "start" });
+    const restartCursor = (readHistoryDetails(restarted).textPage as { nextCursor: string })
+      .nextCursor;
+    const last = await tool.execute("restarted-tail", { ...args, textCursor: restartCursor });
+    expect(last.details).toMatchObject({
+      textPage: { text: "😀 REPLACED_END", offset: 3999 },
+      hasMore: false,
+    });
+  });
+
+  it.each([
+    { ok: false, unavailableReason: "oversized" },
+    {
+      ok: true,
+      message: {
+        role: "user",
+        content: "Partial display text",
+        __openclaw: { id: "selected-message", truncated: true, reason: "display-cap" },
+      },
+    },
+    {
+      ok: true,
+      message: { role: "user", content: [], __openclaw: { id: "selected-message" } },
+    },
+  ] satisfies ChatMessageGetResult[])(
+    "returns explicit text-read failure for %j",
+    async (response) => {
+      const tool = createTextHistoryTool(() => response);
+      const result = await tool.execute("unavailable", {
+        sessionKey: "main",
+        messageId: "selected-message",
+        textCursor: "start",
+      });
+      expect(Value.Check(tool.outputSchema!, result.details)).toBe(true);
+      expect(result.details).toMatchObject({ status: "error", error: expect.any(String) });
+      expect(result.details).not.toHaveProperty("textPage");
+      expect(result.details).not.toHaveProperty("hasMore");
+    },
+  );
 
   it("returns not-found for an unknown explicit key without reading history", async () => {
     const requests: CallGatewayRequest[] = [];

@@ -27,7 +27,7 @@ export function isToolCallBlockType(value: unknown): boolean {
   return typeof value === "string" && TOOL_CALL_BLOCK_TYPES.has(value);
 }
 
-function isToolResultBlockType(value: unknown): boolean {
+export function isToolResultBlockType(value: unknown): boolean {
   return typeof value === "string" && TOOL_RESULT_BLOCK_TYPES.has(value);
 }
 

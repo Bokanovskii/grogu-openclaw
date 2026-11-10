@@ -1,5 +1,9 @@
 import { expectDefined } from "@openclaw/normalization-core";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
+import type { AgentToolGatewayRequestCaller } from "../../agents/tools/in-process-gateway.js";
+import { createSessionsHistoryTool } from "../../agents/tools/sessions-history-tool.js";
 import {
   appendTranscriptMessage,
   loadTranscriptEvents,
@@ -35,6 +39,124 @@ async function request(
 }
 
 describe("registered chat read scope", () => {
+  it("reconstructs complete bounded message text through non-admin model-tool reads", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const cfg = rolePolicyConfig();
+      await state.writeConfig(cfg);
+      const owner = roleClient("write", "text-owner");
+      const client = roleClient("view", "text-reader");
+      const scope = {
+        agentId: "main",
+        sessionKey: "agent:main:complete-text",
+        sessionId: "complete-text",
+      };
+      await upsertSessionEntryCore(scope, {
+        sessionId: scope.sessionId,
+        updatedAt: 1,
+        visibility: "shared",
+        createdActor: {
+          type: "human",
+          source: "profile",
+          id: expectDefined(owner.authenticatedUserProfile, "owner profile").profileId,
+        },
+      });
+      const firstText = `${"a".repeat(3999)}😀 FIRST_END`;
+      const secondText = ` \r\n<relevant-memories>Literal tool data</relevant-memories>\r\n${"b".repeat(4200)} SECOND_END `;
+      const nestedText = `${"n".repeat(6012)}\r\nNESTED_END`;
+      await appendTranscriptMessage(scope, {
+        eventId: "complete-message",
+        message: {
+          role: "toolResult",
+          toolCallId: "complete-call",
+          toolName: "read",
+          content: [
+            { type: "text", text: firstText },
+            { type: "text", text: secondText },
+          ],
+        },
+      });
+      await appendTranscriptMessage(scope, {
+        eventId: "nested-message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Nested output follows." },
+            {
+              type: "toolResult",
+              toolCallId: "nested-call",
+              toolName: "read",
+              content: [{ type: "text", text: nestedText }],
+            },
+            { type: "toolResult", toolCallId: "inline-call", content: "INLINE_END" },
+          ],
+        },
+      });
+      const context = await createHistoryReadContext({ getRuntimeConfig: () => cfg });
+      const tool = createSessionsHistoryTool({
+        agentSessionKey: scope.sessionKey,
+        config: cfg,
+        callGateway: async <T>(
+          options: Parameters<AgentToolGatewayRequestCaller>[0],
+        ): Promise<T> => {
+          const [ok, payload, error] = await request(
+            context,
+            client,
+            options.method,
+            asOptionalRecord(options.params) ?? {},
+          );
+          if (!ok) {
+            throw new Error(error?.message ?? "Gateway read failed");
+          }
+          return payload as T;
+        },
+      });
+      type TextResult = {
+        sessionId: string;
+        textPage: { field: string; offset: number; text: string; nextCursor?: string };
+      };
+      for (const [messageId, expected] of [
+        ["complete-message", { "content[0].text": firstText, "content[1].text": secondText }],
+        [
+          "nested-message",
+          {
+            "content[0].text": "Nested output follows.",
+            "content[1].content[0].text": nestedText,
+            "content[2].content": "INLINE_END",
+          },
+        ],
+      ] as const) {
+        const reconstructed = new Map<string, string>();
+        let textCursor: string | undefined = "start";
+        for (let page = 0; textCursor && page < 8; page++) {
+          const result = await tool.execute(`text-${page}`, {
+            sessionKey: "current",
+            messageId,
+            includeTools: true,
+            textCursor,
+          });
+          expect(
+            Value.Check(expectDefined(tool.outputSchema, "output schema"), result.details),
+          ).toBe(true);
+          expect(result.details).toHaveProperty("textPage");
+          const { sessionId, textPage } = result.details as TextResult;
+          expect(sessionId).toBe(scope.sessionId);
+          expect(textPage.text.length).toBeLessThanOrEqual(4000);
+          expect(Buffer.byteLength(JSON.stringify(result.details), "utf8")).toBeLessThanOrEqual(
+            80 * 1024,
+          );
+          expect(textPage.text.isWellFormed()).toBe(true);
+          const previous = reconstructed.get(textPage.field) ?? "";
+          expect(textPage.offset).toBe(previous.length);
+          reconstructed.set(textPage.field, previous + textPage.text);
+          textCursor = textPage.nextCursor;
+        }
+        expect(textCursor).toBeUndefined();
+        expect(Object.fromEntries(reconstructed)).toEqual(expected);
+      }
+      expect(client.connect.scopes).not.toContain("operator.admin");
+    });
+  });
+
   it.each([
     { name: "owner draft", actor: "owner", visibility: "draft", allowed: true },
     { name: "admin draft", actor: "admin", visibility: "draft", allowed: true },

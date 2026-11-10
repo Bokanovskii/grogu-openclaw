@@ -52,6 +52,7 @@ const HERMETIC_TEST_ENV_KEYS = [
   "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
   "OPENCLAW_HOME",
 ] as const;
+const GIT_COMMAND_CONFIG_ENV = /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/iu;
 const LIVE_EXTERNAL_AUTH_DIRS = [".claude/backups", ".gemini", ".minimax"] as const;
 const LIVE_EXTERNAL_AUTH_FILES = [
   ".claude.json",
@@ -197,7 +198,7 @@ function loadProfileEnv(homeDir = os.homedir()): void {
   }
 }
 
-function resolveRestoreEntries(credentialEnvKeys: readonly string[]): RestoreEntry[] {
+function resolveRestoreEntries(isolatedEnvKeys: readonly string[]): RestoreEntry[] {
   return [
     ...HERMETIC_TEST_ENV_KEYS.map((key) => ({ key, value: process.env[key] })),
     { key: "OPENCLAW_TEST_FAST", value: process.env.OPENCLAW_TEST_FAST },
@@ -231,7 +232,7 @@ function resolveRestoreEntries(credentialEnvKeys: readonly string[]): RestoreEnt
     { key: "OPENCLAW_TEST_HOME", value: process.env.OPENCLAW_TEST_HOME },
     { key: "OPENCLAW_AGENT_DIR", value: process.env.OPENCLAW_AGENT_DIR },
     { key: "PI_CODING_AGENT_DIR", value: process.env.PI_CODING_AGENT_DIR },
-    ...[...new Set([...ISOLATED_TEST_CREDENTIAL_ENV_KEYS, ...credentialEnvKeys])].map((key) => ({
+    ...[...new Set([...ISOLATED_TEST_CREDENTIAL_ENV_KEYS, ...isolatedEnvKeys])].map((key) => ({
       key,
       value: process.env[key],
     })),
@@ -240,7 +241,7 @@ function resolveRestoreEntries(credentialEnvKeys: readonly string[]): RestoreEnt
   ];
 }
 
-function initializeIsolatedTestEnv(tempHome: string, credentialEnvKeys: readonly string[]): void {
+function initializeIsolatedTestEnv(tempHome: string, isolatedEnvKeys: readonly string[]): void {
   // Corepack's installed toolchain is independent of application state. Bind its
   // upstream cache default before isolating HOME/XDG so nested pnpm stays offline.
   setTestEnvValue("COREPACK_HOME", resolveTestCorepackHome(process.env));
@@ -271,8 +272,8 @@ function initializeIsolatedTestEnv(tempHome: string, credentialEnvKeys: readonly
   for (const key of ISOLATED_TEST_CREDENTIAL_ENV_KEYS) {
     deleteTestEnvValue(key);
   }
-  // Fixture env copies spread process.env credentials into assertion output.
-  for (const key of credentialEnvKeys) {
+  // Fixture env copies can expose credentials and inherited Git configuration.
+  for (const key of isolatedEnvKeys) {
     deleteTestEnvValue(key);
   }
   // A test worker is not the parent Gateway's service. Retaining its identity
@@ -544,10 +545,15 @@ export function installTestEnv(options?: InstallTestEnvOptions): {
       return { cleanup: () => {}, tempHome: realHome };
     }
 
-    const credentialEnvKeys = live ? [] : Object.keys(process.env).filter(isCredentialEnvName);
-    const restore = resolveRestoreEntries(credentialEnvKeys);
+    // Git's count, keys, and values must be removed together; values may contain credentials.
+    const isolatedEnvKeys = live
+      ? []
+      : Object.keys(process.env).filter(
+          (key) => isCredentialEnvName(key) || GIT_COMMAND_CONFIG_ENV.test(key),
+        );
+    const restore = resolveRestoreEntries(isolatedEnvKeys);
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-test-home-"));
-    initializeIsolatedTestEnv(tempHome, credentialEnvKeys);
+    initializeIsolatedTestEnv(tempHome, isolatedEnvKeys);
 
     if (hermetic) {
       for (const key of HERMETIC_TEST_ENV_KEYS) {

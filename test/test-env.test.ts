@@ -321,6 +321,10 @@ describe("installTestEnv", () => {
     setTestEnvValue("OPENCLAW_CONFIG_PATH", "~/custom-openclaw.json5");
     setTestEnvValue("OPENCLAW_TEST_HOME", priorIsolatedHome);
     setTestEnvValue("OPENCLAW_STATE_DIR", path.join(priorIsolatedHome, ".openclaw"));
+    setTestEnvValue("GIT_CONFIG_COUNT", "1");
+    setTestEnvValue("GIT_CONFIG_KEY_0", "openclaw.fixture");
+    setTestEnvValue("GIT_CONFIG_VALUE_0", "fixture-value");
+    setTestEnvValue("GIT_CONFIG_PARAMETERS", "'openclaw.parameter=fixture-parameter'");
 
     const testEnv = installTestEnv();
     cleanupFns.push(testEnv.cleanup);
@@ -333,6 +337,10 @@ describe("installTestEnv", () => {
     expect(process.env.FAL_KEY).toBe("fal-sentinel-not-a-real-key-0123456789");
     expect(process.env.OPENAI_API_KEY).toBe("openai-sentinel-not-a-real-key-0123456789");
     expect(process.env.TWILIO_AUTH_TOKEN).toBeUndefined();
+    expect(process.env.GIT_CONFIG_COUNT).toBe("1");
+    expect(process.env.GIT_CONFIG_KEY_0).toBe("openclaw.fixture");
+    expect(process.env.GIT_CONFIG_VALUE_0).toBe("fixture-value");
+    expect(process.env.GIT_CONFIG_PARAMETERS).toBe("'openclaw.parameter=fixture-parameter'");
 
     const copiedConfigPath = path.join(testEnv.tempHome, ".openclaw", "openclaw.json");
     const copiedConfig = JSON.parse(fs.readFileSync(copiedConfigPath, "utf8")) as {

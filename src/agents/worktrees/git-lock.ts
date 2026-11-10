@@ -4,7 +4,7 @@ import { WorktreeRemovalContentionError } from "./errors.js";
 import { commandError, runGit, listGitWorktrees } from "./git.js";
 import type { ManagedWorktreeRecord } from "./types.js";
 
-const OPENCLAW_LOCK_PATTERN = /^openclaw pid=(\d+)$/;
+const MANAGED_LOCK_REASON_PATTERN = /^openclaw pid=(\d+)$/;
 
 type LockState =
   | { kind: "none" }
@@ -23,7 +23,7 @@ function classifyLockReason(reason: string | undefined): LockState {
   if (reason === undefined) {
     return { kind: "none" };
   }
-  const match = OPENCLAW_LOCK_PATTERN.exec(reason);
+  const match = MANAGED_LOCK_REASON_PATTERN.exec(reason);
   if (!match) {
     return { kind: "foreign", reason };
   }

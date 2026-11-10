@@ -1670,6 +1670,39 @@ describe("dispatchCronDelivery", () => {
     },
   );
 
+  it.each([false, true])(
+    "mirrors current-target delivery to its recipient only when distinct from source=%s",
+    async (sameConversation) => {
+      const source = sameConversation
+        ? "agent:main:telegram:direct:123456"
+        : "agent:main:dashboard:shopping";
+      const route = mockResolvedOutboundRoute();
+      const params = makeBaseParams({
+        synthesizedText: "A verified useful update.",
+        sessionTarget: "current",
+      });
+      params.job.sessionKey = source;
+      params.sourceSessionKey = source;
+      const state = await dispatchCronDelivery(params);
+      expect(state.delivered).toBe(true);
+      expect(deliverOutboundPayloads).toHaveBeenCalledOnce();
+      expect(commitBackgroundResultToSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionKey: source, text: "A verified useful update." }),
+      );
+      if (sameConversation) {
+        expect(appendAssistantMessageToSessionTranscriptMock).not.toHaveBeenCalled();
+      } else {
+        expect(appendAssistantMessageToSessionTranscriptMock).toHaveBeenCalledOnce();
+        expect(appendAssistantMessageToSessionTranscriptMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionKey: route.sessionKey,
+            text: "A verified useful update.",
+          }),
+        );
+      }
+    },
+  );
+
   it.each([undefined, "telegram"])(
     "commits current-session output with unresolved channel=%s",
     async (channel) => {

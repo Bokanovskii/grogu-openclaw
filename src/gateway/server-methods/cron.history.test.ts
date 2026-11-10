@@ -44,6 +44,7 @@ import { operatorSessionCap } from "../operator-role-policy.js";
 import { sharingPolicyClient } from "../session-sharing.test-utils.js";
 import { createHistoryReadContext } from "./chat-history.test-helpers.js";
 import { cronHandlers } from "./cron.js";
+import { createCronCallerClient } from "./cron.validation.test-support.js";
 import { disposeSessionReadContexts } from "./sessions-read-cache.test-support.js";
 import type { GatewayRequestHandlerOptions, RespondFn } from "./types.js";
 
@@ -517,3 +518,123 @@ it.each(["sharing", "binding", "retention", "transcript owner"] as const)(
     );
   },
 );
+
+it("shares saved automation history only with the same account and preserves operator access after deletion", async () => {
+  await withCronTranscript(
+    async ({ cron, storePath, record, oldScope, alias, baseKey, profile, query }) => {
+      const added = await cron.add(
+        {
+          name: "Account history",
+          agentId: "main",
+          owner: { agentId: "main", sessionKey: baseKey, accountId: "work" },
+          schedule: { kind: "every", everyMs: 60_000 },
+          enabled: false,
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "fixture" },
+          delivery: { mode: "none" },
+        },
+        {
+          scheduledToolPolicy: {
+            version: 1,
+            mode: "account",
+            ownerSessionKey: baseKey,
+            ownerAccountId: "work",
+          },
+        },
+      );
+      const accountJob = "job" in added ? added.job : added;
+      const detail = cronRunLogEntryToDetail(
+        {
+          jobId: accountJob.id,
+          action: "finished",
+          ts: 30,
+          runAtMs: 10,
+          runId: "public-account-run",
+          sessionKey: alias,
+          sessionId: oldScope.sessionId,
+          status: "ok",
+        },
+        { storeKey: cronStoreKey(storePath) },
+      );
+      persistHistory([
+        {
+          ...record,
+          jobId: accountJob.id,
+          runId: "internal-account-run",
+          startedAt: 30,
+          endedAt: 30,
+          detail,
+        },
+      ]);
+
+      const identity = (accountId: string) =>
+        createCronCallerClient("main", accountId, "agent:main:history-reader").internal;
+      const reader = {
+        ...sharingPolicyClient({ user: profile.id, scopes: ["operator.read"] }),
+        internal: identity("work"),
+      };
+      const allowed = await query(
+        { id: accountJob.id, runId: "public-account-run" },
+        { client: reader },
+      );
+      expect(allowed.respond).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({
+          messages: expect.arrayContaining([expect.objectContaining({ content: "Old first" })]),
+        }),
+      );
+
+      const wrongAccountReader = { ...reader, internal: identity("personal") };
+      const denied = await query(
+        { id: accountJob.id, runId: "public-account-run" },
+        { client: wrongAccountReader },
+      );
+      expect(denied.respond.mock.calls[0]).toMatchObject([
+        false,
+        undefined,
+        { code: "UNAVAILABLE" },
+      ]);
+
+      const otherProfile = ensureProfileForEmail("cron-history-other@example.test");
+      const otherProfileReader = {
+        ...sharingPolicyClient({ user: otherProfile.id, scopes: ["operator.read"] }),
+        internal: identity("work"),
+      };
+      await patchSessionEntryCore({ agentId: "main", sessionKey: baseKey }, () => ({
+        visibility: "draft",
+      }));
+      const draftDenied = await query(
+        { id: accountJob.id, runId: "public-account-run" },
+        { client: otherProfileReader },
+      );
+      expect(draftDenied.respond.mock.calls[0]?.[0]).toBe(false);
+      expect(draftDenied.respond.mock.calls[0]?.[1]).toBeUndefined();
+
+      await cron.remove(accountJob.id);
+      const deletedDenied = await query(
+        { id: accountJob.id, runId: "public-account-run" },
+        { client: reader },
+      );
+      expect(deletedDenied.respond.mock.calls[0]).toMatchObject([
+        false,
+        undefined,
+        { code: "UNAVAILABLE" },
+      ]);
+      const operator = sharingPolicyClient({
+        scopes: ["operator.admin"],
+        user: "cron-history-admin",
+      });
+      const deletedAllowed = await query(
+        { id: accountJob.id, runId: "public-account-run" },
+        { client: operator },
+      );
+      expect(deletedAllowed.respond).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({
+          messages: expect.arrayContaining([expect.objectContaining({ content: "Old first" })]),
+        }),
+      );
+    },
+  );
+});

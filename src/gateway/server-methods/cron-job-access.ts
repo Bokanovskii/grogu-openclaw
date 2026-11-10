@@ -11,6 +11,7 @@ import {
 } from "../../state/agent-database-admission.js";
 import { assertActiveAgentRuntimeAuthority } from "./agent-runtime-authority.js";
 import {
+  cronJobMatchesCallerReadScope,
   cronJobMatchesCallerScope,
   readCronCallerScope,
   type CronCallerScope,
@@ -119,9 +120,15 @@ export function scopedCronJobHandler<P extends CronJobIdParams>(
     options: Omit<GatewayRequestHandlerOptions, "params"> & {
       params: P;
     },
-    loaded: { jobId: string; callerScope: CronCallerScope | undefined; job: CronJob },
+    loaded: {
+      jobId: string;
+      callerScope: CronCallerScope | undefined;
+      job: CronJob;
+      assertCurrent: () => void;
+    },
   ) => ReturnType<GatewayRequestHandler>,
   scope: {
+    accessMode?: "read" | "manage";
     allowCurrentJob?: boolean;
     checkVisibility?: boolean;
     preserveCronGetWireMessage?: boolean;
@@ -150,22 +157,45 @@ export function scopedCronJobHandler<P extends CronJobIdParams>(
       const callerScope = readCronCallerScope(client);
       const job = prepareVisibility ? context.cron.getJob(jobId) : loaded;
       const visibility = scope.checkVisibility ? visibilityRead.resolve() : undefined;
+      const matchesCaller = (candidate: CronJob, currentScope: CronCallerScope | undefined) =>
+        scope.accessMode === "read"
+          ? cronJobMatchesCallerReadScope({
+              job: candidate,
+              callerScope: currentScope,
+              defaultAgentId: context.cron.getDefaultAgentId(),
+              allowCurrentJob: scope.allowCurrentJob,
+            })
+          : cronJobMatchesCallerScope({
+              job: candidate,
+              callerScope: currentScope,
+              defaultAgentId: context.cron.getDefaultAgentId(),
+              allowCurrentJob: scope.allowCurrentJob,
+            });
       if (
         !job ||
         (scope.checkVisibility &&
           !cronJobIsVisible(job, visibility, context.cron.getDefaultAgentId())) ||
-        !cronJobMatchesCallerScope({
-          job,
-          callerScope,
-          defaultAgentId: context.cron.getDefaultAgentId(),
-          allowCurrentJob: scope.allowCurrentJob,
-        })
+        !matchesCaller(job, callerScope)
       ) {
         respondCronJobNotFound(respond, jobId, scope);
         return;
       }
+      const assertCurrent = () => {
+        assertCronReadCurrent(options);
+        const currentJob = context.cron.getJob(jobId);
+        const currentScope = readCronCallerScope(client);
+        const currentVisibility = scope.checkVisibility ? visibilityRead.resolve() : undefined;
+        if (
+          !currentJob ||
+          (scope.checkVisibility &&
+            !cronJobIsVisible(currentJob, currentVisibility, context.cron.getDefaultAgentId())) ||
+          !matchesCaller(currentJob, currentScope)
+        ) {
+          throw new Error("Cron job access changed before reply");
+        }
+      };
       // Consume authorized reads in this frame; mutations retain their lock-time commit guards.
-      return await run(options, { jobId, callerScope, job });
+      return await run(options, { jobId, callerScope, job, assertCurrent });
     } finally {
       visibilityRead.release();
     }

@@ -2,14 +2,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const nestedGitEnvKeys = [
+const nestedGitEnvKeys = new Set([
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
   "GIT_DIR",
   "GIT_INDEX_FILE",
   "GIT_OBJECT_DIRECTORY",
   "GIT_QUARANTINE_PATH",
   "GIT_WORK_TREE",
-] as const;
+]);
 
 export function createNestedGitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -17,8 +18,10 @@ export function createNestedGitEnv(): NodeJS.ProcessEnv {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
-  for (const key of nestedGitEnvKeys) {
-    delete env[key];
+  for (const key of Object.keys(env)) {
+    if (nestedGitEnvKeys.has(key.toUpperCase())) {
+      delete env[key];
+    }
   }
   return env;
 }

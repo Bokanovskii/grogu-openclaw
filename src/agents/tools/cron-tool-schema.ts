@@ -14,7 +14,7 @@ import {
 import { gatewayCallOptionSchemaProperties } from "./gateway-schema.js";
 
 export const REMINDER_CONTEXT_MESSAGES_MAX = 10;
-export const CRON_TOOL_LIST_MAX_LIMIT = 200;
+export const CRON_TOOL_MAX_PAGE_SIZE = 200;
 
 // Spell out job properties for the model-facing schema; runtime validation
 // still happens in normalizeCronJob* to avoid nested union schemas. One object
@@ -393,6 +393,11 @@ export function createCronToolSchema(options?: CronToolSchemaOptions): TSchema {
       },
     ),
   );
+  const paginationActions = managementOnly
+    ? 'action="list"'
+    : options?.selfRemoveOnly
+      ? 'action="runs"'
+      : 'action="list" or action="runs"';
   const schema = Type.Object(
     {
       action: stringEnum(
@@ -403,11 +408,11 @@ export function createCronToolSchema(options?: CronToolSchemaOptions): TSchema {
       ...gatewayCallOptionSchemaProperties(),
       includeDisabled: Type.Optional(Type.Boolean()),
       limit: optionalPositiveIntegerSchema({
-        maximum: CRON_TOOL_LIST_MAX_LIMIT,
-        description: 'Maximum jobs returned by action="list"',
+        maximum: CRON_TOOL_MAX_PAGE_SIZE,
+        description: `Maximum results for ${paginationActions}`,
       }),
       offset: optionalNonNegativeIntegerSchema({
-        description: 'Job offset for action="list"; use nextOffset to load the next page',
+        description: `Offset for ${paginationActions}; use nextOffset to load the next page`,
       }),
       job: managementOnly ? Type.Optional(Type.Omit(job, ["declarationKey", "owner"])) : job,
       jobId: Type.Optional(Type.String()),
@@ -456,7 +461,7 @@ export function createCronToolSchema(options?: CronToolSchemaOptions): TSchema {
       "includeDisabled",
       "jobId",
       "id",
-      ...(managementOnly ? [] : ["in", "runId"]),
+      ...(managementOnly ? [] : ["in", "runId", "limit", "offset"]),
     ]);
   }
   return managementOnly

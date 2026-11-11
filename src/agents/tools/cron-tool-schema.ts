@@ -1,6 +1,8 @@
 /** Model-facing schema and input validation for the cron tool. */
 import { MAX_DATE_TIMESTAMP_MS } from "@openclaw/normalization-core/number-coercion";
 import { Type, type TSchema } from "typebox";
+import { CronHistoryParamsSchema } from "../../../packages/gateway-protocol/src/schema/cron.js";
+import { ChatHistoryTextCursorSchema } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { parseCronPacingBounds } from "../../cron/pacing.js";
 import type { CronPacing } from "../../cron/types.js";
 import { CRON_MANAGEMENT_METHODS } from "../../gateway/cron-creator-authority-grant.js";
@@ -30,11 +32,20 @@ const CRON_ACTIONS = [
   "remove",
   "run",
   "runs",
+  "history",
   "next_check",
   "wake",
 ] as const;
 
-const CRON_SELF_ACTIONS = ["status", "list", "get", "remove", "runs", "next_check"] as const;
+const CRON_SELF_ACTIONS = [
+  "status",
+  "list",
+  "get",
+  "remove",
+  "runs",
+  "history",
+  "next_check",
+] as const;
 
 const CRON_SCHEDULE_KINDS = ["at", "every", "cron", "stream"] as const;
 // When cron.triggers.enabled is explicitly false, the scheduler rejects
@@ -431,8 +442,19 @@ export function createCronToolSchema(options?: CronToolSchemaOptions): TSchema {
           'Run mode for action="run": omitted defaults to "due"; use "force" to trigger now.',
       }),
       runId: Type.Optional(
-        Type.String({ description: 'Run id from action="run" to read with action="runs"' }),
+        Type.String({ description: 'Exact run id for action="runs" or action="history"' }),
       ),
+      runAtMs: CronHistoryParamsSchema.properties.runAtMs,
+      cursor: Type.With(CronHistoryParamsSchema.properties.cursor, {
+        description: 'For action="history", copy nextCursor unchanged to read older messages.',
+      }),
+      includeTools: Type.Optional(
+        Type.Boolean({ description: 'Include tool results for action="history". Default false.' }),
+      ),
+      messageId: Type.With(CronHistoryParamsSchema.properties.messageId, {
+        description: 'With textCursor, read this message ID from action="history".',
+      }),
+      textCursor: ChatHistoryTextCursorSchema,
       contextMessages: Type.Optional(
         Type.Integer({ minimum: 0, maximum: REMINDER_CONTEXT_MESSAGES_MAX }),
       ),
@@ -461,10 +483,34 @@ export function createCronToolSchema(options?: CronToolSchemaOptions): TSchema {
       "includeDisabled",
       "jobId",
       "id",
-      ...(managementOnly ? [] : ["in", "runId", "limit", "offset"]),
+      ...(managementOnly
+        ? []
+        : [
+            "in",
+            "runId",
+            "limit",
+            "offset",
+            "runAtMs",
+            "cursor",
+            "includeTools",
+            "messageId",
+            "textCursor",
+          ]),
     ]);
   }
   return managementOnly
-    ? Type.Omit(schema, ["in", "text", "mode", "contextMessages", "sessionKey", "runId"])
+    ? Type.Omit(schema, [
+        "in",
+        "text",
+        "mode",
+        "contextMessages",
+        "sessionKey",
+        "runId",
+        "runAtMs",
+        "cursor",
+        "includeTools",
+        "messageId",
+        "textCursor",
+      ])
     : schema;
 }

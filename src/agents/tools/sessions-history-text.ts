@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
-import type { ChatMessageGetResult } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
+import {
+  CHAT_HISTORY_TEXT_CURSOR_MAX_CHARS,
+  type ChatMessageGetResult,
+} from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { redactToolPayloadText } from "../../logging/redact.js";
 import { isToolCallBlockType } from "../../shared/tool-block-contract.js";
@@ -11,37 +14,6 @@ import { stripToolMessages } from "./chat-history-text.js";
 import { ToolInputError } from "./common.js";
 
 const TEXT_MAX_CHARS = 4000;
-const CURSOR_MAX_CHARS = 4096;
-export const SessionsHistoryTextCursorSchema = Type.Optional(
-  Type.String({
-    minLength: 1,
-    maxLength: CURSOR_MAX_CHARS,
-    description:
-      'With messageId, use "start" to read complete visible text in bounded pages, then copy textPage.nextCursor unchanged. History pagination is ignored. Cursors do not grant access; changed text requires restarting.',
-  }),
-);
-export const SessionsHistoryTextOutputSchema = Type.Object(
-  {
-    sessionKey: Type.String(),
-    sessionId: Type.String(),
-    messageId: Type.String(),
-    textPage: Type.Object(
-      {
-        field: Type.String(),
-        offset: Type.Integer(),
-        text: Type.String(),
-        totalChars: Type.Integer(),
-        nextCursor: Type.Optional(Type.String()),
-      },
-      { additionalProperties: false },
-    ),
-    hasMore: Type.Boolean(),
-    contentRedacted: Type.Boolean(),
-    bytes: Type.Number(),
-    sessionLinkRule: Type.Optional(Type.String()),
-  },
-  { additionalProperties: false },
-);
 const CursorSchema = Type.Object(
   {
     version: Type.Literal(1),
@@ -52,6 +24,7 @@ const CursorSchema = Type.Object(
     hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
     fieldIndex: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     offset: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    scope: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
   },
   { additionalProperties: false },
 );
@@ -131,7 +104,7 @@ function decodeTextCursor(value: string): TextCursor | undefined {
     return undefined;
   }
   const invalid = () => new ToolInputError('Invalid textCursor; restart with textCursor: "start".');
-  if (value.length > CURSOR_MAX_CHARS || !/^[a-zA-Z0-9_-]+$/.test(value)) {
+  if (value.length > CHAT_HISTORY_TEXT_CURSOR_MAX_CHARS || !/^[a-zA-Z0-9_-]+$/.test(value)) {
     throw invalid();
   }
   let decoded: unknown;
@@ -159,8 +132,14 @@ export function prepareSessionsHistoryTextRead(params: {
   includeTools: boolean;
   maxBytes: number;
   sessionLinkRule?: string;
+  cursorScope?: string;
 }) {
   const cursor = decodeTextCursor(params.textCursor);
+  if (cursor && cursor.scope !== params.cursorScope) {
+    throw new ToolInputError(
+      'textCursor belongs to another recorded run or includeTools value; restart with textCursor: "start".',
+    );
+  }
   if (
     cursor &&
     (cursor.agentId !== params.agentId ||
@@ -242,10 +221,11 @@ export function prepareSessionsHistoryTextRead(params: {
               hash,
               fieldIndex: nextIndex,
               offset: nextIndex === fieldIndex ? nextOffset : 0,
+              ...(params.cursorScope ? { scope: params.cursorScope } : {}),
             } satisfies TextCursor),
           ).toString("base64url")
         : undefined;
-      if (nextCursor && nextCursor.length > CURSOR_MAX_CHARS) {
+      if (nextCursor && nextCursor.length > CHAT_HISTORY_TEXT_CURSOR_MAX_CHARS) {
         throw new Error(
           "Message identity exceeds the text continuation limit; select another message.",
         );

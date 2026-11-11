@@ -5,13 +5,22 @@ import {
   errorShape,
   validateCronHistoryParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { CHAT_MESSAGE_MAX_CHARS } from "../../../packages/gateway-protocol/src/schema/chat-history-constants.js";
 import { CronHistoryResultSchema } from "../../../packages/gateway-protocol/src/schema/cron.js";
+import {
+  ChatHistoryTextResultSchema,
+  ChatMessageGetResultSchema,
+} from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
+import { ToolInputError } from "../../agents/tool-input-error.js";
+import { prepareSessionsHistoryTextRead } from "../../agents/tools/sessions-history-text.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { readSessionHistoryPageInWorker } from "../../config/sessions/session-history-worker-runtime.js";
 import { cronStoreKey } from "../../cron/store/key.js";
 import { readCronRunHistoryBinding } from "../../cron/store/read-only.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
+import { MAX_AGENT_TOOL_HISTORY_BYTES } from "../server-constants.js";
+import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { cronJobMatchesCallerReadScope, readCronCallerScope } from "./cron-caller-scope.js";
 import { assertCronReadCurrent } from "./cron-job-access.js";
 import {
@@ -40,6 +49,31 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
     );
     return;
   }
+  if (params.messageId && (params.cursor !== undefined || params.limit !== undefined)) {
+    respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "cron.history messageId cannot be combined with cursor or limit",
+      ),
+    );
+    return;
+  }
+  if (
+    (params.messageId === undefined) !== (params.textCursor === undefined) ||
+    (params.includeTools !== undefined && params.messageId === undefined)
+  ) {
+    respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        'cron.history text requires messageId and textCursor; start with "start".',
+      ),
+    );
+    return;
+  }
   const fail = () =>
     respond(
       false,
@@ -50,6 +84,9 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
       ),
     );
   const storeKey = cronStoreKey(context.cronStorePath);
+  const maxHistoryBytes = client?.internal?.agentRuntimeIdentity
+    ? MAX_AGENT_TOOL_HISTORY_BYTES
+    : MAX_CRON_HISTORY_BYTES;
   const sessionVisibility = createCronSessionVisibility(client, () => context.getRuntimeConfig());
   const assertAllowed = (sessionKey?: string, agentId?: string) => {
     assertCronReadCurrent(opts);
@@ -146,27 +183,86 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
     }
     await sessionVisibility.prepare([{ sessionKey: physical.sessionKey, agentId }]);
     assertCurrent(physical.sessionKey);
+    const retainedTranscript = {
+      sessionId,
+      verifyRetainedState: async () => {
+        await context.cron.readJob(params.id);
+        assertCurrent(physical.sessionKey);
+        const current = await select();
+        assertCurrent(physical.sessionKey);
+        return current?.binding === binding;
+      },
+    };
+    if (params.messageId && params.textCursor) {
+      const target = resolveRequestedSessionAgentId(
+        context.getRuntimeConfig(),
+        physical.sessionKey,
+        agentId,
+      );
+      if (!target.ok) {
+        fail();
+        return;
+      }
+      const textRead = prepareSessionsHistoryTextRead({
+        textCursor: params.textCursor,
+        agentId: target.agentId,
+        sessionKey: physical.sessionKey,
+        displayKey: physical.sessionKey,
+        sessionId,
+        messageId: params.messageId,
+        includeTools: params.includeTools === true,
+        maxBytes: MAX_AGENT_TOOL_HISTORY_BYTES - 1024,
+        cursorScope: `${binding}:${params.includeTools === true}`,
+      });
+      const { handleChatMessageGetRequest } = await import("./chat-message-get-handler.js");
+      assertCurrent(physical.sessionKey);
+      await handleChatMessageGetRequest({
+        ...opts,
+        retainedTranscript,
+        params: {
+          sessionKey: physical.sessionKey,
+          agentId: target.agentId,
+          messageId: params.messageId,
+          maxChars: CHAT_MESSAGE_MAX_CHARS,
+        },
+        respond: (ok, payload, error) => {
+          if (!ok) {
+            respond(false, undefined, error);
+            return;
+          }
+          if (!Value.Check(ChatMessageGetResultSchema, payload)) {
+            throw new Error("Invalid recorded cron message");
+          }
+          const result = textRead.finish(payload, sessionId);
+          if ("status" in result) {
+            assertCurrent(physical.sessionKey);
+            respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, result.error));
+            return;
+          }
+          if (
+            !Value.Check(ChatHistoryTextResultSchema, result) ||
+            Buffer.byteLength(JSON.stringify(result)) > MAX_AGENT_TOOL_HISTORY_BYTES
+          ) {
+            throw new Error("Invalid recorded cron message result");
+          }
+          assertCurrent(physical.sessionKey);
+          respond(true, result);
+        },
+      });
+      return;
+    }
     const { handleChatHistoryRequest } = await import("./chat-history-handler.js");
     assertCurrent(physical.sessionKey);
     await handleChatHistoryRequest({
       ...opts,
       method: "chat.history",
-      retainedTranscript: {
-        sessionId,
-        verifyRetainedState: async () => {
-          await context.cron.readJob(params.id);
-          assertCurrent(physical.sessionKey);
-          const current = await select();
-          assertCurrent(physical.sessionKey);
-          return current?.binding === binding;
-        },
-      },
+      retainedTranscript,
       params: {
         sessionKey: physical.sessionKey,
         ...(agentId ? { agentId } : {}),
         limit: params.limit ?? 100,
         offset,
-        maxBytes: MAX_CRON_HISTORY_BYTES - 16_384,
+        maxBytes: maxHistoryBytes - 16_384,
       },
       respond: (ok, payload, error) => {
         if (!ok) {
@@ -187,7 +283,7 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
         };
         if (
           !Value.Check(CronHistoryResultSchema, result) ||
-          Buffer.byteLength(JSON.stringify(result)) > MAX_CRON_HISTORY_BYTES
+          Buffer.byteLength(JSON.stringify(result)) > maxHistoryBytes
         ) {
           throw new Error("Invalid cron transcript page");
         }
@@ -196,8 +292,12 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
         respond(true, result);
       },
     });
-  } catch {
-    fail();
+  } catch (error) {
+    if (error instanceof ToolInputError) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, error.message));
+    } else {
+      fail();
+    }
   } finally {
     sessionVisibility.release();
   }

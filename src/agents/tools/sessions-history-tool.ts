@@ -4,6 +4,8 @@ import { Type } from "typebox";
 import { CHAT_MESSAGE_MAX_CHARS } from "../../../packages/gateway-protocol/src/schema/chat-history-constants.js";
 import {
   ChatHistoryParamsSchema,
+  ChatHistoryTextCursorSchema,
+  ChatHistoryTextResultSchema,
   ChatPendingInputsPageSchema,
   type ChatHistoryDeltaResult,
   type ChatPendingInputsPage,
@@ -11,6 +13,7 @@ import {
 } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { MAX_AGENT_TOOL_HISTORY_BYTES } from "../../gateway/server-constants.js";
 import { capArrayByJsonBytes } from "../../gateway/session-transcript-readers.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
@@ -50,12 +53,7 @@ import {
   resolveVisibleSessionReference,
   shouldResolveSessionIdInput,
 } from "./sessions-helpers.js";
-import {
-  prepareSessionsHistoryTextRead,
-  sanitizeHistoryMessage,
-  SessionsHistoryTextCursorSchema,
-  SessionsHistoryTextOutputSchema,
-} from "./sessions-history-text.js";
+import { prepareSessionsHistoryTextRead, sanitizeHistoryMessage } from "./sessions-history-text.js";
 
 const SessionsHistoryToolSchema = Type.Object({
   user: requesterProfileSchema(),
@@ -74,7 +72,7 @@ const SessionsHistoryToolSchema = Type.Object({
       "Transcript session id that owns messageId. Requires messageId; omit for the latest tail.",
   }),
   includeTools: Type.Optional(Type.Boolean()),
-  textCursor: SessionsHistoryTextCursorSchema,
+  textCursor: ChatHistoryTextCursorSchema,
 });
 
 const SessionsHistoryOutputSchema = Type.Union([
@@ -98,7 +96,7 @@ const SessionsHistoryOutputSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
-  SessionsHistoryTextOutputSchema,
+  ChatHistoryTextResultSchema,
   Type.Object(
     {
       status: Type.Union([Type.Literal("error"), Type.Literal("forbidden")]),
@@ -108,7 +106,7 @@ const SessionsHistoryOutputSchema = Type.Union([
   ),
 ]);
 
-const SESSIONS_HISTORY_MAX_BYTES = 80 * 1024;
+const SESSIONS_HISTORY_MAX_BYTES = MAX_AGENT_TOOL_HISTORY_BYTES;
 const SESSIONS_HISTORY_PENDING_MAX_BYTES = 4096;
 type ChatHistoryPaginationMetadata = Partial<
   Record<"offset" | "nextOffset" | "totalMessages", number> & {

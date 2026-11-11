@@ -540,6 +540,8 @@ export {
   CronRunParamsSchema,
   CronRunsParamsSchema,
   CronHistoryParamsSchema,
+  ChatHistoryTextCursorSchema,
+  ChatHistoryTextResultSchema,
   CronHistoryResultSchema,
   CronScratchGetParamsSchema,
   CronScratchGetResultSchema,

@@ -9,7 +9,7 @@ import {
   cronScriptPayloadSchema,
 } from "./cron-shared.js";
 import { FailoverReasonSchema } from "./failover-reason.js";
-import { ChatHistoryActivitySchema } from "./logs-chat.js";
+import { ChatHistoryActivitySchema, ChatHistoryTextCursorSchema } from "./logs-chat.js";
 import { NonEmptyString } from "./primitives.js";
 
 /**
@@ -735,6 +735,9 @@ export const CronHistoryParamsSchema = closedObject({
   runAtMs: Type.Optional(CronDateTimestampMsSchema),
   cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+  messageId: Type.Optional(NonEmptyString),
+  textCursor: ChatHistoryTextCursorSchema,
+  includeTools: Type.Optional(Type.Boolean()),
 });
 
 export const CronHistoryResultSchema = closedObject({

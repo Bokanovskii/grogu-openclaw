@@ -55,6 +55,33 @@ export const ChatHistoryParamsSchema = closedObject({
   toolResultMaxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 500_000 })),
 });
 
+export const CHAT_HISTORY_TEXT_CURSOR_MAX_CHARS = 4096;
+export const ChatHistoryTextCursorSchema = Type.Optional(
+  Type.String({
+    minLength: 1,
+    maxLength: CHAT_HISTORY_TEXT_CURSOR_MAX_CHARS,
+    description:
+      'With messageId, use "start" to read complete visible text in bounded pages, then copy textPage.nextCursor unchanged. History pagination is ignored. Cursors do not grant access; changed text requires restarting.',
+  }),
+);
+export const ChatHistoryTextResultSchema = closedObject({
+  sessionKey: Type.String(),
+  sessionId: Type.String(),
+  messageId: Type.String(),
+  textPage: closedObject({
+    field: Type.String(),
+    offset: Type.Integer(),
+    text: Type.String(),
+    totalChars: Type.Integer(),
+    nextCursor: Type.Optional(Type.String()),
+  }),
+  hasMore: Type.Boolean(),
+  contentRedacted: Type.Boolean(),
+  bytes: Type.Number(),
+  sessionLinkRule: Type.Optional(Type.String()),
+});
+export type ChatHistoryTextResult = Static<typeof ChatHistoryTextResultSchema>;
+
 /** Resolve a short chat link and fetch its first page under the same discovery policy. */
 export const ChatStartupParamsSchema = Type.Union([
   ChatHistoryParamsSchema,

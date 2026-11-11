@@ -4,8 +4,10 @@ import {
   CronAddResultSchema,
   CronDeliveryPreviewSchema,
   CronJobSchema,
+  CronHistoryResultSchema,
   CronRunLogEntrySchema,
 } from "../../../packages/gateway-protocol/src/schema/cron.js";
+import { ChatHistoryTextResultSchema } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { defineToolOutputSchema } from "../schema/tool-output-schema.js";
 
 function closedObject<T extends TProperties>(properties: T) {
@@ -164,6 +166,18 @@ export const CronToolOutputSchema = defineToolOutputSchema({
     ]),
     run: CronRunOutputSchema,
     runs: closedObject({ entries: Type.Array(CronRunLogEntrySchema), ...page }),
+    history: closedObject({
+      messages: CronHistoryResultSchema.properties.messages,
+      nextCursor: CronHistoryResultSchema.properties.nextCursor,
+      contentTruncated: Type.Boolean(),
+      contentRedacted: Type.Boolean(),
+      sessionKey: Type.Optional(ChatHistoryTextResultSchema.properties.sessionKey),
+      sessionId: Type.Optional(ChatHistoryTextResultSchema.properties.sessionId),
+      messageId: Type.Optional(ChatHistoryTextResultSchema.properties.messageId),
+      textPage: Type.Optional(ChatHistoryTextResultSchema.properties.textPage),
+      hasMore: Type.Optional(ChatHistoryTextResultSchema.properties.hasMore),
+      bytes: Type.Optional(ChatHistoryTextResultSchema.properties.bytes),
+    }),
     next_check: closedObject({
       ok: Type.Literal(true),
       delayMs: Type.Number({ exclusiveMinimum: 0 }),

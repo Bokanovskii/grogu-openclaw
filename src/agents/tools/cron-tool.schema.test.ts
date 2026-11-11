@@ -30,6 +30,7 @@ describe("cron model schema regressions", () => {
       "get",
       "remove",
       "runs",
+      "history",
       "next_check",
     ]);
     for (const field of ["job", "text", "mode", "runMode", "sessionKey", "contextMessages"]) {

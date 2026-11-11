@@ -275,6 +275,10 @@ describe("automations output contract", () => {
       "cron.status": { enabled: true, jobs: 1 },
       "cron.get": job,
       "cron.runs": history,
+      "cron.history": {
+        messages: [{ role: "assistant", content: "Run transcript" }],
+        nextCursor: "opaque-cursor",
+      },
     };
     const gatewayCall = vi.fn().mockImplementation(async (method: string) => {
       if (!(method in replies)) {
@@ -304,7 +308,10 @@ async function consume() {
   const scheduleErrorCount = details.state.scheduleErrorCount;
   const runs = await automations({ action: "runs", jobId: details.id });
   const summaries = runs.entries.map(entry => entry.summary);
-  return { names, next, enabled, jobCount, name, scheduleErrorCount, summaries };
+  const transcript = await automations({ action: "history", jobId: details.id, runId: "run-1" });
+  const transcriptCount = transcript.messages.length;
+  const transcriptCursor = transcript.nextCursor;
+  return { names, next, enabled, jobCount, name, scheduleErrorCount, summaries, transcriptCount, transcriptCursor };
 }
 `;
     const fileName = "/automations-consumer.ts";
@@ -362,8 +369,10 @@ async function checkContracts(action: "list" | "runs", input: Parameters<typeof 
         name: job.name,
         scheduleErrorCount: 3,
         summaries: ["Three unpaid invoices"],
+        transcriptCount: 1,
+        transcriptCursor: expect.any(String),
       },
     });
-    expect(gatewayCall).toHaveBeenCalledTimes(4);
+    expect(gatewayCall).toHaveBeenCalledTimes(5);
   });
 });

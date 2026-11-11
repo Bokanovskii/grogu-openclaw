@@ -619,7 +619,9 @@ export function runServiceChildGroupAnchor(): void {
       const stopInput = () => {
         input.unpipe(destination);
         input.off("end", endInput);
-        input.destroy();
+        // The host closes its writer on stdin-closed. Keep fd 0 open until exit:
+        // closing it here can abort libuv when the cleanup census spawns ps.
+        input.pause();
         if (!inputClosed) {
           inputClosed = true;
           void send({ type: "stdin-closed" });

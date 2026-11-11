@@ -150,6 +150,9 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
         "input" in input.command &&
         isRecord(input.command.input) &&
         typeof input.command.input.agentId === "string") ||
+      (input.command.type === "updateRecoveryRetirement.read" &&
+        isRecord(input.command.input) &&
+        typeof input.command.input.runId === "string") ||
       (input.command.type === "agentRecovery.holds" &&
         isRecord(input.command.input) &&
         typeof input.command.input.statePath === "string") ||

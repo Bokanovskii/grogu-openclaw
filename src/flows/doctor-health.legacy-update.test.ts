@@ -11,9 +11,12 @@ import { loadExactSessionEntry } from "../config/sessions/session-accessor.js";
 import * as runtimePaths from "../daemon/runtime-paths.js";
 import type { GatewayServiceRuntime } from "../daemon/service-runtime.js";
 import * as legacyGatewayLock from "../infra/gateway-lock-legacy.js";
+import { acquireGatewayStateOwner } from "../infra/gateway-state-owner.js";
 import * as packageJson from "../infra/package-json.js";
+import { resolveUpdateCaptureRoot } from "../infra/update-capture-paths.js";
 import * as builtRuntime from "../infra/update-git-runtime.js";
 import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
   withOpenClawTestState,
@@ -96,7 +99,7 @@ function inspectStaleBuild() {
   });
 }
 
-describe("Doctor invoked by the published 2026.6.33 updater", () => {
+describe("Doctor standalone and published 2026.6.33 updater maintenance", () => {
   beforeEach(() => {
     // These are the shipped parent's markers, not the current updater's builder.
     vi.stubEnv("OPENCLAW_UPDATE_IN_PROGRESS", "1");
@@ -129,6 +132,71 @@ describe("Doctor invoked by the published 2026.6.33 updater", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
+
+  it.each([true, false])(
+    "publishes standalone completion only after verified Gateway restoration (ready=%s)",
+    async (ready) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+        vi.stubEnv("OPENCLAW_UPDATE_IN_PROGRESS", undefined);
+        vi.stubEnv("OPENCLAW_UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR", undefined);
+        vi.stubEnv("OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE", undefined);
+        openOpenClawStateDatabase({ env: state.env });
+        const events: string[] = [];
+        const service = managedService(state, true, events);
+        const restart = service.restart.getMockImplementation();
+        if (!restart) {
+          throw new Error("Missing synthetic service restart.");
+        }
+        let resumedOwner: ReturnType<typeof acquireGatewayStateOwner> | undefined;
+        service.restart.mockImplementationOnce(async () => {
+          const result = await restart();
+          resumedOwner = acquireGatewayStateOwner({
+            databasePath: resolveOpenClawStateSqlitePath(state.env),
+            payload: {
+              pid: process.pid,
+              createdAt: new Date().toISOString(),
+              stateDir: state.stateDir,
+              configPath: state.configPath,
+              role: "gateway",
+            },
+          });
+          return result;
+        });
+        mocks.restartedHealthy = ready;
+        const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+        try {
+          await runDoctorHealthFlow(runtime, { repair: true, nonInteractive: true });
+          expect(events).toEqual(["stop", "restart"]);
+          expect(resumedOwner).toBeDefined();
+          resumedOwner?.assertCurrent();
+          const root = resolveUpdateCaptureRoot(state.stateDir);
+          const captures = fs.readdirSync(root).filter((entry) => entry.startsWith("doctor-"));
+          expect(captures).toHaveLength(1);
+          const outcomePath = path.join(root, captures[0]!, "outcome.json");
+          if (ready) {
+            expect(JSON.parse(fs.readFileSync(outcomePath, "utf8"))).toMatchObject({
+              status: "committed",
+              doctorCompletion: {
+                completedAtMs: expect.any(Number),
+                manifestSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                driver: expect.objectContaining({ pid: process.pid }),
+              },
+            });
+            expect(runtime.log.mock.calls.flat().join("\n")).not.toContain(
+              "Doctor recovery capture remains protected",
+            );
+          } else {
+            expect(fs.existsSync(outcomePath)).toBe(false);
+            expect(runtime.log.mock.calls.flat().join("\n")).toContain(
+              "Gateway started but readiness was not verified",
+            );
+          }
+        } finally {
+          resumedOwner?.release();
+        }
+      });
+    },
+  );
 
   it("imports retained legacy sessions after verified stop and before any candidate RPC", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {

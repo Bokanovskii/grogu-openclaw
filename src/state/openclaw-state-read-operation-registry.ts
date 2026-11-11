@@ -9,6 +9,7 @@ import type { gatewayBootReadOperations } from "../infra/gateway-boot-lifecycle.
 import type { RestartSentinelReadOperations } from "../infra/restart-sentinel.read.worker-contract.js";
 import type { DiagnosticReadOperations } from "../infra/sqlite-audit-record.read-contract.js";
 import type { SqliteWorkerCommand } from "../infra/sqlite-worker-contract.js";
+import type { updateRecoveryRetirementReadOperations } from "../infra/update-recovery-retirement.read.js";
 import type { GeneratedHtmlProvenanceReadOperations } from "../media/generated-html-provenance.worker-contract.js";
 import type { PairingReadOperations } from "../pairing/pairing-store.types.js";
 import type { SecretStoreReadOperations } from "../secrets/store/secret-store.types.js";
@@ -28,6 +29,7 @@ type Operations = WorkerOperations<typeof localWorkspaceReadOperations> &
   AgentRecoveryReadOperations &
   WorkerOperations<typeof agentLifecycleReadOperations> &
   WorkerOperations<typeof gatewayBootReadOperations> &
+  WorkerOperations<typeof updateRecoveryRetirementReadOperations> &
   DiagnosticReadOperations &
   GeneratedHtmlProvenanceReadOperations &
   PairingReadOperations &
@@ -43,6 +45,10 @@ export type RegisteredStateReadCommand = SqliteWorkerCommand<Operations>;
 export type RegisteredStateReadResult = Operations[keyof Operations]["output"];
 
 export const stateReadRegistry = createWorkerOperationRegistry<Operations, DatabaseSync>({
+  updateRecoveryRetirement: () =>
+    import("../infra/update-recovery-retirement.read.js").then(
+      (m) => m.updateRecoveryRetirementReadOperations,
+    ),
   agentDeletion: () =>
     import("../agents/agent-delete-session-store-safety.kernel.js").then(
       (m) => m.agentDeletionSessionStoreReadOperations,

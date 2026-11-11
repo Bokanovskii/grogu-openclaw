@@ -1,10 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, stat as statFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { z } from "zod";
+import { CronJobSchema } from "../packages/gateway-protocol/src/schema/cron.js";
+import type { CronJob } from "../packages/gateway-protocol/src/schema/cron.types.js";
 import { readGroguPrivateProfileDocument } from "../src/agents/grogu-private-profile.js";
 
 const execute = promisify(execFile);
@@ -169,46 +173,57 @@ export async function sha256File(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
-const completeBackupSchema = z
+const cronPageSchema = z
   .object({
-    archivePath: absolutePath,
-    verified: z.boolean(),
-    dryRun: z.literal(false),
-    includeWorkspace: z.literal(true),
-    onlyConfig: z.literal(false),
+    jobs: z.array(z.unknown()),
+    snapshotRevision: z.string().min(1),
+    hasMore: z.boolean(),
+    nextOffset: z.number().int().nonnegative().nullable(),
   })
   .passthrough();
+const listedCronJobSchema = Type.Object(
+  {
+    ...CronJobSchema.properties,
+    effectiveAgentId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  },
+  { additionalProperties: false },
+);
 
-export async function createVerifiedBackup(profile: OperatorProfile) {
-  const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
-  const captureStartedAt = Date.now();
-  const result = completeBackupSchema.parse(
-    await runNative(profile, ["backup", "create", "--output", directory, "--json"], directory),
-  );
-  const captureMs = Date.now() - captureStartedAt;
-  const verificationStartedAt = Date.now();
-  await runNative(profile, ["backup", "verify", result.archivePath, "--json"], directory);
-  const verificationMs = Date.now() - verificationStartedAt;
-  const digestStartedAt = Date.now();
-  const digest = await sha256File(result.archivePath);
-  const digestMs = Date.now() - digestStartedAt;
-  const archiveBytes = (await statFile(result.archivePath)).size;
-  const receipt = await writePrivateReceipt(directory, "backup-provenance.json", {
-    schemaVersion: 1,
-    archivePath: result.archivePath,
-    sha256: digest,
-    verified: true,
-    includeWorkspace: true,
-    archiveBytes,
-    phaseTimingsMs: {
-      capture: captureMs,
-      verification: verificationMs,
-      digest: digestMs,
-    },
-    capture: "online-per-database",
-    quiescentCutoverBackup: false,
-  });
-  return { archivePath: result.archivePath, sha256: digest, receipt };
+export async function listNativeJobs(
+  profile: OperatorProfile,
+  directory: string,
+): Promise<CronJob[]> {
+  const jobs: CronJob[] = [];
+  let offset = 0;
+  let revision: string | undefined;
+  for (let page = 0; page < 50; page += 1) {
+    const result = cronPageSchema.parse(
+      await callNative(
+        profile,
+        "cron.list",
+        { includeDisabled: true, compact: false, limit: 200, offset },
+        directory,
+      ),
+    );
+    if (revision !== undefined && result.snapshotRevision !== revision) {
+      throw new Error("Native jobs changed during the read; rerun maintenance");
+    }
+    revision = result.snapshotRevision;
+    for (const job of result.jobs) {
+      if (!Value.Check(listedCronJobSchema, job)) {
+        throw new Error("Native cron.list returned an invalid job");
+      }
+      jobs.push(job);
+    }
+    if (!result.hasMore) {
+      return jobs;
+    }
+    if (result.nextOffset === null || result.nextOffset <= offset) {
+      throw new Error("Native cron.list returned a non-advancing page cursor");
+    }
+    offset = result.nextOffset;
+  }
+  throw new Error("Native cron.list did not terminate within the page budget");
 }
 
 export async function stageNativeRestore(

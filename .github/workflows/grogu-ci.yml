@@ -72,7 +72,8 @@ jobs:
         run: >-
           pnpm test test/scripts/grogu-upstream.test.ts test/scripts/grogu-upstream-pr.test.ts
           test/scripts/grogu-bootstrap.test.ts test/scripts/grogu-policy.test.ts
-          test/scripts/grogu-operator.test.ts test/scripts/grogu-release.test.ts test/scripts/grogu-workflows.test.ts
+          test/scripts/grogu-operator.test.ts test/scripts/grogu-release.test.ts test/scripts/grogu-storage.test.ts test/scripts/grogu-workflows.test.ts
+          src/infra/update-recovery-capture-retirement.test.ts src/flows/doctor-health.legacy-update.test.ts
           packages/ai/src/transports/sparky-policy.test.ts packages/ai/src/transports/openai-completions-transport.test.ts
           src/agents/grogu-private-profile.test.ts src/agents/sparky-request-queue.test.ts
           src/agents/model-request-telemetry.test.ts src/agents/research-checkpoint-guard.test.ts

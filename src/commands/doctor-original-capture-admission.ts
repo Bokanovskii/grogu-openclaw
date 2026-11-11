@@ -1,5 +1,6 @@
 import { measureGatewayBootstrapStep } from "../cli/startup-trace.js";
 import { DoctorMaintenanceRefusalError } from "../infra/update-doctor-result.js";
+import type { UpdateRecoveryBaselineRef } from "../infra/update-recovery-baseline-capture.js";
 import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
 import type { DoctorMaintenanceParams } from "./doctor-maintenance-types.js";
 import type { preserveDoctorOriginalState } from "./doctor-original-capture.js";
@@ -13,8 +14,14 @@ export function createDoctorOriginalCaptureHook(
     rehearsalRoot?: string;
     json?: boolean;
   },
-): NonNullable<DoctorMaintenanceParams["beforeStateMutation"]> {
-  return async ({ env, signal }) => {
+): NonNullable<DoctorMaintenanceParams["beforeStateMutation"]> & {
+  complete: () => Promise<void>;
+} {
+  let captured: { ref: UpdateRecoveryBaselineRef; env: NodeJS.ProcessEnv } | undefined;
+  const hook: NonNullable<DoctorMaintenanceParams["beforeStateMutation"]> = async ({
+    env,
+    signal,
+  }) => {
     const [{ preserveDoctorOriginalState }, { getOpenClawDatabaseMaintenanceScope }] =
       await Promise.all([
         import("./doctor-original-capture.js"),
@@ -56,15 +63,37 @@ export function createDoctorOriginalCaptureHook(
         );
       }
     }
-    await measureGatewayBootstrapStep("doctor.maintenance.preserve-original-state", () =>
-      preserveDoctorOriginalState({
-        root: params.root,
-        env,
-        runtime: params.runtime,
-        signal,
-        assertCurrent: () => scope.assertOwnerCurrent(),
-        writeAuthority: params.writeAuthority,
-      }),
+    const ref = await measureGatewayBootstrapStep(
+      "doctor.maintenance.preserve-original-state",
+      () =>
+        preserveDoctorOriginalState({
+          root: params.root,
+          env,
+          runtime: params.runtime,
+          signal,
+          assertCurrent: () => scope.assertOwnerCurrent(),
+          writeAuthority: params.writeAuthority,
+        }),
     );
+    if (ref) {
+      captured = { ref, env: { ...env } };
+    }
   };
+  return Object.assign(hook, {
+    async complete() {
+      if (!captured) {
+        return;
+      }
+      const { completeStandaloneDoctorCapture } =
+        await import("../infra/update-recovery-doctor-completion.js");
+      try {
+        await completeStandaloneDoctorCapture(captured);
+        captured = undefined;
+      } catch (error) {
+        params.runtime.log(
+          `Doctor recovery capture remains protected: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+  });
 }

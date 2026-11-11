@@ -4,7 +4,6 @@ import { reconcileManagedJobs, reconcileWorkerTriggers } from "./bootstrap.js";
 import { stageGroguCompactionConfig } from "./compaction-config.js";
 import {
   createPrivateArtifactDirectory,
-  createVerifiedBackup,
   callNative,
   loadOperatorProfile,
   runNative,
@@ -12,6 +11,8 @@ import {
 } from "./operator.js";
 import { checkLivePolicy } from "./policy.js";
 import { buildRelease, verifyRelease } from "./release.js";
+import { withGroguStorageLock } from "./storage-artifacts.js";
+import { bootstrapGroguStorage, cleanupGroguStorage } from "./storage.js";
 import { checkUpstream } from "./upstream.js";
 
 const program = new Command()
@@ -33,29 +34,70 @@ program
     "Write validated candidate, apply, rollback and recovery artifacts; never change live config",
   )
   .action(async () => {
-    console.log(JSON.stringify(await stageGroguCompactionConfig(profile())));
+    const selected = profile();
+    console.log(
+      JSON.stringify(
+        await withGroguStorageLock(selected, () => stageGroguCompactionConfig(selected)),
+      ),
+    );
   });
 
 program
   .command("release-build <source>")
   .description("Build and verify a complete source-pinned native package; never activate it")
   .action(async (source: string) => {
-    console.log(JSON.stringify(await buildRelease(profile(), source)));
+    const selected = profile();
+    console.log(
+      JSON.stringify(await withGroguStorageLock(selected, () => buildRelease(selected, source))),
+    );
   });
 
 program
   .command("release-verify <manifest>")
   .description("Check immutable package digest and platform; never infer rollback compatibility")
   .action(async (manifest: string) => {
-    console.log(JSON.stringify(await verifyRelease(profile(), manifest)));
+    const selected = profile();
+    console.log(
+      JSON.stringify(await withGroguStorageLock(selected, () => verifyRelease(selected, manifest))),
+    );
   });
 
 program
   .command("bootstrap")
-  .description("Preview revision-checked native job metadata; preserve models, pauses and delivery")
-  .option("--apply", "Apply only non-behavioral metadata changes", false)
+  .description("Reconcile native job metadata and install the small-disk storage policy")
+  .option("--apply", "Apply job metadata, disable local full backups, and install cleanup", false)
   .action(async (options: { apply: boolean }) => {
-    console.log(JSON.stringify(await reconcileManagedJobs(profile(), options.apply)));
+    const selected = profile();
+    const jobs = await reconcileManagedJobs(selected, options.apply);
+    const storage = await bootstrapGroguStorage(selected, options.apply);
+    console.log(JSON.stringify({ jobs, storage }));
+    if (storage.backups.deferred.length > 0) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("storage-bootstrap")
+  .description("Disable local full-backup schedules and install hourly model-free cleanup")
+  .option("--apply", "Apply the small-disk storage policy", false)
+  .action(async (options: { apply: boolean }) => {
+    const result = await bootstrapGroguStorage(profile(), options.apply);
+    console.log(JSON.stringify(result));
+    if (result.backups.deferred.length > 0) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("storage-cleanup")
+  .description("Retire completed temporary artifacts; preserve active or unknown recovery")
+  .option("--apply", "Permanently remove eligible temporary artifacts", false)
+  .action(async (options: { apply: boolean }) => {
+    const result = await cleanupGroguStorage(profile(), options.apply);
+    console.log(JSON.stringify(result));
+    if (result.backups.deferred.length > 0 || result.updateCaptures.warnings.length > 0) {
+      process.exitCode = 1;
+    }
   });
 
 program
@@ -106,9 +148,11 @@ program
 
 program
   .command("backup")
-  .description("Create and verify a complete native online archive; not a quiescent cutover")
-  .action(async () => {
-    console.log(JSON.stringify(await createVerifiedBackup(profile())));
+  .description("Retired: Grogu does not create local full backups")
+  .action(() => {
+    throw new Error(
+      "Grogu local full backups are disabled. Update recovery copies are temporary; use storage-cleanup to inspect them.",
+    );
   });
 
 program
@@ -116,9 +160,11 @@ program
   .description("Run native archive and SQLite inventory verification")
   .action(async (archive: string) => {
     const selected = profile();
-    const directory = await createPrivateArtifactDirectory(selected.recoveryDir);
-    await runNative(selected, ["backup", "verify", archive, "--json"], directory);
-    console.log(JSON.stringify({ nativeVerification: "passed", privateReceipts: directory }));
+    await withGroguStorageLock(selected, async () => {
+      const directory = await createPrivateArtifactDirectory(selected.recoveryDir);
+      await runNative(selected, ["backup", "verify", archive, "--json"], directory);
+      console.log(JSON.stringify({ nativeVerification: "passed", privateReceipts: directory }));
+    });
   });
 
 program
@@ -127,7 +173,12 @@ program
     "Restore to empty staging using native ownership guards; never activate or start channels",
   )
   .action(async (archive: string, target: string) => {
-    console.log(JSON.stringify(await stageNativeRestore(profile(), archive, target)));
+    const selected = profile();
+    console.log(
+      JSON.stringify(
+        await withGroguStorageLock(selected, () => stageNativeRestore(selected, archive, target)),
+      ),
+    );
   });
 
 try {

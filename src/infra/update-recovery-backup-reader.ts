@@ -29,6 +29,7 @@ import {
   assertUpdateRecoverySealComplete,
   hasPendingUpdateRecoverySeal,
 } from "./update-recovery-capture-seal.js";
+import { doctorCaptureCompletionSchema } from "./update-recovery-doctor-completion-contract.js";
 import { canonicalEntryPath } from "./update-recovery-path.js";
 import { recordedUpdateRunDrivers } from "./update-run-activity.js";
 import { inspectUpdateRunDriver, sameUpdateRunDriver } from "./update-run-driver.js";
@@ -47,6 +48,7 @@ const recordedOutcomeSchema = z.strictObject({
   status: z.enum(["restored", "committed"]),
   error: z.string().max(4096).optional(),
   manifestSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  doctorCompletion: doctorCaptureCompletionSchema.optional(),
 });
 
 type Outcome = {
@@ -170,7 +172,7 @@ async function assertPinnedDirectoryAt(
   await pin.assertCurrent();
 }
 
-async function withRecoveryMetadata<T>(
+export async function withRecoveryMetadata<T>(
   location: Omit<UpdateRecoveryBackupRef, "manifestSha256"> & { manifestSha256?: string },
   run: (state: {
     ref: UpdateRecoveryBackupRef;

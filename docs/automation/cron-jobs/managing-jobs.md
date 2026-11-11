@@ -146,6 +146,8 @@ Archiving a session (Control UI, or `sessions.patch { key, archived: true, expec
 
 The agent `automations` tool's `run` action waits in the Gateway instead: it returns the finished run (status, error, delivery status, and summary) when the run ends within the call's `timeoutMs` (default 60 seconds, capped at 10 minutes). A longer run returns its `runId`; read it later with the `runs` action and that `runId`. Main-session jobs, and jobs that run in the calling session, return at once because they start only after the calling turn ends.
 
+The agent `automations` tool returns run records with `action: "runs"` and a job ID. It returns 50 records by default; set `limit` up to 200. If `hasMore` is true, pass `nextOffset` as the next request's `offset`. This also applies to a self-scoped tool reading its current automation's runs. Pages can shift as runs finish or expire; the retention limits below still apply.
+
 Run-now delivery measures lateness from when the manual request was accepted. An old pending scheduled slot does not make its fresh output stale; automatic and `--due` runs keep the original scheduled time for that check. A manual run still preserves the job's recurring cadence or future one-shot occurrence.
 
 Running a paused future one-shot leaves it paused and keeps its saved occurrence. Re-enable it when automatic execution is wanted. If a manual run was accepted before the scheduled time but waited past it in the command queue, that occurrence remains available after re-enabling or restarting the Gateway.

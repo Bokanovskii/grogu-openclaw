@@ -4,6 +4,7 @@ import { Value } from "typebox/value";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { typeCheckSources } from "../../../test/helpers/typescript.js";
 import { clearCronJobActive, markCronJobActive } from "../../cron/active-jobs.js";
+import { projectCronRunHistoryPage } from "../../cron/run-history.js";
 import { CronService } from "../../cron/service.js";
 import { createCronStoreHarness, createNoopLogger } from "../../cron/service.test-harness.js";
 import type { CronJob } from "../../cron/types.js";
@@ -11,6 +12,7 @@ import { GatewayClientRequestError } from "../../gateway/client.js";
 import { projectCronListJobs } from "../../gateway/server-methods/cron-list-projection.js";
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
+import { isRecord } from "../../utils.js";
 import { applyCodeModeCatalog } from "../code-mode.js";
 import {
   createCodeModeHarness,
@@ -156,6 +158,78 @@ describe("automations output contract", () => {
     expect(
       Value.Errors(expectDefined(tool.outputSchema, "automations output schema"), result.details),
     ).toEqual([]);
+  });
+
+  it.each([
+    { scope: "ordinary", options: undefined },
+    {
+      scope: "current automation",
+      options: { agentSessionKey: "agent:main:cron:invoice-check", selfRemoveOnlyJobId: job.id },
+    },
+  ])("pages run history for the $scope scope", async ({ options }) => {
+    const records = [1, 2, 3, 4, 5].map((number) => ({
+      id: `row-${number}`,
+      jobId: job.id,
+      createdAt: number,
+      endedAt: number,
+      status: "succeeded",
+      detail: {
+        kind: "cron-run",
+        storeKey: "fixture",
+        runId: `run-${number}`,
+        status: "ok",
+      },
+    }));
+    const gatewayCall = vi
+      .fn()
+      .mockImplementation(
+        async (
+          method: string,
+          _options: unknown,
+          params: { id: string; limit?: number; offset?: number },
+        ) => {
+          expect(method).toBe("cron.runs");
+          return projectCronRunHistoryPage(records, {
+            storeKey: "fixture",
+            jobId: params.id,
+            limit: params.limit,
+            offset: params.offset,
+          });
+        },
+      );
+    const tool = createCronTool(options, { callGatewayTool: gatewayCall });
+    const first = await tool.execute("first", { action: "runs", jobId: job.id, limit: 2 });
+    expect(first.details).toMatchObject({
+      entries: [{ runId: "run-5" }, { runId: "run-4" }],
+      limit: 2,
+      offset: 0,
+      hasMore: true,
+      nextOffset: 2,
+    });
+    if (!isRecord(first.details) || typeof first.details.nextOffset !== "number") {
+      throw new Error("Expected a run-history continuation offset");
+    }
+    const second = await tool.execute("second", {
+      action: "runs",
+      jobId: job.id,
+      limit: 2,
+      offset: first.details.nextOffset,
+    });
+    expect(second.details).toMatchObject({
+      entries: [{ runId: "run-3" }, { runId: "run-2" }],
+      limit: 2,
+      offset: 2,
+      hasMore: true,
+      nextOffset: 4,
+    });
+    expect(tool.parameters).toHaveProperty("properties.limit");
+    expect(tool.parameters).toHaveProperty("properties.offset");
+    for (const pagination of [{ limit: 201 }, { offset: -1 }]) {
+      await expect(
+        tool.execute("invalid", { action: "runs", jobId: job.id, ...pagination }),
+      ).rejects.toThrow(/(?:limit|offset) must be a (?:positive|non-negative) integer/);
+    }
+    expect(gatewayCall).toHaveBeenCalledTimes(2);
   });
 
   it("still runs on a shipped Gateway that rejects the run wait", async () => {

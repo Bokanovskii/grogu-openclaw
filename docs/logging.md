@@ -328,10 +328,15 @@ Available flags:
 - `OPENCLAW_DEBUG_MODEL_PAYLOAD=summary`: include a bounded request payload
   summary in model request logs.
 - `OPENCLAW_DEBUG_MODEL_PAYLOAD=tools`: include all model-facing tool names in
-  the payload summary.
+  the payload summary. For Chat Completions, the names come from the encoded
+  request. Unknown entries appear as `<unknown>`. This diagnostic excludes
+  messages, tool descriptions, and authorization headers. It redacts recognized
+  secrets in tool names, but names can reveal enabled capabilities. Review logs
+  before sharing them.
 - `OPENCLAW_DEBUG_MODEL_PAYLOAD=full-redacted`: include a redacted, capped JSON
   payload snapshot. Use only while debugging; secrets are redacted but prompts
-  and message text may still be present.
+  and message text may still be present. Chat Completions reports tool names
+  only.
 - `OPENCLAW_DEBUG_SSE=events`: emit first-event and stream-completion timing.
 - `OPENCLAW_DEBUG_SSE=peek`: also emit the first five redacted SSE event
   payloads, capped per event.

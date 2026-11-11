@@ -6,6 +6,7 @@ import type {
   SimpleStreamOptions,
   StreamFn,
 } from "@openclaw/llm-core";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import OpenAI from "openai";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
@@ -34,6 +35,7 @@ import { boundResponseBody } from "../utils/streaming-byte-guard.js";
 import { createAssistantOutput } from "./assistant-output.js";
 import { buildGuardedModelFetch } from "./host-policy.js";
 import { prepareModelRequestBody } from "./model-request-body.js";
+import { resolveModelPayloadDebugMode } from "./model-transport-debug.js";
 import { hasOpenAICompatibleConversationTurn } from "./openai-compatible-conversation-turn.js";
 import {
   isNativeOpenAIEndpoint,
@@ -54,11 +56,13 @@ import {
   buildOpenAISdkRequestOptions,
   enforceCodeModeResponsesToolSurface,
   getCompat,
+  readCodeModePayloadToolName,
   resolveCodeModeResponsesVisibleToolNames,
 } from "./openai-transport-params.js";
 import {
   createOpenAIProviderAcceptanceHook,
   isOpenAICompletionsThinkingEnabled,
+  log,
   resolveOpenAIClientBaseUrl,
   resolvePromptCacheKey,
   type MutableAssistantOutput,
@@ -77,7 +81,7 @@ import {
   transportAbortError,
   withProviderResponseHook,
 } from "./transport-stream-shared.js";
-import { supportsModelTools } from "./transport-utils.js";
+import { redactSensitiveText, supportsModelTools } from "./transport-utils.js";
 
 export { buildOpenAICompletionsParams } from "./openai-completions-params.js";
 
@@ -92,6 +96,27 @@ function assertOpenAICompletionsPayloadHasConversationTurn(
   throw new Error(
     `OpenAI-compatible chat payload for ${model.provider}/${model.id} contains no non-empty user or assistant messages after compaction and transport transforms; refusing to send a system/tool-only request. Start a new user turn or repair the compacted session history.`,
   );
+}
+
+function logEncodedCompletionsTools(body: Uint8Array, apiKey: string): void {
+  const mode = resolveModelPayloadDebugMode();
+  if (mode !== "tools" && mode !== "full-redacted") {
+    return;
+  }
+  try {
+    const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    if (!isRecord(payload) || (payload.tools !== undefined && !Array.isArray(payload.tools))) {
+      throw new Error("Invalid encoded tool list");
+    }
+    const tools = payload.tools ?? [];
+    const names = tools.map((tool: unknown) => {
+      const name = readCodeModePayloadToolName(tool) ?? "<unknown>";
+      return redactSensitiveText(apiKey ? name.replaceAll(apiKey, "[redacted]") : name);
+    });
+    log.info(`[completions] tools count=${tools.length} names=${JSON.stringify(names)}`);
+  } catch {
+    log.warn("[completions] unable to inspect encoded tool names; request unchanged");
+  }
 }
 
 const SSE_DONE_LINE_RE = /^data:[ \t]*\[DONE\][ \t]*$/i;
@@ -392,9 +417,11 @@ export function streamOpenAICompletionsRequest(
           model,
           async () => {
             // Re-encode each rejected attempt: an SDK-owned request body may be consumed.
+            const body = await encodeBody(params);
+            logEncodedCompletionsTools(body.body, apiKey);
             const attemptRequest = client.chat.completions.create(
               params as OpenAI.Chat.Completions.ChatCompletionCreateParams,
-              { ...requestOptions, ...(await encodeBody(params)) },
+              { ...requestOptions, ...body },
             );
             const attemptResponse = await attemptRequest.asResponse();
             return { request: attemptRequest, response: attemptResponse };

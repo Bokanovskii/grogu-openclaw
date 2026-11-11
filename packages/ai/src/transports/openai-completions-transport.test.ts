@@ -3,7 +3,9 @@ import type { ChatCompletionChunk } from "openai/resources/chat/completions.js";
 import { describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import type { OpenAICompletionsOptions } from "../provider-options.js";
+import { streamSimpleOpenAICompletions } from "../providers/openai-completions.js";
 import type { Context, Model } from "../types.js";
+import { modelRequestBodyState, serializeModelRequestBody } from "./model-request-body.js";
 import { processCompletionsStream } from "./openai-completions-stream.js";
 import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
 import {
@@ -14,11 +16,14 @@ import {
   neverYieldsStream,
 } from "./openai-completions.test-support.js";
 import { buildOpenAISdkRequestOptions } from "./openai-transport-params.js";
+import { log } from "./openai-transport-shared.js";
 
 async function captureTransportRequest(
   model: Model<"openai-completions">,
   tools: Context["tools"] = [],
   options: OpenAICompletionsOptions = {},
+  mode: "direct" | "managed" = "managed",
+  message = "hello",
 ) {
   const previousHost = getAiTransportHost();
   let captured: Request | undefined;
@@ -33,9 +38,13 @@ async function captureTransportRequest(
     },
   });
   try {
-    const stream = createOpenAICompletionsTransportStreamFn()(
+    const streamFn =
+      mode === "direct"
+        ? streamSimpleOpenAICompletions
+        : createOpenAICompletionsTransportStreamFn();
+    const stream = streamFn(
       model,
-      { messages: [{ role: "user", content: "hello", timestamp: 1 }], tools } as never,
+      { messages: [{ role: "user", content: message, timestamp: 1 }], tools } as never,
       { apiKey: "test-key", ...options } as never,
     );
     if (stream instanceof Promise) {
@@ -55,9 +64,149 @@ async function captureTransportRequest(
 }
 
 describe("openai completions transport", () => {
+  it.each(["managed", "direct"] as const)(
+    "reports final encoded tool names without request content in %s mode",
+    async (mode) => {
+      vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", "tools");
+      const info = vi.spyOn(log, "info").mockImplementation(() => undefined);
+      const redact = vi
+        .spyOn(getAiTransportHost(), "redactToolPayloadText")
+        .mockImplementation((name) =>
+          name.replaceAll("synthetic-sensitive-name", "[host-redacted]"),
+        );
+      const message = "synthetic-private-message";
+      const description = "synthetic-private-tool-description";
+      const model = makeCompletionsModel({
+        provider: "synthetic",
+        baseUrl: "https://synthetic.invalid/v1",
+        reasoning: false,
+        headers: { "x-synthetic-private-header": "synthetic-private-header-value" },
+      });
+      const tools = [
+        "read",
+        "prefix-test-key-suffix",
+        "synthetic-sensitive-name",
+        "web_search",
+        "web_fetch",
+      ].map((name) => ({
+        name,
+        description,
+        parameters: { type: "object" as const, properties: {} },
+      }));
+      const options: OpenAICompletionsOptions = {};
+      let encodedAttempts = 0;
+      let encodedBytes: Uint8Array | undefined;
+      modelRequestBodyState(options).encode = async (payload) => {
+        encodedAttempts += 1;
+        const encoded = structuredClone(payload) as {
+          tools: Array<{ function: { name?: string } }>;
+        };
+        encoded.tools = encoded.tools.filter((tool) => tool.function.name !== "web_search");
+        encoded.tools.push({ function: {} });
+        const body = serializeModelRequestBody(encoded);
+        body.body = new TextEncoder().encode(` \n${new TextDecoder().decode(body.body)}\n`);
+        encodedBytes = body.body;
+        return body;
+      };
+      try {
+        const request = await captureTransportRequest(model, tools, options, mode, message);
+        expect(new Uint8Array(await request.clone().arrayBuffer())).toEqual(encodedBytes);
+        expect(request.headers.get("authorization")).toBe("Bearer test-key");
+        expect(request.headers.get("x-synthetic-private-header")).toBe(
+          "synthetic-private-header-value",
+        );
+        const body = (await request.json()) as {
+          tools: Array<{ function: { name?: string } }>;
+        };
+        expect(body.tools.map((tool) => tool.function.name)).toEqual([
+          "prefix-test-key-suffix",
+          "read",
+          "synthetic-sensitive-name",
+          "web_fetch",
+          undefined,
+        ]);
+        expect(encodedAttempts).toBe(1);
+        const diagnostics = info.mock.calls.map(([entry]) => entry);
+        const expected =
+          '[completions] tools count=5 names=["prefix-[redacted]-suffix","read","[host-redacted]","web_fetch","<unknown>"]';
+        expect(diagnostics).toContain(expected);
+        expect(diagnostics.join("\n")).not.toContain(message);
+        expect(diagnostics.join("\n")).not.toContain(description);
+        expect(diagnostics.join("\n")).not.toContain("test-key");
+        expect(diagnostics.join("\n")).not.toContain("synthetic-sensitive-name");
+        expect(diagnostics.join("\n")).not.toContain("synthetic-private-header");
+
+        vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", "full-redacted");
+        info.mockClear();
+        const fullRedactedRequest = await captureTransportRequest(
+          model,
+          tools,
+          options,
+          mode,
+          message,
+        );
+        expect(new Uint8Array(await fullRedactedRequest.arrayBuffer())).toEqual(encodedBytes);
+        expect(info.mock.calls.map(([entry]) => entry)).toContain(expected);
+
+        vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", "tools");
+        info.mockClear();
+        await captureTransportRequest(model, [], {}, mode, message);
+        expect(info.mock.calls.map(([entry]) => entry)).toContain(
+          "[completions] tools count=0 names=[]",
+        );
+
+        vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", undefined);
+        info.mockClear();
+        await captureTransportRequest(model, tools, options, mode, message);
+        expect(info.mock.calls.map(([entry]) => entry).join("\n")).not.toContain(
+          "[completions] tools",
+        );
+      } finally {
+        redact.mockRestore();
+        info.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([
+    new TextEncoder().encode("synthetic-private-invalid-json"),
+    new TextEncoder().encode('{"tools":"synthetic-private-invalid-tool-list"}'),
+    new Uint8Array([0xff]),
+  ])("reports an unreadable encoded request without logging or changing it", async (encoded) => {
+    vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", "tools");
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+    const options: OpenAICompletionsOptions = {};
+    modelRequestBodyState(options).encode = async () => ({
+      body: encoded,
+      stream: true,
+    });
+    try {
+      const request = await captureTransportRequest(
+        makeCompletionsModel({
+          provider: "synthetic",
+          baseUrl: "https://synthetic.invalid/v1",
+          reasoning: false,
+        }),
+        [],
+        options,
+      );
+      expect(new Uint8Array(await request.arrayBuffer())).toEqual(encoded);
+      expect(warn.mock.calls.map(([entry]) => entry)).toContain(
+        "[completions] unable to inspect encoded tool names; request unchanged",
+      );
+      expect(warn.mock.calls.map(([entry]) => entry).join("\n")).not.toContain("synthetic-private");
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("re-encodes only rejected Sparky admission and never replays an accepted incomplete stream", async () => {
     vi.stubEnv("GROGU_PROFILE_FILE", "/synthetic/profile.json");
+    vi.stubEnv("OPENCLAW_DEBUG_MODEL_PAYLOAD", "tools");
     vi.useFakeTimers();
+    const info = vi.spyOn(log, "info").mockImplementation(() => undefined);
     const previousHost = getAiTransportHost();
     const bodies: string[] = [];
     let rejectAdmission = true;
@@ -106,11 +255,18 @@ describe("openai completions transport", () => {
       expect((await pending).stopReason).toBe("stop");
       expect(bodies).toHaveLength(2);
       expect(bodies[0]).toBe(bodies[1]);
+      expect(
+        info.mock.calls.filter(([entry]) => entry.startsWith("[completions] tools")),
+      ).toHaveLength(2);
       incomplete = true;
       expect((await run()).stopReason).toBe("error");
       expect(bodies).toHaveLength(3);
+      expect(
+        info.mock.calls.filter(([entry]) => entry.startsWith("[completions] tools")),
+      ).toHaveLength(3);
     } finally {
       configureAiTransportHost(previousHost);
+      info.mockRestore();
       vi.useRealTimers();
       vi.unstubAllEnvs();
     }

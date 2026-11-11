@@ -5,6 +5,7 @@ import { readGroguPrivateProfileDocument } from "../src/agents/grogu-private-pro
 import {
   callNative,
   createPrivateArtifactDirectory,
+  listNativeJobs,
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
@@ -272,57 +273,13 @@ export function evaluatePolicy(
 const configSnapshotSchema = z
   .object({ valid: z.literal(true), runtimeConfig: z.record(z.string(), z.unknown()) })
   .passthrough();
-const cronPageSchema = z
-  .object({
-    jobs: z.array(z.unknown()),
-    snapshotRevision: z.string().min(1),
-    hasMore: z.boolean(),
-    nextOffset: z.number().int().nonnegative().nullable(),
-  })
-  .passthrough();
-
-const MAX_CRON_PAGES = 50;
-
 export async function checkLivePolicy(profile: OperatorProfile) {
   const policy = readModelPolicy(profile.profileFile);
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
   const snapshot = configSnapshotSchema.parse(
     await callNative(profile, "config.get", {}, directory),
   );
-  const jobs: PolicyJob[] = [];
-  let offset = 0;
-  let revision: string | undefined;
-  for (let page = 0; ; page += 1) {
-    if (page >= MAX_CRON_PAGES) {
-      throw new Error("Native cron.list did not terminate within the page budget");
-    }
-    const result = cronPageSchema.parse(
-      await callNative(
-        profile,
-        "cron.list",
-        { includeDisabled: true, compact: false, limit: 200, offset },
-        directory,
-      ),
-    );
-    if (revision !== undefined && result.snapshotRevision !== revision) {
-      throw new Error("Native jobs changed during the policy read; rerun the check");
-    }
-    revision = result.snapshotRevision;
-    for (const job of result.jobs) {
-      const parsed = policyJobSchema.safeParse(job);
-      if (!parsed.success) {
-        throw new Error("Native cron.list returned a job without a readable route");
-      }
-      jobs.push(parsed.data);
-    }
-    if (!result.hasMore) {
-      break;
-    }
-    if (result.nextOffset === null || result.nextOffset <= offset) {
-      throw new Error("Native cron.list returned a non-advancing page cursor");
-    }
-    offset = result.nextOffset;
-  }
+  const jobs = (await listNativeJobs(profile, directory)).map((job) => policyJobSchema.parse(job));
   const violations = evaluatePolicy(snapshot.runtimeConfig, jobs, policy);
   const receipt = await writePrivateReceipt(directory, "policy-check.json", {
     schemaVersion: 1,

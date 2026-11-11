@@ -15,7 +15,7 @@ verified cutover.
 | Pinned upstream release and toolchain | `grogu/upstream.json`, `grogu/toolchain.json`    | yes     |
 | Personal paths, IDs, model refs, jobs | protected profile (example below)                | never   |
 | Secrets                               | native OpenClaw secret refs only                 | never   |
-| State, sessions, backups, receipts    | OpenClaw state dir and the private recovery dir  | never   |
+| State, sessions, temporary receipts   | OpenClaw state dir and the private recovery dir  | never   |
 
 Upstream GitHub workflows are kept for reference under
 `.github/upstream-workflows/`; only `grogu-ci.yml` and `grogu-upstream.yml` run.
@@ -65,27 +65,73 @@ node --import ./scripts/tsx.mjs grogu/maint.mts --profile <profile> <command>
 
 Release builds install the same CLI as `dist/grogu-maint.js`.
 
-| Command                         | Effect                                                                                                                                                                    |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                                    |
-| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted.             |
-| `compaction-stage`              | Writes a validated private candidate config plus apply, rollback, and recovery scripts. Apply requires a verified complete-backup receipt and never restarts the Gateway. |
-| `backup`                        | Complete native online archive, verified, with a private digest receipt.                                                                                                  |
-| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                         |
-| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                             |
-| `bootstrap [--apply]`           | Revision-checked metadata reconcile for bound jobs; preview by default.                                                                                                   |
-| `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                          |
-| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                |
-| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                   |
-| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                |
+| Command                         | Effect                                                                                                                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                                                      |
+| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted.                               |
+| `compaction-stage`              | Writes a validated candidate configuration and a small original-configuration recovery copy. Apply checks exact configuration hashes, needs no full backup, and never restarts the Gateway. |
+| `backup`                        | Retired. Exits with an error without creating a local full backup.                                                                                                                          |
+| `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                                           |
+| `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                                               |
+| `bootstrap [--apply]`           | Reconciles bound job metadata and installs the small-disk storage policy; preview by default.                                                                                               |
+| `storage-bootstrap [--apply]`   | Disables local full-backup schedules and installs one hourly native cleanup job without a model call; preview by default.                                                                   |
+| `storage-cleanup [--apply]`     | Disables local full-backup schedules and retires eligible temporary artifacts; preview by default.                                                                                          |
+| `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                                            |
+| `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                                  |
+| `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                                     |
+| `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                                  |
 
-Every command writes owner-only receipts to a new directory under the profile's
-`recoveryDir`.
+Native calls write owner-only receipts under the profile's `recoveryDir`.
 
-The backup receipt records archive bytes and separate capture, verification,
-and digest timings. It preserves the complete online archive and workspace
-contract; phase facts identify the slow owner without publishing paths or
-inventory.
+### Small-disk storage policy
+
+Grogu does not create routine local full backups or retain historical release
+packages. Git preserves source, not conversations, credentials, or databases.
+Removing recovery copies permanently loses the ability to restore those earlier
+states.
+
+After installing a Grogu release, run the normal bootstrap with the protected
+profile. The installed release must include `dist/grogu-maint.js`.
+
+```sh
+node /path/to/installed/openclaw/dist/grogu-maint.js \
+  --profile /path/to/private/profile.json bootstrap --apply
+```
+
+Bootstrap disables native full-archive backup jobs that target filesystem
+storage and legacy Grogu backup workers. It preserves remote backup schedules,
+Git snapshot jobs, unrelated automations, and running work. A running backup
+is reported as deferred and must finish before the next cleanup disables it.
+The old backup contract marker is retained only to identify installed legacy
+workers during migration.
+
+The hourly cleanup runs as a native command job, not an agent turn. It uses
+the installed Node and maintenance CLI from the private profile, so it needs
+no source checkout or machine-specific paths. Its run history records failures
+and deferred work. No new operating-system scheduler or model-backed watcher
+is required. Repeating bootstrap converges the same declaration-key job.
+
+Completed Grogu backup archives, release packages, and failed package builds are temporary for at most
+24 hours plus the next hourly sweep. Cleanup requires their producer receipts
+and shares a lock with package builders and archive readers. It preserves the
+running installation, state, credentials, active work, and unrecognized files.
+The cleanup also retires native update captures and future standalone Doctor
+captures after verified success and the same 24-hour recovery window.
+Native update ownership and unfinished recovery always block removal.
+Older Doctor captures without completion evidence remain protected.
+Completed storage-maintenance receipts expire with the same window, so the
+cleanup does not accumulate its own private logs.
+Preview cleanup before the first removal:
+
+```sh
+node /path/to/installed/openclaw/dist/grogu-maint.js \
+  --profile /path/to/private/profile.json storage-cleanup
+```
+
+Add `--apply` to permanently remove eligible artifacts. A merge alone does not
+deploy this policy or change an existing private service. Install the release
+and run bootstrap on each host, including a new Mac mini. Legacy backups outside
+the profile's recovery directory need a separate, reviewed one-time cleanup.
 
 Worker prompt contracts live under `grogu/templates/workers/`. Private job
 definitions may consume them after review. They keep unchanged polls
@@ -188,10 +234,11 @@ missing scope, revocation, and transient network/provider failure.
    shows the conflicts; resolve them, record the release as the second parent,
    update `upstream.json`, and open the PR by hand.
 4. Review the PR and CI. Merge only when green.
-5. Deploy deliberately: `backup`, `release-build`, `release-verify`, stage and
-   check, cut over through the native service, then `status` and
-   `policy-check`. Release manifests are never certified for rollback, because
-   state migrations may be one-way; recover from the verified backup if needed.
+5. Deploy deliberately: `release-build`, `release-verify`, stage and check,
+   cut over through the native service, then `status`, `policy-check`, and
+   `bootstrap --apply`. The native updater owns temporary migration recovery
+   copies. Release manifests are never certified for rollback because state
+   migrations can be one-way. No routine local full backup is required.
 
 ## Invariants checked in code
 

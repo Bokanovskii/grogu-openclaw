@@ -82,33 +82,15 @@ function cutoverScript(params: {
   sourceFile: string;
   expectedCurrentSha256: string;
   expectedSourceSha256: string;
-  requireBackup: boolean;
 }): string {
   return `import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 
 const configFile = ${JSON.stringify(params.configFile)};
 const sourceFile = ${JSON.stringify(params.sourceFile)};
 const expectedCurrentSha256 = ${JSON.stringify(params.expectedCurrentSha256)};
 const expectedSourceSha256 = ${JSON.stringify(params.expectedSourceSha256)};
-const requireBackup = ${JSON.stringify(params.requireBackup)};
 const digest = (value) => createHash("sha256").update(value).digest("hex");
-const digestFile = async (file) => {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest("hex");
-};
-
-if (requireBackup) {
-  const receiptFile = process.env.GROGU_VERIFIED_BACKUP_RECEIPT;
-  if (!receiptFile) throw new Error("Set GROGU_VERIFIED_BACKUP_RECEIPT to a verified backup-provenance.json");
-  const receipt = JSON.parse(await readFile(receiptFile, "utf8"));
-  if (receipt?.verified !== true || typeof receipt.archivePath !== "string" || typeof receipt.sha256 !== "string") {
-    throw new Error("The backup receipt is not a verified complete backup receipt");
-  }
-  if ((await digestFile(receipt.archivePath)) !== receipt.sha256) throw new Error("The verified backup archive digest changed");
-}
 
 const current = await readFile(configFile);
 if (digest(current) !== expectedCurrentSha256) throw new Error("The live config changed since staging");
@@ -175,7 +157,6 @@ export async function stageGroguCompactionConfig(profile: OperatorProfile) {
       sourceFile: candidateFile,
       expectedCurrentSha256: originalSha256,
       expectedSourceSha256: candidateSha256,
-      requireBackup: true,
     }),
     { mode: 0o700, flag: "wx" },
   );
@@ -186,7 +167,6 @@ export async function stageGroguCompactionConfig(profile: OperatorProfile) {
       sourceFile: originalFile,
       expectedCurrentSha256: candidateSha256,
       expectedSourceSha256: originalSha256,
-      requireBackup: false,
     }),
     { mode: 0o700, flag: "wx" },
   );
@@ -201,7 +181,7 @@ export async function stageGroguCompactionConfig(profile: OperatorProfile) {
     agentId: binding.agentId,
     originalSha256,
     candidateSha256,
-    applyRequiresVerifiedBackup: true,
+    applyRequiresVerifiedBackup: false,
     gatewayRestarted: false,
     liveConfigChanged: false,
   });

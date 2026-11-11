@@ -148,6 +148,11 @@ async function runDoctorHealthFlowWithResult(
   let healthContext: DoctorHealthFlowContext | undefined;
   let preparedArchiveDiscovery: DoctorDatabasePreflight["agentDatabaseMigrationDiscovery"];
   let doctorResult: UpdatePostInstallDoctorResult = { status: "error" };
+  let originalCapture:
+    | ReturnType<
+        typeof import("../commands/doctor-original-capture-admission.js").createDoctorOriginalCaptureHook
+      >
+    | undefined;
   const recordConfigWriteRefusal = (ctx: DoctorHealthFlowContext): boolean => {
     if (!ctx.configWriteRefusal) {
       return false;
@@ -208,6 +213,13 @@ async function runDoctorHealthFlowWithResult(
       import("../commands/doctor-maintenance.js"),
       import("../commands/doctor-original-capture-admission.js"),
     ]);
+    originalCapture = createDoctorOriginalCaptureHook({
+      root,
+      runtime: repairRuntime,
+      writeAuthority,
+      rehearsalRoot: preCaptureRehearsalRoot,
+      json: options.json,
+    });
     maintenance = await measureGatewayBootstrapStep("doctor.maintenance.begin", () =>
       beginDoctorMaintenance({
         options,
@@ -216,13 +228,7 @@ async function runDoctorHealthFlowWithResult(
         runtime: repairRuntime,
         assertCurrent: writeAuthority?.assertCurrent,
         databaseGenerations: writeAuthority?.databaseGenerations,
-        beforeStateMutation: createDoctorOriginalCaptureHook({
-          root,
-          runtime: repairRuntime,
-          writeAuthority,
-          rehearsalRoot: preCaptureRehearsalRoot,
-          json: options.json,
-        }),
+        beforeStateMutation: originalCapture,
       }),
     );
     const runChecks = async () => {
@@ -687,5 +693,14 @@ async function runDoctorHealthFlowWithResult(
     }
   }
 
+  if (
+    doctorResult.status === "ok" &&
+    !doctorResult.warnings?.length &&
+    !doctorResult.failureFacts?.length &&
+    !doctorResult.maintenanceRefusal &&
+    !healthContext?.updateWarnings?.length
+  ) {
+    await originalCapture?.complete();
+  }
   outro("Doctor complete.");
 }

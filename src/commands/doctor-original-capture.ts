@@ -10,6 +10,7 @@ import {
   DoctorMaintenanceRefusalError,
   type UpdateDoctorWriteAuthority,
 } from "../infra/update-doctor-result.js";
+import type { UpdateRecoveryBaselineRef } from "../infra/update-recovery-baseline-capture.js";
 import { readUpdateRunDriver } from "../infra/update-run-driver.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -52,7 +53,7 @@ export async function preserveDoctorOriginalState(params: {
   signal: AbortSignal;
   assertCurrent: () => void;
   writeAuthority?: UpdateDoctorWriteAuthority;
-}): Promise<void> {
+}): Promise<UpdateRecoveryBaselineRef | undefined> {
   const original = params.writeAuthority?.originalRecoveryCapture;
   const runId = original?.runId ?? params.env[UPDATE_RUN_ID_ENV]?.trim();
   const updateInProgress = original !== undefined || params.env.OPENCLAW_UPDATE_IN_PROGRESS === "1";
@@ -66,7 +67,7 @@ export async function preserveDoctorOriginalState(params: {
     params.runtime.log(
       "Original update capture is unavailable. Doctor will repair current state without replacing the retained originals.",
     );
-    return;
+    return undefined;
   }
   let admission: ReturnType<typeof resolveDoctorUpdateAdmission> | undefined;
   const assertCurrent = () => {
@@ -95,7 +96,7 @@ export async function preserveDoctorOriginalState(params: {
           ? `Original update capture retained at ${retained.ref.manifestPath}.`
           : "Original update capture is unavailable. Doctor will repair current state without replacing the retained originals.",
       );
-      return;
+      return undefined;
     }
     const { captureUpdateRecoveryBaseline, retireExpiredStandaloneDoctorCaptures } =
       await import("../infra/update-recovery-baseline-capture.js");
@@ -131,7 +132,7 @@ export async function preserveDoctorOriginalState(params: {
         `This container already retained a pre-repair capture (${activationCapture}); Doctor skipped a repeated full capture. Repair-specific backups still apply.`,
       );
       await retireExpiredCaptures(activationCapture);
-      return;
+      return undefined;
     }
     const installRoot = params.root;
     if (!installRoot) {
@@ -173,6 +174,7 @@ export async function preserveDoctorOriginalState(params: {
     for (const warning of captured.diagnostics.databaseWarnings) {
       params.runtime.log(warning);
     }
+    return captured.ref;
   } catch (error) {
     assertCurrent();
     if (
@@ -194,4 +196,5 @@ export async function preserveDoctorOriginalState(params: {
       `Original state capture was unavailable: ${formatErrorMessage(error)}. Doctor will continue; inspect retained evidence manually before restoring state.`,
     );
   }
+  return undefined;
 }

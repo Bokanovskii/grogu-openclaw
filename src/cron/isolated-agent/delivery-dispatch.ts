@@ -474,9 +474,7 @@ export async function dispatchCronDelivery(
           !isSameSessionKey(deliverySessionKey, awarenessMainSessionKey))
           ? deliveryAwarenessText
           : undefined;
-      // For explicit isolated deliveries that resolve to the main session, the
-      // awareness queue is the intentional main-session record on the next turn;
-      // adding an immediate assistant mirror would make the cron text appear twice.
+      // Explicit isolated main-session deliveries use queued awareness instead of a duplicate mirror.
       const deliveryWillReachAwarenessMainSession =
         mirrorTargetsAwarenessMainSession && Boolean(targetSessionAwarenessText);
       // Implicit/default isolated delivery must not create main-session awareness.
@@ -486,7 +484,8 @@ export async function dispatchCronDelivery(
         delivery.mode !== "explicit";
       if (
         deliveryState.delivered &&
-        !requiresSessionCompletion &&
+        (!requiresSessionCompletion ||
+          !isSameSessionKey(deliverySessionKey, params.sourceSessionKey)) &&
         !deliveryWillReachAwarenessMainSession &&
         !mirrorWouldBypassIsolatedAwarenessPolicy
       ) {
@@ -503,7 +502,6 @@ export async function dispatchCronDelivery(
                   },
                 ),
               );
-        const mirrorText = resolveDirectCronTranscriptMirrorText(mirrorProjection);
         const transcriptMirror = {
           sessionKey: deliverySessionKey,
           agentId: params.agentId,
@@ -513,9 +511,8 @@ export async function dispatchCronDelivery(
                 expectedLifecycleRevision: params.lifecycleRevision,
               }
             : {}),
-          text: mirrorText,
-          // Keep cron delivery mirrors text-first: non-audio attachment names
-          // are folded into mirrorText so media does not replace delivered text.
+          text: resolveDirectCronTranscriptMirrorText(mirrorProjection),
+          // Non-audio attachment names stay in mirrorText so media cannot replace delivered text.
           mediaUrls: undefined,
           storePath: resolveSessionStorePathCore(params.cfgWithAgentDefaults.session?.store, {
             // This mirror already carries the admitted run owner. Re-parsing a

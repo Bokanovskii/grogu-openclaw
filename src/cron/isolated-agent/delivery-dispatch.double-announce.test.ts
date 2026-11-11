@@ -203,6 +203,7 @@ import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { withTempCronHome } from "../isolated-agent.test-harness.js";
 import type { CronDelivery } from "../types.js";
 import type { DispatchCronDeliveryParams } from "./delivery-dispatch-types.js";
+import { registerCurrentTargetDeliveryTests } from "./delivery-dispatch.current-target.test-support.js";
 import {
   dispatchCronDelivery,
   queueCronMessageToolDeliveryAwareness,
@@ -1638,74 +1639,7 @@ describe("dispatchCronDelivery", () => {
     },
   );
 
-  it.each([false, true])(
-    "refuses a current-target completion with archived=%s",
-    async (archived) => {
-      const params = makeBaseParams({
-        synthesizedText: "must not escape before commit",
-        sessionTarget: "current",
-      });
-      const queueSourceAwareness = vi.fn().mockResolvedValue(undefined);
-      const error = archived
-        ? "source session was archived"
-        : "current cron delivery is missing its source session generation";
-      if (archived) {
-        commitBackgroundResultToSessionMock.mockResolvedValueOnce({ ok: false, reason: error });
-        params.queueSourceSessionMessageToolAwareness = queueSourceAwareness;
-      } else {
-        params.sourceSessionGeneration = undefined;
-      }
-      const state = await dispatchCronDelivery(params);
-      expect(state).toMatchObject({
-        delivered: false,
-        deliveryAttempted: true,
-        deliveryError: error,
-      });
-      if (archived) {
-        expect(queueSourceAwareness).toHaveBeenCalledOnce();
-      } else {
-        expect(commitBackgroundResultToSessionMock).not.toHaveBeenCalled();
-      }
-      expect(deliverOutboundPayloads).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each([undefined, "telegram"])(
-    "commits current-session output with unresolved channel=%s",
-    async (channel) => {
-      const params = makeBaseParams({
-        synthesizedText: channel ? "Committed report" : "scheduled dashboard report",
-        sessionTarget: "current",
-        runStartedAt: channel ? 1_500 : 1_000,
-      });
-      const dashboardSessionKey = "agent:main:dashboard:c5557dcf-54bf-46b0-9bf2-a1f6ad1d0667";
-      if (!channel) {
-        params.job.sessionKey = dashboardSessionKey;
-        params.sourceSessionKey = dashboardSessionKey;
-      }
-      params.resolvedDelivery = {
-        ok: false,
-        channel,
-        mode: "implicit",
-        error: new Error(channel ? "Target is required" : "No configured channels detected"),
-      };
-      const state = await dispatchCronDelivery(params);
-      expect(state.disposition).toBeUndefined();
-      expect(state).toMatchObject({ delivered: !channel, deliveryAttempted: true });
-      expect(state.deliveryError).toBe(channel ? "Target is required" : undefined);
-      if (channel) {
-        expect(commitBackgroundResultToSessionMock).toHaveBeenCalledTimes(1);
-      } else {
-        expect(commitBackgroundResultToSessionMock).toHaveBeenCalledWith(
-          expect.objectContaining({
-            sessionKey: dashboardSessionKey,
-            text: "scheduled dashboard report",
-          }),
-        );
-      }
-      expect(deliverOutboundPayloads).not.toHaveBeenCalled();
-    },
-  );
+  registerCurrentTargetDeliveryTests({ mockResolvedOutboundRoute });
 
   it.each([false, true])(
     "commits the finalized current-target media projection with descendant=%s",

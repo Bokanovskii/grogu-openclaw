@@ -55,6 +55,19 @@ Fixed-command helpers that validate research checkpoints use the maintained
 `dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
 hashed chunk or an operator-created dist patch.
 
+## Active-response budgets
+
+For Grogu automations with `payload.kind: "agentTurn"`, set
+`payload.timeoutSeconds: 0` unless the owner explicitly chooses a finite
+budget. This disables the scheduler's overall watchdog, which otherwise allows
+60 minutes when an agent-turn automation has no explicit timeout. This policy
+does not apply to other payload kinds; do not change global timeout defaults or
+other OpenClaw installations.
+
+Disabling the scheduler's overall watchdog does not remove provider
+idle/no-progress safeguards, tool or settlement deadlines, or cancellation.
+Preserve those protections. Schedule cadence is not a run deadline.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:

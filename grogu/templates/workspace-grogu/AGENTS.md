@@ -1,5 +1,17 @@
 # Grogu workspace guidance
 
+## Active-response budgets
+
+- For Grogu automations with `payload.kind: "agentTurn"`, set
+  `payload.timeoutSeconds: 0` unless the owner explicitly chooses a finite
+  budget. This disables the scheduler's overall watchdog, which otherwise
+  allows 60 minutes when an agent-turn automation has no explicit timeout.
+- Do not apply this policy to other payload kinds, change global timeout
+  defaults, or change other OpenClaw installations.
+- Disabling the scheduler's overall watchdog does not remove provider
+  idle/no-progress safeguards, tool or settlement deadlines, or cancellation.
+  Preserve those protections. Schedule cadence is not a run deadline.
+
 ## Older conversation context
 
 - Treat the deterministic compaction digest as a bounded index, not the complete

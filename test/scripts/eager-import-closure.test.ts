@@ -18,7 +18,6 @@ import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { prepareCopiedSourceModules } from "./copied-source-modules.test-support.js";
 import { copyPrWrapperSources, linkPrWrapperDependencies } from "./pr-wrapper.test-support.js";
-import { readWorkflowSource } from "./workflow-source.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const itPosix = process.platform === "win32" ? it.skip : it;
@@ -44,15 +43,7 @@ it("keeps packaged scripts closed over runtime imports", () => {
 
 it("keeps the PR wrapper inventory closed over runtime imports", () => {
   const components = readFileSync(wrapperInventory, "utf8").trim().split("\n");
-  const stale = components
-    .filter((file) => {
-      if (file.startsWith(".github/workflows/")) {
-        readWorkflowSource(file);
-        return false;
-      }
-      return !existsSync(file);
-    })
-    .toSorted();
+  const stale = components.filter((file) => !existsSync(file)).toSorted();
   // scripts/pr archives all of pr-lib implicitly. Other inventory entries also
   // seed the graph: shell-launched helpers and workers are not ordinary imports.
   const wrapperFiles = readdirSync("scripts/pr-lib", { recursive: true, withFileTypes: true })

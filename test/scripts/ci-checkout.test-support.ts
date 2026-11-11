@@ -10,7 +10,7 @@ import {
   inspectManagedProcessGroup,
   terminateManagedChild,
 } from "../../scripts/lib/managed-child-process.mts";
-import { readWorkflowSource } from "./workflow-source.test-support.js";
+import { readWorkflowSource } from "./workflow-source.test-support.ts";
 
 type Step = { name?: string; run?: string; env?: Record<string, string | number> };
 const processRecord = z.object({

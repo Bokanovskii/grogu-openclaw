@@ -87,7 +87,7 @@ export async function runNative(
   profile: OperatorProfile,
   args: string[],
   receiptDirectory: string,
-  options?: { configFile?: string },
+  options?: { configFile?: string; output?: "json" | "text" },
 ): Promise<unknown> {
   let stdout: string;
   let stderr: string;
@@ -124,16 +124,20 @@ export async function runNative(
     });
   }
   let result: unknown;
-  try {
-    result = JSON.parse(stdout);
-  } catch (error) {
-    await writePrivateReceipt(receiptDirectory, `native-output-invalid-${randomUUID()}.json`, {
-      stdout,
-      stderr,
-    });
-    throw new Error("Native command returned invalid JSON; retained the private output", {
-      cause: error,
-    });
+  if (options?.output === "text") {
+    result = stdout;
+  } else {
+    try {
+      result = JSON.parse(stdout);
+    } catch (error) {
+      await writePrivateReceipt(receiptDirectory, `native-output-invalid-${randomUUID()}.json`, {
+        stdout,
+        stderr,
+      });
+      throw new Error("Native command returned invalid JSON; retained the private output", {
+        cause: error,
+      });
+    }
   }
   await writePrivateReceipt(receiptDirectory, `native-${randomUUID()}.json`, { result, stderr });
   return result;

@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CRON_FORM } from "../../test-helpers/cron.ts";
 import { updatePickers, choosePickerValue } from "../../test-helpers/select-picker.ts";
+import { THINKING_SUGGESTIONS } from "./form-suggestions.ts";
 import {
   createCronViewJob as createJob,
   findToggleByLabel,
@@ -635,7 +636,7 @@ describe("cron view editor", () => {
       createOpen: true,
       agentSuggestions: ["main"],
       modelSuggestions: ["openai/gpt-5.2"],
-      thinkingSuggestions: ["low"],
+      thinkingSuggestions: THINKING_SUGGESTIONS,
       timezoneSuggestions: ["UTC"],
       deliveryToSuggestions: ["+15551234"],
       accountSuggestions: ["default"],
@@ -663,5 +664,11 @@ describe("cron view editor", () => {
     const inheritText = model.querySelector('[role="option"][data-value=""]')?.textContent ?? "";
     expect(inheritText).toContain("Default");
     expect(inheritText).not.toContain("common.default");
+    const reasoning = getElement(container, "#cron-payload-thinking", HTMLInputElement);
+    expect(reasoning.value).toBe("");
+    expect(reasoning.placeholder).toBe("Default");
+    expect(
+      container.querySelector('#cron-thinking-suggestions option[value="ultra"]'),
+    ).not.toBeNull();
   });
 });

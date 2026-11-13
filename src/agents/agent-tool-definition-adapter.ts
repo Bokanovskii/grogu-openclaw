@@ -32,6 +32,7 @@ import {
 } from "./code-mode-control-tools.js";
 import { sanitizeForConsole } from "./console-sanitize.js";
 import type { ClientToolDefinition } from "./embedded-agent-runner/run/params.js";
+import { buildToolLifecycleErrorResult } from "./embedded-agent-tool-results.js";
 import { projectAgentToolDefinition } from "./prepared-tool-surface.js";
 import type { AgentTool as AnyAgentTool, AgentToolResult } from "./runtime/index.js";
 import {
@@ -219,9 +220,10 @@ function normalizeToolExecutionResult(params: {
 function buildToolExecutionErrorResult(params: {
   toolName: string;
   message: string;
+  error: unknown;
 }): AgentToolResult<unknown> {
   return jsonResult({
-    status: "error",
+    ...buildToolLifecycleErrorResult(params.error).details,
     tool: params.toolName,
     error: params.message,
   });
@@ -261,6 +263,7 @@ async function executeAdaptedToolOperation(params: {
     const result = buildToolExecutionErrorResult({
       toolName: params.normalizedToolName,
       message: described.message,
+      error: err,
     });
     // Error presentation must preserve private execution and content provenance.
     return typeof err === "object" && err !== null
@@ -612,6 +615,7 @@ export function toClientToolDefinitions(
             return buildToolExecutionErrorResult({
               toolName: func.name,
               message: err.message,
+              error: err,
             });
           }
           throw err;

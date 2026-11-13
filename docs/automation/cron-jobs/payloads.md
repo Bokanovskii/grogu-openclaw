@@ -49,6 +49,12 @@ The weekly Skill Workshop curator (declaration key `skill-collection-review:<age
 <ParamField path="--clear-thinking" type="boolean">
   On `automations edit`, removes the per-job thinking override. Cannot combine with `--thinking`.
 </ParamField>
+
+In the Control UI, a blank **Reasoning** field shows **Default** and stores no
+per-job override. Normal automation reasoning precedence applies, including
+saved session preferences and configured agent defaults; it does not select Low.
+To override that inheritance, enter a supported level such as `ultra`.
+
 <ParamField path="--light-context" type="boolean">
   Skip workspace bootstrap file injection.
 </ParamField>
@@ -259,6 +265,11 @@ The script may return an object with these optional fields:
 - `nextCheck`: A duration such as `"15m"`. It is valid only for jobs with pacing enabled and uses the same pacing clamp as agent-turn proposals.
 
 Throws, timeouts, exhausted tool budgets, invalid results, and `nextCheck` without pacing are normal automation run errors: they enter run history, backoff, and failure-alert handling without persisting returned state.
+
+A truncated returned or logged JSON result is also an `output_limit_exceeded`
+error, not an empty successful completion. The result and diagnostic output
+share the owning agent's Code Mode `maxOutputBytes` budget; return a smaller
+complete result. This does not undo tool actions already performed by the script.
 
 Plugin reloads invalidate cached script preparation. If a plugin retires during setup,
 OpenClaw refreshes the tools once before starting the script, within the original

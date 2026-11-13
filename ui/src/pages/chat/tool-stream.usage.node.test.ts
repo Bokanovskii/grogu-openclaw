@@ -60,12 +60,26 @@ describe("app-tool-stream run usage", () => {
 
   it("accepts a newer corrected count but ignores older recovery usage", () => {
     const host = createHost({ chatRunId: "client-run" });
-    handleAgentEvent(host, agentEvent("client-run", 8, "usage", { outputTokens: 120 }, "main"));
+    handleAgentEvent(
+      host,
+      agentEvent(
+        "client-run",
+        8,
+        "usage",
+        { outputTokens: 100, outputTokensEstimate: 120 },
+        "main",
+      ),
+    );
+    expect(host.chatRunUsageById?.get("client-run")).toEqual({
+      outputTokens: 100,
+      outputTokensEstimate: 120,
+      seq: 8,
+    });
     handleAgentEvent(host, agentEvent("client-run", 9, "usage", { outputTokens: 115 }, "main"));
     resetToolStream(host);
     handleAgentEvent(host, agentEvent("client-run", 7, "lifecycle", { phase: "start" }, "main"));
     handleAgentEvent(host, agentEvent("client-run", 7, "usage", { outputTokens: 150 }, "main"));
-    expect(host.chatRunUsageById?.get("client-run")?.outputTokens).toBe(115);
+    expect(host.chatRunUsageById?.get("client-run")).toEqual({ outputTokens: 115, seq: 9 });
   });
 
   it("projects provider-independent system warnings into the visible session transcript", () => {
@@ -227,7 +241,7 @@ describe("app-tool-stream startup status", () => {
     };
   }
 
-  it.each(["tool", "preamble", "assistant"])(
+  it.each(["tool", "preamble", "assistant", "thinking", "usage"])(
     "keeps retry waits transient and ordered across %s progress and delayed replay",
     (kind) => {
       const host = createHost({
@@ -252,23 +266,35 @@ describe("app-tool-stream startup status", () => {
       expect(host.chatRunId).toBe("run-1");
       expect(retryLabel()).toBe(retry.data.message);
 
-      handleAgentEvent(host, {
+      if (kind === "usage") {
+        handleAgentEvent(
+          host,
+          agentEvent("run-1", 4, "usage", { outputTokens: 10, outputTokensEstimate: 15 }, "main"),
+        );
+        expect(retryLabel()).toBe(retry.data.message);
+      }
+      const progress: AgentEvent = {
         ...retry,
-        seq: 4,
+        seq: kind === "usage" ? 5 : 4,
         stream: kind === "preamble" ? "item" : kind,
         data:
           kind === "tool"
             ? { phase: "start", toolCallId: "tool-next", name: "read" }
             : kind === "preamble"
               ? { kind: "preamble", itemId: "resumed", progressText: "Continuing" }
-              : { text: "Continuing" },
-      });
+              : kind === "usage"
+                ? { outputTokens: 10, outputTokensEstimate: 15, modelProgress: true }
+                : { text: "Continuing", delta: "Continuing" },
+      };
+      handleAgentEvent(host, progress);
       handleAgentEvent(host, retry);
       expect(retryLabel()).toBeUndefined();
       expect(host.chatRunId).toBe("run-1");
 
-      handleAgentEvent(host, { ...retry, seq: 5 });
+      handleAgentEvent(host, { ...retry, seq: progress.seq + 1 });
       expect(retryLabel()).toBe(retry.data.message);
+      handleAgentEvent(host, { ...progress, seq: progress.seq + 2 });
+      expect(retryLabel()).toBeUndefined();
     },
   );
 });

@@ -148,8 +148,17 @@ describe("resolveTurnRecap", () => {
   let host: { turnRecapWatch: TurnRecapWatch | null };
   const runId = "watched-run";
   const doneRow = { lastRunId: runId, status: "done" as const, runtimeMs: 14_000 };
-  const usage = (outputTokens: number, owner = runId) =>
-    new Map([[owner, { outputTokens, seq: 1 }]]);
+  const usage = (outputTokens: number, owner = runId, outputTokensEstimate?: number) =>
+    new Map([
+      [
+        owner,
+        {
+          outputTokens,
+          ...(outputTokensEstimate !== undefined ? { outputTokensEstimate } : {}),
+          seq: 1,
+        },
+      ],
+    ]);
   const resolve = (params: Omit<Parameters<typeof resolveTurnRecap>[1], "sessionKey"> = {}) =>
     resolveTurnRecap(host, { sessionKey: SESSION, ...params });
   const watch = () => resolve({ indicator: { runId } });
@@ -172,12 +181,13 @@ describe("resolveTurnRecap", () => {
 
   it("reconciles usage arriving after the first completed recap", () => {
     watch();
-    expect(resolve({ row: doneRow, usageByRun: usage(690) })).toEqual({
+    expect(resolve({ row: doneRow, usageByRun: usage(690, runId, 695) })).toEqual({
       runId,
       runtimeMs: 14_000,
-      outputTokens: 690,
+      outputTokens: 695,
+      outputTokensEstimated: true,
     });
-    expect(resolve({ row: doneRow, usageByRun: usage(695) })).toEqual({
+    expect(resolve({ usageByRun: usage(695) })).toEqual({
       runId,
       runtimeMs: 14_000,
       outputTokens: 695,
@@ -234,11 +244,18 @@ describe("resolveTurnRecap", () => {
     it("reports the whole request: the wait and every run's tokens", () => {
       const usageByRun = new Map([
         ["handoff-run", { outputTokens: 4_100, seq: 1 }],
-        [runId, { outputTokens: 256, seq: 2 }],
+        [runId, { outputTokens: 200, outputTokensEstimate: 256, seq: 2 }],
       ]);
       resolve({ indicator: resumed });
       // 97s from the request to the end, though the last run alone took 14s.
       expect(resolve({ row: { ...doneRow, endedAt: 98_000 }, usageByRun })).toEqual({
+        runId,
+        runtimeMs: 97_000,
+        outputTokens: 4_356,
+        outputTokensEstimated: true,
+      });
+      usageByRun.set(runId, { outputTokens: 256, seq: 3 });
+      expect(resolve({ usageByRun })).toEqual({
         runId,
         runtimeMs: 97_000,
         outputTokens: 4_356,

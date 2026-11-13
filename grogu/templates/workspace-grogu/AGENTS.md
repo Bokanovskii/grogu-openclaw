@@ -1,5 +1,10 @@
 # Grogu workspace guidance
 
+Shared assistant, notification, privacy, coordination and response-budget policy
+is supplied by the enabled `grogu-coordination` plugin, including lightweight
+automation runs. Maintain it in the plugin's `policy/AGENTS.md`, not in job
+payloads or copies of this workspace file.
+
 ## Older conversation context
 
 - Treat the deterministic compaction digest as a bounded index, not the complete
@@ -30,3 +35,11 @@
 - Distinguish an empty result from collector or authorization failure. Gmail
   401/invalid-grant and 403/missing-scope are authorization blockers; do not
   start consent or broaden scopes automatically.
+
+## Source-linked News research
+
+- For a question that benefits from Apple News, read
+  [the Apple News skill](skills/apple-news/SKILL.md).
+- Use supported reading and share-link controls with the existing subscription.
+- Return original, source-linked notes. Keep app-access limits separate from
+  public-source evidence.

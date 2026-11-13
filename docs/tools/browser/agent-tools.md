@@ -11,6 +11,10 @@ The agent gets **one tool** for browser automation:
 
 - `browser` - doctor/status/start/stop/tabs/open/focus/close/snapshot/screenshot/navigate/act/requests/errors/text/emulate
 
+For research, prefer bounded visible text and DOM/accessibility snapshots over
+screenshots or full HTML dumps. A snapshot is a text-based page tree, not an image.
+Use screenshots for appearance, images/canvas, or controls not exposed in snapshots.
+
 How it maps:
 
 - `browser snapshot` returns a stable UI tree (AI or ARIA).

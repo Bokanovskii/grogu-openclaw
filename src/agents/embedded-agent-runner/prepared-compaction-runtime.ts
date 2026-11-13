@@ -301,7 +301,7 @@ export async function buildPreparedCompactionRuntime(
             sessionPermissionPolicy,
             requireWorkspaceOnly: params.requireWorkspaceOnly,
             clientCaps: params.clientCaps,
-            pinnedWidgetAuthoring: params.pinnedWidgetAuthoring,
+            inlineWidgetAuthoring: params.inlineWidgetAuthoring,
             oneShotCliRun: params.oneShotCliRun,
             allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
             webSearchEnabled: params.toolOverrides?.webSearch !== false,

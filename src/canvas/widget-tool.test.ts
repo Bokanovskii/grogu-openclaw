@@ -552,6 +552,50 @@ describe("show_widget", () => {
     ).rejects.toThrow("capabilities require pin=true");
   });
 
+  it.each([
+    // The note's delivery, not terminate, ends the turn; see widget-tool.agent-loop.test.ts.
+    { grantState: "granted", terminate: undefined, sourceReply: { text: "Rain after 3pm." } },
+    { grantState: "pending", terminate: undefined, sourceReply: undefined },
+    { grantState: "rejected", terminate: undefined, sourceReply: undefined },
+  ] as const)(
+    "offers a final pinned closing note only when grants need no follow-up ($grantState)",
+    async ({ grantState, terminate, sourceReply }) => {
+      const callGateway: InProcessGatewayCaller = async <T>(
+        _method: string,
+        params: Record<string, unknown>,
+      ) =>
+        ({
+          resolvedWidgetName: params.name,
+          widgets: [{ name: params.name, tabId: "main", grantState }],
+        }) as T;
+      const tool = createShowWidgetTool({
+        agentSessionKey: "agent:main:final-pin",
+        callGateway,
+        inlineClientAvailable: false,
+      });
+
+      const result = await tool.execute("final-pin", {
+        title: "Weather",
+        widget_code: "<p>weather</p>",
+        pin: true,
+        final: true,
+        closing_text: "Rain after 3pm.",
+        capabilities: { netOrigins: ["https://api.open-meteo.com"] },
+      });
+
+      expect(result.terminate).toBe(terminate);
+      expect((result.details as { sourceReply?: unknown }).sourceReply).toEqual(sourceReply);
+    },
+  );
+
+  it("rejects a closing note on a widget that does not end the turn", async () => {
+    const tool = createShowWidgetTool({ stateDir: await createStateDir(), sessionId: "note" });
+
+    await expect(
+      tool.execute("note", { title: "Note", widget_code: "<p>x</p>", closing_text: "Done." }),
+    ).rejects.toThrow("closing_text requires final=true");
+  });
+
   it("wraps SVG widgets with the stable result and sandbox contracts", async () => {
     const stateDir = await createStateDir();
     const { viewId, url, sandbox, text } = await executeWidget({

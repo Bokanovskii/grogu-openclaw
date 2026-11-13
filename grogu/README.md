@@ -55,6 +55,54 @@ Fixed-command helpers that validate research checkpoints use the maintained
 `dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
 hashed chunk or an operator-created dist patch.
 
+## Thinking defaults
+
+Grogu's Sparky utility completions inherit the agent, model and global thinking
+defaults from their admitted native configuration, unless a caller explicitly
+selects an effort. Activity recaps no longer force thinking off. Other providers
+and installations without a private Grogu profile keep their existing behavior.
+
+`agents.defaults.thinkingDefault: "ultra"` selects the provider's highest
+advertised effort, not a literal provider-native `ultra` value. For a model
+advertising only none, low, medium and high, Ultra uses high. Explicit request,
+session, model, agent and job choices remain in force.
+
+## Active-response budgets
+
+Grogu uses `agents.defaults.timeoutSeconds: 0` and
+`agents.defaults.subagents.runTimeoutSeconds: 0` to remove overall chat and
+child-session execution caps without reducing Sparky/Ultra. Model-backed
+automations also need an explicit `payload.timeoutSeconds: 0`; omitting it
+retains OpenClaw's separate 60-minute automation watchdog. The
+[shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#preserve-privacy-authority-and-progress)
+requires this when Grogu creates or edits a model-backed automation, unless the
+owner requests a finite budget. Other OpenClaw installations and clients keep
+their existing defaults.
+
+These settings leave provider idle/no-model-progress protection, tool deadlines,
+settlement deadlines and cancellation intact. They apply to newly admitted runs;
+changing defaults does not rescue a run admitted with an earlier deadline.
+
+Administrative payload edits can retire a job's recorded local-origin provenance.
+For a job that requires that access, re-save its unchanged tool cap through a
+fresh authenticated local creator turn. Do not restore provenance directly from
+a backup or manufacture requester identity.
+When [Tool Search](../docs/tools/tool-search.md#structured-controls) is active,
+discover and invoke the scheduler through its catalog; a failed direct call to
+the deferred tool name does not establish that the capability is unavailable.
+
+## Owner notification content
+
+The [shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#send-useful-updates-not-operational-commentary)
+keeps deduplication decisions, suppressed topics and routine check commentary
+out of owner messages, including when a genuine alert is being sent. The
+[coordination plugin](plugins/grogu-coordination/README.md) supplies that policy
+through the existing stable system-context hook, including lightweight jobs
+that skip workspace bootstrap. Verify the installed cutover before removing
+temporary saved-payload copies. Already-admitted turns keep their prior inputs.
+Preserve source-backed findings, useful links and exact `NO_REPLY` on quiet
+unattended scans; explicit owner requests still receive useful answers.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:
@@ -230,6 +278,76 @@ Production app audience avoids testing-mode seven-day expiry, but refresh
 tokens can still be revoked; a low-frequency health check must distinguish
 missing scope, revocation, and transient network/provider failure.
 
+## Local microphone input
+
+The [local voice plugin](plugins/grogu-local-voice/README.md) uses an installed
+whisper.cpp executable and model through the existing transcription relay.
+Tap the microphone, speak, stop, edit the transcript, and send it to the same chat.
+Sparky remains the reasoning model. The plugin does not upload audio or download a model.
+The operator must approve its live installation and configuration after source review.
+
+The [Apple News skill](templates/workspace-grogu/skills/apple-news/SKILL.md) guides
+bounded research through normal app controls and the existing subscription.
+It distinguishes articles read in News from public-source evidence and blocked app access.
+It creates original source-linked notes, not an article archive.
+
+## Prepare a separate Grogu browser app
+
+Chrome owns profile creation, web-app installation, and app shortcuts.
+Keep the existing Safari `Grogu.app` and Safari as the OS default browser.
+Use Chrome's maintained app owner instead of building a replacement launcher.
+
+A Chrome profile keeps its browser data separate from other profiles.
+Use a new Grogu-only profile without Google sign-in or synchronization.
+Do not attach automation to a personal Chrome profile or copy browser credentials.
+Do not register the app to start at login.
+
+Source approval does not authorize profile creation, app installation, or
+persistent account access. Before those actions, obtain one confirmation for
+creating the unsigned-in Grogu profile and installing a separate Grogu app.
+If the approved UI tool cannot reach that profile without opening a personal
+profile, stop and have the owner expose the profile chooser.
+Do not bypass the tool with shell launch, focus commands, or browser debugging.
+
+After that confirmation, use the supported Chrome UI:
+
+1. Create a new profile through Chrome's profile chooser.
+2. Name the profile `Grogu` without enabling Google sign-in or synchronization.
+3. In that profile, open the same credential-free Control UI URL as the old app.
+4. Use Chrome's web-app installation UI to install the app.
+5. If an app shortcut is needed, open `chrome://apps` in that profile.
+6. Select **Create shortcut** for the installed app.
+7. Make sure that the shortcut opens a separate window in the Grogu profile.
+
+If Chrome offers a name field, use `Grogu Chrome`.
+Otherwise, keep Chrome's installed name, such as `OpenClaw Control`, and record that name.
+Do not edit generated app metadata or replace the Safari app to force a name.
+
+A website shortcut alone does not prove standalone app installation.
+If Chrome does not offer web-app installation for that URL, report the missing
+action instead of creating a script wrapper. Sign in or pair with Grogu through
+its normal flow only after account-access approval.
+Keep that authorization separate from Google account sign-in.
+
+Make sure that relaunch reaches the same Gateway and preserves the dedicated
+profile. Make sure that external links follow the intended browser behavior.
+Chrome can keep external links in Chrome even when Safari is the OS default.
+Rollback uses the unchanged Safari app. Do not delete profiles with owner data.
+Browser choice does not change the reasoning model. Sparky remains unchanged.
+
+Compare scrolling before selecting a browser workaround. Use the same served
+build, conversation, widget, and window size in Safari and dedicated Chrome.
+Test inner widget scrolling, outer transcript scrolling, resize, focus changes,
+returning from a hidden window, and relaunch. Record exact disappearing or
+returning content before changing overflow, resize, or visibility code.
+A UI tool's refusal to scroll is a tool limit, not proof of a browser defect.
+Do not claim Chromium-only support from a Chromium test lane.
+
+See [Chrome's profile guide](https://support.google.com/chrome/answer/2364824),
+[web-app guide](https://support.google.com/chrome/answer/9658361),
+[website-shortcut guide](https://support.google.com/chrome/answer/15085120),
+and the [Control UI guide](../docs/web/control-ui.md).
+
 ## Taking in upstream releases
 
 1. `grogu-upstream.yml` runs daily (or on dispatch) in the private repository.
@@ -271,3 +389,9 @@ missing scope, revocation, and transient network/provider failure.
   answer (`REQUIRED_CHANNEL_QUEUE_MODES` in `policy.ts`).
 - Maintenance only targets the canonical loopback Gateway and never prints
   credentials (`operator.ts`).
+- Sparky requests keep at most two images without rewriting conversation history.
+  Images attached to the latest user message take priority; remaining slots keep
+  the newest historical or tool images. Older images are replaced with an
+  explicit omission notice in the request only. Browser research can therefore
+  continue after multiple screenshots. Attaching more than two images to one
+  user message still returns an actionable validation error.

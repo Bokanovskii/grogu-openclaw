@@ -18,6 +18,14 @@ Physical integrity admission remains valid independently of canonical readiness.
 The schema 25 migration seeds every existing node before admission; see
 [canonical writer validation](/reference/database-schemas/agent-schema-history#canonical-writer-validation).
 
+Canonical certification retries an expired, unaccepted commit checkpoint only
+after its worker confirms a rolled-back transaction and a current, open native
+connection. The next batch rejoins the existing writer queues and rechecks live
+authority. Startup remains pending until certification finishes. Owner revocation,
+corruption, and uncertain rollback or cleanup retain their failure and drain
+contracts; they are not retried. Schemas, stored bytes, and update behavior are
+unchanged.
+
 Runtime database access belongs in workers. The Gateway main thread owns live
 projections, caches, and caller authority; it awaits prepared facts and installs
 committed results. Synchronous boot admission, migrations, Doctor/CLI one-shots,

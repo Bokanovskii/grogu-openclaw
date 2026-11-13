@@ -17,7 +17,10 @@ import {
 } from "../../state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import type { SqliteSessionReclamationAdmissionDiagnostics } from "./session-accessor.sqlite-contract.js";
-import { revokeSqliteReclamationCommit } from "./session-accessor.sqlite-reclamation-commit.js";
+import {
+  revokeSqliteReclamationCommit,
+  SqliteReclamationCommitExpiredError,
+} from "./session-accessor.sqlite-reclamation-commit.js";
 import {
   observeSqliteMutationWorkerEnd,
   terminateSqliteMutationWorker,
@@ -108,7 +111,7 @@ export type SqliteMutationWorkerValidationOwner =
     };
 
 export type SqliteMutationWorkerMessage<Result> =
-  | { type: "refused"; operationId: number; settled: true }
+  | { type: "refused"; operationId: number; settled: true; commitExpired?: true }
   | { type: "commit-request"; operationId: number }
   | { type: "admission-request" | "admission-release"; operationId: number; admissionId: number }
   | {
@@ -121,7 +124,10 @@ export type SqliteMutationWorkerMessage<Result> =
 
 /** Transport settlement is separate from the caller's refused authority. */
 export class SqliteMutationWorkerSettledRefusal extends Error {
-  constructor(cause: Error) {
+  constructor(
+    cause: Error,
+    readonly commitExpired = false,
+  ) {
     super(cause.message, { cause });
   }
 }
@@ -200,6 +206,7 @@ export function runSqliteMutationWorkerRequest<Result>(params: {
     let admissionId = 0;
     let completed = false;
     let settledRefusal = false;
+    let commitExpired = false;
     const admissionTasks: Promise<void>[] = [];
     const terminate = () => {
       void terminateSqliteMutationWorker(transport).catch((failure: unknown) => {
@@ -241,7 +248,17 @@ export function runSqliteMutationWorkerRequest<Result>(params: {
         .then(() => {
           const failure = workerError ?? transportError ?? params.getFailure?.();
           if (failure) {
-            reject(settledRefusal ? new SqliteMutationWorkerSettledRefusal(failure) : failure);
+            reject(
+              settledRefusal
+                ? new SqliteMutationWorkerSettledRefusal(
+                    failure,
+                    commitExpired &&
+                      failure instanceof SqliteReclamationCommitExpiredError &&
+                      !transportError &&
+                      !params.getFailure?.(),
+                  )
+                : failure,
+            );
           } else if (code !== undefined && code !== 0) {
             reject(new Error(`SQLite transcript archive worker exited with code ${code}`));
           } else if (result === undefined) {
@@ -359,6 +376,7 @@ export function runSqliteMutationWorkerRequest<Result>(params: {
           return;
         }
         settledRefusal = true;
+        commitExpired = message.commitExpired === true;
         workerError ??= new Error("SQLite reclamation Worker request was refused");
         finish();
       } else if (message.type === "reclaimed") {

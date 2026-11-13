@@ -217,6 +217,8 @@ export class ToolSearchRuntime {
   private readonly pluginRuntimeRefresh = captureAgentPluginRuntimeRefresh();
   private callSequence = 0;
   private readonly terminalTargetBatchByParent = new Map<string, boolean>();
+  // Accepted results of targets whose author declared `canDeliverSourceReply`.
+  private readonly sourceReplyCapableResults = new WeakSet<object>();
   private readonly networkInvocations = new Map<string, { active: number; observed: boolean }>();
 
   constructor(
@@ -354,6 +356,11 @@ export class ToolSearchRuntime {
         : "");
     const terminal = this.terminalTargetBatchByParent.get(parent) === true;
     return this.terminalTargetBatchByParent.delete(parent) && terminal;
+  }
+
+  /** Whether this accepted target result came from a tool that may deliver its own reply. */
+  isSourceReplyCapableResult(result: object): boolean {
+    return this.sourceReplyCapableResults.has(result);
   }
 
   isReplaySafeExactId = (id: string): boolean => {
@@ -537,6 +544,9 @@ export class ToolSearchRuntime {
           )
         : await runExecution();
       acceptedResult = await acceptResultBeforeProjection(result);
+      if ("canDeliverSourceReply" in entry.tool && entry.tool.canDeliverSourceReply === true) {
+        this.sourceReplyCapableResults.add(acceptedResult);
+      }
       if (options?.parentToolCallId) {
         this.terminalTargetBatchByParent.set(
           options.parentToolCallId,

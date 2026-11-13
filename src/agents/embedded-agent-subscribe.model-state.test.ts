@@ -17,7 +17,7 @@ import { createSubscribedSessionHarness as subscribe } from "./embedded-agent-su
 import { SessionManager } from "./sessions/session-manager.js";
 import { recordSessionModelUsage } from "./sessions/session-model-usage.js";
 import { makeAssistantMessageFixture } from "./test-helpers/assistant-message-fixtures.js";
-import { makeZeroUsageSnapshot } from "./usage.js";
+import { makeZeroUsageSnapshot, type NormalizedUsage } from "./usage.js";
 
 function createSubscribedSessionHarness(params: Parameters<typeof subscribe>[0]) {
   const harness = subscribe(params);
@@ -37,6 +37,8 @@ type UsageCall = {
   usage: StreamUsage;
   streamedUsage?: StreamUsage;
   text?: string;
+  streamedText?: readonly string[];
+  streamedToolArguments?: readonly string[];
   asyncTool?: boolean;
   stopReason?: "stop" | "error" | "aborted";
 };
@@ -118,7 +120,7 @@ async function runUsageCalls(
     undefined,
     () => {
       const call = expectDefined(calls[callIndex++], "Expected a configured model call");
-      const text = call.text ?? "Reply.";
+      const text = call.text ?? call.streamedText?.join("") ?? "Reply.";
       const asyncCall: ToolCall = {
         type: "toolCall",
         id: "lookup-1",
@@ -142,11 +144,33 @@ async function runUsageCalls(
       const stream = new AssistantMessageEventStream();
       stream.push({ type: "start", partial: { ...message, content: [], usage: makeUsage() } });
       if (call.asyncTool) {
+        for (const delta of call.streamedToolArguments ?? []) {
+          stream.push({
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta,
+            partial: { ...message, content: [asyncCall], usage: makeUsage() },
+          });
+        }
         stream.push({
           type: "toolcall_end",
           contentIndex: 0,
           toolCall: asyncCall,
           partial: { ...message, content: [asyncCall] },
+        });
+      }
+      let streamedText = "";
+      for (const delta of call.streamedText ?? []) {
+        streamedText += delta;
+        stream.push({
+          type: "text_delta",
+          contentIndex: call.asyncTool ? 1 : 0,
+          delta,
+          partial: {
+            ...message,
+            content: [...(call.asyncTool ? [asyncCall] : []), { type: "text", text: streamedText }],
+            usage: makeUsage(),
+          },
         });
       }
       if (call.streamedUsage) {
@@ -171,6 +195,81 @@ async function runUsageCalls(
 }
 
 describe("subscribeEmbeddedAgentSession model state", () => {
+  it("publishes live estimates across async fragments without billing them", async () => {
+    const onAgentEvent = vi.fn();
+    const harness = createSubscribedSessionHarness({
+      runId: "streaming-output-usage",
+      lifecycleGeneration: agentEvents.getAgentEventLifecycleGeneration(),
+      onAgentEvent,
+      sessionExtras: { sessionManager: SessionManager.inMemory() },
+    });
+    const usageEvents = () =>
+      onAgentEvent.mock.calls.map(([event]) => event).filter((event) => event.stream === "usage");
+    await runUsageCalls(
+      harness,
+      [
+        {
+          asyncTool: true,
+          streamedToolArguments: ["{", "}"],
+          streamedText: ["a", "b", "cd", "efgh"],
+          usage: makeUsage({ input: 100, output: 12, cost: 0.125, billed: true }),
+        },
+        {
+          streamedText: ["jklm", "nopq"],
+          usage: makeUsage({ input: 200, output: 8, cost: 0.25, billed: true }),
+        },
+      ],
+      (event) => {
+        if (event.type !== "message_update") {
+          return;
+        }
+        const update = event.assistantMessageEvent;
+        if (update.type === "toolcall_delta") {
+          expect(usageEvents().at(-1)?.data).toEqual({
+            outputTokens: 0,
+            outputTokensEstimate: 1,
+            modelProgress: true,
+          });
+          expect(harness.subscription.getUsageTotals()).toBeUndefined();
+          expect(harness.subscription.hasSuccessfulModelResponse()).toBe(false);
+        }
+        if (update.type === "text_delta" && update.delta === "cd") {
+          recordSessionModelUsage(
+            harness.session.sessionManager,
+            makeUsage({ input: 10, output: 3, cost: 0.05 }),
+          );
+          expect(harness.subscription.getUsageTotals()?.output).toBe(3);
+        }
+      },
+    );
+    expect(usageEvents()).toEqual([
+      { stream: "usage", data: { outputTokens: 0, outputTokensEstimate: 1, modelProgress: true } },
+      { stream: "usage", data: { outputTokens: 0, outputTokensEstimate: 2, modelProgress: true } },
+      { stream: "usage", data: { outputTokens: 3, outputTokensEstimate: 5 } },
+      { stream: "usage", data: { outputTokens: 3, outputTokensEstimate: 6, modelProgress: true } },
+      { stream: "usage", data: { outputTokens: 15 } },
+      {
+        stream: "usage",
+        data: { outputTokens: 15, outputTokensEstimate: 16, modelProgress: true },
+      },
+      {
+        stream: "usage",
+        data: { outputTokens: 15, outputTokensEstimate: 17, modelProgress: true },
+      },
+      { stream: "usage", data: { outputTokens: 23 } },
+    ]);
+    expect(harness.subscription.getUsageTotals()).toMatchObject({
+      input: 310,
+      output: 23,
+      cost: { total: 0.425 },
+    });
+    expect(harness.subscription.getLastAssistantUsage()).toMatchObject({
+      input: 200,
+      output: 8,
+      cost: { total: 0.25, totalOrigin: "provider-billed" },
+    });
+  });
+
   it("does not count a provider refusal as recovered model progress", () => {
     const recovery = createEmbeddedRunContextRecoveryState();
     recovery.overflowCompactionAttempts = 2;
@@ -425,15 +524,36 @@ describe("subscribeEmbeddedAgentSession model state", () => {
     },
     {
       name: "explicitly unknown context",
-      call: { usage: makeUsage({ contextUsage: { state: "unavailable" } }) },
+      call: {
+        streamedText: ["a".repeat(400)],
+        usage: makeUsage({ contextUsage: { state: "unavailable" } }),
+      },
       expected: {
         input: 0,
         output: 0,
         total: 0,
         contextUsage: { state: "unavailable" },
         cost: { total: 0 },
-      },
+      } satisfies NormalizedUsage,
       contextTokens: undefined,
+    },
+    {
+      name: "coherent zero output receipt",
+      call: {
+        streamedText: ["a".repeat(400)],
+        usage: makeUsage({
+          input: 7,
+          contextUsage: { state: "available", promptTokens: 7, totalTokens: 7 },
+        }),
+      },
+      expected: {
+        input: 7,
+        output: 0,
+        total: 7,
+        contextUsage: { state: "available", promptTokens: 7, totalTokens: 7 },
+        cost: { total: 0 },
+      } satisfies NormalizedUsage,
+      contextTokens: 7,
     },
   ])(
     "settles $name through the core event producer",
@@ -462,11 +582,14 @@ describe("subscribeEmbeddedAgentSession model state", () => {
       const { total, cost, ...tokens } = expected;
       expect(completed?.usage).toMatchObject({ ...tokens, totalTokens: total, cost });
       if (contextTokens !== undefined) {
-        expect(subscription.getUsageTotals()).toMatchObject({
+        const aggregateExpected: NormalizedUsage = {
           ...tokens,
           total,
           cost: { total: cost.total },
-        });
+        };
+        delete aggregateExpected.contextUsage;
+        aggregateExpected.output ||= undefined;
+        expect(subscription.getUsageTotals()).toMatchObject(aggregateExpected);
       }
       expect(subscription.getLastAssistantUsage()).toMatchObject(expected);
       expect(subscription.getCurrentAttemptAssistant()).toEqual(completed);
@@ -479,9 +602,19 @@ describe("subscribeEmbeddedAgentSession model state", () => {
       ]);
       expect(
         onAgentEvent.mock.calls.map(([event]) => event).filter((event) => event.stream === "usage"),
-      ).toEqual(
-        expected.output ? [{ stream: "usage", data: { outputTokens: expected.output } }] : [],
-      );
+      ).toEqual([
+        ...(call.streamedText
+          ? [
+              {
+                stream: "usage",
+                data: { outputTokens: 0, outputTokensEstimate: 100, modelProgress: true },
+              },
+            ]
+          : []),
+        ...(expected.output || (call.streamedText && contextTokens !== undefined)
+          ? [{ stream: "usage", data: { outputTokens: expected.output } }]
+          : []),
+      ]);
       expectDefined(terminal, "Expected assistant completion").usage.input = 999;
       const snapshot = expectDefined(
         subscription.getCurrentAttemptAssistant(),
@@ -507,7 +640,7 @@ describe("subscribeEmbeddedAgentSession model state", () => {
     const usage = makeUsage({ cost: costTotal, billed: true });
     const completed = await runUsageCalls(harness, [
       { usage: makeUsage({ input: 100, output: 20, cost: priorCost }) },
-      { usage },
+      { usage, streamedText: ["abcd"] },
     ]);
     expect(subscription.getUsageTotals()?.cost).toEqual({
       total: priorCost + costTotal,
@@ -530,7 +663,11 @@ describe("subscribeEmbeddedAgentSession model state", () => {
       onAgentEvent.mock.calls.map(([event]) => event).filter((event) => event.stream === "usage"),
     ).toEqual([
       { stream: "usage", data: { outputTokens: 20 } },
-      { stream: "usage", data: { outputTokens: 22 } },
+      {
+        stream: "usage",
+        data: { outputTokens: 20, outputTokensEstimate: 21, modelProgress: true },
+      },
+      { stream: "usage", data: { outputTokens: 22, outputTokensEstimate: 23 } },
     ]);
 
     subscription.unsubscribe();

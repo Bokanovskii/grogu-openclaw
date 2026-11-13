@@ -68,6 +68,142 @@
   }
 }
 
+/* Grogu (fork): a pixel sprite of Grogu replaces the claw. Each pose is a full
+   frame (chat-grogu-eater.ts); only one shows at a time. At rest he watches the
+   stream and blinks; while reasoning streams he reaches for a crumb of it,
+   bites, and chews. The look pose is the static and reduced-motion frame. */
+.chat-grogu-eater {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--muted);
+}
+
+/* Whole-pixel 2x scale keeps the pixel art crisp. */
+.chat-grogu-eater__sprite {
+  display: block;
+  width: 44px;
+  height: 28px;
+}
+
+/* The sprite faces the inline end, where the reasoning stream is. */
+.chat-grogu-eater:dir(rtl) .chat-grogu-eater__sprite {
+  transform: scaleX(-1);
+}
+
+.chat-grogu-eater__pose {
+  opacity: 0;
+  /* Keep timing independent of the pose's name; minifiers discard unnamed shorthands. */
+  animation-duration: 4.2s;
+  animation-timing-function: step-end;
+  animation-iteration-count: infinite;
+}
+
+.chat-grogu-eater__pose--look {
+  opacity: 1;
+  animation-name: chatGroguIdleLook;
+}
+
+.chat-grogu-eater__pose--blink {
+  animation-name: chatGroguIdleBlink;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose {
+  animation-duration: 1.6s;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose--look {
+  animation-name: chatGroguEatLook;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose--blink {
+  animation-name: none;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose--reach {
+  animation-name: chatGroguEatReach;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose--bite {
+  animation-name: chatGroguEatBite;
+}
+
+.chat-grogu-eater--eating .chat-grogu-eater__pose--chew {
+  animation-name: chatGroguEatChew;
+}
+
+@keyframes chatGroguIdleLook {
+  0%,
+  96% {
+    opacity: 1;
+  }
+
+  92% {
+    opacity: 0;
+  }
+}
+
+@keyframes chatGroguIdleBlink {
+  0%,
+  96% {
+    opacity: 0;
+  }
+
+  92% {
+    opacity: 1;
+  }
+}
+
+/* look 0-18%, reach 18-40%, bite 40-58%, chew 58-72%, look 72-80%, chew 80-90%,
+   look 90-100%: one grab, then two chews before the next. */
+@keyframes chatGroguEatLook {
+  0%,
+  72%,
+  90% {
+    opacity: 1;
+  }
+
+  18%,
+  80% {
+    opacity: 0;
+  }
+}
+
+@keyframes chatGroguEatReach {
+  0%,
+  40% {
+    opacity: 0;
+  }
+
+  18% {
+    opacity: 1;
+  }
+}
+
+@keyframes chatGroguEatBite {
+  0%,
+  58% {
+    opacity: 0;
+  }
+
+  40% {
+    opacity: 1;
+  }
+}
+
+@keyframes chatGroguEatChew {
+  0%,
+  72%,
+  90% {
+    opacity: 0;
+  }
+
+  58%,
+  80% {
+    opacity: 1;
+  }
+}
+
 .chat-working-indicator__status {
   display: inline-flex;
   flex-wrap: wrap;
@@ -781,7 +917,8 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
   .chat-reading-indicator--brand,
   .chat-reading-indicator--neutral > span,
   .chat-reading-indicator svg,
-  .chat-reading-indicator svg .claw-icon__jaw {
+  .chat-reading-indicator svg .claw-icon__jaw,
+  .chat-grogu-eater .chat-grogu-eater__pose {
     animation: none;
   }
 
@@ -790,10 +927,17 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
   }
 }
 
-/* Live reasoning: one line whose newest text stays visible as older text slides out left. */
-.chat-working-indicator:has(.chat-working-indicator__reasoning) {
+/* Live reasoning: one line between the eater and the status. The newest text
+   stays beside the status at the end while older text slides toward the eater
+   at the start and fades into it; elapsed time and token counts keep the end. */
+.chat-working-indicator--reasoning {
   display: flex;
   width: 100%;
+}
+
+.chat-working-indicator--reasoning > .chat-working-indicator__status {
+  flex: 0 1 auto;
+  justify-content: flex-end;
 }
 
 .chat-working-indicator__reasoning {
@@ -807,6 +951,20 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
   font-style: italic;
   white-space: nowrap;
   mask-image: linear-gradient(to right, transparent, black 3rem);
+}
+
+.chat-working-indicator__reasoning:dir(rtl) {
+  mask-image: linear-gradient(to left, transparent, black 3rem);
+}
+
+/* Grogu takes the stream from his hand, so it fades only just before him. */
+.chat-grogu-eater + .chat-working-indicator__reasoning {
+  margin-inline-start: calc(-1 * var(--space-1, 4px));
+  mask-image: linear-gradient(to right, transparent, black 1rem);
+}
+
+.chat-grogu-eater + .chat-working-indicator__reasoning:dir(rtl) {
+  mask-image: linear-gradient(to left, transparent, black 1rem);
 }
 
 .chat-working-indicator__reasoning-text {

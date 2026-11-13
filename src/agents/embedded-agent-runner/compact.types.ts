@@ -16,7 +16,7 @@ export type CompactEmbeddedAgentSessionParams = Pick<
   | "messageChannel"
   | "messageProvider"
   | "clientCaps"
-  | "pinnedWidgetAuthoring"
+  | "inlineWidgetAuthoring"
   | "chatType"
   | "agentAccountId"
   | "conversationRoutePeerId"

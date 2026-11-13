@@ -1,0 +1,49 @@
+{
+  "id": "spaces",
+  "name": "Spaces",
+  "description": "Personal lists and research that remain available across chats.",
+  "categories": [
+    "productivity"
+  ],
+  "enabledByDefault": false,
+  "activation": {
+    "onStartup": true
+  },
+  "uiCapabilities": [
+    "page",
+    "navigation",
+    "panel"
+  ],
+  "contracts": {
+    "tools": [
+      "spaces_query",
+      "spaces_edit"
+    ]
+  },
+  "toolMetadata": {
+    "spaces_query": {
+      "optional": true
+    },
+    "spaces_edit": {
+      "optional": true
+    }
+  },
+  "backupResources": [
+    {
+      "disposition": "include",
+      "scope": "state",
+      "relativePath": "plugins/spaces"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "controlUi": {
+    "entry": "dist/control-ui/2bb388e2733c85719e1223e0057872c82ac4d6f01edb58dcfe1a1729d5cb5093/index.js",
+    "styles": [
+      "dist/control-ui/2bb388e2733c85719e1223e0057872c82ac4d6f01edb58dcfe1a1729d5cb5093/index.css"
+    ]
+  }
+}

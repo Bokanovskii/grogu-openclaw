@@ -38,6 +38,7 @@ import { assertSessionSubagentRunsCurrent } from "./session-accessor.sqlite-desc
 import type { SqliteSessionReclamationPlan } from "./session-accessor.sqlite-lifecycle-types.js";
 import {
   markSqliteReclamationSettled,
+  SqliteReclamationCommitExpiredError,
   SqliteReclamationRequestRefusedError,
   waitForSqliteReclamationCommit,
 } from "./session-accessor.sqlite-reclamation-commit.js";
@@ -471,10 +472,13 @@ export async function runReclamationWorkerPort(
               validation,
             } satisfies SqliteMutationWorkerMessage<typeof result>;
           } catch (error) {
-            // Canonical validation retains its scoped native-failure/drain contract.
+            const commitExpired =
+              request.type === "canonical-validation" &&
+              error instanceof SqliteReclamationCommitExpiredError;
+            // Only a clean deadline refusal can reuse a canonical task; other failures drain it.
             if (
-              (request.type === "reclaim" || request.type === "prepare") &&
-              !pooledTask &&
+              (commitExpired ||
+                ((request.type === "reclaim" || request.type === "prepare") && !pooledTask)) &&
               error instanceof SqliteReclamationRequestRefusedError &&
               ((!claim && !retainedDatabase) ||
                 (claim?.isCurrent() && retainedDatabase?.isOpen && !retainedDatabase.isTransaction))
@@ -484,6 +488,7 @@ export async function runReclamationWorkerPort(
                 type: "refused",
                 operationId,
                 settled: true,
+                ...(commitExpired ? { commitExpired: true as const } : {}),
               } satisfies SqliteReclamationWorkerMessage;
             }
             failureCleanup = await closeDatabase();

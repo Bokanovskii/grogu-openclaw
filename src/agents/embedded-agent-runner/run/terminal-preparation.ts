@@ -28,6 +28,7 @@ import {
   resolveFinalAssistantVisibleText,
   resolveReportedModelRef,
 } from "./helpers.js";
+import { resolveSettledToolBatchEvidence } from "./incomplete-turn-recovery.js";
 import type { RunEmbeddedAgentInternalParams } from "./internal-params.js";
 import type { RunEmbeddedAgentParams } from "./params.js";
 import { buildEmbeddedRunPayloads } from "./payloads.js";
@@ -196,6 +197,9 @@ export function prepareEmbeddedRunTerminal(input: {
     // A clean yield is a handoff, not a terminal tool failure. Keep the error
     // on the attempt for diagnostics without turning the pause into a warning.
     lastToolError: cleanYield ? undefined : attempt.lastToolError,
+    completedTerminalToolReply:
+      input.terminalState.outcome.status === "ok" &&
+      resolveSettledToolBatchEvidence(attempt).intentionalTermination,
     config: runParams.config,
     isCronTrigger: runParams.trigger === "cron",
     // A conversation's continuation keeps conversational silence and failure reporting.

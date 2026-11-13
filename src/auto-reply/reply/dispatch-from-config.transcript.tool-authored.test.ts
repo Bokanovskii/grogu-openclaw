@@ -2,6 +2,7 @@
 // the send, under the dispatching run's writer fence: a writer replaced after the
 // tool captured the reply cannot receive that assistant row.
 import { describe, expect, it } from "vitest";
+import { deliverAgentCommandResult } from "../../agents/command/delivery.js";
 import { buildPayloads } from "../../agents/embedded-agent-runner/run/payloads.test-helpers.js";
 import {
   loadTranscriptEvents,
@@ -9,7 +10,7 @@ import {
   updateSessionEntry,
 } from "../../config/sessions/session-accessor.js";
 import { useTempSessionsFixture } from "../../config/sessions/test-helpers.js";
-import type { InternalSessionEntry, SessionEntry } from "../../config/sessions/types.js";
+import type { InternalSessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import { mirrorDeliveredReplyToTranscript } from "./dispatch-from-config.transcript.js";
@@ -22,12 +23,17 @@ describe("tool-authored source reply transcript mirror", () => {
   const fixture = useTempSessionsFixture("tool-authored-mirror-");
 
   async function seedSession() {
-    await replaceSessionEntry({ agentId: "main", sessionKey, storePath: fixture.storePath() }, {
+    const entry: InternalSessionEntry = {
       sessionId,
       updatedAt: 1,
       lifecycleRevision: "rev-1",
       activeWriterRunId: "run-a",
-    } as SessionEntry);
+    };
+    await replaceSessionEntry(
+      { agentId: "main", sessionKey, storePath: fixture.storePath() },
+      entry,
+    );
+    return entry;
   }
 
   // The mirror metadata exactly as dispatch fences it for run "run-a".
@@ -46,16 +52,22 @@ describe("tool-authored source reply transcript mirror", () => {
       runId: "run-a",
       agentId: "main",
     });
-    const mirror = getReplyPayloadMetadata(payload as object)?.sourceReplyTranscriptMirror;
+    if (!payload) {
+      throw new Error("tool-authored reply carries no payload");
+    }
+    const mirror = getReplyPayloadMetadata(payload)?.sourceReplyTranscriptMirror;
     if (!mirror) {
       throw new Error("tool-authored reply carries no transcript mirror");
     }
     return {
-      ...mirror,
-      expectedSessionId: sessionId,
-      expectedLifecycleRevision: "rev-1",
-      expectedWriterRunId: "run-a",
-      storePath: fixture.storePath(),
+      payload,
+      metadata: {
+        ...mirror,
+        expectedSessionId: sessionId,
+        expectedLifecycleRevision: "rev-1",
+        expectedWriterRunId: "run-a",
+        storePath: fixture.storePath(),
+      },
     };
   }
 
@@ -73,7 +85,7 @@ describe("tool-authored source reply transcript mirror", () => {
 
   it("writes the assistant row once for the admitted writer", async () => {
     await seedSession();
-    const metadata = fencedMirrorForCapturedReply();
+    const { metadata } = fencedMirrorForCapturedReply();
 
     await mirrorDeliveredReplyToTranscript({ metadata, cfg: {} as OpenClawConfig });
     await mirrorDeliveredReplyToTranscript({ metadata, cfg: {} as OpenClawConfig });
@@ -85,14 +97,72 @@ describe("tool-authored source reply transcript mirror", () => {
 
   it("writes nothing after the session writer is replaced", async () => {
     await seedSession();
-    const metadata = fencedMirrorForCapturedReply();
+    const { metadata } = fencedMirrorForCapturedReply();
     await updateSessionEntry(
       { agentId: "main", sessionKey, storePath: fixture.storePath() },
-      async () => ({ activeWriterRunId: "run-b" }) as Partial<InternalSessionEntry>,
+      async (): Promise<Partial<InternalSessionEntry>> => ({
+        activeWriterRunId: "run-b",
+      }),
     );
 
     await mirrorDeliveredReplyToTranscript({ metadata, cfg: {} as OpenClawConfig });
 
     expect(await assistantTexts()).toEqual([]);
   });
+
+  it.each([
+    { authoring: true, replaced: false },
+    { authoring: false, replaced: false },
+    { authoring: true, replaced: true },
+  ])(
+    "publishes internal tool replies only for the current authorized source ($authoring, $replaced)",
+    async ({ authoring, replaced }) => {
+      const sessionEntry = await seedSession();
+      const { payload } = fencedMirrorForCapturedReply();
+      if (replaced) {
+        await updateSessionEntry(
+          { agentId: "main", sessionKey, storePath: fixture.storePath() },
+          async (): Promise<Partial<InternalSessionEntry>> => ({
+            activeWriterRunId: "run-b",
+          }),
+        );
+      }
+      const deliver = () =>
+        deliverAgentCommandResult({
+          cfg: { session: { store: fixture.storePath() } },
+          deps: {},
+          runtime: { log: () => {}, error: () => {}, exit: () => {} },
+          opts: {
+            message: "Continue the interrupted task",
+            sessionId,
+            sessionKey,
+            runId: "run-a",
+            messageChannel: "webchat",
+            deliver: false,
+            inlineWidgetAuthoring: authoring,
+          },
+          sessionEntry,
+          outboundSession: undefined,
+          result: {
+            payloads: [payload],
+            meta: { durationMs: 0 },
+          },
+          payloads: [payload],
+        });
+
+      if (replaced) {
+        await expect(deliver()).rejects.toThrow(/source reply.*session rebound/i);
+      } else {
+        const delivered = await deliver();
+        expect(delivered.sourceReplyDelivered).toBe(authoring ? true : undefined);
+        expect(delivered.sourceReplyDeliveryState).toBe(authoring ? "delivered" : undefined);
+        await deliver();
+      }
+      const texts = await assistantTexts();
+      expect(texts).toHaveLength(authoring && !replaced ? 1 : 0);
+      if (authoring && !replaced) {
+        expect(texts[0]).toContain(replyText);
+      }
+    },
+  );
 });

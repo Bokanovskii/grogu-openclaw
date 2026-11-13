@@ -35,6 +35,7 @@ import type { SqliteReclamationClaim } from "./session-accessor.sqlite-reclamati
 import { runExclusiveSqliteSessionWrite } from "./session-accessor.sqlite-scope.js";
 import {
   withSqliteMutationWorkerLifetime,
+  SqliteMutationWorkerSettledRefusal,
   type SqliteMutationWorkerValidationOwner,
 } from "./session-accessor.sqlite-worker-request.js";
 import type { PendingCanonicalValidation } from "./session-canonical-validation-deferral.js";
@@ -261,7 +262,29 @@ export async function certifySessionCanonicalValidationPending(
                   },
                   signal,
                 ),
-            );
+            ).catch((error: unknown) => {
+              if (!(error instanceof SqliteMutationWorkerSettledRefusal) || !error.commitExpired) {
+                throw error;
+              }
+              assertOwnerCurrent();
+              assertReadinessCurrent();
+              execution?.assertCurrent();
+              claim?.assertCurrent();
+              log.warn(
+                "Canonical validation commit deadline expired after confirmed rollback; retrying",
+                {
+                  path: pathname,
+                  reason: error.message,
+                },
+              );
+              return undefined;
+            });
+            if (!result) {
+              const waitMs = CONTENTION_BACKOFF_MS[contendedBatches] ?? 250;
+              contendedBatches = Math.min(contendedBatches + 1, CONTENTION_BACKOFF_MS.length - 1);
+              await delay(waitMs);
+              continue;
+            }
             assertOwnerCurrent();
             assertReadinessCurrent();
             claim?.assertCurrent();

@@ -69,6 +69,7 @@ import { CHAT_COMPOSER_DRAFT_STORAGE_ERROR } from "./composer-persistence.ts";
 import { exportChatMarkdown } from "./export.ts";
 import { admitChatSubmission } from "./history-merge.ts";
 import { admitInitialTurnHandoff, subscribeInitialTurnHandoff } from "./initial-turn-handoff.ts";
+import { clearChatSessionScrollPosition } from "./scroll.ts";
 import { applyChatCacheSnapshot, readChatSessionSnapshot } from "./session-message-cache.ts";
 import { closeSlot } from "./sidebar-layout.ts";
 
@@ -320,6 +321,7 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
     pageState.chatIsMaintenanceScroll = () => this.transcript.isMaintenanceScroll;
     pageState.chatScrollElement = () => this.transcript.scrollElement;
     pageState.chatScrollToEnd = (options) => this.transcript.scrollToEnd(options);
+    clearChatSessionScrollPosition(this.paneId, pageState.sessionKey);
     pageState.chatCancelScroll = () => this.transcript.cancelScroll();
     pageState.reviewQueuedMessageEdit = () => this.reviewQueuedMessageEdit(pageState);
     pageState.createChatSession = () => this.createSession();

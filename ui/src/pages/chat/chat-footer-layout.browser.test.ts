@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { readStyleSheet } from "../../../../test/helpers/ui-style-fixtures.js";
-import { withBrowserPage } from "../../test-helpers/browser-page.ts";
+import { closeBrowserPage, withBrowserPage } from "../../test-helpers/browser-page.ts";
 import {
   canRunChatLayoutBrowser,
   createChatLayoutBrowser,
@@ -542,4 +542,92 @@ describeBrowserLayout.concurrent("chat footer browser layout", () => {
       });
     },
   );
+
+  it("uses the available chat width by default and respects a narrower configured column", async () => {
+    const page = await openBrowserPage(1600, 900);
+    const renderFixture = async (savedWidth?: string) => {
+      const style = savedWidth
+        ? `style="--chat-thread-max-width: ${savedWidth}; --chat-message-max-width: 100%"`
+        : "";
+      await page.setContent(`<!doctype html><html><head><style>${readUiCss()}</style></head><body>
+        <section class="chat" ${style}>
+          <div class="chat-thread chat-thread--direct" role="log">
+            <div class="chat-thread-inner">
+              <div class="chat-group tool">
+                <div class="chat-group-messages" data-tool-lane>
+                  <div class="chat-bubble chat-bubble--tool-shell" data-tool-shell>
+                    <div class="chat-tool-msg-collapse">Tool output</div>
+                  </div>
+                </div>
+              </div>
+              <div class="chat-group tool chat-group--activity">
+                <div class="chat-group-messages" data-activity-lane>
+                  <div class="chat-activity-group">Activity</div>
+                </div>
+              </div>
+              <div class="chat-group assistant chat-group--with-footer">
+                <div class="chat-group-messages" data-frame-lane>
+                  <div class="chat-activity-group">Framed activity</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="chat-footer">
+            <div class="agent-chat__composer-shell" data-composer>
+              <div class="chat-footer__context">
+                <div class="chat-prs" data-chat-prs>Pull requests</div>
+              </div>
+              <div class="agent-chat__input">Composer</div>
+            </div>
+          </div>
+        </section>
+      </body></html>`);
+      return await page.evaluate(() => {
+        const rect = (selector: string) => {
+          const bounds = document.querySelector<HTMLElement>(selector)!.getBoundingClientRect();
+          return { center: bounds.x + bounds.width / 2, width: bounds.width };
+        };
+        return {
+          activity: rect("[data-activity-lane] .chat-activity-group"),
+          composer: rect("[data-composer]"),
+          prs: rect("[data-chat-prs]"),
+          shell: rect("[data-tool-shell]"),
+          framedActivity: rect("[data-frame-lane] .chat-activity-group"),
+          thread: rect(".chat-thread-inner"),
+          tool: rect("[data-tool-lane]"),
+        };
+      });
+    };
+
+    try {
+      const defaults = await renderFixture();
+      expect(defaults.thread.width).toBeGreaterThan(1440);
+      expect(defaults.composer.width).toBeCloseTo(defaults.thread.width, 0);
+      expect(defaults.prs.width).toBeCloseTo(defaults.composer.width, 0);
+      expect(defaults.tool.width).toBeCloseTo(defaults.thread.width, 0);
+      expect(defaults.shell.width).toBeCloseTo(defaults.thread.width, 0);
+      expect(defaults.activity.width).toBeCloseTo(defaults.thread.width, 0);
+      expect(defaults.framedActivity.width).toBeCloseTo(defaults.activity.width, 0);
+
+      for (const savedWidth of ["82%", "48rem"]) {
+        const configured = await renderFixture(savedWidth);
+        for (const key of ["activity", "framedActivity", "shell", "tool"] as const) {
+          expect(configured[key].width).toBeCloseTo(configured.thread.width, 0);
+        }
+        expect(configured.composer.width).toBeCloseTo(configured.prs.width, 0);
+        for (const rect of Object.values(configured)) {
+          expect(rect.center).toBeCloseTo(configured.thread.center, 0);
+        }
+        expect(configured.thread.width).toBeLessThan(defaults.thread.width);
+        expect(configured.composer.width).toBeLessThan(defaults.composer.width);
+        if (savedWidth === "48rem") {
+          // The former default stays exact for users who saved it explicitly.
+          expect(configured.thread.width).toBeCloseTo(768, 0);
+          expect(configured.composer.width).toBeCloseTo(768, 0);
+        }
+      }
+    } finally {
+      await closeBrowserPage(page);
+    }
+  });
 });

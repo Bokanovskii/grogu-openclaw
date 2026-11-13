@@ -88,6 +88,10 @@
   overflow: hidden;
 }
 
+.shell--conversation {
+  background-image: none;
+}
+
 /* Collapsing hides the sidebar entirely; shell chrome and Cmd+B bring it back.
    Keep --shell-nav-width in sync for fixed-position consumers (e.g. the
    docked terminal panel). */

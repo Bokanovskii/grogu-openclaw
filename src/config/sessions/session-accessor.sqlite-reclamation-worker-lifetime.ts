@@ -417,7 +417,7 @@ export class SqliteReclamationWorker {
           (value) => ({ value }),
           (error: unknown) => {
             if (error instanceof SqliteMutationWorkerSettledRefusal) {
-              return { error: error.cause };
+              return { error: error.commitExpired ? error : error.cause };
             }
             throw error;
           },

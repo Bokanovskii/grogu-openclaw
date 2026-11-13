@@ -387,7 +387,6 @@ export function createSessionActivitySummaries(deps: {
             const result = await (deps.completeModel ?? defaultCompleteModel)({
               ...prepared,
               purpose: "session-activity-summary",
-              ...("thinkLevel" in utilityBounds ? { thinkLevel: utilityBounds.thinkLevel } : {}),
               config: deps.getConfig(),
               systemPrompt: SYSTEM_PROMPT,
               prompt: JSON.stringify({

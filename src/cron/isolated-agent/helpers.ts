@@ -16,7 +16,14 @@ import { truncateUtf16Safe } from "../../utils.js";
 
 type DeliveryPayload = Pick<
   ReplyPayload,
-  "text" | "mediaUrl" | "mediaUrls" | "presentation" | "interactive" | "channelData" | "isError"
+  | "text"
+  | "mediaUrl"
+  | "mediaUrls"
+  | "presentation"
+  | "interactive"
+  | "channelData"
+  | "isError"
+  | "isReasoning"
 >;
 
 /** Normalized cron run payload state used for summaries, delivery, and failure classification. */
@@ -186,12 +193,14 @@ export function resolveCronPayloadOutcome(params: {
   finalAssistantVisibleText?: string | undefined;
   preferFinalAssistantVisibleText?: boolean;
 }): CronPayloadOutcome {
-  const fallbackOutputText = pickLastNonEmptyTextFromPayloads(params.payloads);
+  // Diagnostic reasoning is not an automatic notification or a completion summary.
+  const payloads = params.payloads.filter((payload) => payload?.isReasoning !== true);
+  const fallbackOutputText = pickLastNonEmptyTextFromPayloads(payloads);
   const fallbackSummary = pickSummaryFromOutput(fallbackOutputText);
   const deliveryPayload =
-    params.payloads.findLast((payload) => !payload?.isError && isDeliverablePayload(payload)) ??
-    params.payloads.findLast(isDeliverablePayload);
-  const successfulDeliveryPayloads = params.payloads.filter(
+    payloads.findLast((payload) => !payload?.isError && isDeliverablePayload(payload)) ??
+    payloads.findLast(isDeliverablePayload);
+  const successfulDeliveryPayloads = payloads.filter(
     (payload) => payload != null && payload.isError !== true && isDeliverablePayload(payload),
   );
   const selectedDeliveryPayloads = successfulDeliveryPayloads.length
@@ -200,27 +209,24 @@ export function resolveCronPayloadOutcome(params: {
       ? [deliveryPayload]
       : [];
   const deliveryPayloadHasStructuredContent = payloadHasStructuredDeliveryContent(deliveryPayload);
-  const lastErrorPayloadIndex = params.payloads.findLastIndex(
-    (payload) => payload?.isError === true,
-  );
-  const lastTextErrorPayload = params.payloads.findLast(
+  const lastErrorPayloadIndex = payloads.findLastIndex((payload) => payload?.isError === true);
+  const lastTextErrorPayload = payloads.findLast(
     (payload) => payload?.isError === true && Boolean(payload?.text?.trim()),
   );
   const lastErrorPayloadText = lastTextErrorPayload?.text?.trim();
-  const errorPayloads = params.payloads.filter((payload) => payload?.isError === true);
+  const errorPayloads = payloads.filter((payload) => payload?.isError === true);
   const finalText = normalizeOptionalString(params.finalAssistantVisibleText);
   const normalizedFinalAssistantVisibleText =
     finalText && !isSilentReplyPayloadText(finalText) ? finalText : undefined;
   const hasSuccessfulPayloadAfterLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex >= 0 &&
-    params.payloads.slice(lastErrorPayloadIndex + 1).some(isSuccessfulCronPayload);
+    payloads.slice(lastErrorPayloadIndex + 1).some(isSuccessfulCronPayload);
   const hasSuccessfulPayloadBeforeLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex > 0 &&
-    params.payloads.slice(0, lastErrorPayloadIndex).some(isSuccessfulCronPayload);
-  const lastErrorPayload =
-    lastErrorPayloadIndex >= 0 ? params.payloads[lastErrorPayloadIndex] : undefined;
+    payloads.slice(0, lastErrorPayloadIndex).some(isSuccessfulCronPayload);
+  const lastErrorPayload = lastErrorPayloadIndex >= 0 ? payloads[lastErrorPayloadIndex] : undefined;
   const hasRecoveringTerminalOutput =
     normalizedFinalAssistantVisibleText !== undefined ||
     hasSuccessfulPayloadAfterLastError ||

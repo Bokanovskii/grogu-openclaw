@@ -49,7 +49,7 @@ export async function readArtwork(shell: Locator) {
     const mutedColor = getComputedStyle(probe).color;
     probe.remove();
 
-    const match = /^url\(["']?(.*?)["']?\)$/u.exec(style.backgroundImage);
+    const match = /^url\(["']?(.*?)["']?\)$/u.exec(tokenImage);
     if (!match?.[1]) {
       throw new Error(`Expected one bundled app image, received ${style.backgroundImage}`);
     }
@@ -147,13 +147,15 @@ export async function readArtwork(shell: Locator) {
     pixels.fillStyle = style.backgroundColor;
     pixels.fillRect(0, 0, canvas.width, canvas.height);
     const scale = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
-    pixels.drawImage(
-      image,
-      (canvas.width - image.naturalWidth * scale) / 2,
-      (canvas.height - image.naturalHeight * scale) / 2,
-      image.naturalWidth * scale,
-      image.naturalHeight * scale,
-    );
+    if (style.backgroundImage !== "none") {
+      pixels.drawImage(
+        image,
+        (canvas.width - image.naturalWidth * scale) / 2,
+        (canvas.height - image.naturalHeight * scale) / 2,
+        image.naturalWidth * scale,
+        image.naturalHeight * scale,
+      );
+    }
 
     const luminance = (red: number, green: number, blue: number) => {
       const linear = (channel: number) => {
@@ -251,13 +253,21 @@ export async function readArtwork(shell: Locator) {
   });
 }
 
-export function expectAppArtwork(artwork: Awaited<ReturnType<typeof readArtwork>>, label: string) {
-  expect(artwork.backgroundImage, label).toBe(artwork.tokenImage);
+export function expectAppArtwork(
+  artwork: Awaited<ReturnType<typeof readArtwork>>,
+  label: string,
+  flat = false,
+) {
+  expect(artwork.backgroundImage, label).toBe(flat ? "none" : artwork.tokenImage);
   expect(artwork.backgroundColor, label).toBe(artwork.canvasColor);
   expect(artwork.backgroundPosition, label).toBe("50% 50%");
   expect(artwork.backgroundSize, label).toBe("cover");
   expect(artwork.paintedPixels, label).toBeGreaterThan(0);
-  expect(artwork.visiblePaintedPixels, label).toBeGreaterThan(0);
+  if (flat) {
+    expect(artwork.visiblePaintedPixels, label).toBe(0);
+  } else {
+    expect(artwork.visiblePaintedPixels, label).toBeGreaterThan(0);
+  }
   expect(artwork.transparentAncestors.length, label).toBeGreaterThan(0);
   for (const ancestor of artwork.transparentAncestors) {
     expect(ancestor.alpha, `${label}: ${ancestor.className} hides the canvas`).toBe(0);

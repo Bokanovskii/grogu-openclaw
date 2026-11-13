@@ -1,3 +1,4 @@
+import { inspectTlsCertificateError } from "@openclaw/ai/internal/shared";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { VerboseLevel } from "../../../auto-reply/thinking.js";
 import { formatToolAggregateParts } from "../../../auto-reply/tool-meta.js";
@@ -73,6 +74,34 @@ export function buildFailureWarning(params: {
       : validationErrorSummary
         ? ": invalid arguments"
         : "";
+  if (params.lastToolError.toolName === "web_fetch" && failureVerb === "failed") {
+    const code = params.lastToolError.errorCode;
+    const httpStatus = code?.match(/^WEB_FETCH_HTTP_([1-5]\d{2})$/u)?.[1];
+    const certificate = inspectTlsCertificateError({ code });
+    const reason =
+      code === "CERT_HAS_EXPIRED"
+        ? "could not connect securely because the website certificate has expired."
+        : certificate || code === "WEB_FETCH_TLS_CERTIFICATE"
+          ? "could not connect securely because the website certificate could not be verified."
+          : httpStatus === "403"
+            ? "could not retrieve a source (HTTP 403: access denied)."
+            : httpStatus === "429"
+              ? "could not retrieve a source (HTTP 429: too many requests)."
+              : httpStatus
+                ? `could not retrieve a source (HTTP ${httpStatus}).`
+                : code === "WEB_FETCH_TRANSPORT_FAILED"
+                  ? "could not establish a connection."
+                  : code === "WEB_FETCH_EXTRACTION_FAILED"
+                    ? "could not extract readable content."
+                    : "could not retrieve a source.";
+    const recovery =
+      certificate || code === "WEB_FETCH_TLS_CERTIFICATE"
+        ? "Use another source or ask the website owner to fix the certificate."
+        : httpStatus === "429"
+          ? "Wait before retrying, or use another source."
+          : "Open the page in a browser or use another source.";
+    return `⚠️ Web Fetch ${reason} ${recovery}${errorSuffix}`;
+  }
   if (isExecLikeToolName(params.lastToolError.toolName)) {
     const toolLabel = resolveToolDisplay({ name: params.lastToolError.toolName }).label;
     const subject = includeDetails

@@ -415,7 +415,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     clientCaps: params.clientCaps,
     bootstrapUserProfileId: params.bootstrapUserProfileId,
     gatewayUiCommandTarget: params.gatewayUiCommandTarget,
-    pinnedWidgetAuthoring: params.pinnedWidgetAuthoring,
+    inlineWidgetAuthoring: params.inlineWidgetAuthoring,
     toolBindings: params.toolBindings,
     chatType: params.chatType,
     agentAccountId: params.agentAccountId,

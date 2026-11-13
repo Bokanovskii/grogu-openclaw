@@ -38,6 +38,101 @@ const suite = createControlUiE2eSuite({
 });
 
 suite.define(() => {
+  it.each([
+    { sendBeforeFinal: false, lateCreate: false },
+    { sendBeforeFinal: true, lateCreate: false },
+    { sendBeforeFinal: true, lateCreate: true },
+  ])(
+    "taps to dictate, edits, and sends once (send before final: $sendBeforeFinal, late create: $lateCreate)",
+    async ({ sendBeforeFinal, lateCreate }) => {
+      await suite.withPage({ permissions: ["microphone"] }, async ({ page }) => {
+        const responses = createDictationMethodResponses("local-voice-proof", "local-voice-proof");
+        const gateway = await installMockGateway(page, {
+          deferredMethods: ["talk.session.close", ...(lateCreate ? ["talk.session.create"] : [])],
+          heldMethods: ["chat.send"],
+          methodResponses: {
+            ...responses,
+            "talk.session.create": {
+              ...responses["talk.session.create"],
+              finalTranscriptTimeoutMs: 121_000,
+            },
+          },
+        });
+        await installTalkBrowserFixtures(page);
+        await page.goto(`${suite.server.baseUrl}chat`);
+        const textarea = page.locator(".agent-chat__composer-combobox textarea");
+        await textarea.fill("Please check the calendar.");
+        await captureComposerProof(suite, page, `tap-dictation-before-${sendBeforeFinal}.png`);
+        await page.getByRole("button", { name: "Start voice input", exact: true }).click();
+        const created = await gateway.waitForRequest("talk.session.create");
+        expect(created.params).toEqual({
+          mode: "transcription",
+          transport: "gateway-relay",
+          brain: "none",
+        });
+        await page.getByRole("button", { name: "Stop and keep text", exact: true }).click();
+        if (lateCreate) {
+          await gateway.resolveDeferred("talk.session.create");
+        }
+        await gateway.waitForRequest("talk.session.close");
+        await expect
+          .poll(() => page.getByText("Finishing dictation…", { exact: true }).isVisible())
+          .toBe(true);
+        expect(await textarea.evaluate((element: HTMLTextAreaElement) => element.readOnly)).toBe(
+          false,
+        );
+        expect(await gateway.getRequests("chat.send")).toHaveLength(0);
+        const edited = "Please check tomorrow's calendar.";
+        if (!sendBeforeFinal) {
+          await gateway.emitGatewayEvent("talk.event", {
+            transcriptionSessionId: "local-voice-proof",
+            type: "transcript",
+            text: "Show my next meeting.",
+            final: true,
+          });
+          await gateway.emitGatewayEvent("talk.event", {
+            transcriptionSessionId: "local-voice-proof",
+            type: "close",
+            reason: "completed",
+          });
+          await expect.poll(() => textarea.inputValue()).toContain("Show my next meeting.");
+        }
+        await textarea.fill(edited);
+        await captureComposerProof(suite, page, `tap-dictation-edited-${sendBeforeFinal}.png`);
+        await page.getByRole("button", { name: "Send message", exact: true }).click();
+        const sent = await gateway.waitForRequest("chat.send");
+        expect(sent.params).toMatchObject({ message: edited, sessionKey: "agent:main:main" });
+        await expect.poll(() => textarea.inputValue()).toBe("");
+        if (sendBeforeFinal) {
+          await expect
+            .poll(async () =>
+              (await gateway.getRequests("talk.session.close")).map((entry) => entry.params),
+            )
+            .toContainEqual(
+              expect.objectContaining({ sessionId: "local-voice-proof", discard: true }),
+            );
+          await gateway.emitGatewayEvent("talk.event", {
+            transcriptionSessionId: "local-voice-proof",
+            type: "transcript",
+            text: "Must not reappear after Send.",
+            final: true,
+          });
+          await gateway.emitGatewayEvent("talk.event", {
+            transcriptionSessionId: "local-voice-proof",
+            type: "close",
+            reason: "completed",
+          });
+        }
+        expect(await textarea.inputValue()).toBe("");
+        expect(await gateway.getRequests("chat.send")).toHaveLength(1);
+        expect(await gateway.getRequests("talk.session.create")).toHaveLength(1);
+        await captureComposerProof(suite, page, `tap-dictation-sent-${sendBeforeFinal}.png`);
+        await gateway.resolveDeferred("chat.send");
+        await gateway.resolveDeferred("talk.session.close");
+      });
+    },
+  );
+
   it.each([false, true])(
     "dictates during a running turn and sends explicitly (wait for completion: %s)",
     async (waitForCompletion) => {

@@ -13,6 +13,7 @@ import { resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
 import { formatDurationLong } from "../../../lib/format-duration.ts";
 import { renderChatAvatar } from "../chat-avatar.ts";
 import type { ChatSubagentWait } from "../chat-subagent-wait.ts";
+import { isGroguAgentName } from "./chat-grogu-eater.ts";
 import { renderGroupedMessage } from "./chat-message-bubble.ts";
 import { prepareChatMessageRender, resolveMessageActionDetails } from "./chat-message-markdown.ts";
 import { renderChatTimestamp } from "./chat-message-timestamp.ts";
@@ -81,7 +82,10 @@ export type StreamGroupOptions = StreamMessageOptions & {
   onOpenSubagent?: (key: string) => void;
   onOpenSubagents?: () => void;
   runOutputTokens?: number | null;
+  runOutputTokensEstimated?: boolean;
   runReasoning?: string;
+  showReasoning?: boolean;
+  answerStreaming?: boolean;
   questionPrompts?: ReadonlyMap<string, QuestionPrompt>;
 };
 
@@ -122,7 +126,11 @@ export function renderStreamGroupPart(
   presentation: "standalone" | "continuation",
 ) {
   if (part.kind === "reading-indicator") {
+    if (opts.answerStreaming && part.waitingOn !== "subagents" && !opts.waitingApproval) {
+      return nothing;
+    }
     return renderChatWorkingIndicator(part, {
+      groguEater: isGroguAgentName(opts.assistant?.name),
       mascot: opts.branding?.mascot,
       workingIndicator: opts.branding?.workingIndicator,
       workingPhrases: opts.branding?.workingPhrases,
@@ -134,6 +142,7 @@ export function renderStreamGroupPart(
       onOpenSubagents: opts.onOpenSubagents,
       startupLabel: opts.startupLabel,
       outputTokens: opts.runOutputTokens,
+      outputTokensEstimated: opts.runOutputTokensEstimated,
       reasoning: opts.runReasoning,
       presentation,
     });
@@ -144,7 +153,12 @@ export function renderStreamGroupPart(
   }
   const source = prepareChatMessageRender({
     role: "assistant",
-    content: [{ type: "text", text: part.text }],
+    content: [
+      ...(part.isStreaming && opts.runReasoning
+        ? [{ type: "thinking", thinking: opts.runReasoning }]
+        : []),
+      { type: "text", text: part.text },
+    ],
     timestamp: part.startedAt,
   });
   return renderGroupedMessage(
@@ -154,7 +168,7 @@ export function renderStreamGroupPart(
       ...opts,
       isStreaming: part.isStreaming,
       entryRef: opts.entryRefFor?.(part.key),
-      showReasoning: false,
+      showReasoning: opts.showReasoning === true,
       // Settled segments can be replied to without transcript IDs or footer actions.
       messageActions: resolveMessageActionDetails(source, {
         messageId: part.key,

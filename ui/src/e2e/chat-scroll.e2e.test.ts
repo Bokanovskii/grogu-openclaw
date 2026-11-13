@@ -2,11 +2,14 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import type { ApplicationContext } from "../app/context.ts";
 import { CHAT_TRANSCRIPT_END_THRESHOLD_PX } from "../pages/chat/scroll.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   chatThreadDistanceFromBottom,
+  chatSessionListResponse,
+  controlUiSessionUrl,
   createChatFlowE2eSuite,
   installMockGateway,
   requireRecord,
@@ -19,6 +22,84 @@ import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-su
 const suite = createChatFlowE2eSuite();
 
 suite.define(() => {
+  it("opens fresh, retained and evicted chats at the latest message", async () => {
+    await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
+      const historyMessages = Array.from({ length: 50 }, (_, index) => ({
+        role: index % 2 ? "assistant" : "user",
+        content: `Opening history ${index}\n${"Transcript detail\n".repeat(4)}`,
+        timestamp: Date.now() - 100_000 + index,
+      }));
+      const firstSession = "agent:main:main";
+      const gateway = await installMockGateway(page, {
+        historyMessages,
+        methodResponses: {
+          "sessions.list": chatSessionListResponse(
+            [
+              "main",
+              ...["second", "third", "fourth", "fifth"].map((name) => `opening-${name}`),
+            ].map((name) => ({
+              key: `agent:main:${name}`,
+              kind: "direct",
+              label: name,
+              updatedAt: 1,
+            })),
+          ),
+        },
+      });
+      const navigate = async (sessionKey: string) => {
+        const pathname = new URL(controlUiSessionUrl(suite.server.baseUrl, sessionKey)).pathname;
+        await page.evaluate(async (to) => {
+          const app = document.querySelector<
+            HTMLElement & { runtime: { context: ApplicationContext } }
+          >("openclaw-app");
+          if (!app) {
+            throw new Error("Expected the running Control UI");
+          }
+          app.runtime.context.navigate("chat", { pathname: to });
+        }, pathname);
+      };
+      const expectLatest = async () => {
+        await expect
+          .poll(() => chatThreadDistanceFromBottom(page))
+          .toBeLessThanOrEqual(CHAT_TRANSCRIPT_END_THRESHOLD_PX);
+        await page
+          .locator(".chat-pane-cache__pane--active .chat-thread")
+          .getByText("Opening history 49", { exact: false })
+          .waitFor();
+      };
+
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, firstSession));
+      await expectLatest();
+      await scrollChatThreadToTop(page);
+      await gateway.deferNext("chat.startup");
+      await navigate("agent:main:opening-second");
+      await gateway.waitForRequest("chat.startup", {
+        match: { sessionKey: "agent:main:opening-second" },
+      });
+      await gateway.resolveDeferred("chat.startup");
+      await expectLatest();
+
+      await navigate(firstSession);
+      await expectLatest();
+      await scrollChatThreadToTop(page);
+      for (const suffix of ["third", "fourth", "fifth"]) {
+        await navigate(`agent:main:opening-${suffix}`);
+        await expectLatest();
+      }
+      await navigate(firstSession);
+      await expectLatest();
+      await page.reload();
+      await expectLatest();
+
+      await scrollChatThreadToTop(page);
+      const thread = page.locator(".chat-pane-cache__pane--active .chat-thread");
+      const readerOffset = await thread.evaluate((element) => element.scrollTop);
+      await page.locator(".agent-chat__composer-combobox textarea").fill("Keep my reading place");
+      await waitForChatScrollIdle(page);
+      expect(await thread.evaluate((element) => element.scrollTop)).toBe(readerOffset);
+    });
+  });
+
   it("scrolls the transcript over the pinned composer while preserving nested scrolling", async () => {
     await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
       const baseTs = Date.now() - 100_000;

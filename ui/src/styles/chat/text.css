@@ -1,11 +1,54 @@
+/* Completed reasoning reads as a quiet sibling of the work rollup: the summary
+   reuses the inline-disclosure row, and the open body hangs off a hairline rail
+   aligned under the icon instead of sitting in a boxed panel. */
 .chat-thinking {
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  border: 1px dashed color-mix(in srgb, var(--text) 18%, transparent);
-  background: color-mix(in srgb, var(--text) 4%, transparent);
+  min-width: 0;
   color: var(--muted);
+}
+
+.chat-thinking > .chat-thinking__summary {
+  position: static;
+  margin: 0;
+  list-style: none;
+}
+
+.chat-thinking > .chat-thinking__summary::-webkit-details-marker,
+.chat-thinking > .chat-thinking__summary::before {
+  display: none;
+}
+
+.chat-thinking[open] > .chat-thinking__summary .chat-tool-row__chevron {
+  opacity: 1;
+  transform: rotate(90deg);
+}
+
+.chat-thinking:not([open]) > .chat-thinking__summary:dir(rtl) .chat-tool-row__chevron {
+  transform: scaleX(-1);
+}
+
+.chat-thinking__body {
+  margin-block: var(--space-1) var(--space-2);
+  margin-inline-start: 11px;
+  padding-block: 2px;
+  padding-inline-start: var(--space-4);
+  border-inline-start: 1px solid var(--border);
   font-size: var(--control-ui-text-sm);
-  line-height: 1.4;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.chat-thinking__body > :first-child {
+  margin-block-start: 0;
+}
+
+.chat-thinking__body > :last-child {
+  margin-block-end: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-thinking > .chat-thinking__summary .chat-tool-row__chevron {
+    transition: none;
+  }
 }
 
 .chat-message-disclosure {

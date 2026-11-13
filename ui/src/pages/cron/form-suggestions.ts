@@ -11,7 +11,7 @@ import { getCronJobPayload, resolveConfiguredCronModelSuggestions } from "../../
 import type { CronState } from "../../lib/cron/types.ts";
 import { resolveCronTimezoneSuggestions } from "./timezone-suggestions.ts";
 
-export const THINKING_SUGGESTIONS = ["off", "minimal", "low", "medium", "high"];
+export const THINKING_SUGGESTIONS = ["off", "minimal", "low", "medium", "high", "ultra"];
 
 /**
  * Reduces a fetched conversation directory to plain target suggestions for the

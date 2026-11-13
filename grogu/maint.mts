@@ -9,6 +9,7 @@ import {
   runNative,
   stageNativeRestore,
 } from "./operator.js";
+import { bootstrapGroguPlugins } from "./plugins.js";
 import { checkLivePolicy } from "./policy.js";
 import { buildRelease, verifyRelease } from "./release.js";
 import { withGroguStorageLock } from "./storage-artifacts.js";
@@ -96,6 +97,19 @@ program
     const result = await cleanupGroguStorage(profile(), options.apply);
     console.log(JSON.stringify(result));
     if (result.backups.deferred.length > 0 || result.updateCaptures.warnings.length > 0) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("plugins-bootstrap")
+  .description("Preview or install the pinned Grogu plugin packages")
+  .option("--apply", "Install missing packages and repair approved installations", false)
+  .option("--accept-capabilities", "Accept reviewed plugin capabilities", false)
+  .action(async (options: { apply: boolean; acceptCapabilities: boolean }) => {
+    const result = await bootstrapGroguPlugins(profile(), options);
+    console.log(JSON.stringify(result));
+    if (result.plugins.some((plugin) => plugin.action === "conflict")) {
       process.exitCode = 1;
     }
   });

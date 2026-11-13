@@ -76,12 +76,35 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `bootstrap [--apply]`           | Reconciles bound job metadata and installs the small-disk storage policy; preview by default.                                                                                               |
 | `storage-bootstrap [--apply]`   | Disables local full-backup schedules and installs one hourly native cleanup job without a model call; preview by default.                                                                   |
 | `storage-cleanup [--apply]`     | Disables local full-backup schedules and retires eligible temporary artifacts; preview by default.                                                                                          |
+| `plugins-bootstrap [--apply]`   | Previews or installs Grogu's pinned plugin packages with OpenClaw's native installer.                                                                                                       |
 | `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                                            |
 | `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                                  |
 | `release-verify <manifest>`     | Checks the package digest and platform.                                                                                                                                                     |
 | `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                                  |
 
 Native calls write owner-only receipts under the profile's `recoveryDir`.
+
+### Plugin setup
+
+Run `plugins-bootstrap` with the protected profile on the new host. The command
+previews the approved plugins and their exact versions. Add `--apply` to install
+them with OpenClaw. OpenClaw installs the declared dependencies and keeps its
+source, security, and capability checks. Set up plugins before starting the new
+Gateway; applying while it is running can reload its plugins.
+
+The list includes the `duckduckgo` web-search plugin and the community
+`openclaw-icloud-calendar` plugin. Review the calendar plugin's capabilities
+before you add `--accept-capabilities`. The command does not install local
+dictation or copy browser, Keychain, or npm cache data.
+
+The command leaves a matching installation with its required direct dependencies
+in place. It uses the native installer to repair a missing package or direct
+dependencies, or to pin an existing matching package. It preserves existing
+enablement and access lists; update those separately if a plugin should be
+enabled. It stops if an existing installation has a different or unverifiable
+source, package, or version, or OpenClaw reports an unresolved error. If an
+installation fails, read the private native receipt. Fix the reported problem
+and run the command again.
 
 ### Small-disk storage policy
 

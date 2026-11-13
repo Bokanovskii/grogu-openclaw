@@ -15,8 +15,10 @@ and run `python3 scripts/install-skills autoreview` from that checkout. On Windo
 use `python`; `--mode copy` is available when symlinks are unavailable.
 
 Run the shared `scripts/autoreview` helper with Python from the repository being
-reviewed, preserving its working directory. Follow this repository's review
-requirements in addition to the canonical skill.
+reviewed, preserving its working directory, only when that helper route is selected.
+The root [scoped review policy](../../../AGENTS.md#scoped-review) owns this
+repository's reviewer selection and stopping rules, including its direct Copilot
+route instead of the shared Codex CLI default.
 
 Keep shared fixes and instructions upstream in `openclaw/agent-skills`. Update
 the shared checkout once for all symlinked consumers; reinstall copy-mode skills

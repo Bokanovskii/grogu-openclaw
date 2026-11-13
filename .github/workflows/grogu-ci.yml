@@ -65,7 +65,9 @@ jobs:
           node scripts/run-tsgo.mjs -p grogu/tsconfig.json --noEmit
       # pnpm lint (Control UI i18n verify, type-aware Oxlint/tsgolint, Stylelint) is skipped here:
       # tsgolint peaks near 6.5 GB RSS on a ~7.7 GB runner and repeatedly killed hosted attempts.
-      # Full `pnpm check` without this flag is a REQUIRED LOCAL gate before merging.
+      # Focused pull requests use pnpm check:changed and tests for the touched contract.
+      # Use full `pnpm check` for broad changes: dependencies, toolchain, shared config or
+      # tooling, or changes in several areas.
       - name: Run offline source checks without the lint stage on the free private runner
         run: pnpm check --skip-lint --base "$(node -p "require('./grogu/upstream.json').commit")"
       - name: Prove the downstream boundaries without providers or live services

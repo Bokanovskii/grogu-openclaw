@@ -6,7 +6,6 @@ import { resolveNativeModelPrimary } from "../agents/agent-scope.js";
 import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
 import { resolveSessionModelRef } from "../agents/session-model-ref.js";
 import { resolveSessionRuntimeOverrideForProvider } from "../agents/session-runtime-compat.js";
-import { createCrustaceanSlug } from "../agents/session-slug.js";
 import { resolveUtilityModelRefForAgent } from "../agents/utility-model.js";
 import type { WorktreeSourceStage } from "../agents/worktrees/types.js";
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
@@ -47,7 +46,7 @@ const DASHBOARD_SESSION_TITLE_MAX_CHARS = 60;
 const DASHBOARD_SESSION_TITLE_SOURCE_MAX_CHARS = 1_000;
 const WORKTREE_SESSION_TITLE_WAIT_MS = 30_000;
 const DASHBOARD_SESSION_TITLE_PROMPT =
-  "Generate a concise session title (3-6 words, max 60 characters) from the supplied source message. Use the language the message is written in, not the language of quoted literals, in sentence case: capitalize only the first word and words that language always capitalizes. No emoji. Return only the title.";
+  "Generate a concise session title (3-6 words, max 60 characters) in the source language. Use sentence case. No emoji.";
 
 function decodeTextAttachmentPrefix(attachment: ChatAttachment, maxChars: number): string | null {
   const mimeType = attachment.mimeType?.trim().toLowerCase();
@@ -115,7 +114,6 @@ type SessionTitleParams = {
   operatorAuthority?: AdmittedRunOperatorAuthority;
   /** Settles with the turn this title overlapped; a failed label retries once after it. */
   retryAfter?: Promise<void>;
-  onFallback?: () => void;
 };
 
 function isAutoTitleSessionKey(sessionKey: string): boolean {
@@ -237,7 +235,6 @@ async function generateDashboardSessionTitle(params: {
   assertCurrent?: () => void;
   operatorAuthority?: AdmittedRunOperatorAuthority;
   retryAfter?: Promise<void>;
-  onFallback?: () => void;
 }): Promise<string | null> {
   const sourceText = buildDashboardSessionTitleSource({
     message: params.userMessage,
@@ -311,9 +308,9 @@ async function generateDashboardSessionTitle(params: {
   if (params.utilityOnly) {
     return null;
   }
-  // Saved titles also name Git branches; never persist raw prompt text as a fallback.
-  params.onFallback?.();
-  return createCrustaceanSlug();
+  // A fallback displayName would look final and prevent a later send from retrying.
+  // Worktree creation owns its independent branch-name fallback.
+  throw new Error("Session title generation unavailable; retry on the next message.");
 }
 
 /** Prepares a creation draft's title without creating or updating a session. */
@@ -467,7 +464,6 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
           operatorAuthority: params.operatorAuthority,
           ...(abortSignal ? { abortSignal } : {}),
           ...(params.retryAfter ? { retryAfter: params.retryAfter } : {}),
-          onFallback: params.onFallback,
         });
       const withSource = params.withSource;
       if (!withSource) {

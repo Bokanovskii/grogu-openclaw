@@ -5,6 +5,7 @@ import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import {
   appendTranscriptMessage,
   loadSessionEntry,
+  patchSessionEntryCore,
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
 import {
@@ -97,43 +98,86 @@ it.each([
   },
 );
 
-it("falls back after one label attempt when naming starts after its turn settled", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = {
-      agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
-    };
-    const scope = {
-      agentId: "main",
-      sessionKey: "agent:main:dashboard:settled-title",
-      sessionId: "settled-title-session",
-      storePath: resolveOpenClawAgentSqlitePath({ agentId: "main" }),
-    };
-    await replaceSessionEntry(scope, { sessionId: scope.sessionId, updatedAt: 1 });
-    const started = createDeferredCore();
-    const label = createDeferredCore<string>();
-    generate.mockReset().mockImplementation(async () => {
-      started.resolve();
-      return await label.promise;
+it.each([false, true])(
+  "retries a failed title from the first query without replacing a manual rename (%s)",
+  async (renameDuringRetry) => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const cfg = {
+        agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+      };
+      const scope = {
+        agentId: "main",
+        sessionKey: "agent:main:dashboard:settled-title",
+        sessionId: "settled-title-session",
+        storePath: resolveOpenClawAgentSqlitePath({ agentId: "main" }),
+      };
+      await replaceSessionEntry(scope, { sessionId: scope.sessionId, updatedAt: 1 });
+      await appendTranscriptMessage(scope, {
+        cwd: state.workspaceDir,
+        message: { role: "user", content: "Plan the release", timestamp: 1 },
+      });
+      const started = createDeferredCore();
+      const label = createDeferredCore<string>();
+      const warned = createDeferredCore();
+      const context = createDirectChatContext({ getRuntimeConfig: () => cfg });
+      context.logGateway.warn = vi.fn(() => warned.resolve());
+      generate.mockReset().mockImplementation(async () => {
+        started.resolve();
+        return await label.promise;
+      });
+      scheduleChatDashboardSessionTitle(
+        {
+          ...scope,
+          admittedSessionId: scope.sessionId,
+          cfg,
+          context,
+          request: { rawMessage: "Plan the release", normalizedAttachments: [] },
+        },
+        settledTurn(),
+      );
+      await started.promise;
+      const title = sessionTitleRequests.get(scope);
+      expect(title).toBeDefined();
+      const failedTitle = title?.catch(() => undefined);
+      label.reject(new Error("conversation label generation failed (primary fallback)"));
+      await failedTitle;
+      await warned.promise;
+      expect(generate).toHaveBeenCalledOnce();
+      expect(loadSessionEntry(scope)?.displayName).toBeUndefined();
+      expect(context.logGateway.warn).toHaveBeenCalledWith(
+        expect.stringContaining("dashboard session title generation failed"),
+      );
+
+      const retryStarted = createDeferredCore();
+      const retryLabel = createDeferredCore<string>();
+      generate.mockImplementation(async () => {
+        retryStarted.resolve();
+        return await retryLabel.promise;
+      });
+      scheduleChatDashboardSessionTitle(
+        {
+          ...scope,
+          admittedSessionId: scope.sessionId,
+          cfg,
+          context,
+          request: { rawMessage: "What about next week?", normalizedAttachments: [] },
+        },
+        settledTurn(),
+      );
+      await retryStarted.promise;
+      const retry = sessionTitleRequests.get(scope);
+      expect(generate.mock.calls[1]?.[0].userMessage).toBe("Plan the release");
+      if (renameDuringRetry) {
+        await patchSessionEntryCore(scope, () => ({ label: "My custom name" }));
+      }
+      retryLabel.resolve("Release planning");
+      await retry;
+      const current = loadSessionEntry(scope);
+      expect(current?.displayName).toBe(renameDuringRetry ? undefined : "Release planning");
+      expect(current?.label).toBe(renameDuringRetry ? "My custom name" : undefined);
     });
-    scheduleChatDashboardSessionTitle(
-      {
-        ...scope,
-        admittedSessionId: scope.sessionId,
-        cfg,
-        context: createDirectChatContext({ getRuntimeConfig: () => cfg }),
-        request: { rawMessage: "Plan the release", normalizedAttachments: [] },
-      },
-      settledTurn(),
-    );
-    await started.promise;
-    const title = sessionTitleRequests.get(scope);
-    expect(title).toBeDefined();
-    label.reject(new Error("conversation label generation failed (primary fallback)"));
-    await title;
-    expect(generate).toHaveBeenCalledOnce();
-    expect(loadSessionEntry(scope)?.displayName).toMatch(/^[a-z]+-[a-z]+$/);
-  });
-});
+  },
+);
 
 it("compacts after the reply releases its admission while its title is still generating", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {

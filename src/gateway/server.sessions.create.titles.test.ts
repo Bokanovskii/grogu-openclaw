@@ -331,7 +331,7 @@ test.each(["generator error", "worktree wait timeout"])(
         );
         expect(loadSessionEntry(target)?.worktree?.branch).toBe(branch);
       } else {
-        expect(branch).toBe(`openclaw/${loadSessionEntry(target)?.displayName}`);
+        expect(loadSessionEntry(target)?.displayName).toBeUndefined();
       }
       expect(isSessionWorkAdmissionActive(storePath, [key])).toBe(true);
       expect(titleMocks.generate).toHaveBeenCalledOnce();

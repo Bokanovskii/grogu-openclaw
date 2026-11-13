@@ -78,7 +78,7 @@ if (args[1] === "list") {
   const at = target.lastIndexOf("@");
   const name = target.slice(0, at);
   const version = target.slice(at + 1);
-  const id = name.slice(name.lastIndexOf("/") + 1);
+  const id = name === "@openclaw/duckduckgo-plugin" ? "duckduckgo" : name.slice(name.lastIndexOf("/") + 1);
   if (state.plugins[id] && !args.includes("--force")) {
     console.error("Plugin already installed");
     process.exit(1);
@@ -170,9 +170,9 @@ describe("Grogu plugin setup", () => {
     });
     expect(preview.applied).toBe(false);
     expect(preview.plugins.map((plugin) => plugin.id)).toEqual(
-      expect.arrayContaining(["acpx", "openclaw-icloud-calendar"]),
+      expect.arrayContaining(["acpx", "duckduckgo", "openclaw-icloud-calendar"]),
     );
-    expect(preview.plugins).toHaveLength(5);
+    expect(preview.plugins).toHaveLength(6);
     expect(preview.plugins.some((plugin) => plugin.id === "grogu-local-voice")).toBe(false);
     expect(setup.read().installs).toEqual([]);
 
@@ -180,7 +180,7 @@ describe("Grogu plugin setup", () => {
       bootstrapGroguPlugins(setup.profile, { apply: true, acceptCapabilities: false }),
     ).rejects.toThrow(/Native plugins install failed; private receipt:/);
     expect(setup.read().plugins["openclaw-icloud-calendar"]).toBeUndefined();
-    expect(setup.read().installs).toHaveLength(4);
+    expect(setup.read().installs).toHaveLength(5);
 
     const applied = await bootstrapGroguPlugins(setup.profile, {
       apply: true,
@@ -193,6 +193,11 @@ describe("Grogu plugin setup", () => {
       dependencies: true,
     });
     expect(installed.plugins.acpx).toMatchObject({ source: "npm", dependencies: true });
+    expect(installed.plugins.duckduckgo).toMatchObject({
+      source: "npm",
+      name: "@openclaw/duckduckgo-plugin",
+      dependencies: true,
+    });
 
     const repeated = await bootstrapGroguPlugins(setup.profile, {
       apply: true,

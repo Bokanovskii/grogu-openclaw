@@ -92,9 +92,10 @@ them with OpenClaw. OpenClaw installs the declared dependencies and keeps its
 source, security, and capability checks. Set up plugins before starting the new
 Gateway; applying while it is running can reload its plugins.
 
-The list includes the community `openclaw-icloud-calendar` plugin. Review its
-capabilities before you add `--accept-capabilities`. The command does not install
-local dictation or copy browser, Keychain, or npm cache data.
+The list includes the `duckduckgo` web-search plugin and the community
+`openclaw-icloud-calendar` plugin. Review the calendar plugin's capabilities
+before you add `--accept-capabilities`. The command does not install local
+dictation or copy browser, Keychain, or npm cache data.
 
 The command leaves a matching installation with its required direct dependencies
 in place. It uses the native installer to repair a missing package or direct

@@ -7,6 +7,7 @@ const requiredPlugins = [
   { id: "acpx", package: "@openclaw/acpx", version: "2026.10.7", source: "npm" },
   { id: "copilot", package: "@openclaw/copilot", version: "2026.10.7", source: "npm" },
   { id: "diffs", package: "@openclaw/diffs", version: "2026.10.7", source: "clawhub" },
+  { id: "duckduckgo", package: "@openclaw/duckduckgo-plugin", version: "2026.10.7", source: "npm" },
   { id: "lobster", package: "@openclaw/lobster", version: "2026.10.7", source: "clawhub" },
   {
     id: "openclaw-icloud-calendar",

@@ -97,13 +97,12 @@ not. Neither route waives enforced reviews.
 
 ## Review and publish
 
-Before committing or landing nontrivial code, run `$autoreview` and resolve
-verified actionable findings. Use it for a review-only request when that request
-asks for independent autoreview; ordinary findings-only review does not need a
-second reviewer by default. Do not add another mandatory CLI review pass.
-Reopen review for substantive changes or unresolved concerns, not a patch-identical
-rebase or a mechanical head change. Address real human/bot findings and explain
-rejected ones; bot scores and Rank-up lists do not create separate obligations.
+Before committing or landing nontrivial code, follow the root
+[bounded review policy](../../../AGENTS.md#bounded-review) with `$autoreview` scope
+and finding rules. The root owns reviewer selection, exceptions, and stopping rules.
+Do not add a mandatory CLI review or restart review merely to open or update a PR.
+Address real human/bot findings and explain rejected ones; bot scores and Rank-up
+lists do not create separate obligations.
 ClawSweeper reviews advisory. Never wait for bot comment before landing.
 
 Use the current PR template. Lead with the plain-language problem and concrete

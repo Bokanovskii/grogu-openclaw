@@ -76,7 +76,30 @@ Update instructions at their owner instead of adding competing rules here.
 - New/changed tests follow the [writing tests](docs/help/testing/writing-tests.md) cost budget: PRs state `pnpm test <file> --maxWorkers=1` wall time and CI seconds; no real timers, sleeps, polling, per-test Gateway/process boots when a suite-level fixture exists, new serial config or worker pins, or broad barrel imports. Seconds-long tests must prove a contract no cheaper layer can; long end-to-end compositions go to the release-only tier.
 - Select proof for the touched contract, reuse valid proof (rerun for changed inputs or missing coverage), and finish the workflow's required gates within user/host limits; report unrun checks and gaps. Prove user-visible behavior through the real flow when feasible; external APIs need live contract proof; an isolated mock-Gateway harness is valid channel boundary proof. Docs-only: docs sanity and `git diff --check`.
 - **Visual changes** need inspected, sanitized before/after screenshots in chat and embedded in the PR before merge or completion ([gate](.agents/skills/openclaw-pr-maintainer/references/media.md#screenshot-completion-gate)).
-- Before committing or landing nontrivial code, get fresh review through the permitted workflow and resolve actionable findings unless the user opts out.
+- Before committing or landing nontrivial code, follow the [bounded review policy](#bounded-review) and resolve verified actionable findings unless the user opts out.
+
+### Bounded review
+
+For Grogu development, select one available read-only Copilot reviewer directly.
+Honor explicit model choices; otherwise use the runtime-selected model.
+Do not probe or install Codex CLI, or announce its absence as a fallback.
+This repository choice takes precedence over the shared `autoreview` engine default.
+Use the shared skill's scope and finding rules, not an additional helper review.
+
+Run one initial review of the completed change, with no nested reviewers.
+Request high-confidence P0/P1 defects, not speculative edge cases or optional polish.
+Give the reviewer the task, full diff, necessary context, and a ten-minute work budget.
+At budget exhaustion, return findings and explicitly name any uncovered scope.
+If review is unavailable or incomplete, report the gap, never claim a clean review,
+and do not automatically retry, switch reviewers, or start a review loop.
+Pause only actions that require that missing review.
+
+Verify findings before editing. After fixes, check only changed behavior and unresolved
+findings; reuse valid review evidence. Do not restart whole-change review for rejected
+suggestions, mechanical changes, or a cleaner verdict. A new whole-change review needs
+new evidence that invalidates prior coverage or an enforced gate.
+Ordinary findings-only requests and documentation-only changes need no separate reviewer
+unless explicitly requested. Enforced GitHub reviews and safety gates remain unchanged.
 
 ### Execution gotchas
 

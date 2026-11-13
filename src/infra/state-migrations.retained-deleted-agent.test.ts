@@ -65,6 +65,46 @@ afterEach(() => {
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 describe("Doctor with a deleted agent database", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "admits distinct deleted agents beneath an unwritable ancestor",
+    async () => {
+      const stateDir = fs.realpathSync.native(tempDirs.make("doctor-deleted-agents-"));
+      const oldHome = fs.realpathSync.native(tempDirs.make("doctor-old-home-"));
+      const env = { OPENCLAW_STATE_DIR: stateDir };
+      for (const agentId of ["retired-one", "retired-two"]) {
+        const agentDir = path.join(oldHome, "missing", "agents", agentId, "agent");
+        const operationId = `delete-${agentId}`;
+        beginAgentDeletionJournal(
+          {
+            agentId,
+            operationId,
+            agentDir,
+            workspaceDir: path.join(oldHome, "missing", `workspace-${agentId}`),
+            sessionsDir: path.join(oldHome, "missing", "agents", agentId, "sessions"),
+            databasePaths: [path.join(agentDir, "openclaw-agent.sqlite")],
+            deleteFiles: false,
+          },
+          { env },
+        );
+        runOpenClawStateWriteTransaction(
+          (database) => completeAgentDeletionJournalInDatabase(database, agentId, operationId),
+          { env },
+        );
+      }
+      fs.chmodSync(oldHome, 0o555);
+      try {
+        const result = await preflightOpenClawDatabaseSchemas({
+          env,
+          configuredAgentDatabaseTargets: [],
+        });
+        expect(result.incompatible).toEqual([]);
+        expect(result.indeterminate).toEqual([]);
+      } finally {
+        fs.chmodSync(oldHome, 0o755);
+      }
+    },
+  );
+
   it.each([false, true])(
     "records held stores as advisories and completes independent repairs (unknown custom owner: %s)",
     async (unknownOwner) => {

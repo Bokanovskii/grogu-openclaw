@@ -157,13 +157,13 @@ export function createAgentDatabaseDeletionClassifier(params: {
     ) {
       return "held";
     }
-    const deletion = entries.find(
-      (entry) =>
-        entry.agentId === agentId ||
+    const deletion =
+      entries.find((entry) => entry.agentId === agentId) ??
+      entries.find((entry) =>
         (artifactDirectories ? [entry.agentDir] : entry.databasePaths).some((file) =>
           samePath(file, pathname),
         ),
-    );
+      );
     if (!deletion) {
       return unknown;
     }

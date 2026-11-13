@@ -16,6 +16,7 @@ Update instructions at their owner instead of adding competing rules here.
 ## Working agreement
 
 - Follow through on actionable requests, including "can you", within authorized scope; a plan or progress report is a checkpoint, not completion. Preserve unaffected work across corrections and side questions.
+- Record approved Grogu implementation changes in `Bokanovskii/grogu-openclaw`. Deliver each coherent change through its own small, focused PR. Do not silently limit an agent-authored proposal to local implementation. Respect requests for design or review only, required permissions, and the live deployment owner.
 - Resolve routine, reversible choices with reasonable assumptions; ask only about consequential decisions context cannot resolve, and continue independent authorized work meanwhile. Silence does not authorize a gated action.
 - If a skill causes a pause, permission request, unfinished work, or scope change, link its exact `SKILL.md`, quote the instruction, explain how it applies (requirement vs interpretation), and check prior authorization before asking again.
 - Inspect `git status -sb` before editing or GitHub work. Preserve unrelated work, branches, processes, and user-managed checkouts; serialize shared Git mutations and isolate work when needed; never switch a checkout another agent or test run uses.

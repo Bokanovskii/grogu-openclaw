@@ -6,6 +6,7 @@ import { isCompleteAgentPreamble } from "../agents/agent-activity-presentation.j
 import type { AgentEventPayload } from "../infra/agent-events.js";
 import { deepFreezeDiagnosticValue } from "../infra/diagnostic-event-snapshot.js";
 import { boundedJsonUtf8Bytes } from "../infra/json-utf8-bytes.js";
+import { readWidgetDraftMetadata } from "../shared/widget-draft.js";
 
 const CHAT_RUN_PROGRESS_MAX_EVENTS = 50;
 const CHAT_RUN_PROGRESS_MAX_BYTES = 128 * 1024;
@@ -264,10 +265,10 @@ export function updateChatRunProgressSnapshot(
         return false;
       }
       if (phase === "start") {
-        return true;
+        return candidate.data?.phase !== "input_delta" || !candidate.data.widgetDraft;
       }
       if (phase === "result") {
-        return candidate.data?.phase === "result";
+        return candidate.data?.phase === "result" || Boolean(candidate.data?.widgetDraft);
       }
       if (phase !== "review" || candidate.data?.phase !== "review") {
         return candidate.data?.phase === phase;
@@ -306,6 +307,9 @@ export function updateChatRunProgressSnapshot(
   if (isTool && mode === "full") {
     for (const field of toolFields) {
       storedData[field] = data[field];
+    }
+    if (isTool && phase === "input_delta" && data.name === "show_widget") {
+      storedData.widgetDraft = readWidgetDraftMetadata(data.widgetDraft);
     }
   }
   for (const key of Object.keys(storedData)) {

@@ -288,6 +288,7 @@ export function subscribeEmbeddedAgentSession(input: SubscribeEmbeddedAgentSessi
     toolMetaById.clear();
     toolSummaryById.clear();
     state.liveEditDiffStateById.clear();
+    state.widgetDraftProjector?.clear();
     state.itemActiveIds.clear();
     state.itemStartedCount = 0;
     state.itemCompletedCount = 0;
@@ -407,6 +408,7 @@ export function subscribeEmbeddedAgentSession(input: SubscribeEmbeddedAgentSessi
     clearAssistantStream();
     cleanupRunToolStartData(params.runId);
     state.liveEditDiffStateById.clear();
+    state.widgetDraftProjector?.clear();
     // Reject pending compaction wait to unblock awaiting code.
     // Don't resolve, as that would incorrectly signal "compaction complete" when it's still in-flight.
     if (compactionRetry) {

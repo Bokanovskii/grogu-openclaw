@@ -26,6 +26,23 @@ For HTML widgets, OpenClaw core validates `widget_code` by parsing every inline 
 
 Channel plugins can register a contextual presenter behind the same core tool. In a configured Discord session, core hands the composed document to the Discord presenter, which stores it and posts the Activity button in the current channel. The model still makes one `show_widget` call. There is no transport-specific widget tool or content kind.
 
+While a supported model streams `show_widget` arguments, the Control UI shows
+**Building widget**, the title, received character count, and elapsed time.
+The working row hides old reasoning during this phase. HTML appears in a
+non-interactive draft preview in short batches, rather than waiting for the
+complete tool call. Incomplete markup and content drawn by scripts can remain
+blank until the finished widget arrives.
+
+Draft previews cannot run scripts, submit forms, navigate, or load network
+resources. They use the widget stylesheet but do not grant widget capabilities.
+The existing validation and hosting path still owns the finished widget.
+A failed call replaces its draft with a short error row. Stopping a run removes
+the preview. Reloading during generation restores the title and count, not the
+partial HTML. A gap in streamed content, an unsupported source kind, or the
+256-Ki-character draft limit leaves the status visible without a preview.
+These limits do not change the finished widget's size limit or pinning behavior.
+Other channel clients do not receive draft HTML.
+
 In Control UI sessions, a Canvas widget can also be pinned to the session dashboard. Set `pin: true` in the tool call, or use **Pin to dashboard** on an existing transcript widget. Pinning gives the dashboard copy its own identity and capability grants. The inline preview never inherits those grants. The browser never resolves a widget data binding inside the untrusted frame.
 
 For browser embedding, the wrapper document injects six small host bridges around the widget code:

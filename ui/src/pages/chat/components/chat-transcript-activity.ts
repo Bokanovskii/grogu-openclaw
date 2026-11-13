@@ -1,5 +1,7 @@
+import { t } from "../../../i18n/index.ts";
 import type { ChatItem } from "../../../lib/chat/chat-types.ts";
 import { readPreparedActivity } from "../../../lib/chat/tool-call-grouping.ts";
+import { readMessageWidgetDraft } from "../../../lib/chat/widget-draft.ts";
 import { sumRunOutputTokens } from "../chat-progress.ts";
 import { transcriptRunId } from "../chat-thread-run-identity.ts";
 import { getChatItemsGeneration, type buildCachedChatItems } from "../chat-thread.ts";
@@ -51,4 +53,19 @@ export function projectTranscriptActivity(
     ? props.runReasoningById?.get(workingIndicator.runId)
     : undefined;
   return { workingIndicator, activityRunId, activityGroupKey, runOutputTokens, runReasoning };
+}
+
+// A silent show_widget call replaces the generic working label for its run.
+export function buildingWidgetLabel(
+  toolMessages: readonly unknown[],
+  runId: string | null | undefined,
+): string | undefined {
+  const building =
+    runId &&
+    toolMessages.some(
+      (message) =>
+        transcriptRunId(message) === runId &&
+        readMessageWidgetDraft(message)?.status === "building",
+    );
+  return building ? t("chat.toolCards.widgetDraft.building") : undefined;
 }

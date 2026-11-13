@@ -12,6 +12,7 @@ import type { ChatItem, ToolCard } from "../../lib/chat/chat-types.ts";
 import { normalizeRoleForGrouping, resolveMessageRole } from "../../lib/chat/message-normalizer.ts";
 import { readPreparedActivity } from "../../lib/chat/tool-call-grouping.ts";
 import { extractToolBlockCardsCached, extractToolCardsCached } from "../../lib/chat/tool-cards.ts";
+import { readMessageWidgetDraft } from "../../lib/chat/widget-draft.ts";
 import { resolveToolBlockId } from "./chat-thread-items.ts";
 import { chatItemStartsDisplayTurn } from "./chat-turn-boundary.ts";
 import { buildToolStreamIdentity, extractToolMessageRefs } from "./tool-stream-identity.ts";
@@ -311,6 +312,7 @@ function coalesceTurn(items: ChatItem[]): ChatItem[] {
     const resultReceived = result !== undefined && result.rank > 1;
     const itemEnded = invocation.live?.["__openclawToolStreamItemEnded"] === true;
     const completed = resultReceived || itemEnded;
+    const widgetDraft = readMessageWidgetDraft(invocation.live);
     const transcript =
       message.messageId ??
       metadata?.id ??
@@ -332,6 +334,7 @@ function coalesceTurn(items: ChatItem[]): ChatItem[] {
       transcript,
       invocation.live?.["__openclawToolStreamDiffStat"],
       invocation.live?.["__openclawToolStreamReceivedAt"],
+      widgetDraft ? owner.id : undefined,
       (names.get(identity(owner))?.size ?? 0) > 1 ? owner.name : undefined,
     ]);
     const bundleKey = `${owner.source.index}:${renderingKey}`;
@@ -399,6 +402,8 @@ function coalesceTurn(items: ChatItem[]): ChatItem[] {
                 ? undefined
                 : invocation.live["__openclawToolStreamDiffStat"],
               __openclawToolStreamReceivedAt: invocation.live["__openclawToolStreamReceivedAt"],
+              __openclawWidgetDraft:
+                completed && widgetDraft?.status === "building" ? undefined : widgetDraft,
             }
           : {}),
       },

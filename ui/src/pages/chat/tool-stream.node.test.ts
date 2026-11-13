@@ -45,6 +45,81 @@ afterAll(() => {
 
 afterEach(() => vi.useRealTimers());
 
+describe("widget draft lifecycle", () => {
+  const progress = (html: string, offset = 0) => ({
+    phase: "input_delta",
+    name: "show_widget",
+    toolCallId: "widget",
+    widgetDraft: { html, offset, receivedChars: offset + html.length, title: "Report" },
+  });
+  const readDraft = (host: ReturnType<typeof createHost>) =>
+    host.chatToolMessages.flatMap(extractToolCardsCached).find((card) => card.callId === "widget")
+      ?.widgetDraft;
+
+  it("keeps live draft bytes ordered and discards them on success or terminal run events", () => {
+    useToolStreamFakeTimers();
+    const host = createHost({ chatRunId: "run-1" });
+    emitTool(host, "run-1", 1, progress("<p>"));
+    emitTool(host, "run-1", 2, progress("Report</p>", 3));
+    emitTool(host, "run-1", 1, progress("duplicate"));
+    expect(readDraft(host)?.html).toBe("<p>Report</p>");
+    emitTool(host, "run-1", 3, {
+      phase: "result",
+      name: "show_widget",
+      toolCallId: "widget",
+      result: {},
+    });
+    expect(readDraft(host)).toBeUndefined();
+    emitTool(host, "run-1", 4, progress("late"));
+    expect(readDraft(host)).toBeUndefined();
+    emitTool(host, "run-2", 1, progress("<p>"));
+    handleAgentEvent(host, agentEvent("run-2", 2, "lifecycle", { phase: "end", aborted: true }));
+    expect(host.chatToolMessages.flatMap(extractToolCardsCached).at(-1)?.widgetDraft).toMatchObject(
+      {
+        status: "stopped",
+        html: "",
+      },
+    );
+    emitTool(host, "run-2", 3, progress("late", 3));
+    expect(host.chatToolMessages.flatMap(extractToolCardsCached).at(-1)?.widgetDraft?.html).toBe(
+      "",
+    );
+  });
+
+  it.each(["gap", "reconnect"] as const)(
+    "keeps status but not a broken preview after %s",
+    (mode) => {
+      useToolStreamFakeTimers();
+      const host = createHost({ chatRunId: "run-1" });
+      const event = progress("<p>");
+      if (mode === "reconnect") {
+        handleAgentEvent(
+          host,
+          agentEvent("run-1", 1, "tool", {
+            ...event,
+            widgetDraft: { receivedChars: 3, title: "Report" },
+          }),
+          "history",
+        );
+      } else {
+        emitTool(host, "run-1", 1, event);
+      }
+      emitTool(host, "run-1", 2, progress("tail", 12));
+      expect(readDraft(host)).toMatchObject({ status: "building", unavailable: "gap", html: "" });
+      emitTool(host, "run-1", 3, {
+        phase: "result",
+        name: "show_widget",
+        toolCallId: "widget",
+        isError: true,
+        result: "Invalid",
+      });
+      expect(readDraft(host)).toMatchObject({ status: "failed", html: "" });
+      resetToolStream(host);
+      expect(host.chatToolMessages).toEqual([]);
+    },
+  );
+});
+
 describe("observed steering boundary", () => {
   it.each(["live", "history"] as const)(
     "anchors only first-observed live tools and commentary (%s)",

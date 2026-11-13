@@ -29,6 +29,7 @@ import type { ToolCard, ToolCardOutcome, ToolOutputMetadata } from "./chat-types
 import { isToolResultMessage } from "./message-normalizer.ts";
 import { readLiveDiffStat } from "./tool-call-diff.ts";
 import { readPreparedActivity } from "./tool-call-grouping.ts";
+import { readMessageWidgetDraft } from "./widget-draft.ts";
 
 export type ToolPreview = NonNullable<ToolCard["preview"]>;
 export type CanvasToolPreview = Extract<ToolPreview, { kind: "canvas" }>;
@@ -348,6 +349,7 @@ function extractToolCards(message: unknown): ToolCard[] {
   const messageIsError = readToolErrorFlag(m);
   const isLiveToolStream = m["__openclawToolStreamLive"] === true;
   const liveDiffStat = readLiveDiffStat(m["__openclawToolStreamDiffStat"]);
+  const widgetDraft = readMessageWidgetDraft(message);
   const cards: ToolCard[] = [];
   const fallbackMatchedCards = new WeakSet<ToolCard>();
   const transcriptMessageId = resolveTranscriptMessageId(m);
@@ -421,6 +423,7 @@ function extractToolCards(message: unknown): ToolCard[] {
             }
           : {}),
         ...(liveDiffStat ? { liveDiffStat } : {}),
+        ...(name === "show_widget" && widgetDraft ? { widgetDraft } : {}),
       });
       continue;
     }

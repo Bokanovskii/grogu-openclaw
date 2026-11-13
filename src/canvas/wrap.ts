@@ -7,7 +7,7 @@ import { WIDGET_THEME_MESSAGE_TYPE, WIDGET_THEME_TOKENS } from "../shared/widget
 // fallback renders match Control UI renders, where the theme bridge pushes the
 // same host values. Contrast tradeoffs in these pairings are owned by the host
 // theme; do not diverge here.
-const WIDGET_BASE_STYLES = `:root{color-scheme:light dark;
+export const WIDGET_BASE_STYLES = `:root{color-scheme:light dark;
 --surface:#faf9f7;--card:#ffffff;--elevated:#ffffff;
 --text:#403c35;--text-strong:#211e1a;--muted:#6e6960;
 --border:#e8e4dc;--border-strong:#d6d0c5;

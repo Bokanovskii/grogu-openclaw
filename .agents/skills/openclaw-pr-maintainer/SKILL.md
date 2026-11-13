@@ -98,7 +98,7 @@ not. Neither route waives enforced reviews.
 ## Review and publish
 
 Before committing or landing nontrivial code, follow the root
-[bounded review policy](../../../AGENTS.md#bounded-review) with `$autoreview` scope
+[scoped review policy](../../../AGENTS.md#scoped-review) with `$autoreview` scope
 and finding rules. The root owns reviewer selection, exceptions, and stopping rules.
 Do not add a mandatory CLI review or restart review merely to open or update a PR.
 Address real human/bot findings and explain rejected ones; bot scores and Rank-up

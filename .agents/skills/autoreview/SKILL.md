@@ -16,7 +16,7 @@ use `python`; `--mode copy` is available when symlinks are unavailable.
 
 Run the shared `scripts/autoreview` helper with Python from the repository being
 reviewed, preserving its working directory, only when that helper route is selected.
-The root [bounded review policy](../../../AGENTS.md#bounded-review) owns this
+The root [scoped review policy](../../../AGENTS.md#scoped-review) owns this
 repository's reviewer selection and stopping rules, including its direct Copilot
 route instead of the shared Codex CLI default.
 

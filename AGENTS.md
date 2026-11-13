@@ -86,15 +86,21 @@ Do not probe or install Codex CLI, or announce its absence as a fallback.
 This repository choice takes precedence over the shared `autoreview` engine default.
 Use the shared skill's scope and finding rules, not an additional helper review.
 
+The outer loop owns implementation, self-evaluation, and validation.
+Before review, assess the diff against the requested outcome, check affected behavior
+and regression coverage, and resolve known defects. Do not hand unfinished
+implementation or routine validation to the reviewer.
+
 Run one initial review of the completed change, with no nested reviewers.
 Request high-confidence P0/P1 defects, not speculative edge cases or optional polish.
 Give the reviewer the task, full diff, necessary context, completed validation results,
 and any known unresolved concerns. Do not impose an arbitrary time budget.
 
-Review is a final read-only code analysis, not another implementation or validation loop.
-Read and research the changed code, relevant owners, callers, siblings, tests, and
-dependency contracts to find remaining gaps. Assess the code independently rather
-than accepting the implementing agent's conclusions.
+Review is a simple independent final check of the code, not another outer loop.
+Read the changed code and research relevant unchanged code, tests, or dependency
+contracts as needed to find remaining gaps. Assess the code independently rather
+than accepting the implementing agent's conclusions; do not repeat the task's full
+investigation or require an evidence matrix.
 Use the outer loop's completed checks as evidence; do not repeat tests, builds,
 lint, reproductions, screenshots, environment setup, CI watching, or publication work.
 Read test code to assess coverage. If a concrete code concern needs missing or stale

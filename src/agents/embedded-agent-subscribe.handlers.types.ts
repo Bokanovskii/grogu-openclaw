@@ -33,6 +33,7 @@ import type {
   createAssistantVisibleStreamText,
   ThinkingTagStreamState,
 } from "./embedded-agent-utils.js";
+import type { WidgetDraftProjector } from "./embedded-agent-widget-draft.js";
 import type { McpConnectAction } from "./mcp-connect-action.js";
 import type { McpAppChannelView } from "./mcp-ui-resource.js";
 import type { ReplyDeliveryState } from "./reply-completion.js";
@@ -134,6 +135,7 @@ export type EmbeddedAgentSubscribeState = {
     { lastEmittedAtMs: number; itemMetadata: ExecLiveItemMetadata }
   >;
   liveEditDiffStateById: Map<string, LiveEditDiffProgressState>;
+  widgetDraftProjector?: WidgetDraftProjector;
   itemActiveIds: Set<string>;
   itemStartedCount: number;
   itemCompletedCount: number;

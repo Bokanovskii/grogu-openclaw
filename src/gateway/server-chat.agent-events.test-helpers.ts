@@ -5,6 +5,7 @@ import {
   type AgentEventPayload,
   type AgentEventStream,
 } from "../infra/agent-events.js";
+import { registerAgentRunContext } from "../infra/agent-run-registry.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
@@ -325,8 +326,8 @@ export function registerChatConnectionIdentityTest(harness: {
   });
 }
 
-/** Bounded widget retention shares the agent-event fixture without growing its event-fanout suite. */
-export function registerBoundedWidgetSnapshotsTest({
+/** Widget progress shares the agent-event fixture without growing its event-fanout suite. */
+export function registerWidgetProgressTests({
   createHarness,
   widgetResult,
   logWarnMock,
@@ -337,6 +338,67 @@ export function registerBoundedWidgetSnapshotsTest({
   widgetResult: typeof import("./server-chat.agent-events.test-harness.js").widgetResult;
   logWarnMock: ReturnType<typeof vi.fn>;
 }) {
+  test("sends widget draft HTML only to live UI subscribers and replays metadata after tool start", async () => {
+    const h = createHarness();
+    h.register("widget-run", "session-widget", "widget-run");
+    registerAgentRunContext("widget-run", {
+      sessionKey: "session-widget",
+      verboseLevel: "full",
+      isControlUiVisible: true,
+    });
+    h.toolEventRecipients.add("widget-run", "conn-widget");
+    h.sessionEventSubscribers.subscribe("conn-session");
+    const widgetDraft = {
+      title: "Build report",
+      receivedChars: 15,
+      offset: 0,
+      html: "<h2>Report</h2>",
+    };
+    await h.emit("widget-run", "tool", {
+      phase: "input_delta",
+      name: "show_widget",
+      toolCallId: "draft",
+      widgetDraft,
+    });
+    expect(h.targetedAgent().some(([, payload]) => payload.data.widgetDraft === widgetDraft)).toBe(
+      true,
+    );
+    const sessionCall = h.broadcastToConnIds.mock.calls.find(([event]) => event === "session.tool");
+    expect(sessionCall?.[1]).toMatchObject({ data: { widgetDraft } });
+    expect(h.nodeSendToSession).not.toHaveBeenCalled();
+    await h.emit(
+      "widget-run",
+      "tool",
+      {
+        phase: "start",
+        name: "show_widget",
+        toolCallId: "draft",
+        args: { title: "Build report" },
+      },
+      { seq: 2 },
+    );
+    const progress = h.chatRunState.runs.get("widget-run")?.progressSnapshot;
+    expect(progress?.events.some((event) => event.data.widgetDraft)).toBe(true);
+    expect(JSON.stringify(progress)).not.toContain("<h2>");
+    await h.emit(
+      "widget-run",
+      "tool",
+      {
+        phase: "result",
+        name: "show_widget",
+        toolCallId: "draft",
+        result: { content: [{ type: "text", text: "Ready" }] },
+      },
+      { seq: 3 },
+    );
+    expect(
+      h.chatRunState.runs
+        .get("widget-run")
+        ?.progressSnapshot?.events.some((event) => event.data.widgetDraft),
+    ).toBe(false);
+    await h.handler.dispose();
+  });
+
   test("keeps live widget snapshots bounded without retaining failed or node-panel results", async () => {
     vi.useFakeTimers();
     const h = createHarness();

@@ -68,6 +68,7 @@ import {
 } from "./chat-tool-cards.ts";
 import { renderToolOutcomeSummary, renderToolReviewOutcome } from "./chat-tool-outcome-summary.ts";
 import { renderTurnRecapRow } from "./chat-working-indicator.ts";
+import { renderWidgetDrafts } from "./widget-draft.ts";
 
 type GroupedMessageRenderOptions = Parameters<typeof renderGroupedMessage>[2];
 
@@ -332,6 +333,7 @@ export function renderActivityGroup(
         ${activityExpanded ? renderMessages() : nothing}
       </div>
       ${renderBrowserTabPreviews(groups, opts)}
+      ${activityExpanded ? nothing : renderWidgetDrafts(groups)}
     </div>
   `;
   return frame(content);

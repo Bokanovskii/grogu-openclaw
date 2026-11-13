@@ -27,6 +27,7 @@ import type { SidebarContent } from "./chat-sidebar-content-types.ts";
 import { syncToolDisclosureOverflow } from "./chat-tool-cards.ts";
 import { renderToolOutcomeSummary } from "./chat-tool-outcome-summary.ts";
 import { renderChatWorkingIndicator } from "./chat-working-indicator.ts";
+import { renderWidgetDrafts } from "./widget-draft.ts";
 
 /** A contiguous run of in-flight streaming items rendered under one assistant group. */
 export type StreamGroupPart = Extract<
@@ -315,6 +316,7 @@ export function renderWorkGroupSummary(
       </button>
       <div class="chat-work-group__separator" aria-hidden="true"></div>
       ${opts.expanded ? nothing : (opts.browserTabPreviews ?? nothing)}
+      ${opts.expanded ? nothing : renderWidgetDrafts(item.groups)}
     </div>
   `;
   return opts.presentation === "continuation"

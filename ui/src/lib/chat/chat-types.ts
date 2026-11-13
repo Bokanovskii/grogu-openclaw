@@ -472,6 +472,7 @@ export type ToolCard = {
   details?: unknown;
   /** Monotonic edit counts while a live tool call is still receiving input. */
   liveDiffStat?: { added: number; removed: number };
+  widgetDraft?: import("./widget-draft.ts").WidgetDraft;
   /** Producer-reported process exit code, when the result supplies one. */
   exitCode?: number;
   isError?: boolean;

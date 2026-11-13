@@ -14,11 +14,12 @@ import {
   withToolApprovalReviews,
 } from "../../lib/chat/tool-approval-reviews.ts";
 import { readLiveDiffStat } from "../../lib/chat/tool-call-diff.ts";
+import { updateWidgetDraft } from "../../lib/chat/widget-draft.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { formatUnknownText, truncateText } from "../../lib/format.ts";
 import { uiSessionEventMatches } from "../../lib/sessions/session-key.ts";
 import { reconcileChatRunStartup } from "./chat-run-startup.ts";
-import { getChatRunOwner } from "./history-merge.ts";
+import { getChatRunOwner, getChatRunStatus } from "./history-merge.ts";
 import { observedRunInputSendId } from "./stream-causal-boundary.ts";
 import type { AgentEventPayload, ToolStreamEntry, ToolStreamHost } from "./tool-stream-contract.ts";
 import { buildToolStreamIdentity } from "./tool-stream-identity.ts";
@@ -108,12 +109,14 @@ function refreshSessionStatusModel(host: ToolStreamHost, data: Record<string, un
 }
 
 function buildToolStreamMessage(entry: ToolStreamEntry): Record<string, unknown> {
-  const itemEnded = entry.activity?.some(
-    (item) =>
-      (item.toolCallId ?? item.itemId) === entry.toolCallId &&
-      item.phase === "end" &&
-      !item.suppressChannelProgress,
-  );
+  const itemEnded =
+    entry.widgetDraft?.status === "stopped" ||
+    entry.activity?.some(
+      (item) =>
+        (item.toolCallId ?? item.itemId) === entry.toolCallId &&
+        item.phase === "end" &&
+        !item.suppressChannelProgress,
+    );
   const content: Array<Record<string, unknown>> = [];
   content.push({
     type: "toolcall",
@@ -153,6 +156,7 @@ function buildToolStreamMessage(entry: ToolStreamEntry): Record<string, unknown>
       ? { __openclawToolStreamDiffStat: entry.liveDiffStat }
       : {}),
     __openclawToolStreamReceivedAt: entry.receivedAt,
+    ...(entry.widgetDraft ? { __openclawWidgetDraft: entry.widgetDraft } : {}),
     ...(entry.afterUserSendId ? { openclawToolStreamAfterSendId: entry.afterUserSendId } : {}),
   };
 }
@@ -516,6 +520,29 @@ export function handleAgentEvent(
     if (runId) {
       (host.knownAgentRunIds ??= new Set()).add(runId);
     }
+    if (
+      payload.stream === "lifecycle" &&
+      (payload.data.phase === "end" || payload.data.phase === "error")
+    ) {
+      const sequences = (host.activityEventSeqById ??= new Map());
+      sequences.set(`widget-ended:${payload.runId}`, payload.seq);
+      const endedRuns = [...sequences.keys()].filter((key) => key.startsWith("widget-ended:"));
+      for (const key of endedRuns.slice(0, -RUN_USAGE_LIMIT)) {
+        sequences.delete(key);
+      }
+      for (const entry of host.toolStreamById.values()) {
+        if (entry.runId !== payload.runId || entry.widgetDraft?.status !== "building") {
+          continue;
+        }
+        entry.widgetDraft = { ...entry.widgetDraft, html: "", status: "stopped" };
+        publishToolStreamEntry(host, entry, true);
+      }
+    } else if (payload.stream === "lifecycle" && payload.data.phase === "start") {
+      const key = `widget-ended:${payload.runId}`;
+      if (payload.seq > (host.activityEventSeqById?.get(key) ?? -1)) {
+        host.activityEventSeqById?.delete(key);
+      }
+    }
   }
 
   if (
@@ -577,6 +604,15 @@ export function handleAgentEvent(
   const toolStreamIdentity = buildToolStreamIdentity(payload.runId, toolCallId);
   let entry = host.toolStreamById.get(toolStreamIdentity);
   const phase = typeof data.phase === "string" ? data.phase : "";
+  if (phase === "input_delta" && data.widgetDraft) {
+    const runStatus = getChatRunStatus(host, payload.runId);
+    if (
+      (runStatus && runStatus !== "streaming") ||
+      host.activityEventSeqById?.has(`widget-ended:${payload.runId}`)
+    ) {
+      return true;
+    }
+  }
   const approvalReview = phase === "review" ? normalizeToolApprovalReview(data.review) : null;
   if (phase === "review" && !approvalReview) {
     return true;
@@ -661,14 +697,30 @@ export function handleAgentEvent(
   if (liveDiffStat) {
     entry.liveDiffStat = liveDiffStat;
   }
+  if (phase === "input_delta" && name === "show_widget" && !entry.resultReceived) {
+    entry.widgetDraft = updateWidgetDraft(entry.widgetDraft, data.widgetDraft, entry.startedAt);
+  }
   if (phase === "result") {
     entry.liveDiffStat = undefined;
     entry.resultReceived = true;
+    entry.widgetDraft =
+      entry.widgetDraft && resultIsError
+        ? {
+            ...entry.widgetDraft,
+            html: "",
+            status: "failed",
+            error: truncateText(entry.output ?? "", 200).text,
+          }
+        : undefined;
   }
 
   if (approvalReview) {
     applyToolReviewEvent(host, payload, entry, approvalReview);
   }
-  publishToolStreamEntry(host, entry, phase === "result" || approvalReview !== null);
+  publishToolStreamEntry(
+    host,
+    entry,
+    phase === "result" || approvalReview !== null || Boolean(entry.widgetDraft),
+  );
   return true;
 }

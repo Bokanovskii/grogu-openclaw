@@ -1174,7 +1174,7 @@ export function createAgentEventHandler({
       nodeHasSessionSubscribers,
     );
     const firstDeliveryKey = deliveryKeys[0];
-    if (!firstDeliveryKey) {
+    if (!firstDeliveryKey || payload.data.widgetDraft) {
       return;
     }
     const verbose = resolveToolVerboseLevel(event, sessionKey, agentId);

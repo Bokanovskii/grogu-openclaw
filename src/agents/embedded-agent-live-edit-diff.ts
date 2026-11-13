@@ -1,5 +1,6 @@
 import { parseStreamingJson } from "@openclaw/ai/internal/runtime";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { readToolCallBlock, readToolCallId } from "./embedded-agent-tool-call-progress.js";
 import { countStreamingFileMutationLines } from "./file-mutation-args.js";
 import { resolveFileMutationToolName } from "./tool-mutation-names.js";
 
@@ -20,37 +21,6 @@ type LiveEditDiffProgress = {
   name: string;
   diff: { added: number; removed: number };
 };
-
-function readToolCallBlock(event: Record<string, unknown>): Record<string, unknown> | undefined {
-  const contentIndex = event.contentIndex;
-  const partial = event.partial;
-  if (
-    typeof contentIndex !== "number" ||
-    !Number.isInteger(contentIndex) ||
-    contentIndex < 0 ||
-    !partial ||
-    typeof partial !== "object"
-  ) {
-    return undefined;
-  }
-  const content = (partial as { content?: unknown }).content;
-  const block = Array.isArray(content) ? content[contentIndex] : undefined;
-  return block && typeof block === "object" && !Array.isArray(block)
-    ? (block as Record<string, unknown>)
-    : undefined;
-}
-
-function readToolCallId(event: Record<string, unknown>): string | undefined {
-  const toolCall = event.toolCall;
-  if (toolCall && typeof toolCall === "object" && !Array.isArray(toolCall)) {
-    const id = (toolCall as Record<string, unknown>).id;
-    if (typeof id === "string" && id) {
-      return id;
-    }
-  }
-  const block = readToolCallBlock(event);
-  return typeof block?.id === "string" && block.id ? block.id : undefined;
-}
 
 /** Update one run's bounded best-effort diff counters from a model stream event. */
 export function updateLiveEditDiffProgress(

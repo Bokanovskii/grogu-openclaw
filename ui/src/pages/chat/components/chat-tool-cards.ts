@@ -40,6 +40,7 @@ import {
 } from "./chat-tool-content.ts";
 import { renderToolOutcomeSummary } from "./chat-tool-outcome-summary.ts";
 import { renderToolPreview } from "./widget-card.ts";
+import { renderWidgetDraft } from "./widget-draft.ts";
 
 export function renderBrowserTabPreviews(
   groups: readonly MessageGroup[],
@@ -460,6 +461,9 @@ export function renderToolCard(
     activityCards?: readonly ToolCard[];
   },
 ) {
+  if (originalCard.widgetDraft) {
+    return renderWidgetDraft(originalCard);
+  }
   const card = resolveToolCardDisplay(originalCard);
   const outcome = resolveToolCardOutcome(card, opts.runActive);
   const progressReceipt = renderProgressCardReceipt(card, outcome);

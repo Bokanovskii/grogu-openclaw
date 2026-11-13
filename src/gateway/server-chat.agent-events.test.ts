@@ -100,7 +100,7 @@ import {
   type AgentEventTestHarnessOptions,
 } from "./server-chat.agent-events.test-harness.js";
 import {
-  registerBoundedWidgetSnapshotsTest,
+  registerWidgetProgressTests,
   subscribeAgentEvents,
 } from "./server-chat.agent-events.test-helpers.js";
 import { createChatAbortMarker, type AgentEventHandlerOptions } from "./server-chat.js";
@@ -239,7 +239,7 @@ describe("agent event handler", () => {
     });
   });
 
-  registerBoundedWidgetSnapshotsTest({ createHarness, widgetResult, logWarnMock });
+  registerWidgetProgressTests({ createHarness, widgetResult, logWarnMock });
 
   it.each(["silent", "heartbeat"])("does not revive widgets from a %s turn", async (mode) => {
     const h = createHarness();

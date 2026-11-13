@@ -3897,6 +3897,15 @@ export const en: TranslationMap & {
     toolCards: {
       tool: "Tool",
       canvas: "Canvas",
+      widgetDraft: {
+        building: "Building widget",
+        failed: "Widget failed",
+        stopped: "Widget unfinished",
+        received: "{count} characters received",
+        preview: "Widget draft preview",
+        note: "Live preview. Controls work when the widget is ready.",
+        unavailable: "Preview unavailable. The widget is still being built.",
+      },
       summary: "Summary",
       toolInput: "Tool input",
       toolOutput: "Tool output",

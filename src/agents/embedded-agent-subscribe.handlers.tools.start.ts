@@ -303,6 +303,7 @@ export function handleToolExecutionStart(
 ): void | Promise<void> {
   const startToolName = normalizeToolPolicyName(evt.toolName);
   ctx.state.liveEditDiffStateById.delete(evt.toolCallId);
+  ctx.state.widgetDraftProjector?.finish(evt.toolCallId);
   const isQuestionTool =
     startToolName === "ask_user" ||
     (startToolName === "secrets" &&

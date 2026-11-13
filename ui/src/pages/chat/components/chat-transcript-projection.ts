@@ -40,7 +40,7 @@ import {
   type ChatThreadProps,
 } from "./chat-thread-interactions.ts";
 import { renderWorkGroupBrowserTabPreviews } from "./chat-tool-cards.ts";
-import { projectTranscriptActivity } from "./chat-transcript-activity.ts";
+import { buildingWidgetLabel, projectTranscriptActivity } from "./chat-transcript-activity.ts";
 import { latestTranscriptAnnouncement } from "./chat-transcript-announcement.ts";
 import {
   isTranscriptGlobalAlias,
@@ -152,6 +152,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
   const chatItems = buildCachedChatItems(chatItemsInput);
   const { workingIndicator, activityRunId, activityGroupKey, runOutputTokens, runReasoning } =
     projectTranscriptActivity(chatItems, props);
+  const startupLabel = buildingWidgetLabel(props.toolMessages, activityRunId) ?? props.startupLabel;
   const latestBrowserTabs = props.latestBrowserTabs;
   syncToolCardExpansionState(
     props.sessionKey,
@@ -337,7 +338,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     ...sharedMessageRenderOptions,
     branding: props.branding,
     assistant: assistantIdentity,
-    startupLabel: props.startupLabel,
+    startupLabel,
     waitingApproval: props.waitingApproval,
     waitingSubagents: subagentWait ?? undefined,
     runningSubagents: subagents.running,
@@ -610,7 +611,7 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     activityRunId,
     activityGroupKey,
     Boolean(props.runWorking),
-    props.startupLabel,
+    startupLabel,
     Boolean(props.waitingApproval),
     props.questionPrompts,
     state.asyncQuestionRevision,

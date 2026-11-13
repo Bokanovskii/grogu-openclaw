@@ -98,6 +98,7 @@ export function handleAgentEnd(
   evt?: Extract<AgentSessionEvent, { type: "agent_end" }>,
 ): void | Promise<void> {
   ctx.state.liveEditDiffStateById.clear();
+  ctx.state.widgetDraftProjector?.clear();
   type BeforeTerminalDeliveryDecision = void | {
     suppressTerminalDelivery?: boolean;
     continueCurrentTurn?: boolean;

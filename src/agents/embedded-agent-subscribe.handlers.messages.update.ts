@@ -48,6 +48,7 @@ import {
   extractAssistantVisibleText,
   extractThinkingFromTaggedStream,
 } from "./embedded-agent-utils.js";
+import { WidgetDraftProjector } from "./embedded-agent-widget-draft.js";
 import type { AgentEvent, AgentMessage } from "./runtime/index.js";
 
 const REASONING_TAG_RE = /<\s*\/?\s*(?:(?:antml:|mm:)?(?:think(?:ing)?|thought)|antthinking)\b/i;
@@ -66,6 +67,20 @@ export function handleMessageUpdate(
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
   if (evtType !== "text_delta") {
     ctx.flushAssistantStream();
+  }
+  if (evtType.startsWith("toolcall_")) {
+    ctx.state.widgetDraftProjector ??= new WidgetDraftProjector((toolCallId, widgetDraft) => {
+      if (ctx.state.unsubscribed) {
+        return;
+      }
+      // Draft bytes are UI-only progress, not channel reply callbacks or transcript content.
+      emitAgentEvent({
+        runId: ctx.params.runId,
+        stream: "tool",
+        data: { phase: "input_delta", name: "show_widget", toolCallId, widgetDraft },
+      });
+    });
+    ctx.state.widgetDraftProjector.update(assistantRecord);
   }
   const liveEditDiff = updateLiveEditDiffProgress(ctx.state.liveEditDiffStateById, assistantRecord);
   if (liveEditDiff) {

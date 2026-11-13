@@ -9,6 +9,7 @@ import type {
   ChatStreamSegment,
 } from "../../lib/chat/chat-types.ts";
 import type { DiffStat } from "../../lib/chat/tool-call-diff.ts";
+import type { WidgetDraft } from "../../lib/chat/widget-draft.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import type { UiSessionDefaultsHost } from "../../lib/sessions/session-key.ts";
 import type { ChatRunStartupState } from "./chat-run-startup.ts";
@@ -31,6 +32,7 @@ export type ToolStreamEntry = {
   details?: unknown;
   /** Monotonic edit counts received while the tool arguments stream. */
   liveDiffStat?: DiffStat;
+  widgetDraft?: WidgetDraft;
   isError?: boolean;
   exitCode?: number;
   /** True once a result event landed, even when the output text is empty. */

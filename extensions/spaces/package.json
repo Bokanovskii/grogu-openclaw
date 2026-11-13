@@ -1,0 +1,33 @@
+{
+  "name": "@openclaw/spaces",
+  "version": "2026.10.7",
+  "private": true,
+  "description": "Personal lists and research that remain available across chats",
+  "type": "module",
+  "dependencies": {
+    "lit": "3.3.3",
+    "typebox": "1.3.34",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.10.7"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": { "optional": true }
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": { "pluginApi": ">=2026.10.7" },
+    "controlUi": "./browser/index.ts",
+    "assetScripts": {
+      "build": "cd ../.. && node --import ./scripts/tsx.mjs scripts/build-plugin-control-ui.mts extensions/spaces",
+      "copy": "cd ../.. && node --import ./scripts/tsx.mjs scripts/build-plugin-control-ui.mts extensions/spaces --copy",
+      "buildOutputs": ["openclaw.plugin.json"]
+    },
+    "build": { "workerEntries": ["./src/store.worker.ts"] }
+  }
+}

@@ -24,7 +24,7 @@ export function buildUiPresentationPrompt(params: {
     clawHubMessageToolName &&
       `\`${clawHubMessageToolName}\`: Tools/skills first. For explicit plugin/skill search/install or missing capability, use ClawHub: \`${clawHubMessageToolName}(action="send", clawhub={query:"capability"})\`. Skip routine tasks, tool errors, permissions. Omit channel/target. Trust result status.`,
     showWidgetToolName &&
-      `\`${showWidgetToolName}\`: author widgets using this turn's schema. pin=true saves to the dashboard; status=pinned means the widget is on the session dashboard. Follow result.presentation when present. Inline availability is per turn, including after restart.`,
+      `\`${showWidgetToolName}\`: show HTML in chat by default, including comparisons and follow-up versions. Publish updated widget_code inline; do not pin merely to update a previous chat widget. pin=true is only for an explicit dashboard request; status=pinned means saved to the session dashboard. Follow this turn's schema and result.presentation.`,
     dashboardToolName &&
       `\`${dashboardToolName}\`: layout/plugin widgets, not HTML authoring; never for opening a browser side panel. For a saved widget, use action="focus_tab" with its tabId.${showWidgetToolName ? "" : " Custom authoring is unavailable this turn, not unsupported by dashboards."}`,
     portalToolName &&

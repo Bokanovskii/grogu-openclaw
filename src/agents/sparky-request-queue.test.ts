@@ -3,9 +3,9 @@ import { createSparkyAdmission, queueSparkyFetch } from "./sparky-request-queue.
 import { makeProviderModelFixture } from "./test-helpers/provider-model-fixture.js";
 
 const model = makeProviderModelFixture({
+  api: "openai-completions",
   id: "synthetic",
   provider: "sparky",
-  api: "openai-completions",
   baseUrl: "https://queue.example.invalid/v1",
 });
 const flush = async () => {

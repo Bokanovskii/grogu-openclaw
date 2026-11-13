@@ -63,8 +63,8 @@ export type AgentRunClientContext = {
   /** Capabilities declared by the gateway client that originated this run. */
   clientCaps?: string[];
   gatewayUiCommandTarget?: import("../../gateway/ui-command-target.types.js").GatewayUiCommandTarget;
-  /** Host-admitted dashboard authoring without an originating inline renderer. */
-  pinnedWidgetAuthoring?: boolean;
+  /** Host-admitted publication back to a recovered Control UI source, not a live client grant. */
+  inlineWidgetAuthoring?: boolean;
 };
 
 export type AgentRunMessageContext = {

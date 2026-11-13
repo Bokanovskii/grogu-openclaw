@@ -4,7 +4,6 @@ import {
   resolveOptionalIntegerOption,
 } from "@openclaw/normalization-core/number-coercion";
 import {
-  normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
@@ -40,9 +39,9 @@ import {
   readToolStringParam,
   scheduleToolProgress,
 } from "./common.js";
+import { createWebFetchConnectionError, formatWebFetchErrorDetail } from "./web-fetch-errors.js";
 import {
   extractBasicHtmlContent,
-  htmlToMarkdown,
   markdownToText,
   truncateWebFetchText,
   type ExtractMode,
@@ -211,29 +210,6 @@ function resolveFetchHeaders(fetch?: WebFetchConfig): Record<string, string> | u
     .map(({ name, value }) => [name, value] as const)
     .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function looksLikeHtml(value: string): boolean {
-  const head = normalizeLowercaseStringOrEmpty(value.trimStart().slice(0, 256));
-  return head.startsWith("<!doctype html") || head.startsWith("<html");
-}
-
-function formatWebFetchErrorDetail(params: {
-  detail: string;
-  contentType?: string | null;
-}): string {
-  const { detail, contentType } = params;
-  if (!detail) {
-    return "";
-  }
-  let text = detail;
-  const contentTypeLower = normalizeOptionalLowercaseString(contentType);
-  if (contentTypeLower?.includes("text/html") || looksLikeHtml(detail)) {
-    const rendered = htmlToMarkdown(detail);
-    const withTitle = rendered.title ? `${rendered.title}\n${rendered.text}` : rendered.text;
-    text = markdownToText(withTitle);
-  }
-  return truncateWebFetchText(text.trim(), DEFAULT_ERROR_MAX_CHARS).text;
 }
 
 function redactUrlForDebugLog(rawUrl: string): string {
@@ -661,7 +637,7 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
     if (payload) {
       return payload;
     }
-    throw error;
+    throw createWebFetchConnectionError(error);
   }
 
   try {
@@ -676,9 +652,13 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
       const detail = formatWebFetchErrorDetail({
         detail: rawDetailResult.text,
         contentType: res.headers.get("content-type"),
+        maxChars: DEFAULT_ERROR_MAX_CHARS,
       });
       const wrappedDetail = wrapWebFetchContent(detail || res.statusText, DEFAULT_ERROR_MAX_CHARS);
-      throw new Error(`Web fetch failed (${res.status}): ${wrappedDetail.text}`);
+      throw Object.assign(new Error(`Web fetch failed (${res.status}): ${wrappedDetail.text}`), {
+        code: `WEB_FETCH_HTTP_${res.status}`,
+        status: res.status,
+      });
     }
 
     const contentType = res.headers.get("content-type") ?? "application/octet-stream";
@@ -704,8 +684,11 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
         if (payload) {
           return payload;
         }
-        throw new Error(
-          "Web fetch extraction failed: Readability disabled and no fetch provider is available.",
+        throw Object.assign(
+          new Error(
+            "Web fetch extraction failed: Readability disabled and no fetch provider is available.",
+          ),
+          { code: "WEB_FETCH_EXTRACTION_FAILED" },
         );
       }
       let extracted = await extractReadableContent({
@@ -731,8 +714,11 @@ async function fetchWebPayload(params: WebFetchRuntimeParams): Promise<Record<st
         if (!basic?.text) {
           const providerLabel =
             (await params.resolveProviderFallback())?.provider.label ?? "provider fallback";
-          throw new Error(
-            `Web fetch extraction failed: Readability, ${providerLabel}, and basic HTML cleanup returned no content.`,
+          throw Object.assign(
+            new Error(
+              `Web fetch extraction failed: Readability, ${providerLabel}, and basic HTML cleanup returned no content.`,
+            ),
+            { code: "WEB_FETCH_EXTRACTION_FAILED" },
           );
         }
         extracted = { ...basic, extractor: "raw-html" };

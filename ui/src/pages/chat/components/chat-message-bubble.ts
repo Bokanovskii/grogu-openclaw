@@ -314,7 +314,6 @@ export function renderGroupedMessage(
   const clawHubCards = normalizedMessage.content.filter((item) => item.type === "clawhub");
   const extractedThinking =
     opts.showReasoning && role === "assistant" ? extractThinkingCached(message) : null;
-  const reasoningMarkdown = extractedThinking ? `_Reasoning:_\n\n${extractedThinking}` : null;
   const markdown =
     (normalizedRole === "user" ? opts.messageActions?.markdown : undefined) ??
     (displayMarkdown || null);
@@ -370,7 +369,7 @@ export function renderGroupedMessage(
   if (
     !markdown &&
     !asyncQuestions &&
-    !reasoningMarkdown &&
+    !extractedThinking &&
     !hasToolCards &&
     !hasMediaContent &&
     clawHubCards.length === 0 &&
@@ -474,7 +473,7 @@ export function renderGroupedMessage(
   // Pure tool messages (no text/images/attachments) skip the "Tool output"
   // shell and render as flat kind-aware rows, one disclosure level deep.
   const onlyToolCards =
-    isStandaloneToolMessage && hasToolCards && !markdown && !hasMediaContent && !reasoningMarkdown;
+    isStandaloneToolMessage && hasToolCards && !markdown && !hasMediaContent && !extractedThinking;
 
   const toolRenderOptions = { ...opts, messageKey, onOpenSidebar };
   const renderMessageContent = () => {
@@ -560,12 +559,16 @@ export function renderGroupedMessage(
     )}
     ${isStandaloneToolMessage ? assistantViewContent : nothing}
     ${
-      reasoningMarkdown
+      extractedThinking
         ? html`<details class="chat-thinking">
-            <summary>${t("chat.view.reasoning")}</summary>
-            <div>
+            <summary class="chat-inline-disclosure chat-tool-msg-summary chat-thinking__summary">
+              <span class="chat-tool-msg-summary__icon" aria-hidden="true">${icons.brain}</span>
+              <span class="chat-tool-msg-summary__label">${t("chat.view.reasoning")}</span>
+              <span class="chat-tool-row__chevron" aria-hidden="true">${icons.chevronRight}</span>
+            </summary>
+            <div class="chat-thinking__body">
               ${unsafeHTML(
-                toSanitizedMarkdownHtml(reasoningMarkdown, {
+                toSanitizedMarkdownHtml(extractedThinking, {
                   codeBlockInteraction: "interactive",
                 }),
               )}

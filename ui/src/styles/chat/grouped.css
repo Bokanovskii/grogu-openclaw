@@ -862,6 +862,11 @@ img.chat-avatar {
   object-position: center;
 }
 
+.chat-avatar:is(img, .chat-avatar--custom) {
+  background: transparent;
+  border-color: transparent;
+}
+
 :is(.chat-thread, .chat-session-rail__thread) .chat-bubble {
   letter-spacing: 0; /* Custodian shares .chat-bubble but keeps the application-wide tracking. */
 }
@@ -974,6 +979,18 @@ img.chat-avatar {
   border: 0;
   background: var(--bg);
   box-shadow: none;
+}
+
+:is(.chat-group--reply, .chat-message--reply)
+  > :is(
+    img.chat-avatar,
+    .chat-avatar--custom,
+    .chat-avatar-slot:has(> :is(img.chat-avatar, .chat-avatar--custom))
+  ),
+:is(.chat-group--reply, .chat-message--reply)
+  > .chat-avatar-slot
+  > :is(img.chat-avatar, .chat-avatar--custom) {
+  background: transparent;
 }
 
 /* Center on the first text line inside the native 4px-padded assistant bubble:

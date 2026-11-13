@@ -71,6 +71,8 @@ export function buildEmbeddedRunPayloads(params: {
   lastAssistant: AssistantMessage | undefined;
   currentAssistant?: AssistantMessage | null;
   lastToolError?: ToolErrorSummary;
+  /** The settled tool-batch owner proved successful intentional termination. */
+  completedTerminalToolReply?: boolean;
   config?: OpenClawConfig;
   isCronTrigger?: boolean;
   isHeartbeatTrigger?: boolean;
@@ -378,13 +380,21 @@ export function buildEmbeddedRunPayloads(params: {
           )
         : false;
       if (!duplicateWarning) {
+        const sourceLimitation =
+          !isRestartStatus &&
+          params.completedTerminalToolReply === true &&
+          params.lastToolError.toolName === "web_fetch" &&
+          params.lastToolError.mutatingAction === false &&
+          params.runAborted !== true;
         const warning = {
-          text: warningText,
-          ...(!isRestartStatus ? { isError: true } : {}),
+          text: sourceLimitation
+            ? `${warningText}\n\nThe completed results are still available.`
+            : warningText,
+          ...(!isRestartStatus && !sourceLimitation ? { isError: true } : {}),
         };
         setReplyPayloadMetadata(
           warning,
-          isRestartStatus
+          isRestartStatus || sourceLimitation
             ? { hostNotice: true }
             : { toolErrorWarning: { toolName: params.lastToolError.toolName } },
         );

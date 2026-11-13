@@ -515,7 +515,7 @@ async function executeAgentRun(params: StartAgentRunExecutionParams): Promise<vo
                 toolsAllow: pluginSubagentToolsAllow ?? params.restoredCronContinuation?.toolsAllow,
                 runtimePluginToolGrant,
                 trustedInternalHandoff: prepared.trustedInternalHandoff,
-                pinnedWidgetAuthoring: restartRecoveryContext?.pinnedWidgetAuthoring,
+                inlineWidgetAuthoring: restartRecoveryContext?.inlineWidgetAuthoring,
                 toolsAllowIsDefault: params.restoredCronContinuation?.toolsAllowIsDefault,
                 scheduledToolPolicy: params.restoredCronContinuation
                   ? resolveScheduledToolPolicyContext({

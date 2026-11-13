@@ -17,8 +17,9 @@ For a pinned data report, provide a structured `report` with `pin: true`. Report
 The bundled `visualize` skill teaches both inline code explanations (architecture,
 execution traces, performance comparisons, and UI mockups) and persistent
 dashboard content. The `control-ui` skill owns session and board organization.
-Keep one-off visuals inline; pin for an explicit dashboard request or multiple
-non-code visualizations that belong together.
+Keep visuals inline by default, including comparisons, charts, and follow-up
+versions. Pin only when the user explicitly asks to save a dashboard. Several
+visualizations can share one self-contained HTML widget in chat.
 
 ## How widgets work
 
@@ -60,7 +61,22 @@ OpenClaw exposes `show_widget` only when the originating Gateway client declares
 
 An agent-turn automation bound to a persistent session and carrying a server-authored scheduled tool policy may explicitly allow `show_widget` without an inline client. That scheduled surface is pinned-only: every call requires `pin: true`, writes to the bound session dashboard, and cannot set `presentation.target`. Detached cron-run sessions, ordinary capless channel runs, and scheduled jobs without an explicit tool cap remain excluded. The originating-client capability remains mandatory for inline presentation.
 
-When the Gateway automatically resumes an interrupted Control UI turn after a restart, the recovered turn can also create or update pinned dashboard widgets without a connected browser. Recovery uses the same pinned-only surface: set `pin: true` and omit `presentation.target`. Inline previews still require a new turn from a client that declares `inline-widgets`. The resumed turn does not inherit a browser connection or device presentation rights.
+When the Gateway resumes an interrupted Control UI turn after a restart, the
+admitted recovery can publish an HTML artifact back into its original chat.
+Omit `pin` (or set it to `false`); the widget appears when the chat reconnects
+and remains available through history reload. This does not claim a live browser
+connection or grant device presentation rights. Explicit dashboard saves remain
+available with `pin: true`; recovery never requires pinning just to finish an
+inline answer. Ordinary capless channel or HTTP runs do not gain this capability.
+With `final: true` and `closing_text`, the recovered widget's closing reply is
+also saved once in that original chat, after the tool result, without another
+model request. Publication retains the admitted session and writer guards;
+failure to save the reply is reported instead of treating the missing note as
+successful delivery.
+
+For a follow-up revision, publish the updated HTML in the new chat turn.
+Previous inline documents remain unchanged; reusing a dashboard name is not
+necessary and does not turn the revision into a dashboard.
 
 A `status: "pinned"` tool result means the widget is on the session dashboard. Open that dashboard tab in the Control UI, or use `dashboard` with `action: "focus_tab"` and the saved widget's `tabId` when the tool is available. Widget hosting URLs are internal rendering resources and should not be opened in the Browser panel to substitute for widget presentation.
 
@@ -176,7 +192,7 @@ The core tool requires `title` and one content input: `widget_code` for HTML or 
 </ParamField>
 
 <ParamField path="report" type="object">
-  Structured native report with a `blocks` array. Requires `pin: true`. Omit `widget_code`, `kind`, and `capabilities`. Device presentation is unavailable. Maximum 8KB of UTF-8 JSON. See [Native dashboard reports](#native-dashboard-reports).
+  Structured native report with a `blocks` array. Requires `pin: true`. For an HTML widget, omit this field or set it to `null`. For a report, omit `widget_code`, `kind`, and `capabilities`. Device presentation is unavailable. Maximum 8KB of UTF-8 JSON. See [Native dashboard reports](#native-dashboard-reports).
 </ParamField>
 
 Discord also accepts optional `button_label` text for the Activity launch button. The Canvas schema intentionally omits this Discord-only field.
@@ -201,6 +217,22 @@ Pinned results also report `capabilityState`: `none`, `pending`, `rejected`, or
 operator before retrying. The inline preview does not inherit dashboard grants.
 
 If current-channel presentation fails, core falls back inline only when the originating client actually supports inline widgets. Otherwise the tool fails visibly. When `pin: true` succeeded before presentation failed, the result is explicitly partial and names the durable board widget. Presentation failure never rolls back that unrelated board state.
+
+### End the turn with a widget
+
+Set `final: true` when the widget completes the answer. Add a brief `closing_text` (plain text or Markdown, up to 2,000 characters) for anything the widget does not already say. When the show fully succeeds, the turn ends there and the model is not called again:
+
+- With `closing_text`, OpenClaw shows the widget, then delivers the note once as the assistant reply. The note is recorded after the widget in the transcript.
+- Without `closing_text`, any text the model wrote before the call is delivered once, above the widget.
+
+`closing_text` requires `final: true`. The turn continues normally when:
+
+- `final` is omitted (the default);
+- the widget fails validation or presentation, including an inline fallback after a failed channel or device presentation, or a partial result;
+- dashboard capabilities are `pending` or `rejected`, because the operator still needs to act;
+- another tool in the same batch does not end the turn. A delivered `closing_text` ends the turn after the whole batch settles, like other [tool-authored replies](/plugins/tool-plugins#deliver-the-reply-directly).
+
+On the embedded OpenClaw runtime, `closing_text` is delivered the same way whether the model calls `show_widget` directly or through the Tool Search `tool_call` control. The Codex harness follows its separate [direct-only delivery rule](/plugins/tool-plugins#deliver-the-reply-directly) instead; where that rule does not deliver the note, the turn continues. A call made from inside a Code Mode program returns to that program, so its note is never delivered and the turn continues with the model writing the reply itself. If a host cannot deliver the note, the turn also continues rather than dropping it. The pinned-only scheduled surface does not offer `final` or `closing_text`.
 
 ## Native dashboard reports
 

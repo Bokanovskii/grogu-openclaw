@@ -412,11 +412,15 @@ false` are ignored, and the model continues as usual with `content`.
 OpenClaw reads the reply after tool hooks and result middleware run, so
 middleware can rewrite or withdraw it. Only the tool author can grant the
 capability: `canDeliverSourceReply` lives on the tool definition, never in a
-result. A call made from inside a Code Mode program returns to that program and
-is never delivered as a reply. On the Codex harness, only calls the model makes
-directly in the `direct-only` catalog can deliver, so declare
-`catalogMode: "direct-only"` as in the example; otherwise the model restates the
-result as usual.
+result. On the embedded OpenClaw runtime, when the model reaches the tool
+through the Tool Search `tool_call` control, OpenClaw resolves the target from
+the catalog and delivers its reply once, under the outer `tool_call`, only if
+that target declares the capability; a reply-shaped result from any other
+target is never delivered. A call made from inside a Code Mode program returns
+to that program and is never delivered as a reply. The Codex harness does not
+offer that guarantee: only calls the model makes directly in the `direct-only`
+catalog can deliver, so declare `catalogMode: "direct-only"` as in the example;
+otherwise the model restates the result as usual.
 
 ## Configuration
 

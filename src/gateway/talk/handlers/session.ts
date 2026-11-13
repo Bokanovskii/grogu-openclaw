@@ -567,14 +567,19 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
     validateTalkSessionCloseParams,
     async ({ params, respond, client }) => {
       const session = getUnifiedTalkSession(params.sessionId);
+      if (params.discard && session.kind !== "transcription-relay") {
+        respondInvalidRequest(respond, "Discard requires a transcription session");
+        return;
+      }
       if (session.kind === "realtime-relay") {
         const connId = requireUnifiedTalkSessionConn(session, client?.connId);
         await stopTalkRealtimeRelaySession({ relaySessionId: session.relaySessionId, connId });
       } else if (session.kind === "transcription-relay") {
         const connId = requireUnifiedTalkSessionConn(session, client?.connId);
-        stopTalkTranscriptionRelaySession({
+        await stopTalkTranscriptionRelaySession({
           transcriptionSessionId: session.transcriptionSessionId,
           connId,
+          ...(params.discard ? { discard: true } : {}),
         });
       } else {
         getTalkHandoff(session.handoffId);

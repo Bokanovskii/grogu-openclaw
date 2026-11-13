@@ -29,7 +29,6 @@ import { resolveDefaultSessionStorePath, resolveSessionStorePathCore } from "./p
 import {
   isSessionTranscriptProjectionUnavailableError,
   persistSessionTranscriptTurn,
-  resolveSessionEntrySelection,
   updateSessionEntry,
   waitForSessionTranscriptProjection,
   type SessionTranscriptTurnPersistOptions,
@@ -43,7 +42,10 @@ import type {
   LatestTranscriptAssistantText,
   SessionTranscriptReadScope,
 } from "./session-accessor.types.js";
-import { withSessionEntryReadOnlyInWorker } from "./session-entry-read-runtime.js";
+import {
+  readSessionEntryReadOnlyInWorker,
+  withSessionEntryReadOnlyInWorker,
+} from "./session-entry-read-runtime.js";
 import { captureIncognitoSessionOperation } from "./session-incognito-binding.js";
 import { readActiveTranscriptEntryAnchorAsync } from "./session-transcript-anchor-read.js";
 import { readLatestTranscriptAssistantTextAsync } from "./session-transcript-assistant-read.js";
@@ -468,6 +470,7 @@ async function appendExactAssistantMessageWithSource(
   const actorKey = incognito
     ? resolveSqliteSessionKey(sessionKey, incognito.actor.agentId)
     : undefined;
+  // A read-only continuation retires before the canonical writer admits the append.
   const resolved =
     incognito && actorKey
       ? {
@@ -480,11 +483,13 @@ async function appendExactAssistantMessageWithSource(
           ).entry,
           normalizedKey: actorKey,
         }
-      : resolveSessionEntrySelection({
-          ...(transcriptAgentId ? { agentId: transcriptAgentId } : {}),
-          sessionKey,
-          storePath,
-        });
+      : {
+          existing: await readSessionEntryReadOnlyInWorker(
+            { agentId: storeAgentId, sessionKey, storePath },
+            () => params.assertCurrent?.(),
+          ),
+          normalizedKey: resolveSqliteSessionKey(sessionKey, storeAgentId),
+        };
   incognito?.authority.assertCurrent();
   params.assertCurrent?.();
   const entry = resolved.existing;

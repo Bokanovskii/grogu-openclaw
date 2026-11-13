@@ -174,20 +174,30 @@ describe("createChatRunState", () => {
       const event = (seq: number, stream: string, data: Record<string, unknown>) =>
         state.recordProgressEvent("run-1", { runId: "run-1", seq, stream, ts: seq, data }, mode);
       event(1, "usage", { outputTokens: 100 });
-      event(2, "usage", { outputTokens: 170 });
+      event(2, "usage", {
+        outputTokens: 170,
+        outputTokensEstimate: 190,
+        modelProgress: true,
+      });
       event(1, "usage", { outputTokens: 100 });
       event(3, "usage", { activeContextTokens: 900 });
-      for (let seq = 4; seq < 65; seq += 1) {
+      expect(state.runs.get("run-1")?.progressSnapshot?.events.at(-1)?.data).toEqual({
+        outputTokens: 170,
+        outputTokensEstimate: 190,
+        activeContextTokens: 900,
+      });
+      event(4, "usage", { outputTokens: 190 });
+      for (let seq = 5; seq < 66; seq += 1) {
         event(seq, "tool", { phase: "start", toolCallId: `tool-${seq}`, name: "read" });
       }
       const snapshot = state.runs.get("run-1")?.progressSnapshot;
       expect(snapshot?.events.filter((candidate) => candidate.stream === "usage")).toEqual([
         {
           runId: "run-1",
-          seq: 3,
+          seq: 4,
           stream: "usage",
-          ts: 3,
-          data: { outputTokens: 170, activeContextTokens: 900 },
+          ts: 4,
+          data: { outputTokens: 190, activeContextTokens: 900 },
         },
       ]);
       expect(snapshot?.events).toHaveLength(50);
@@ -237,7 +247,7 @@ describe("createChatRunState", () => {
           mode,
         );
       event("tool", { phase: "result", toolCallId: "read-1", name: "read", result: "done" });
-      for (const stream of ["assistant", "tool", "item"]) {
+      for (const stream of ["assistant", "tool", "item", "usage"]) {
         const retry = {
           phase: "retrying",
           message: "Rate limited. Retrying in 2 seconds (attempt 2/8).",
@@ -256,7 +266,9 @@ describe("createChatRunState", () => {
             ? { text: "Continuing" }
             : stream === "tool"
               ? { phase: "start", toolCallId: "read-2", name: "read" }
-              : { kind: "preamble", itemId: "resumed", progressText: "Continuing" },
+              : stream === "usage"
+                ? { outputTokens: 100, outputTokensEstimate: 110, modelProgress: true }
+                : { kind: "preamble", itemId: "resumed", progressText: "Continuing" },
         );
         expect(
           state.runs

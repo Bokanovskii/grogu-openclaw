@@ -371,15 +371,19 @@ export function createOpenClawTools(
     allowlist: options?.runtimeToolAllowlist,
     denylist: explicitFactoryDenylist,
   });
-  // Admitted Control UI recovery and explicitly capped scheduled turns can
-  // keep authoring their durable board without claiming an inline renderer.
-  const pinnedWidgetOnly =
-    (options?.pinnedWidgetAuthoring === true ||
-      (options?.gatewayCallerScheduled === true && scheduledWidgetExplicitlyAllowed)) &&
+  const caplessWidgetSession =
     !inlineWidgetClientAvailable &&
     !widgetPresentation.currentChannelPresenter &&
     Boolean(sessionKey) &&
     !isCronRunSessionKey(sessionKey);
+  // Recovery can publish a source artifact without inventing a live renderer.
+  // Only explicitly capped scheduled work selects the dashboard-only surface.
+  const sourceWidgetPublication = caplessWidgetSession && options?.inlineWidgetAuthoring === true;
+  const pinnedWidgetOnly =
+    caplessWidgetSession &&
+    !sourceWidgetPublication &&
+    options?.gatewayCallerScheduled === true &&
+    scheduledWidgetExplicitlyAllowed;
   const includeMessageTool =
     !embedded ||
     options?.sourceReplyDeliveryMode === "message_tool_only" ||
@@ -482,7 +486,11 @@ export function createOpenClawTools(
           agentSessionKey: sessionKey,
           inlineHostEnabled: isCoreCanvasHostEnabled(resolvedConfig),
           inlineClientAvailable: inlineWidgetClientAvailable,
-          pinnedOnly: pinnedWidgetOnly,
+          publicationMode: sourceWidgetPublication
+            ? "source-reply"
+            : pinnedWidgetOnly
+              ? "pinned-only"
+              : undefined,
           presenters: widgetPresentation.presenters,
           presenterContext: widgetPresentation.context,
         }),

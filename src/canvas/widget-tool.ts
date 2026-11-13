@@ -5,6 +5,7 @@ import type { Result } from "@openclaw/normalization-core/result";
 import { Type } from "typebox";
 import type { BoardWidgetPutResult } from "../../packages/gateway-protocol/src/index.js";
 import { WIDGET_HTML_MAX_UTF8_BYTES } from "../../packages/gateway-protocol/src/schema/canvas.js";
+import type { AgentToolResult } from "../agents/runtime/index.js";
 import { optionalStringEnum } from "../agents/schema/string-enum.js";
 import { type AnyAgentTool, jsonResult, readToolStringParam } from "../agents/tools/common.js";
 import {
@@ -53,6 +54,8 @@ export function hasRegisteredShowWidgetKinds(): boolean {
   return listBoardWidgetContentKinds(currentPluginRegistry()).length > 0;
 }
 
+const WIDGET_CLOSING_TEXT_MAX_CHARS = 2_000;
+
 function createShowWidgetToolSchema(
   kinds: readonly string[],
   presenters: readonly Exclude<WidgetPresenter, { target: "current_channel" }>[],
@@ -75,8 +78,8 @@ function createShowWidgetToolSchema(
     ...(reportAvailable
       ? {
           report: Type.Optional(
-            Type.Record(Type.String(), Type.Unknown(), {
-              description: `Native dashboard data; requires pin=true. Omit widget_code, kind, capabilities, and presentation.target. ${BOARD_REPORT_GUIDANCE}`,
+            Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()], {
+              description: `Only for an explicitly requested dashboard report; requires pin=true. For results in chat, use HTML in widget_code and omit report or set it to null. Omit widget_code, kind, capabilities, and presentation.target for a report. ${BOARD_REPORT_GUIDANCE}`,
             }),
           ),
         }
@@ -88,9 +91,26 @@ function createShowWidgetToolSchema(
       Type.String({
         pattern: "^[a-z0-9][a-z0-9._-]{0,63}$",
         description:
-          "Stable dashboard widget name; reuse the same name with pin=true and new report data or widget_code to update",
+          "For a saved dashboard widget, reuse its name with pin=true to update. Inline follow-ups publish updated widget_code in chat; a name does not overwrite past chat widgets",
       }),
     ),
+    ...(pinnedOnly
+      ? {}
+      : {
+          final: Type.Optional(
+            Type.Boolean({
+              description:
+                "Set true when this widget completes your answer; a successful show then ends the turn. Omit for widgets followed by more work.",
+            }),
+          ),
+          closing_text: Type.Optional(
+            Type.String({
+              maxLength: WIDGET_CLOSING_TEXT_MAX_CHARS,
+              description:
+                "With final=true: brief plain text or Markdown shown after the widget as your closing reply. Add what the widget does not say; do not restate it.",
+            }),
+          ),
+        }),
     pin: pinnedOnly
       ? Type.Literal(true, {
           description: "Required: this surface can only author pinned widgets",
@@ -98,7 +118,7 @@ function createShowWidgetToolSchema(
       : Type.Optional(
           Type.Boolean({
             description:
-              "Pin only for an explicit dashboard request or multiple non-code visualizations",
+              "Defaults to false. Set true only when the user explicitly asks to save a dashboard; comparisons and follow-up versions stay inline",
           }),
         ),
     tab: Type.Optional(
@@ -155,8 +175,8 @@ type ShowWidgetToolOptions = {
   callGateway?: InProcessGatewayCaller;
   inlineHostEnabled?: boolean;
   inlineClientAvailable?: boolean;
-  /** Admitted callers without a rendering client may author only durable dashboard widgets. */
-  pinnedOnly?: boolean;
+  /** Host-admitted source publication is not a live client or device presentation grant. */
+  publicationMode?: "source-reply" | "pinned-only";
   presenters?: readonly WidgetPresenter[];
   presenterContext?: WidgetPresenterContext;
 };
@@ -274,19 +294,23 @@ function assertPinnedWidgetDocumentSize(html: string): void {
 
 export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAgentTool {
   const gatewayCall = options.callGateway ?? callInProcessGatewayTool;
-  const pinnedOnly = options.pinnedOnly === true;
+  const pinnedOnly = options.publicationMode === "pinned-only";
+  const sourcePublication = options.publicationMode === "source-reply";
   const inlineHostEnabled = options.inlineHostEnabled !== false;
   const inlineAvailable =
-    !pinnedOnly && inlineHostEnabled && options.inlineClientAvailable !== false;
+    !pinnedOnly &&
+    inlineHostEnabled &&
+    (sourcePublication || options.inlineClientAvailable !== false);
   const registeredKinds = listBoardWidgetContentKinds(currentPluginRegistry());
   const allKinds = ["html", ...registeredKinds];
   const presenters = options.presenters ?? [];
   const presenterContext =
     options.presenterContext ??
     (options.agentSessionKey ? { sessionKey: options.agentSessionKey } : {});
-  const currentChannelPresenter = pinnedOnly
-    ? undefined
-    : resolveCurrentChannelWidgetPresenter(presenters, presenterContext);
+  const currentChannelPresenter =
+    pinnedOnly || sourcePublication
+      ? undefined
+      : resolveCurrentChannelWidgetPresenter(presenters, presenterContext);
   const kinds =
     currentChannelPresenter && !inlineAvailable
       ? allKinds.filter((kind) => currentChannelPresenter.capabilities.sourceKinds.includes(kind))
@@ -294,26 +318,29 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
   const advertisedRegisteredKinds = kinds.filter((kind) => kind !== "html");
   const reportAvailable = Boolean(options.agentSessionKey?.trim());
   const reportGuidance = reportAvailable
-    ? " Prefer the report argument with pin=true for data reports; these render natively on the dashboard without a document frame. Reports are dashboard-only; omit widget_code, kind, capabilities, and presentation.target."
+    ? " Use report with pin=true only for an explicitly requested dashboard report. For comparisons, charts, and other results in chat, use HTML in widget_code. Reports are dashboard-only; omit widget_code, kind, capabilities, and presentation.target."
     : "";
-  const explicitPresenters = pinnedOnly
-    ? []
-    : presenters.filter((presenter) => presenter.target !== "current_channel");
+  const explicitPresenters =
+    pinnedOnly || sourcePublication
+      ? []
+      : presenters.filter((presenter) => presenter.target !== "current_channel");
   const presenterPrompt =
     explicitPresenters.length > 0
       ? " Use presentation.target to choose a registered device surface."
       : "";
   const usageGuidance = pinnedOnly
     ? "This surface is pinned-only: set pin=true to create or update a durable session dashboard widget. Inline and device presentation are unavailable."
-    : currentChannelPresenter
-      ? "Show widgets through the current channel presenter; follow result.presentation for delivery."
-      : inlineAvailable
-        ? "Keep one-off visualizations inline; pin for explicit dashboard requests or multiple non-code visualizations."
-        : "Inline previews are unavailable this turn; set pin=true to save to the session dashboard.";
+    : sourcePublication
+      ? "Publish HTML back into the original chat. It is available after reconnect; this does not grant a connected client or device presentation. Omit pin unless the user explicitly requested a saved dashboard."
+      : currentChannelPresenter
+        ? "Show widgets through the current channel presenter; follow result.presentation for delivery."
+        : inlineAvailable
+          ? "Keep visualizations inline by default, including comparisons and follow-up versions. Pin only for an explicit dashboard request."
+          : "Inline previews are unavailable this turn; set pin=true to save to the session dashboard.";
   return {
     label: "Show Widget",
     name: "show_widget",
-    description: `Visual helps? Make widget. Do not wait for ask. ${usageGuidance} Update pinned HTML by name. Use for code architecture, execution traces, performance comparisons, interactive explanations, UI mockups, and dashboards. Text clearer? Skip. Load the visualize skill when available for composition and dashboard authoring. The source kind defaults to html${advertisedRegisteredKinds.length ? ` and registered kinds are ${advertisedRegisteredKinds.join(", ")}` : ""}. Send markup directly in widget_code. Scripts, stylesheets, and fonts may load from ${WIDGET_CDN_ORIGINS.join(", ")}; pin library versions. Use direct HTTPS URLs for audio/video, or data/blob URLs for embedded/generated clips. Default videos to controls playsinline preload="auto" so a first frame can appear before playback; do not autoplay. Images and video posters must be data URLs; media playback does not grant fetch access. Inline widgets cannot fetch APIs. Pinned data access needs declared and granted capabilities.netOrigins or capabilities.tools; inline previews never inherit those grants. Keep filters and controls local; user-clicked openclaw.prompt.send(text) requests an agent follow-up in the Control UI. Data, action, state, and cron host APIs are dashboard-only. openclaw.host.controlUiBaseUrl is the Control UI origin plus base path after dashboard initialization, otherwise null; read it at click time. Dashboard HTML links support HTTP(S) destinations only; open them with target="_blank" and rel="noopener noreferrer". Put local workspace file links in chat Markdown, not widget HTML; file:// links cannot open the Files panel. \`title\` is host metadata. Start directly with content; do not repeat the title or recreate dashboard chrome. Use host theme variables such as --text, --muted, --card, --border, --accent, --font-body, and --font-mono. Inline script syntax errors return line and column; fix and retry. Check library loading and rendered interactions; hosting success alone is not visual proof.${reportGuidance}${presenterPrompt}`,
+    description: `Visual helps? Make widget. Do not wait for ask. ${usageGuidance} Publish follow-up HTML versions inline in the new chat turn; past documents remain unchanged. Update pinned HTML by name only for an explicitly saved dashboard. Use for code architecture, execution traces, performance comparisons, interactive explanations, UI mockups, and dashboards. Text clearer? Skip. Load the visualize skill when available for composition and dashboard authoring. The source kind defaults to html${advertisedRegisteredKinds.length ? ` and registered kinds are ${advertisedRegisteredKinds.join(", ")}` : ""}. Send markup directly in widget_code. Scripts, stylesheets, and fonts may load from ${WIDGET_CDN_ORIGINS.join(", ")}; pin library versions. Use direct HTTPS URLs for audio/video, or data/blob URLs for embedded/generated clips. Default videos to controls playsinline preload="auto" so a first frame can appear before playback; do not autoplay. Images and video posters must be data URLs; media playback does not grant fetch access. Inline widgets cannot fetch APIs. Pinned data access needs declared and granted capabilities.netOrigins or capabilities.tools; inline previews never inherit those grants. Keep filters and controls local; user-clicked openclaw.prompt.send(text) requests an agent follow-up in the Control UI. Data, action, state, and cron host APIs are dashboard-only. openclaw.host.controlUiBaseUrl is the Control UI origin plus base path after dashboard initialization, otherwise null; read it at click time. Dashboard HTML links support HTTP(S) destinations only; open them with target="_blank" and rel="noopener noreferrer". Put local workspace file links in chat Markdown, not widget HTML; file:// links cannot open the Files panel. \`title\` is host metadata. Start directly with content; do not repeat the title or recreate dashboard chrome. Use host theme variables such as --text, --muted, --card, --border, --accent, --font-body, and --font-mono. Inline script syntax errors return line and column; fix and retry. Check library loading and rendered interactions; hosting success alone is not visual proof.${reportGuidance}${presenterPrompt}`,
     parameters: createShowWidgetToolSchema(
       kinds,
       explicitPresenters,
@@ -321,9 +348,11 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
       pinnedOnly,
       reportAvailable,
     ),
-    ...(currentChannelPresenter || pinnedOnly
+    ...(currentChannelPresenter || pinnedOnly || sourcePublication
       ? {}
       : { requiredClientCaps: SHOW_WIDGET_REQUIRED_CLIENT_CAPS }),
+    // A final widget's closing_text is delivered by the host after the widget.
+    canDeliverSourceReply: true,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const requestedKind = readToolStringParam(params, "kind");
@@ -333,6 +362,10 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
           trim: false,
         }) ?? "";
       const rawReport = asOptionalRecord(params.report);
+      const closingText = readToolStringParam(params, "closing_text");
+      if (closingText && params.final !== true) {
+        throw new WidgetHtmlInputError("closing_text requires final=true");
+      }
       const isReport =
         params.report !== undefined &&
         params.report !== null &&
@@ -380,6 +413,11 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
       }
       const requestedTarget =
         readToolStringParam(presentation ?? {}, "target") ?? "assistant_message";
+      if (sourcePublication && requestedTarget !== "assistant_message") {
+        throw new WidgetHtmlInputError(
+          "Recovered widget publication is chat-only; device presentation requires a connected client",
+        );
+      }
       if (
         isReport &&
         (!shouldPin ||
@@ -524,16 +562,34 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
           inputName: "widget document after wrapping",
         });
       }
+      // Terminal only after a fully successful show; pending or rejected grants still need follow-up.
+      const endsTurn =
+        !pinnedOnly &&
+        params.final === true &&
+        capabilityState !== "pending" &&
+        capabilityState !== "rejected";
+      // A closing note rides the tool-authored source reply: the host delivers it after
+      // the widget and ends the turn only when it actually captured the note. Calls the
+      // owner cannot deliver (Code Mode programs) continue to the model instead of
+      // ending with the note lost, so only a note-less final sets terminate.
+      const withTerminal = <T extends object>(result: AgentToolResult<T>) =>
+        !endsTurn
+          ? result
+          : closingText
+            ? { ...result, details: { ...result.details, sourceReply: { text: closingText } } }
+            : { ...result, terminate: true as const };
       if (!hasPresentationRoute) {
-        return jsonResult({
-          status:
-            capabilityState === "pending" || capabilityState === "rejected"
-              ? capabilityState
-              : "pinned",
-          boardWidgetName: pinnedWidgetName,
-          capabilityState,
-          text: `Widget ${pinnedText}. Open this dashboard tab in Control UI to view it.`,
-        });
+        return withTerminal(
+          jsonResult({
+            status:
+              capabilityState === "pending" || capabilityState === "rejected"
+                ? capabilityState
+                : "pinned",
+            boardWidgetName: pinnedWidgetName,
+            capabilityState,
+            text: `Widget ${pinnedText}. Open this dashboard tab in Control UI to view it.`,
+          }),
+        );
       }
       let document: Awaited<ReturnType<typeof createCanvasDocument>> | undefined;
       const hostDocument = async () =>
@@ -573,17 +629,19 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
       if (presentationAttempt?.ok && presentationAttempt.value.kind === "message") {
         const receipt = presentationAttempt.value.receipt;
         const messageId = receipt.primaryPlatformMessageId ?? receipt.platformMessageIds[0];
-        return jsonResult({
-          kind: "widget",
-          presentation: {
-            target: "current_channel",
-            title,
-            receipt,
-          },
-          ...(pinnedWidgetName ? { boardWidgetName: pinnedWidgetName } : {}),
-          ...(capabilityState ? { capabilityState } : {}),
-          text: `Widget presented in the current channel${messageId ? ` as message ${messageId}` : ""}${pinnedText ? `; ${pinnedText}` : ""}`,
-        });
+        return withTerminal(
+          jsonResult({
+            kind: "widget",
+            presentation: {
+              target: "current_channel",
+              title,
+              receipt,
+            },
+            ...(pinnedWidgetName ? { boardWidgetName: pinnedWidgetName } : {}),
+            ...(capabilityState ? { capabilityState } : {}),
+            text: `Widget presented in the current channel${messageId ? ` as message ${messageId}` : ""}${pinnedText ? `; ${pinnedText}` : ""}`,
+          }),
+        );
       }
 
       if (presentationAttempt && !presentationAttempt.ok && !inlineAvailable) {
@@ -615,7 +673,7 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
         : presentationAttempt && !presentationAttempt.ok
           ? `; ${widgetPresentationFailureText(presentationAttempt.error, true)}`
           : "";
-      return jsonResult({
+      const hostedResult = jsonResult({
         kind: "canvas",
         ...(capabilityState ? { capabilityState } : {}),
         presentation: {
@@ -633,6 +691,10 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
         },
         text: `Widget hosted at ${hosted.entryUrl}${pinnedText ? `; ${pinnedText}` : ""}${presentationText}`,
       });
+      // A failed requested destination falls back inline; the model must still report that.
+      return presentationAttempt && !presentationAttempt.ok
+        ? hostedResult
+        : withTerminal(hostedResult);
     },
   };
 }

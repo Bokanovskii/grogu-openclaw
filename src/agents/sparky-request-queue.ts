@@ -28,7 +28,7 @@ const priorityForWorkClass = (workClass: SparkyWorkClass): Priority =>
 
 export function sparkyUtilityBounds(modelRef: string | undefined) {
   return modelRef?.startsWith("sparky/")
-    ? { timeoutMs: 120_000, maxTokens: 1_024, thinkLevel: "off" as const }
+    ? { timeoutMs: 120_000, maxTokens: 1_024 }
     : { timeoutMs: 20_000, maxTokens: 240 };
 }
 

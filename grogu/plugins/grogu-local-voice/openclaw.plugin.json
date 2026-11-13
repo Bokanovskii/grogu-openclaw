@@ -1,0 +1,25 @@
+{
+  "id": "grogu-local-voice",
+  "name": "Grogu Local Voice",
+  "description": "Transcribe composer dictation with an explicitly configured, installed whisper.cpp model.",
+  "contracts": {
+    "realtimeTranscriptionProviders": ["grogu-local-voice"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["command", "modelPath"],
+    "properties": {
+      "command": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Absolute path to an already installed whisper-cli executable."
+      },
+      "modelPath": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Absolute path to an already installed whisper.cpp GGML model."
+      }
+    }
+  }
+}

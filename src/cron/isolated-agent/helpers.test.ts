@@ -32,6 +32,49 @@ describe("text payload pickers", () => {
 });
 
 describe("cron delivery outcomes", () => {
+  it.each([
+    { name: "quiet run", visible: [], expectedText: undefined, expectedKind: "empty" },
+    {
+      name: "owner update",
+      visible: [{ text: "The delivery estimate changed." }],
+      expectedText: "The delivery estimate changed.",
+      expectedKind: "visible",
+    },
+    {
+      name: "attachment",
+      visible: [{ mediaUrl: "https://example.com/update.png" }],
+      expectedText: undefined,
+      expectedKind: "visible",
+    },
+  ] as const)(
+    "excludes thinking from delivery and summaries for $name",
+    ({ visible, expectedText, expectedKind }) => {
+      const outcome = resolveCronPayloadOutcome({
+        payloads: [{ text: "Private automation planning.", isReasoning: true }, ...visible],
+        preferFinalAssistantVisibleText: false,
+      });
+
+      expect(outcome.deliveryPayloads).toEqual(visible);
+      expect(outcome.outputText).toBe(expectedText);
+      expect(outcome.summary).toBe(expectedText);
+      expect(outcome.deliveryDisposition.kind).toBe(expectedKind);
+      expect(JSON.stringify(outcome)).not.toContain("Private automation planning.");
+    },
+  );
+
+  it("preserves a runtime failure when the only model payload is thinking", () => {
+    const outcome = resolveCronPayloadOutcome({
+      payloads: [{ text: "Private automation planning.", isReasoning: true }],
+      runLevelError: "The automation runtime failed.",
+    });
+
+    expect(outcome.hasFatalErrorPayload).toBe(true);
+    expect(outcome.deliveryPayloads).toEqual([
+      { text: "cron isolated run failed: The automation runtime failed.", isError: true },
+    ]);
+    expect(JSON.stringify(outcome)).not.toContain("Private automation planning.");
+  });
+
   it("keeps NO_REPLY as a silent heartbeat acknowledgement", () => {
     expect(
       resolveCronPayloadOutcome({ payloads: [{ text: "NO_REPLY" }] }).deliveryDisposition,

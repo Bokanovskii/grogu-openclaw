@@ -105,6 +105,9 @@ function describeBrowserTool(opts: {
     actions.has("text")
       ? "For page prose, use action=text with optional selector and maxChars; it reads the first selector match, else article, main, or body. Use efficient snapshots for controls; they omit most prose."
       : `For page text, use snapshot${evaluateEnabled ? " or a bounded act:evaluate" : ""}; efficient snapshots omit most prose.`,
+    actions.has("screenshot")
+      ? "For research, prefer bounded page text and DOM/accessibility snapshots over screenshots. Use screenshots for appearance, images/canvas, or controls not exposed in snapshots; avoid full HTML dumps."
+      : undefined,
     "Use snapshot query to keep lines matching all whitespace-separated tokens, case-insensitively; matching lines retain element refs.",
     actions.has("requests")
       ? "Use requests for the recent network log; filter matches URL/type, limit defaults to 50, and clear=true clears the collected log after reading."

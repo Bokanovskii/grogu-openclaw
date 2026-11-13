@@ -655,23 +655,27 @@ export function emitAgentEventWithAssistantSourceIfCurrent(
   );
 }
 
-/** Adds one completed model call, returning its accepted run total for local callbacks. */
-export function emitAgentRunOutputTokens(params: {
-  runId: string;
-  lifecycleGeneration: string;
-  outputTokens: number;
-  sessionKey?: string;
-}): { outputTokens: number } | undefined {
+/** Returns the accepted run-usage projection for local callbacks. */
+export function emitAgentRunOutputTokens(
+  params: Omit<Parameters<typeof recordAgentRunOutputTokens>[0], "emit"> & {
+    sessionKey?: string;
+    runContext?: AgentRunContext;
+  },
+): ReturnType<typeof recordAgentRunOutputTokens> {
   return recordAgentRunOutputTokens({
     ...params,
     emit: (data) =>
-      emitAgentEventIfCurrent({
-        runId: params.runId,
-        lifecycleGeneration: params.lifecycleGeneration,
-        sessionKey: params.sessionKey,
-        stream: "usage",
-        data,
-      }),
+      dispatchAgentEvent(
+        {
+          runId: params.runId,
+          lifecycleGeneration: params.lifecycleGeneration,
+          sessionKey: params.sessionKey,
+          stream: "usage",
+          data,
+        },
+        undefined,
+        params.runContext,
+      ),
   });
 }
 

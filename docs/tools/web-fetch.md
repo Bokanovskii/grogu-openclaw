@@ -108,6 +108,23 @@ exists. If cancellation occurs during fetching, fallback processing, or
 connection cleanup, OpenClaw rejects the call instead of returning success or
 adding a result to the fetch cache.
 
+## Failed sources
+
+A failed fetch does not invalidate results from other sources. When a successful
+tool intentionally ends the turn, an earlier read-only fetch failure appears as
+a source limitation notice. The completed results remain available, and the
+original failure stays in diagnostics. Without completed terminal output,
+OpenClaw still reports the fetch failure.
+
+The notice distinguishes HTTP access rejection, rate limiting, connection
+failure, and content extraction failure when the tool records that cause.
+For HTTP 403, open the page in a browser or use another source. For HTTP 429,
+wait before retrying or use another source.
+
+For a certificate failure, use another source or ask the website owner to fix
+the certificate. Do not disable certificate verification. An expired certificate
+is a connection failure, not evidence that the website blocks scrapers.
+
 ## Config
 
 ```json5

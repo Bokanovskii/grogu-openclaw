@@ -1,13 +1,21 @@
 import { spawnSync } from "node:child_process";
 import { renameSync } from "node:fs";
 import { DatabaseSync, StatementSync } from "node:sqlite";
+import type { Worker } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   resolveRuntimeWorkerArgv,
   resolveRuntimeWorkerUrl,
 } from "../../infra/runtime-worker-url.js";
+import * as workerCpu from "../../infra/worker-cpu.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import {
+  AgentDatabaseAdmissionError,
+  readAgentDatabaseAdmissionRefusal,
+  recordAgentDatabaseAdmissions,
+} from "../../state/agent-database-admission.js";
+import { withAgentDatabaseStartupAdmission } from "../../state/agent-database-startup.js";
 import { closeOpenClawAgentDatabases } from "../../state/openclaw-agent-db-lifecycle.js";
 import {
   hasOpenClawAgentCanonicalValidation,
@@ -18,6 +26,7 @@ import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { sessionNativeProcessEntrypoints } from "./native-process-runtime.test-support.js";
 import * as archiveWorker from "./session-accessor.sqlite-archive.js";
+import { withSqliteCanonicalValidationWorkerPool } from "./session-accessor.sqlite-canonical-worker-pool.js";
 import { withSqliteCanonicalValidationWorker } from "./session-accessor.sqlite-reclamation-worker.js";
 import {
   markCanonicalSessionValidationPending,
@@ -56,6 +65,180 @@ function seedPendingRows(count: number, textBytes = 0, agentId = "main") {
   }
   return { options, database };
 }
+
+it.each(
+  (["runtime", "dedicated", "pooled"] as const).flatMap((transport) =>
+    (["clean expiry", "owner revoked", "rollback failed"] as const).map((outcome) => ({
+      transport,
+      outcome,
+    })),
+  ),
+)(
+  "settles canonical startup $outcome through a $transport worker",
+  async ({ transport, outcome }) => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const { options, database } = seedPendingRows(1, 0, "expiry-proof");
+      const pending =
+        transport === "runtime"
+          ? withCanonicalSessionValidationDeferral(() =>
+              assertCanonicalSqliteSessionKeysCurrent(database),
+            )
+          : undefined;
+      const before = database.db.prepare("SELECT session_key, entry_json FROM session_nodes").all();
+      const attempts = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+      const fault = `
+      import { DatabaseSync } from "node:sqlite";
+      import { MessagePort, workerData } from "node:worker_threads";
+      const attempts = new Int32Array(workerData.commitExpiryAttempts);
+      const post = MessagePort.prototype.postMessage;
+      const wait = Atomics.wait;
+      let expired = false;
+      MessagePort.prototype.postMessage = function(message, ...args) {
+        if (message?.type === "commit-request" && Atomics.load(attempts, 0) === 0) {
+          queueMicrotask(() => post.call(this, message, ...args));
+          return;
+        }
+        return post.call(this, message, ...args);
+      };
+      Atomics.wait = (gate, index, expected, timeout) => {
+        if (expected === 5 && timeout === 5000) Atomics.add(attempts, 2, 1);
+        if (expected === 5 && timeout === 5000 &&
+            Atomics.compareExchange(attempts, 0, 0, 1) === 0) {
+          expired = true;
+          return wait(gate, index, expected, 0);
+        }
+        return wait(gate, index, expected, timeout);
+      };
+      const exec = DatabaseSync.prototype.exec;
+      DatabaseSync.prototype.exec = function(sql) {
+        if (expired && /^ROLLBACK\\b/i.test(sql.trim()) &&
+            workerData.commitExpiryOutcome === "rollback failed") {
+          Atomics.add(attempts, 1, 1);
+          throw new Error("synthetic native rollback failure");
+        }
+        return exec.call(this, sql);
+      };
+    `;
+      const createWorker = workerCpu.createCpuTrackedWorker;
+      vi.spyOn(workerCpu, "createCpuTrackedWorker").mockImplementation(
+        (filename, workerOptions: ConstructorParameters<typeof Worker>[1]) => {
+          if (
+            workerOptions?.workerData?.operation !== "reclaim" &&
+            workerOptions?.workerData?.operation !== "canonical-validation-pool"
+          ) {
+            return createWorker(filename, workerOptions);
+          }
+          return createWorker(filename, {
+            ...workerOptions,
+            execArgv: [
+              ...(workerOptions.execArgv ?? []),
+              "--import",
+              `data:text/javascript,${encodeURIComponent(fault)}`,
+            ],
+            workerData: {
+              ...workerOptions.workerData,
+              commitExpiryAttempts: attempts,
+              commitExpiryOutcome: outcome,
+            },
+          });
+        },
+      );
+      let current = true;
+      const revoked = new Error("synthetic preparation owner revoked");
+      let foreground: Promise<void> | undefined;
+      const assertCurrent = () => {
+        if (outcome === "clean expiry" && Atomics.load(new Int32Array(attempts), 0) === 1) {
+          foreground ??= runOpenClawAgentWriteAdmission(options, () => {
+            expect(Atomics.load(new Int32Array(attempts), 2)).toBe(1);
+            expect(hasPendingCanonicalSessionValidation(database)).toBe(true);
+          });
+        }
+        if (outcome === "owner revoked" && Atomics.load(new Int32Array(attempts), 0) === 1) {
+          current = false;
+        }
+        if (!current) {
+          throw revoked;
+        }
+      };
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        const [refusal] = admission.defer({
+          env: state.env,
+          reason: "synthetic deferred inspection",
+          inspections: [
+            {
+              target: { agentId: options.agentId, path: database.path },
+              result: Promise.resolve({ incompatible: [], indeterminate: [] }),
+            },
+          ],
+        });
+        expect(refusal).toBeDefined();
+        recordAgentDatabaseAdmissions([refusal!], { env: state.env, source: "startup" });
+        const lifetime = admission.adopt();
+        const certify = () => {
+          if (transport === "runtime") {
+            if (pending?.kind !== "pending") {
+              throw new Error("Fixture did not capture runtime canonical work");
+            }
+            return certifySessionCanonicalValidationPending(
+              pending.database,
+              undefined,
+              assertCurrent,
+            );
+          }
+          return withSqliteCanonicalValidationWorker((withWorker) =>
+            certifySessionCanonicalValidationPending(
+              { ...options, env: state.env },
+              withWorker,
+              assertCurrent,
+            ),
+          );
+        };
+        admission.activate({
+          isCurrent: () => true,
+          preparationReady: Promise.resolve(),
+          openAgent: async () => {},
+          migrateAgent: async () => {
+            if (transport === "pooled") {
+              await withSqliteCanonicalValidationWorkerPool(state.env, certify);
+            } else {
+              await certify();
+            }
+          },
+          publishAgent: async ({ assertCurrent: assertPublicationCurrent }) =>
+            assertPublicationCurrent(),
+        });
+        try {
+          await admission.waitForAgentPreparation(options.agentId, { env: state.env });
+          expect(Atomics.load(new Int32Array(attempts), 0)).toBe(1);
+          const finalRefusal = readAgentDatabaseAdmissionRefusal(options.agentId, {
+            env: state.env,
+          });
+          if (outcome === "clean expiry") {
+            await foreground;
+            expect(Atomics.load(new Int32Array(attempts), 2)).toBe(2);
+            expect(finalRefusal).toBeUndefined();
+            expect(hasPendingCanonicalSessionValidation(database)).toBe(false);
+          } else {
+            expect(finalRefusal?.code).toBe("agent-database-inspection-failed");
+            if (outcome === "owner revoked") {
+              expect(finalRefusal?.reason).toContain(revoked.message);
+              expect(new AgentDatabaseAdmissionError(finalRefusal!).cause).toBe(revoked);
+            } else {
+              expect(Atomics.load(new Int32Array(attempts), 1)).toBeGreaterThan(0);
+            }
+            expect(hasPendingCanonicalSessionValidation(database)).toBe(true);
+            expect(Atomics.load(new Int32Array(attempts), 2)).toBe(1);
+          }
+          expect(
+            database.db.prepare("SELECT session_key, entry_json FROM session_nodes").all(),
+          ).toEqual(before);
+        } finally {
+          await lifetime.stop();
+        }
+      });
+    });
+  },
+);
 
 it.each(["pending rows", "revoked receipt"] as const)(
   "certifies captured runtime work without caller-thread SQL (%s)",

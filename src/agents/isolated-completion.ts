@@ -28,6 +28,7 @@ import { reconcileAuthProfileQuotaBlocks } from "./auth-profiles/usage.js";
 import { resolveCliBackendConfig } from "./cli-backends.js";
 import { normalizeCliModel } from "./cli-runner/helpers.js";
 import { resolveModelAsync } from "./embedded-agent-runner/model.js";
+import { loadGroguPrivateProfile } from "./grogu-private-profile.js";
 import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
 import type {
   AgentHarness,
@@ -50,6 +51,7 @@ import {
 } from "./isolated-completion-route.js";
 import { ensureAuthProfileStore } from "./model-auth.js";
 import type { ModelRef } from "./model-ref-shared.js";
+import { resolveConfiguredThinkingDefaultCore } from "./model-thinking-default-core.js";
 import { acquireAgentRunPreparedModelRuntime } from "./prepared-model-runtime.js";
 import {
   unwrapModelHeaderSentinelsForProviderEgress,
@@ -408,7 +410,17 @@ async function runIsolatedCompletionOwned(
       if (blocked) {
         throw new IsolatedCompletionError("unsupported", blocked.error);
       }
-      const request = { ...input, ...context, assertCurrent };
+      const thinkLevel =
+        input.thinkLevel ??
+        (provider === "sparky" && loadGroguPrivateProfile()
+          ? resolveConfiguredThinkingDefaultCore({
+              cfg: config,
+              agentId,
+              provider,
+              model: input.model,
+            })
+          : undefined);
+      const request = { ...input, ...context, thinkLevel, assertCurrent };
       await ensureSelectedAgentHarnessPlugin({
         provider,
         modelId: request.model,

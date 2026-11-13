@@ -14,26 +14,31 @@ a widget can illustrate the design but does not complete the implementation.
 
 ## Choose the surface
 
-- **Code work and one-off explanations:** prefer inline when available this turn.
+- **Inline visuals:** use HTML in chat by default, including comparisons,
+  research results, charts, code work, and explanations.
   Show the actual owners, relationships, measured values, or states relevant to the question.
   Distinguish proposed designs and illustrative data from observed behavior.
   Several diagrams for a code task do not by themselves call for a dashboard.
-- **Persistent dashboards:** use `pin: true` for an explicit dashboard request
-  or multiple non-code visualizations that belong together. Read the current
+- **Persistent dashboards:** use `pin: true` only for an explicit dashboard request.
+  Several visualizations can share one inline HTML widget. Read the current
   board first and reuse its names and tabs. Use the `control-ui` skill when
   organizing sessions, tabs, placement, or dashboard presentation.
-- **Native reports:** prefer the tool's `report` input with `pin: true` for
+- **Native reports:** use the tool's `report` input with `pin: true` for explicitly requested
   dashboard text, metrics, tables, simple charts, and links. Omit `widget_code`,
   `kind`, `capabilities`, and `presentation.target`. Reports do not render inline.
-- **Custom widgets:** use `widget_code` for interactive HTML/SVG. Reuse an
+- **Custom widgets:** use `widget_code` for interactive HTML/SVG. For an inline
+  follow-up, publish the updated HTML in the new chat turn; do not pin merely
+  to update it. Earlier chat documents remain unchanged. Reuse an
   explicit `name` with `pin: true` to replace a pinned widget's content. A same-name
   update cannot change its content owner; inspect before converting HTML to a report.
 
 Use only tools, source kinds, and presentation targets advertised in this turn.
 On a pinned-only surface, set `pin: true` and omit `presentation.target`. If the
 tool is unavailable, explain the limitation instead of inventing a render call.
-Restart recovery can be pinned-only even when the original turn supported inline
-widgets; follow the current tool schema instead of earlier delivery instructions.
+An admitted Control UI recovery can publish an artifact into the original chat
+without claiming a live browser or device connection. It does not require pinning
+an inline answer. Follow the current schema; scheduled dashboard-only work still
+requires `pin: true`.
 
 ## Author the content
 
@@ -48,8 +53,9 @@ filters, parameter changes, and animation. Give the root a unique ID and scope
 styles and selectors to it. Insert labels and external data with `textContent`
 instead of interpolating untrusted strings into markup or executable code.
 
-Keep source compact: `widget_code` is limited to 262,144 characters, pinned HTML
-to 256 KiB after wrapping, and Discord source to 48 KiB. Aggregate large datasets
+Keep source compact and follow this turn's limits: HTML/SVG allows 10 MiB of
+UTF-8 data including the wrapper, registered source allows 262,144 characters
+(256 KiB when pinned), and Discord source allows 48 KiB. Aggregate large datasets
 and load a suitable library instead of embedding its distribution in the call.
 
 ## Libraries and fonts

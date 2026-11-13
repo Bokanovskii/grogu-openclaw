@@ -112,6 +112,12 @@ Forced manual runs bypass this gate: `openclaw automations run <job-id>` (forced
 
 The script must return `{ fire, message?, state? }`. The previous JSON state is available as the deeply frozen `trigger.state`; stream gates also receive the current batch as `trigger.streamBatch`. Return a new `state` value to persist it. State is capped at 16 KB. When a firing result includes `message`, the scheduler appends it to the system-event text or agent-turn message before execution. `once: true` disables the job after its first successful fired payload.
 
+The complete result and diagnostic output share the owning agent's Code Mode
+`maxOutputBytes` budget. A truncated result fails with `output_limit_exceeded`;
+OpenClaw does not interpret its JSON prefix or reuse an earlier logged decision.
+Return a smaller complete result. Oversized diagnostic output alone does not
+reject an intact returned decision.
+
 Changing a running watcher's condition or saved state protects that edit from the
 old evaluation's state updates and `once` completion, including after a Gateway
 restart. The completed payload still retains its run history. An unchanged

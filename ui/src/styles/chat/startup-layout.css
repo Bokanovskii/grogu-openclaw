@@ -29,7 +29,7 @@
 }
 
 .chat {
-  --chat-thread-max-width: 48rem;
+  --chat-thread-max-width: 100%;
   /* Keep overlays clear of the edge-hugging scrollbar and add room on wide screens. */
   --chat-thread-gutter: 18px;
   --chat-composer-side-inset: 36px;
@@ -226,6 +226,11 @@
 /* Both sides share the content edge inside the trailing avatar gutter. */
 .chat-group:where(:not(.user), .chat-group--peer) {
   padding-inline-end: var(--chat-avatar-gutter);
+}
+
+.chat-group.assistant,
+.chat-group.tool {
+  --chat-message-max-width: 100%;
 }
 
 .chat-group.user {

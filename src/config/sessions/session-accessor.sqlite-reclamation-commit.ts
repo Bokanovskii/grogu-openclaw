@@ -11,9 +11,17 @@ const REJECTED = 2;
 const COMMITTING = 3;
 const SETTLED = 4;
 const REQUESTED = 5;
+const EXPIRED = 6;
+const EXPIRED_SETTLED = 7;
 
 /** A refused request may reuse its connection only after native rollback is confirmed. */
 export class SqliteReclamationRequestRefusedError extends Error {}
+
+export class SqliteReclamationCommitExpiredError extends SqliteReclamationRequestRefusedError {
+  constructor() {
+    super("SQLite session reclamation commit checkpoint expired");
+  }
+}
 
 /** Preserve the reclamation owner's context when an unrelated synchronous writer helps. */
 export async function withSqliteReclamationAuthorization<T>(
@@ -39,8 +47,14 @@ export async function withSqliteReclamationAuthorization<T>(
         assertCurrent();
         // Acceptance is the commit edge. Pending revocation wins this race;
         // accepted work keeps its writer permit and lifetime through native settlement.
-        if (Atomics.compareExchange(shared, 0, REQUESTED, COMMITTING) !== REQUESTED) {
-          throw new Error("SQLite session reclamation commit checkpoint expired");
+        const decision = Atomics.compareExchange(shared, 0, REQUESTED, COMMITTING);
+        if (decision !== REQUESTED) {
+          if (decision === EXPIRED || decision === EXPIRED_SETTLED) {
+            throw new SqliteReclamationCommitExpiredError();
+          }
+          throw new SqliteReclamationRequestRefusedError(
+            "SQLite session reclamation commit checkpoint expired",
+          );
         }
         Atomics.notify(shared, 0);
       });
@@ -94,7 +108,15 @@ export function waitForSqliteReclamationCommit(
   request();
   Atomics.wait(shared, 0, REQUESTED, COMMIT_DECISION_TIMEOUT_MS);
   if (Atomics.load(shared, 0) !== COMMITTING) {
-    rejectCommit(shared);
+    // Only the worker's unaccepted deadline may be retried, never owner revocation.
+    const decision = Atomics.compareExchange(shared, 0, REQUESTED, EXPIRED);
+    if (decision === COMMITTING) {
+      return;
+    }
+    if (decision === REQUESTED || decision === EXPIRED) {
+      Atomics.notify(shared, 0);
+      throw new SqliteReclamationCommitExpiredError();
+    }
     throw new SqliteReclamationRequestRefusedError(
       "SQLite session reclamation commit was not authorized",
     );
@@ -105,7 +127,11 @@ export function waitForSqliteReclamationCommit(
 export function markSqliteReclamationSettled(buffer: SharedArrayBuffer | undefined): void {
   if (buffer) {
     const shared = new Int32Array(buffer);
-    Atomics.store(shared, 0, SETTLED);
+    // A queued parent commit request must still distinguish timeout from revocation.
+    const expired = Atomics.compareExchange(shared, 0, EXPIRED, EXPIRED_SETTLED);
+    if (expired !== EXPIRED && expired !== EXPIRED_SETTLED) {
+      Atomics.store(shared, 0, SETTLED);
+    }
     Atomics.notify(shared, 0);
   }
 }

@@ -31,7 +31,7 @@ export function resolveAgentRestartRecoveryContext(params: {
   | {
       messageChannel: string;
       channel?: AgentRestartRecoveryChannelContext;
-      pinnedWidgetAuthoring?: true;
+      inlineWidgetAuthoring?: true;
     }
   | undefined {
   const expectedSessionId = normalizeOptionalString(params.expectedExistingSessionId);
@@ -48,7 +48,7 @@ export function resolveAgentRestartRecoveryContext(params: {
     return undefined;
   }
   if (params.isRestartRecoveryResumeRun && entry.restartRecoverySourceIngress === "control-ui") {
-    return { messageChannel: INTERNAL_MESSAGE_CHANNEL, pinnedWidgetAuthoring: true };
+    return { messageChannel: INTERNAL_MESSAGE_CHANNEL, inlineWidgetAuthoring: true };
   }
   const messageChannel = normalizeMessageChannel(entry.restartRecoveryDeliveryContext?.channel);
   if (

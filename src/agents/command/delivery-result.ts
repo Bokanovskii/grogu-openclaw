@@ -7,9 +7,60 @@ import type {
 } from "../../channels/message/runtime.js";
 import { serializeDurableMessagePayloadOutcomes } from "../../channels/message/runtime.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import type { projectOutboundPayloadPlanForJson } from "../../infra/outbound/payloads.js";
+import {
+  formatOutboundPayloadLog,
+  type NormalizedOutboundPayload,
+  type projectOutboundPayloadPlanForJson,
+} from "../../infra/outbound/payloads.js";
+import type { RuntimeEnv } from "../../runtime.js";
 import { hasAnyNonEmptyString as hasNonEmptyStringArray } from "../delivery-evidence-values.js";
 import type { EmbeddedAgentRunResult } from "../embedded-agent-runner/types.js";
+import { isNestedAgentLane } from "../lanes.js";
+import type { AgentCommandOpts } from "./types.js";
+
+const NESTED_LOG_PREFIX = "[agent:nested]";
+
+function formatNestedLogPrefix(opts: AgentCommandOpts, sessionKey?: string): string {
+  const parts = [NESTED_LOG_PREFIX];
+  const fields = {
+    session: sessionKey ?? opts.sessionKey ?? opts.sessionId,
+    run: opts.runId,
+    channel: opts.messageChannel ?? opts.channel,
+    to: opts.to,
+    account: opts.accountId,
+  };
+  for (const [name, value] of Object.entries(fields)) {
+    if (value) {
+      parts.push(`${name}=${value}`);
+    }
+  }
+  return parts.join(" ");
+}
+
+export function logAgentCommandPayload(params: {
+  payload: NormalizedOutboundPayload;
+  runtime: RuntimeEnv;
+  opts: AgentCommandOpts;
+  sessionKey?: string;
+}): void {
+  if (params.opts.json) {
+    return;
+  }
+  const output = formatOutboundPayloadLog(params.payload);
+  if (!output) {
+    return;
+  }
+  if (isNestedAgentLane(params.opts.lane)) {
+    const prefix = formatNestedLogPrefix(params.opts, params.sessionKey);
+    for (const line of output.split(/\r?\n/)) {
+      if (line) {
+        params.runtime.log(`${prefix} ${line}`);
+      }
+    }
+    return;
+  }
+  params.runtime.log(output);
+}
 
 export type AgentCommandDeliveryStatus = {
   requested: true;

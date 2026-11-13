@@ -65,7 +65,7 @@ async function changeTheme(
     .toBe(selection.mode);
 }
 
-async function captureProof(page: Page, name: string, compareBefore = false) {
+async function captureProof(page: Page, name: string, compareBefore = false, chat = false) {
   if (!captureUiProof) {
     return;
   }
@@ -79,7 +79,13 @@ async function captureProof(page: Page, name: string, compareBefore = false) {
   if (compareBefore) {
     // Same DOM/content/viewport; restore only the exact pre-feature CSS rules.
     const override = await page.addStyleTag({
-      content: `
+      content: chat
+        ? `
+      .shell--conversation { background-image: var(--app-background-image) !important; }
+      .chat { --chat-thread-max-width: 48rem; --chat-message-max-width: initial; }
+      .agent-chat__composer-shell { width: calc(100% - var(--chat-composer-side-inset, 36px)); }
+    `
+        : `
       .shell { background: none !important; }
       :root[data-theme-mode="light"] .content { background: var(--bg-content) !important; }
       .agent-chat__input { background: var(--chat-composer-surface) !important;
@@ -99,7 +105,7 @@ async function captureProof(page: Page, name: string, compareBefore = false) {
 }
 
 suite.define(() => {
-  it("shares one readable app canvas across new, chat, and settings without losing drafts", async () => {
+  it("keeps chat flat and other theme canvases readable without losing drafts", async () => {
     await suite.withPage(
       {
         colorScheme: "dark",
@@ -181,7 +187,7 @@ suite.define(() => {
               }
               const label = `${selection.resolved}-${route.replace("/", "-")}-${viewport}`;
               const artwork = await readArtwork(shell);
-              expectAppArtwork(artwork, label);
+              expectAppArtwork(artwork, label, route === "chat");
               const minimumContrast = selection.family === "beacon" ? 7 : 4.5;
               expect
                 .soft(artwork.canvasContrast, `${label}: muted text on app artwork`)
@@ -203,10 +209,10 @@ suite.define(() => {
               if (route === "new" && viewport === "desktop") {
                 images.set(selection.resolved, artwork.backgroundImage);
                 decoded.add(artwork.pixels);
-              } else {
+              } else if (route !== "chat") {
                 expect(artwork.backgroundImage, label).toBe(images.get(selection.resolved));
               }
-              await captureProof(page, label, selection.family === "claw");
+              await captureProof(page, label, selection.family === "claw", route === "chat");
             }
           }
           if (composer && textarea) {
@@ -224,6 +230,8 @@ suite.define(() => {
           });
           const background = () =>
             shell.evaluate((element) => getComputedStyle(element).backgroundImage);
+          const expectedBackground = (resolved: string) =>
+            route === "chat" ? "none" : images.get(resolved);
           for (const media of [
             { contrast: "more", forcedColors: "none" },
             { contrast: "no-preference", forcedColors: "active" },
@@ -236,7 +244,7 @@ suite.define(() => {
             }
           }
           await page.emulateMedia({ contrast: "no-preference", forcedColors: "none" });
-          await expect.poll(background).toBe(images.get("dash-light"));
+          await expect.poll(background).toBe(expectedBackground("dash-light"));
           if (composer && textarea) {
             // Playwright's media options do not expose reduced transparency;
             // exercise the real browser media query through Chromium's protocol.
@@ -254,7 +262,7 @@ suite.define(() => {
                 ),
               ).toBe(true);
               await expectComposerSurface(composer, true);
-              expect(await background()).toBe(images.get("dash-light"));
+              expect(await background()).toBe(expectedBackground("dash-light"));
               expect(await textarea.inputValue()).toBe(draft);
             } finally {
               await session.send("Emulation.setEmulatedMedia", { features: [] });
@@ -267,7 +275,7 @@ suite.define(() => {
             await page.emulateMedia({ colorScheme: mode });
             const resolved = mode === "dark" ? "dash" : "dash-light";
             await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(resolved);
-            expect(await background()).toBe(images.get(resolved));
+            expect(await background()).toBe(expectedBackground(resolved));
             if (composer && textarea) {
               await expectComposerSurface(composer);
               expect(await textarea.inputValue()).toBe(draft);
@@ -324,7 +332,7 @@ suite.define(() => {
         const gateway = await installMockGateway(page, {
           methodResponses: { "config.get": themeConfig("custom", "dark") },
         });
-        await page.goto(`${suite.server.baseUrl}chat`);
+        await page.goto(`${suite.server.baseUrl}new`);
         const composer = page.locator(".agent-chat__input");
         await composer.locator("textarea").fill("Keep imported palettes local and quiet");
         const images = new Set<string>();
@@ -358,6 +366,9 @@ suite.define(() => {
         expect(await composer.locator("textarea").inputValue()).toBe(
           "Keep imported palettes local and quiet",
         );
+        await page.goto(`${suite.server.baseUrl}chat`);
+        await page.locator(".agent-chat__input textarea").waitFor({ state: "visible" });
+        expectAppArtwork(await readArtwork(page.locator(".shell")), "custom chat", true);
         expect(externalRequests).toEqual([]);
       },
     );

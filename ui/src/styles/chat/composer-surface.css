@@ -14,7 +14,9 @@
   gap: 6px;
   /* The new-session page reuses this shell outside .chat, where the tokens are
      not defined; the fallbacks keep its geometry identical there. */
-  width: calc(100% - var(--chat-composer-side-inset, 36px));
+  width: calc(
+    100% - var(--chat-composer-side-inset, 36px) - 2 * var(--chat-thread-side-inset, 0px)
+  );
   max-width: var(--chat-thread-max-width, 48rem);
   margin: var(--chat-composer-top-margin, 8px) auto var(--chat-composer-bottom-gap, 14px);
 }

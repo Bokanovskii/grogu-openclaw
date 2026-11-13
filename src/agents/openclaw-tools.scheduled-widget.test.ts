@@ -1,5 +1,9 @@
 // Scheduled show_widget registration and allowlist coverage.
-import { describe, expect, it, vi } from "vitest";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { readCanvasDocumentHtmlSource } from "../canvas/documents.js";
+import { resolveAgentRestartRecoveryContext } from "../gateway/agent-turn/agent-restart-recovery-context.js";
 import { createOpenClawCodingTools } from "./agent-tools.js";
 import { resolveEmbeddedAttemptToolConstructionPlan } from "./embedded-agent-runner/run/attempt-tool-construction-plan.js";
 import { createOpenClawTools } from "./openclaw-tools.js";
@@ -7,6 +11,9 @@ import { createOpenClawTools } from "./openclaw-tools.js";
 vi.mock("./openclaw-plugin-tools.js", () => ({
   resolveOpenClawPluginToolsForOptions: () => [],
 }));
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+afterEach(() => vi.unstubAllEnvs());
 
 function expectWidget(tools: ReturnType<typeof createOpenClawTools>) {
   const tool = tools.find((candidate) => candidate.name === "show_widget");
@@ -30,15 +37,32 @@ describe("pinned show_widget registration", () => {
   it.each([undefined, "agent:main:cron:job:run:detached"])(
     "requires a persistent session for recovered authoring (%s)",
     (agentSessionKey) => {
-      const tools = createOpenClawTools({ agentSessionKey, pinnedWidgetAuthoring: true });
+      const tools = createOpenClawTools({ agentSessionKey, inlineWidgetAuthoring: true });
       expect(tools.some((tool) => tool.name === "show_widget")).toBe(false);
     },
   );
 
-  it("applies tool policy to recovered dashboard authoring", () => {
+  it("publishes recovered widget revisions in chat and applies tool policy", async () => {
+    const stateDir = tempDirs.make("openclaw-recovered-inline-widget-");
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    const recovery = resolveAgentRestartRecoveryContext({
+      isRestartRecoveryResumeRun: true,
+      canUseInternalRuntimeHandoff: true,
+      expectedExistingSessionId: "recovered-session",
+      resolvedSessionId: "recovered-session",
+      runId: "recovered-run",
+      sessionEntry: {
+        sessionId: "recovered-session",
+        updatedAt: 1,
+        restartRecoveryDeliveryRunId: "recovered-run",
+        restartRecoveryDeliverySourceRunId: "original-ui-run",
+        restartRecoverySourceIngress: "control-ui",
+      },
+    });
+    expect(recovery).toBeDefined();
     const options = {
       sessionKey: "agent:main:dashboard:recovered",
-      pinnedWidgetAuthoring: true,
+      ...recovery,
       toolConstructionPlan: {
         includeBaseCodingTools: false,
         includeShellTools: false,
@@ -47,12 +71,46 @@ describe("pinned show_widget registration", () => {
         includePluginTools: false,
       },
     };
-    expectPinnedOnlySchema(expectWidget(createOpenClawCodingTools(options)));
+    const tool = expectWidget(createOpenClawCodingTools(options));
+    const documents: string[] = [];
+    for (const version of ["Original comparison", "Updated comparison"]) {
+      const result = await tool.execute("recovered-widget", {
+        title: "Comparison",
+        name: "comparison",
+        widget_code: `<main>${version}</main>`,
+        final: true,
+      });
+      expect(result.details).toMatchObject({
+        kind: "canvas",
+        presentation: { target: "assistant_message", sandbox: "scripts" },
+      });
+      const view = asOptionalRecord(asOptionalRecord(result.details)?.view);
+      if (typeof view?.id !== "string") {
+        throw new Error("Expected a hosted inline widget");
+      }
+      documents.push(view.id);
+      expect(await readCanvasDocumentHtmlSource(view.id, { stateDir })).toMatchObject({
+        html: expect.stringContaining(version),
+        cspSandbox: "scripts",
+      });
+      expect(view).not.toHaveProperty("boardWidgetName");
+    }
+    expect(documents[0]).not.toBe(documents[1]);
+    expect(await readCanvasDocumentHtmlSource(documents[0]!, { stateDir })).toMatchObject({
+      html: expect.stringContaining("Original comparison"),
+    });
+    await expect(
+      tool.execute("recovered-device", {
+        title: "Comparison",
+        widget_code: "<main>Updated comparison</main>",
+        presentation: { target: "node_panel" },
+      }),
+    ).rejects.toThrow(/chat-only/);
     const deniedTools = createOpenClawCodingTools({
       ...options,
       config: { tools: { deny: ["show_widget"] } },
     });
-    expect(deniedTools.some((tool) => tool.name === "show_widget")).toBe(false);
+    expect(deniedTools.some((candidate) => candidate.name === "show_widget")).toBe(false);
   });
 
   it("does not let scheduled provenance replace an explicit widget cap", () => {

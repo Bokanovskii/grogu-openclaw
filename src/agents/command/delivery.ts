@@ -5,9 +5,14 @@ import {
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   copyReplyPayloadMetadata,
+  getReplyPayloadMetadata,
   type ReplyPayload,
   formatBtwTextForExternalDelivery,
 } from "../../auto-reply/reply-payload.js";
+import {
+  mirrorDeliveredReplyToTranscript,
+  transcriptMirrorForDeliveredPayload,
+} from "../../auto-reply/reply/dispatch-from-config.transcript.js";
 import {
   normalizeReplyPayloadOutcome,
   type NormalizeReplyOutcome,
@@ -29,7 +34,7 @@ import type { AnyChannelPlugin as ChannelPlugin } from "../../channels/plugins/t
 import { createReplyPrefixContext } from "../../channels/reply-prefix.js";
 import { formatUnknownChannelMessage } from "../../cli/error-format.js";
 import { createOutboundSendDeps, type CliDeps } from "../../cli/outbound-send-deps.js";
-import type { SessionEntry } from "../../config/sessions.js";
+import type { InternalSessionEntry as SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { toErrorObject } from "../../infra/errors.js";
 import {
@@ -40,7 +45,6 @@ import { resolveMessageChannelSelection } from "../../infra/outbound/channel-sel
 import { resolveAgentOutboundIdentity } from "../../infra/outbound/identity.js";
 import {
   createOutboundPayloadPlan,
-  formatOutboundPayloadLog,
   type NormalizedOutboundPayload,
   projectOutboundPayloadPlanForDelivery,
   projectOutboundPayloadPlanForJson,
@@ -51,7 +55,6 @@ import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../../runtime.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { normalizeSentMediaUrlsForDelivery } from "../delivery-evidence-values.js";
-import { isNestedAgentLane } from "../lanes.js";
 import {
   createAgentCommandDeliveryGuard,
   createRestartOnlyAbortSignal,
@@ -59,6 +62,7 @@ import {
 import {
   buildDeliveryResult,
   deliveryStatusFromDurableSend,
+  logAgentCommandPayload,
   selectSourceDeliverablePayloads,
   noVisiblePayloadStatus,
   preDeliveryFailureStatus,
@@ -69,8 +73,6 @@ import type { AgentCommandOpts } from "./types.js";
 
 type RunResult = Awaited<ReturnType<(typeof import("../embedded-agent.js"))["runEmbeddedAgent"]>>;
 type DurableSendResult = Awaited<ReturnType<typeof sendDurableMessageBatchCore>>;
-
-const NESTED_LOG_PREFIX = "[agent:nested]";
 
 type FreshSessionEntryForDeliveryResolver = () => Promise<SessionEntry | undefined>;
 
@@ -105,38 +107,6 @@ function isFreshDeliverySessionMatch(
 ): boolean {
   const normalizedExpected = expectedSessionId?.trim();
   return Boolean(normalizedExpected && freshSessionEntry.sessionId === normalizedExpected);
-}
-
-function formatNestedLogPrefix(opts: AgentCommandOpts, sessionKey?: string): string {
-  const parts = [NESTED_LOG_PREFIX];
-  const fields = {
-    session: sessionKey ?? opts.sessionKey ?? opts.sessionId,
-    run: opts.runId,
-    channel: opts.messageChannel ?? opts.channel,
-    to: opts.to,
-    account: opts.accountId,
-  };
-  for (const [name, value] of Object.entries(fields)) {
-    if (value) {
-      parts.push(`${name}=${value}`);
-    }
-  }
-  return parts.join(" ");
-}
-
-function logNestedOutput(
-  runtime: RuntimeEnv,
-  opts: AgentCommandOpts,
-  output: string,
-  sessionKey?: string,
-) {
-  const prefix = formatNestedLogPrefix(opts, sessionKey);
-  for (const line of output.split(/\r?\n/)) {
-    if (!line) {
-      continue;
-    }
-    runtime.log(`${prefix} ${line}`);
-  }
 }
 
 async function normalizeReplyMediaPathsForDelivery(params: {
@@ -682,21 +652,48 @@ export async function deliverAgentCommandResult(
   }
 
   let deliverySucceeded = false;
-  const logPayload = (payload: NormalizedOutboundPayload) => {
-    if (opts.json) {
-      return;
-    }
-    const output = formatOutboundPayloadLog(payload);
-    if (!output) {
-      return;
-    }
-    if (isNestedAgentLane(opts.lane)) {
-      logNestedOutput(runtime, opts, output, effectiveSessionKey);
-      return;
-    }
-    runtime.log(output);
-  };
+  const logPayload = (payload: NormalizedOutboundPayload) =>
+    logAgentCommandPayload({ payload, runtime, opts, sessionKey: effectiveSessionKey });
   if (!deliver) {
+    // Recovery has no outbound transport; publishing the tool-authored closing
+    // reply to its original chat is the delivery, not a best-effort post-send mirror.
+    if (opts.inlineWidgetAuthoring) {
+      let sourceReplyPublished = false;
+      for (const payload of payloads ?? []) {
+        const metadata = getReplyPayloadMetadata(payload)?.sourceReplyTranscriptMirror;
+        if (!metadata || metadata.transcriptOwner) {
+          continue;
+        }
+        if (metadata.sessionKey !== effectiveSessionKey || !opts.sessionId || !opts.runId) {
+          throw new Error("Source reply publication requires its original session and run.");
+        }
+        const mirror = transcriptMirrorForDeliveredPayload(metadata, payload);
+        if (!mirror) {
+          continue;
+        }
+        const published = await mirrorDeliveredReplyToTranscript({
+          cfg,
+          assertCurrent: params.assertDeliveryCurrent,
+          metadata: {
+            ...mirror,
+            expectedSessionId: params.expectedSessionIdForFreshDelivery ?? opts.sessionId,
+            expectedLifecycleRevision: sessionEntry?.lifecycleRevision ?? null,
+            expectedWriterRunId: opts.runId,
+          },
+        });
+        params.assertDeliveryCurrent?.();
+        if (!published?.ok) {
+          throw new Error(
+            `Source reply publication failed: ${published?.reason ?? "missing transcript outcome"}`,
+          );
+        }
+        sourceReplyPublished = true;
+      }
+      if (sourceReplyPublished) {
+        result.sourceReplyDelivered = true;
+        result.sourceReplyDeliveryState = "delivered";
+      }
+    }
     for (const payload of deliveryPayloads) {
       logPayload(payload);
     }

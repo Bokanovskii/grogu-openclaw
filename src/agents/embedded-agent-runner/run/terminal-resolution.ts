@@ -244,10 +244,10 @@ export async function resolveEmbeddedRunTerminal(input: {
     timedOut: terminalTimedOut,
     attempt,
   };
+  // Text written before a terminal batch is that turn's closing text, not a stalled continuation.
   const intentionalTerminalCompletion =
     !terminalAborted &&
     !terminalTimedOut &&
-    payloadCount === 0 &&
     resolveSettledToolBatchEvidence(attempt).intentionalTermination;
   // A failed isolated finalization is terminal for this user turn. Do not let
   // its settled side effects cascade into any ordinary retry family.

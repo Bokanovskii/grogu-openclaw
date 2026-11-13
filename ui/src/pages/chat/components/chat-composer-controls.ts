@@ -66,6 +66,7 @@ type MicrophonePickerProps = {
   onHoldToDictateChange?: (enabled: boolean) => void;
   onOpenTalkSettings?: () => void;
   onOpenDictationSettings?: () => void;
+  onStartRealtimeTalk?: () => void;
 };
 
 // Pointer selection must blur after the dropdown restores focus, or this
@@ -146,6 +147,11 @@ export function renderMicrophonePicker(props: MicrophonePickerProps) {
         event.preventDefault();
         if (item.dataset.chatTalkPreference === "hold-to-dictate") {
           props.onHoldToDictateChange?.(props.holdToDictate === false);
+          return;
+        }
+        if (item.dataset.chatTalkCapability === "start-realtime") {
+          props.onClose();
+          props.onStartRealtimeTalk?.();
           return;
         }
         unavailableCapabilities
@@ -264,6 +270,16 @@ export function renderMicrophonePicker(props: MicrophonePickerProps) {
         `,
       )}
       ${
+        props.realtimeStatus === "ready" && props.onStartRealtimeTalk
+          ? html`
+              <wa-dropdown-item data-chat-talk-capability="start-realtime">
+                <span slot="icon" aria-hidden="true">${icons.audioLines}</span>
+                <span>${t("chat.composer.realtimeTalkCapability")}</span>
+              </wa-dropdown-item>
+            `
+          : nothing
+      }
+      ${
         props.onHoldToDictateChange
           ? html`
               <wa-dropdown-item
@@ -315,7 +331,10 @@ export function renderComposerVoiceButton(props: ComposerVoiceButtonProps) {
     ? t("chat.composer.dictationStopAndKeep")
     : (props.idleLabel ?? t("chat.composer.startVoiceInput"));
   const tooltip =
-    props.dictation && !startsDictationDirectly && !(active || finalizing)
+    props.dictation &&
+    props.onDictationPointerDown &&
+    !startsDictationDirectly &&
+    !(active || finalizing)
       ? [props.submitDisabledReason, t("chat.composer.voiceGestureHint")]
           .filter(Boolean)
           .join(" · ")
@@ -331,7 +350,7 @@ export function renderComposerVoiceButton(props: ComposerVoiceButtonProps) {
           class=${
             active
               ? "chat-send-btn chat-send-btn--dictating"
-              : `chat-send-btn chat-send-btn--voice${props.dictation && !startsDictationDirectly ? " chat-send-btn--hold-enabled" : ""}${arming ? " chat-send-btn--dictation-arming" : ""}`
+              : `chat-send-btn chat-send-btn--voice${props.onDictationPointerDown && !startsDictationDirectly ? " chat-send-btn--hold-enabled" : ""}${arming ? " chat-send-btn--dictation-arming" : ""}`
           }
           type="button"
           @pointerdown=${(event: PointerEvent) => props.onDictationPointerDown?.(event)}
@@ -364,7 +383,7 @@ export function renderComposerVoiceButton(props: ComposerVoiceButtonProps) {
               props.disabled ||
               (!props.dictation && Boolean(props.submitDisabledReason)))
           }
-          aria-disabled=${String(finalizing)}
+          aria-disabled=${String(finalizing && active)}
           aria-label=${label}
         >
           ${
@@ -426,7 +445,7 @@ export function renderComposerDictationSendAction(
 }
 
 export function renderComposerDictationStatus(dictation?: ComposerDictationController) {
-  if (!dictation?.active) {
+  if (!dictation?.active && !dictation?.finalizing) {
     return nothing;
   }
   if (dictation.connecting) {

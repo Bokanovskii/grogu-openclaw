@@ -339,10 +339,10 @@ describe("maybeGenerateDashboardSessionTitle", () => {
       .mockRejectedValueOnce(new Error("route unavailable"))
       .mockResolvedValueOnce("Release Planning");
 
-    await expect(maybeGenerateDashboardSessionTitle(titleParams())).resolves.toBe(true);
-    // Clear the persisted name so a later send can claim naming again.
-    loadSessionEntry.mockReturnValue(baseEntry);
-    mockSessionUpdate(baseEntry);
+    await expect(maybeGenerateDashboardSessionTitle(titleParams())).rejects.toThrow(
+      "Session title generation unavailable",
+    );
+    expect(updateSessionEntry).not.toHaveBeenCalled();
     await expect(maybeGenerateDashboardSessionTitle(titleParams())).resolves.toBe(true);
     expect(generateConversationLabelWithFallback).toHaveBeenCalledTimes(2);
     const update = updateSessionEntry.mock.calls.at(-1)?.[1];
@@ -357,7 +357,6 @@ describe("maybeGenerateDashboardSessionTitle", () => {
       const firstAttempt = createDeferredCore();
       const label = createDeferredCore<string>();
       const params = titleParams();
-      const onFallback = vi.fn();
       generateConversationLabelWithFallback.mockImplementationOnce(async () => {
         firstAttempt.resolve();
         return await label.promise;
@@ -368,29 +367,28 @@ describe("maybeGenerateDashboardSessionTitle", () => {
       const pending = maybeGenerateDashboardSessionTitle({
         ...params,
         retryAfter: reply.promise,
-        onFallback,
       });
+      const completion =
+        outcome === "unavailable"
+          ? expect(pending).rejects.toThrow("Session title generation unavailable")
+          : expect(pending).resolves.toBe(false);
       await firstAttempt.promise;
       label.reject(new Error("conversation label generation failed (primary fallback)"));
       try {
         await vi.advanceTimersByTimeAsync(0);
         expect(updateSessionEntry).not.toHaveBeenCalled();
-        expect(onFallback).not.toHaveBeenCalled();
         if (outcome === "renamed") {
           mockSessionUpdate({ ...baseEntry, label: "My custom name" });
         }
       } finally {
         reply.resolve();
-        await pending;
+        await completion;
       }
-      await expect(pending).resolves.toBe(outcome !== "renamed");
       if (outcome === "unavailable") {
-        expect(loadSessionEntry().displayName).toMatch(/^[a-z]+-[a-z]+$/);
-        expect(onFallback).toHaveBeenCalledOnce();
+        expect(loadSessionEntry().displayName).toBeUndefined();
       } else {
         expect(loadSessionEntry()).toMatchObject({ label: "My custom name" });
         expect(loadSessionEntry().displayName).toBeUndefined();
-        expect(onFallback).not.toHaveBeenCalled();
       }
       expect(generateConversationLabelWithFallback).toHaveBeenCalledTimes(2);
     },
@@ -428,41 +426,33 @@ describe("maybeGenerateDashboardSessionTitle", () => {
     expect(loadSessionEntry()).toMatchObject({ displayName: "Release Planning" });
   });
 
-  it.each(["generated", "fallback"])(
-    "persists a late %s title after the worktree caller stops waiting",
-    async (outcome) => {
-      vi.useFakeTimers();
-      const naming = createDeferredCore<string>();
-      generateConversationLabelWithFallback.mockReturnValue(naming.promise);
-      const params = titleParams();
-      const onError = vi.fn();
-      const onPersisted = vi.fn();
-      const worktree = generateWorktreeSessionTitle({ ...params, onError, onPersisted });
-      const background = maybeGenerateDashboardSessionTitle(params);
+  it("persists a late generated title after the worktree caller stops waiting", async () => {
+    vi.useFakeTimers();
+    const naming = createDeferredCore<string>();
+    generateConversationLabelWithFallback.mockReturnValue(naming.promise);
+    const params = titleParams();
+    const onError = vi.fn();
+    const onPersisted = vi.fn();
+    const worktree = generateWorktreeSessionTitle({ ...params, onError, onPersisted });
+    const background = maybeGenerateDashboardSessionTitle(params);
 
-      await vi.advanceTimersByTimeAsync(8_000);
-      expect(onError).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(22_000);
-      await expect(worktree).resolves.toBeUndefined();
-      expect(onError).toHaveBeenCalledOnce();
-      expect(updateSessionEntry).not.toHaveBeenCalled();
-      if (outcome === "generated") {
-        naming.resolve("Release Planning");
-      } else {
-        naming.reject(new Error("model attempts exhausted"));
-      }
-      await background;
-      await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(22_000);
+    await expect(worktree).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(updateSessionEntry).not.toHaveBeenCalled();
+    naming.resolve("Release Planning");
+    await background;
+    await vi.advanceTimersByTimeAsync(0);
 
-      expect(loadSessionEntry()).toMatchObject({
-        displayName:
-          outcome === "generated" ? "Release Planning" : expect.stringMatching(/^[a-z]+-[a-z]+$/),
-      });
-      expect(onPersisted).toHaveBeenCalledOnce();
-      expect(updateSessionEntry).toHaveBeenCalledOnce();
-      expect(generateConversationLabelWithFallback).toHaveBeenCalledOnce();
-    },
-  );
+    expect(loadSessionEntry()).toMatchObject({
+      displayName: "Release Planning",
+    });
+    expect(onPersisted).toHaveBeenCalledOnce();
+    expect(updateSessionEntry).toHaveBeenCalledOnce();
+    expect(generateConversationLabelWithFallback).toHaveBeenCalledOnce();
+  });
 
   it.each([1, 2])(
     "retries a joined title failure only once (%s failed writes)",

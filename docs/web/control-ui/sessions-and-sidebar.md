@@ -41,11 +41,16 @@ This is creation-only: later messages do not regenerate an existing session's
 name. Explicit worktree names are preserved, and typing never creates a worktree
 or runs setup.
 
-If automatic naming fails after submission, the session receives a two-word,
-crustacean-themed name. New worktree branches use the saved session title when
-available, with the same two-word fallback if naming has not finished. They never
-use the first-message text as a branch-name fallback. A title that arrives later
-updates the sidebar without renaming an existing branch.
+Automatic naming uses a short, tool-free request with at most the first 1,000
+characters of the first message. If naming fails, the Gateway logs the failure
+and leaves the session unnamed. A later message retries naming from the original
+first message, not the follow-up. Manual names always take priority, including
+renames made while a naming request is running.
+
+New worktree branches use the saved session title when available, or a two-word,
+crustacean-themed fallback if naming has not finished. They never use the
+first-message text as a branch-name fallback. A title that arrives later updates
+the sidebar without renaming an existing branch.
 
 ## New-session preferences and recents
 

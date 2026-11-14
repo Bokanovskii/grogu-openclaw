@@ -1,14 +1,21 @@
 /* @vitest-environment jsdom */
 
 import { render } from "lit";
-import { beforeEach, expect, it } from "vitest";
-import { currentThemeBranding } from "../../../components/neutral-mark.ts";
+import { afterEach, beforeEach, expect, it } from "vitest";
+import { currentThemeBranding, setCurrentThemeBranding } from "../../../app/theme-branding.ts";
 import { renderStreamGroup } from "./chat-message-stream.ts";
+import { renderTurnRecapRow } from "./chat-working-indicator.ts";
 
 let view: HTMLDivElement;
 
+const defaultBranding = currentThemeBranding();
+
 beforeEach(() => {
   view = document.createElement("div");
+});
+
+afterEach(() => {
+  setCurrentThemeBranding(defaultBranding);
 });
 
 it("lets Grogu eat live reasoning ahead of the run metrics in place of the claw", () => {
@@ -76,4 +83,27 @@ it("lets Grogu eat live reasoning ahead of the run metrics in place of the claw"
     "chat-working-indicator__reasoning",
     "chat-working-indicator__status",
   ]);
+});
+
+it("parks a still Grogu in the finished-turn recap in place of the claw", () => {
+  const renderRecap = (grogu: boolean) =>
+    render(renderTurnRecapRow({ runtimeMs: 12_000, outputTokens: 42 }, { grogu }), view);
+
+  renderRecap(true);
+  expect(view.querySelector(".chat-turn-recap__claw")).toBeNull();
+  expect(view.querySelector(".chat-turn-recap__grogu .chat-grogu-eater")).not.toBeNull();
+  expect(
+    view.querySelector(".chat-grogu-eater")?.classList.contains("chat-grogu-eater--eating"),
+  ).toBe(false);
+  expect(view.querySelector(".chat-turn-recap")?.textContent).toContain("Done in 12 seconds");
+
+  renderRecap(false);
+  expect(view.querySelector(".chat-grogu-eater")).toBeNull();
+  expect(view.querySelector(".chat-turn-recap__claw svg")).not.toBeNull();
+
+  // Another theme brand icon stays the theme's choice.
+  setCurrentThemeBranding({ ...defaultBranding, brandIcon: "mark" });
+  renderRecap(true);
+  expect(view.querySelector(".chat-grogu-eater")).toBeNull();
+  expect(view.querySelector(".chat-turn-recap__claw")).not.toBeNull();
 });

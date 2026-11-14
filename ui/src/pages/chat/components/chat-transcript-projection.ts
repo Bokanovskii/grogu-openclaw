@@ -24,6 +24,7 @@ import {
 } from "../chat-thread.ts";
 import { renderAgentRunFrame } from "./chat-agent-run-frame.ts";
 import { buildChatArchiveNotice, renderChatDivider, renderChatNotice } from "./chat-divider.ts";
+import { isGroguAgentName } from "./chat-grogu-eater.ts";
 import { renderActivityGroup, renderMessageGroup } from "./chat-message-group.ts";
 import { assistantMediaPolicyKey, getChatMediaRenderVersion } from "./chat-message-media.ts";
 import {
@@ -535,7 +536,10 @@ export function projectChatTranscript(props: ChatThreadProps, transcript: ChatTr
     appendContent("realtime-talk", realtimeConversation);
   }
   if (turnRecap !== null && !recapAttached && !isEmpty && !showLoadingSkeleton) {
-    appendContent("turn-recap", renderTurnRecapRow(turnRecap));
+    appendContent(
+      "turn-recap",
+      renderTurnRecapRow(turnRecap, { grogu: isGroguAgentName(props.assistantName) }),
+    );
   }
   if (subagentWait && !subagents.placedWait && !searchFiltering) {
     appendContent(

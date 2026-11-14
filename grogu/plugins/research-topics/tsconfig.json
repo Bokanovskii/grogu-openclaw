@@ -1,0 +1,12 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../../.."
+  },
+  "include": [
+    "*.ts",
+    "../../../src/**/*.d.ts",
+    "../../../test/scripts/grogu-research-topics.test.ts"
+  ],
+  "exclude": []
+}

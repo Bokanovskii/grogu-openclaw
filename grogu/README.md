@@ -137,6 +137,12 @@ Native calls write owner-only receipts under the profile's `recoveryDir`.
 
 ### Plugin setup
 
+The optional [Research Topics plugin](plugins/research-topics/README.md) provides
+a private SQLite ledger for chat intake and a scheduled research planner.
+Its `research_topics` tool tracks priorities, due times, shared source limits,
+and fetch outcomes without reading large workspace files on every run.
+Installation alone does not migrate private topics or change running jobs.
+
 Run `plugins-bootstrap` with the protected profile on the new host. The command
 previews the approved plugins and their exact versions. Add `--apply` to install
 them with OpenClaw. OpenClaw installs the declared dependencies and keeps its

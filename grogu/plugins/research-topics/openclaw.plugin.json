@@ -1,0 +1,16 @@
+{
+  "id": "research-topics",
+  "name": "Research Topics",
+  "description": "A private research ledger with shared source limits and due-topic planning.",
+  "contracts": {
+    "tools": ["research_topics"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

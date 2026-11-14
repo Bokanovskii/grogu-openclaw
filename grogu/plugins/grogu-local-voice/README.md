@@ -125,8 +125,18 @@ Recordings are limited to two minutes.
 At most two transcription processes run at once.
 Final processing and shutdown have a two-minute budget.
 Silence produces no transcript and a visible browser notice.
+The plugin drops whisper.cpp markers such as `[BLANK_AUDIO]` and noise captions such as `(air whooshing)`.
+Room noise without speech therefore also produces no transcript.
+Speech segments join into one line of draft text.
 Cancellation and connection loss discard audio and stop active processing.
 Errors stay visible and never switch to another provider.
+
+To update the plugin, copy the new version to a new directory that names its commit.
+Run the same `openclaw plugins install --link --force --no-enable` command with that path.
+A linked install adds its path to `plugins.load.paths` and keeps the old path.
+Until you remove the old path, the install reports that the plugin has no unambiguous install record.
+Remove the old path with a config patch that lists every remaining entry.
+Then run `openclaw plugins reload grogu-local-voice` and check `talk.catalog` again.
 
 To turn dictation off, set `plugins.entries.grogu-local-voice.enabled` to `false`.
 `openclaw plugins uninstall grogu-local-voice` removes the plugin record.

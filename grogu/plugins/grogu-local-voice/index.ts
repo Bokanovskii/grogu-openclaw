@@ -12,6 +12,18 @@ const SAMPLE_RATE = 8000;
 const MAX_RECORDING_BYTES = SAMPLE_RATE * 120;
 const FINALIZATION_TIMEOUT_MS = 120_000;
 const MAX_CONCURRENT_TRANSCRIPTIONS = 2;
+// whisper.cpp prints markers such as [BLANK_AUDIO], and Whisper captions noise as
+// "(air whooshing)" or music symbols. Neither is speech to put in the draft.
+const BRACKETED_MARKER = /\[[^\]]*\]/g;
+const NON_SPEECH_SEGMENT = /^(?:\([^)]*\)|\*[^*]*\*|[♪♫\s])+$/u;
+
+function speechText(output: string): string {
+  return output
+    .split("\n")
+    .map((segment) => segment.replace(BRACKETED_MARKER, " ").replace(/\s+/g, " ").trim())
+    .filter((segment) => segment && !NON_SPEECH_SEGMENT.test(segment))
+    .join(" ");
+}
 
 function readConfig(config: unknown): { command: string; modelPath: string } {
   if (
@@ -134,7 +146,7 @@ export function createLocalVoiceProvider(
                   `Local transcription failed (${result.termination}, exit ${result.code}). Check the installed whisper-cli and model.`,
                 );
               }
-              const transcript = result.stdout.toString("utf8").trim();
+              const transcript = speechText(result.stdout.toString("utf8"));
               if (transcript) {
                 request.onTranscript?.(transcript);
               }

@@ -515,11 +515,14 @@ function createCronCodeModeRunner(deps: CronTriggerEvaluatorDeps) {
           }
           const selected = runtime;
           const authority = admitted;
-          tools = await withPluginRuntimeRegistryScope(selected.pluginRegistry, () =>
-            selected.createTools(
-              authority,
-              evaluationScope.signal,
-              admission?.messageActionTurnCapability,
+          // Construction runs as the admitted caller, so versioned plugin tools bind its lifetime.
+          tools = await withGatewayToolCallerIdentity(caller, () =>
+            withPluginRuntimeRegistryScope(selected.pluginRegistry, () =>
+              selected.createTools(
+                authority,
+                evaluationScope.signal,
+                admission?.messageActionTurnCapability,
+              ),
             ),
           );
           assertActive();

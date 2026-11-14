@@ -28,6 +28,7 @@ import {
 import { createReplyDelivery } from "./embedded-agent-subscribe.reply-delivery.js";
 import { createEmbeddedAgentSubscribeState } from "./embedded-agent-subscribe.run-state.js";
 import type { SubscribeEmbeddedAgentSessionParams } from "./embedded-agent-subscribe.types.js";
+import { makeAgentAssistantMessage } from "./test-helpers/agent-message-fixtures.js";
 
 function createDelivery(params: Omit<SubscribeEmbeddedAgentSessionParams, "session">) {
   const { session } = createStubSessionHarness();
@@ -60,6 +61,32 @@ function emitPartialThenProviderFailure(emit: (event: unknown) => void): void {
 describe("subscribeEmbeddedAgentSession partial reply lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("recognizes a silent token split across text parts before block delivery", async () => {
+    const onBlockReply = vi.fn();
+    const { emit, subscription } = createSubscribedSessionHarness({
+      runId: "split-silent-token",
+      onBlockReply,
+      blockReplyBreak: "message_end",
+    });
+    const message = makeAgentAssistantMessage({
+      content: [
+        { type: "thinking", thinking: "private reasoning" },
+        { type: "text", text: "\n\nNO" },
+        { type: "thinking", thinking: "\n" },
+        { type: "text", text: "_REPLY" },
+      ],
+    });
+    try {
+      emit({ type: "message_start", message });
+      emit({ type: "message_end", message });
+      await subscription.waitForPendingEvents();
+      expect(onBlockReply).not.toHaveBeenCalled();
+      expect(subscription.assistantTexts).toEqual(["NO_REPLY"]);
+    } finally {
+      subscription.unsubscribe();
+    }
   });
 
   it("joins a partial reply task created while terminal events settle", async () => {

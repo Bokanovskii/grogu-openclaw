@@ -50,23 +50,26 @@ export function extractAssistantStreamSnapshot(
   let blockSource = "";
   let finalAnswer = true;
   const parts: { separator: string; index?: number }[] = [];
-  const renderText = prepareAssistantVisibleText(observedMessage, (part, final, phase, index) => {
-    // Native blocks can divide a tag or fence; only complete visible parts get a separator.
-    const separator =
-      rawText && !state.pendingTagFragment && !state.pendingFenceFragment ? "\n" : "";
-    parts.push({ separator, index });
-    rawText += `${separator}${part}`;
-    // Final prose preserves inline tag examples; generic streams still hide reasoning.
-    const preparedFinal = phase === "final_answer" && !ctx.params.enforceFinalTag;
-    finalAnswer &&= preparedFinal;
-    const visible = preparedFinal
-      ? `${separator}${part}`
-      : ctx.stripBlockTags(`${separator}${part}`, state, {
-          final: final && options?.final !== false,
-        });
-    blockSource += visible;
-    return preparedFinal ? part : visible;
-  });
+  const renderText = prepareAssistantVisibleText(
+    observedMessage,
+    (part, final, phase, index, joiner) => {
+      // Native blocks can divide a tag or fence; only complete visible parts get a separator.
+      const separator =
+        rawText && !state.pendingTagFragment && !state.pendingFenceFragment ? (joiner ?? "\n") : "";
+      parts.push({ separator, index });
+      rawText += `${separator}${part}`;
+      // Final prose preserves inline tag examples; generic streams still hide reasoning.
+      const preparedFinal = phase === "final_answer" && !ctx.params.enforceFinalTag;
+      finalAnswer &&= preparedFinal;
+      const visible = preparedFinal
+        ? `${separator}${part}`
+        : ctx.stripBlockTags(`${separator}${part}`, state, {
+            final: final && options?.final !== false,
+          });
+      blockSource += visible;
+      return preparedFinal ? part : visible;
+    },
+  );
   const visibleBlockSource = finalAnswer
     ? sanitizeAssistantVisibleStreamText(blockSource, "final_answer", {
         preserveTrailingWhitespace: true,

@@ -29,6 +29,31 @@ async function run(params?: Record<string, unknown>, options?: { strictReasoning
 }
 
 describe("structured reasoning streaming opt-in", () => {
+  it.each([undefined, { structuredReasoningStreaming: true }])(
+    "keeps answer fragments together across whitespace reasoning with params %j",
+    async (params) => {
+      const model = { ...makeCompletionsModel(), params };
+      const output = createAssistantOutput(model);
+      const events: CapturedStreamEvent[] = [];
+      await processCompletionsStream(
+        streamChunks([
+          makeCompletionsChunk({ reasoning_content: "private reasoning" }),
+          makeCompletionsChunk({ content: "\n\nNO" }),
+          makeCompletionsChunk({ reasoning_content: "\n" }),
+          makeCompletionsChunk({ content: "_REPLY" }),
+          makeCompletionsChunk({}, "stop"),
+        ]),
+        output,
+        model,
+        { push: (event) => events.push(event) },
+      );
+      expect(output.content.filter((part) => part.type === "text")).toEqual([
+        { type: "text", text: "\n\nNO_REPLY" },
+      ]);
+      expect(events.filter((event) => event.type === "thinking_start")).toHaveLength(1);
+    },
+  );
+
   it("streams visible answer text after structured reasoning without a terminal barrier", async () => {
     const { output, events } = await run({ structuredReasoningStreaming: true });
     expect(output.openclawDelivery?.textPhaseRequiresTerminal).toBeUndefined();

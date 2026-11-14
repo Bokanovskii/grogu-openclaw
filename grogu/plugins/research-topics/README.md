@@ -24,7 +24,7 @@ The tarball contains JavaScript, the manifest, and this README, not TypeScript s
 Install the tarball through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-1.0.0.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-1.1.0.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -64,20 +64,22 @@ Ids use lowercase letters, digits, dots, underscores, and hyphens, with a maximu
 Use stable ids so repeated intake finds the same topic.
 Unknown fields and invalid arguments fail without a write.
 
-| Action                | Arguments besides `action`                                                | Result                                                             |
-| --------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `list`                | Optional `status`, `limit` (1–50, default 20), `after`                    | `{topics, nextCursor}` with summaries ordered by id                |
-| `get`                 | `id`                                                                      | Full topic with its `sources`                                      |
-| `add`                 | `id`, `title`, optional topic fields                                      | Full topic. Existing ids fail without overwriting                  |
-| `update`              | `id`, `expectedRevision`, `changes` containing topic fields               | Full topic. Stale revisions fail                                   |
-| `remove`              | `id`, `expectedRevision`, optional `hardDelete` (default false)           | Archived topic, or `{id, deleted:true}`                            |
-| `due`                 | Optional `limit` (1–50, default 10)                                       | `{topics}` with eligible summaries                                 |
-| `acquire`             | `id`, optional `leaseMinutes` (1–60, default 15)                          | `{acquired:true, ...topic, sources}` or `{acquired:false, reason}` |
-| `record_check`        | `id`, `leaseId`, `sources`, optional `nextDueAtMs`                        | Full topic after the check                                         |
-| `record_notification` | `id`, `confirmedAtMs`                                                     | Full topic after confirmed successful notification delivery        |
-| `signal`              | `id`                                                                      | Makes an active topic due now                                      |
-| `source_list`         | Optional `limit` (1–50, default 20), `after`                              | `{sources, nextCursor}`                                            |
-| `source_set`          | `id`, `minimumIntervalMinutes`, `expectedRevision` for an existing source | Full source                                                        |
+| Action                | Arguments besides `action`                                                | Result                                                                                        |
+| --------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `list`                | Optional `status`, `limit` (1–50, default 20), `after`                    | `{topics, nextCursor}` with summaries ordered by id                                           |
+| `get`                 | `id`                                                                      | Full topic with its `sources`                                                                 |
+| `add`                 | `id`, `title`, optional topic fields                                      | Full topic. Existing ids fail without overwriting                                             |
+| `update`              | `id`, `expectedRevision`, `changes` containing topic fields               | Full topic. Stale revisions fail                                                              |
+| `remove`              | `id`, `expectedRevision`, optional `hardDelete` (default false)           | Archived topic, or `{id, deleted:true}`                                                       |
+| `due`                 | Optional `limit` (1–50, default 10)                                       | `{topics}` with eligible summaries                                                            |
+| `acquire`             | `id`, optional `leaseMinutes` (1–60, default 15)                          | `{acquired:true, ...topic, sources}` or `{acquired:false, reason}`                            |
+| `record_check`        | `id`, `leaseId`, `sources`, optional `nextDueAtMs`                        | Full topic after the check                                                                    |
+| `record_notification` | `id`, `confirmedAtMs`                                                     | Full topic after confirmed successful notification delivery                                   |
+| `signal`              | `id`                                                                      | Makes an active topic due now                                                                 |
+| `notice_intent`       | `findings`: 1–20 items with `key`, `category`, optional `topicId`         | `{recorded:true, noticeId, createdAtMs, counts}` or `{recorded:false, reason, duplicateKeys}` |
+| `notice_count`        | Optional `category`                                                       | `{windowStartMs, counts}` with distinct notices per category in the last 24 hours             |
+| `source_list`         | Optional `limit` (1–50, default 20), `after`                              | `{sources, nextCursor}`                                                                       |
+| `source_set`          | `id`, `minimumIntervalMinutes`, `expectedRevision` for an existing source | Full source                                                                                   |
 
 Topic fields for `add` and `update.changes`:
 
@@ -101,6 +103,7 @@ An explicit `nextDueAtMs` in the same update overrides that reset.
 An active signal received during a check stays pending after that check settles.
 The source limits still apply to signals.
 Archive retains the topic. Hard deletion removes the topic and its source links, not shared source history.
+Hard deletion also clears the topic link of its notices. Their key digests stay until they expire.
 
 Each `record_check.sources` item has `id`, `outcome`, and optional `retryAfterMinutes`.
 The outcome is `ok`, `throttled`, `error`, or `skipped`.
@@ -154,15 +157,37 @@ The time must be after topic creation and cannot be in the future.
 Repeated or older confirmations leave the topic and its revision unchanged.
 The ledger does not send messages or deduplicate external delivery.
 
+### Record scheduled notices
+
+A notice is one message that a scheduled run returns for delivery.
+Before a run returns a notice, call `notice_intent` once with every finding in that notice.
+Give each finding a stable `key`, for example the canonical story URL.
+Also give it a `category` id, for example `world` or `market`.
+The ledger compares the exact key text. It stores only a SHA-256 digest of each key.
+Add `topicId` when the finding belongs to a research topic.
+
+If a key appeared in a recorded notice during the last seven days, the call writes no notice.
+It returns `recorded: false` with the repeated keys in `duplicateKeys`.
+Remove those findings from the notice and call again, or send nothing.
+Each key can appear only once in one call.
+
+`notice_count` returns the number of distinct notices per category in the last 24 hours, by intent time.
+A notice with several findings in one category counts once for that category.
+Before a run chooses a notice, compare these counts with the owner's limit for each category.
+The planner prompt owns the limits. The ledger counts notices but does not enforce a limit.
+
+A recorded intent counts against its categories even if delivery fails later.
+Do not send a recorded notice again. A failed delivery is not retried.
+These rules prevent repeated texts from a trusted planner. They do not stop a caller that skips `notice_intent`.
+
 ### Confirm scheduled notifications
 
 Guarded scheduled delivery happens after the model returns.
 Do not call `record_notification` in that model turn.
-Before returning a notice, link the saved finding to its topic and exact job/run identity.
-That link records intent, not delivery.
+`notice_intent` records intent, not delivery. It does not change `lastNotifiedAtMs`.
 
 On a later existing planner or Main turn, read the canonical completed run with `automations` action `runs`.
-Match its job/run identity, finding, topic, and intended recipient.
+Match its run, notice text, topic, and intended recipient.
 Require `status: "ok"` and primary `deliveryStatus: "delivered"`.
 Do not count `failureNotificationDelivery`, an error notice, a quiet run, or an uncertain result.
 Leave ambiguous matches unrecorded and do not resend to resolve uncertainty.
@@ -202,9 +227,14 @@ Synchronous transactions and revision comparisons prevent partial writes and los
 There is no application-level result cache to become stale across processes.
 Indexed due selection and cursor pagination avoid reading every note on each planner run.
 
-The plugin admits schema version 1 once per connection and refuses newer versions without changing their schema.
+The plugin admits schema version 2 once per connection and refuses newer versions without changing their schema.
+Before it upgrades a schema 1 ledger, it writes an SQLite copy named `ledger.schema-1.<time>.sqlite` in the same directory.
+The upgrade then adds the `notices` table in one transaction. Topics and sources do not change.
+To return to schema 1 code, stop the Gateway and restore that copy. Notices and edits after the upgrade are lost.
+The plugin does not delete the copy.
 It does not change OpenClaw's state or agent schemas.
 Disabling or removing the plugin leaves its database intact.
 Updates preserve it, and older code must not open a newer plugin schema.
 Back up this private database through an SQLite-aware backup or after the Gateway stops.
-The plugin does not install a backup schedule or delete data automatically.
+The plugin does not install a backup schedule.
+Each ledger write deletes notice rows that are seven days old or older. No other data expires.

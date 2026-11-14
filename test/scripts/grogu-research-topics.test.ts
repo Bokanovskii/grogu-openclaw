@@ -1,5 +1,5 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -27,6 +27,7 @@ afterEach(async () => {
 });
 const START = Date.UTC(2026, 0, 1);
 const MINUTE = 60_000;
+const DAY = 1_440 * MINUTE;
 
 async function open(databasePath = path.join(tempDirs.make("research-ledger-"), "ledger.sqlite")) {
   const store = await openSqliteWorkerStore<LedgerOperations>({
@@ -496,5 +497,97 @@ describe("research_topics ledger operations", () => {
       nextDueAtMs: START + 120 * MINUTE,
     });
     expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
+  });
+
+  it("records each notice once, counts rolling notices per category and expires keys after seven days", async () => {
+    const ledger = await open();
+    const notice = (...findings: { key: string; category: string; topicId?: string }[]) =>
+      ledger.run({ action: "notice_intent", findings });
+    await ledger.run({ action: "add", id: "markets", title: "Markets" });
+    expect(
+      await notice(
+        { key: "https://example.com/a", category: "world" },
+        { key: "https://example.com/d", category: "world" },
+        { key: "https://example.com/b", category: "market", topicId: "markets" },
+      ),
+    ).toMatchObject({
+      recorded: true,
+      createdAtMs: START,
+      counts: [
+        { category: "market", notices: 1 },
+        { category: "world", notices: 1 },
+      ],
+    });
+    ledger.at(START + MINUTE);
+    expect(
+      await notice(
+        { key: "https://example.com/c", category: "world" },
+        { key: "https://example.com/a", category: "world" },
+      ),
+    ).toEqual({ recorded: false, reason: "duplicate", duplicateKeys: ["https://example.com/a"] });
+    await notice({ key: "https://example.com/c", category: "world" });
+    for (const findings of [
+      [
+        { key: "x", category: "world" },
+        { key: "x", category: "tech" },
+      ],
+      [{ key: "y", category: "world", topicId: "missing" }],
+    ]) {
+      await expect(notice(...findings)).rejects.toThrow(/only once|Unknown research topic/);
+    }
+    expect(await ledger.run({ action: "notice_count" })).toEqual({
+      windowStartMs: START + MINUTE - DAY,
+      counts: [
+        { category: "market", notices: 1 },
+        { category: "world", notices: 2 },
+      ],
+    });
+    ledger.at(START + DAY);
+    expect(await ledger.run({ action: "notice_count", category: "world" })).toEqual({
+      windowStartMs: START,
+      counts: [{ category: "world", notices: 1 }],
+    });
+    await ledger.run({ action: "remove", id: "markets", expectedRevision: 1, hardDelete: true });
+    expect(await notice({ key: "https://example.com/b", category: "market" })).toMatchObject({
+      recorded: false,
+    });
+    ledger.at(START + 7 * DAY);
+    expect(await notice({ key: "https://example.com/a", category: "world" })).toMatchObject({
+      recorded: true,
+    });
+    expect(await notice({ key: "https://example.com/c", category: "world" })).toMatchObject({
+      recorded: false,
+    });
+  });
+
+  it("copies a schema 1 ledger before adding notices and refuses a newer schema", async () => {
+    const ledger = await open();
+    await ledger.run({ action: "add", id: "topic", title: "Topic" });
+    await stores.pop()!.close();
+    const downgrade = new DatabaseSync(ledger.databasePath);
+    downgrade.exec("DROP TABLE notices; PRAGMA user_version=1;");
+    downgrade.close();
+
+    const upgraded = await open(ledger.databasePath);
+    expect(await upgraded.run({ action: "get", id: "topic" })).toMatchObject({ revision: 1 });
+    await upgraded.run({ action: "notice_intent", findings: [{ key: "k", category: "world" }] });
+    const directory = path.dirname(ledger.databasePath);
+    const copies = readdirSync(directory).filter((name) => name.startsWith("ledger.schema-1."));
+    expect(copies).toHaveLength(1);
+    const copyPath = path.join(directory, copies[0]!);
+    expect(statSync(copyPath).mode & 0o777).toBe(0o600);
+    const copy = new DatabaseSync(copyPath, { readOnly: true });
+    expect(copy.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 1 });
+    expect(copy.prepare("SELECT id FROM topics").all()).toMatchObject([{ id: "topic" }]);
+    copy.close();
+
+    await stores.pop()!.close();
+    const newer = new DatabaseSync(ledger.databasePath);
+    newer.exec("PRAGMA user_version=3;");
+    newer.close();
+    await expect(open(ledger.databasePath)).rejects.toThrow("newer than this plugin");
+    expect(readdirSync(directory).filter((name) => name.startsWith("ledger.schema-1."))).toEqual(
+      copies,
+    );
   });
 });

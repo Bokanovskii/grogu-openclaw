@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import {
@@ -43,9 +43,27 @@ CREATE TABLE topic_sources (
   PRIMARY KEY(topicId, sourceId)
 ) STRICT;
 CREATE INDEX topic_sources_source ON topic_sources(sourceId);
-PRAGMA user_version=1;
+`;
+const NOTICES = `
+CREATE TABLE notices (
+  findingKeyDigest TEXT PRIMARY KEY, id TEXT NOT NULL, category TEXT NOT NULL,
+  topicId TEXT REFERENCES topics(id) ON DELETE SET NULL, createdAtMs INTEGER NOT NULL
+) STRICT;
+CREATE INDEX notices_category ON notices(category, createdAtMs);
+CREATE INDEX notices_created ON notices(createdAtMs);
+PRAGMA user_version=2;
 `;
 const BUSY_MS = 5_000;
+const DAY_MS = 86_400_000;
+const NOTICE_RETENTION_MS = 7 * DAY_MS;
+
+function readVersion(db: ReturnType<typeof openNodeSqliteDatabase>) {
+  return Number(db.prepare("PRAGMA user_version").get()?.user_version);
+}
+
+function digest(key: string) {
+  return createHash("sha256").update(key).digest("hex");
+}
 
 class Ledger {
   private readonly db;
@@ -61,11 +79,16 @@ class Ledger {
       db.exec(`PRAGMA busy_timeout=${BUSY_MS}; PRAGMA foreign_keys=ON;`);
       // FULL protects acknowledged owner edits; the private directory protects WAL sidecars.
       db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
+      // VACUUM INTO cannot run inside a transaction, so the schema 1 copy precedes the upgrade.
+      let upgradeCopy: string | undefined;
+      if (readVersion(db) === 1) {
+        upgradeCopy = path.join(directory, `ledger.schema-1.${Date.now()}.sqlite`);
+        db.prepare("VACUUM INTO ?").run(upgradeCopy);
+        chmodSync(upgradeCopy, 0o600);
+      }
       runSqliteImmediateTransactionSync(db, () => {
-        const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-        if (version === 0) {
-          db.exec(SCHEMA);
-        } else if (version !== 1) {
+        const version = readVersion(db);
+        if (version > 2) {
           throw new Error(
             "Research ledger schema is newer than this plugin. Use the matching plugin.",
           );
@@ -74,6 +97,14 @@ class Ledger {
           throw new Error(
             "Research ledger integrity failed. Restore a verified backup before retrying.",
           );
+        }
+        if (version === 0) {
+          db.exec(SCHEMA + NOTICES);
+        } else if (version === 1) {
+          if (!upgradeCopy) {
+            throw new Error("Research ledger changed during startup. Restart the plugin.");
+          }
+          db.exec(NOTICES);
         }
       });
       enableNodeSqliteKyselyStatementCache(db);
@@ -196,13 +227,24 @@ class Ledger {
     return this.get(topic.id);
   }
 
+  private noticeCounts(now: number, categories: string[] | undefined) {
+    let query = this.query
+      .selectFrom("notices")
+      .select((eb) => ["category", eb.fn.count<number>("id").distinct().as("notices")])
+      .where("createdAtMs", ">", now - DAY_MS);
+    if (categories) {
+      query = query.where("category", "in", categories);
+    }
+    return executeSqliteQuerySync(this.db, query.groupBy("category").orderBy("category")).rows;
+  }
+
   execute(input: LedgerOperations["request"]["input"]) {
     const request = parseRequest(input.request);
     const now = input.now;
     if (!Number.isSafeInteger(now) || now < 0) {
       throw new Error("Research ledger requires a valid server time.");
     }
-    const readOnly = ["list", "get", "due", "source_list"].includes(request.action);
+    const readOnly = ["list", "get", "due", "source_list", "notice_count"].includes(request.action);
     const dispatch = () => this.dispatch(request, now);
     if (readOnly) {
       return runSqliteDeferredTransactionSync(this.db, dispatch);
@@ -211,6 +253,10 @@ class Ledger {
       this.db,
       () => {
         requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
+        executeSqliteQuerySync(
+          this.db,
+          this.query.deleteFrom("notices").where("createdAtMs", "<=", now - NOTICE_RETENTION_MS),
+        );
         return dispatch();
       },
       {
@@ -399,6 +445,61 @@ class Ledger {
           return this.get(topic.id);
         }
         return this.bump(topic, now, { lastNotifiedAtMs: request.confirmedAtMs });
+      }
+      case "notice_count":
+        return {
+          windowStartMs: now - DAY_MS,
+          counts: this.noticeCounts(now, request.category ? [request.category] : undefined),
+        };
+      case "notice_intent": {
+        const digests = request.findings.map((finding) => digest(finding.key));
+        if (new Set(digests).size !== digests.length) {
+          throw new Error("Each finding key must appear only once in a notice.");
+        }
+        for (const finding of request.findings) {
+          if (finding.topicId !== undefined) {
+            this.topic(finding.topicId);
+          }
+        }
+        const recorded = new Set(
+          executeSqliteQuerySync(
+            this.db,
+            this.query
+              .selectFrom("notices")
+              .select("findingKeyDigest")
+              .where("findingKeyDigest", "in", digests),
+          ).rows.map((row) => row.findingKeyDigest),
+        );
+        if (recorded.size > 0) {
+          return {
+            recorded: false,
+            reason: "duplicate",
+            duplicateKeys: request.findings
+              .filter((_finding, index) => recorded.has(digests[index]!))
+              .map((finding) => finding.key),
+          };
+        }
+        const id = randomUUID();
+        executeSqliteQuerySync(
+          this.db,
+          this.query.insertInto("notices").values(
+            request.findings.map((finding, index) => ({
+              findingKeyDigest: digests[index]!,
+              id,
+              category: finding.category,
+              topicId: finding.topicId ?? null,
+              createdAtMs: now,
+            })),
+          ),
+        );
+        return {
+          recorded: true,
+          noticeId: id,
+          createdAtMs: now,
+          counts: this.noticeCounts(now, [
+            ...new Set(request.findings.map((finding) => finding.category)),
+          ]),
+        };
       }
       case "due":
         return {

@@ -67,6 +67,14 @@ const page = {
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
   after: Type.Optional(id),
 };
+const findings = Type.Array(
+  object({
+    key: Type.String({ minLength: 1, maxLength: 2_000, pattern: "\\S" }),
+    category: id,
+    topicId: Type.Optional(id),
+  }),
+  { minItems: 1, maxItems: 20 },
+);
 
 export const requestSchema = Type.Union([
   object({ action: Type.Literal("list"), status: Type.Optional(status), ...page }),
@@ -101,6 +109,8 @@ export const requestSchema = Type.Union([
     nextDueAtMs: Type.Optional(nullableTimestamp),
   }),
   object({ action: Type.Literal("record_notification"), id, confirmedAtMs: timestamp }),
+  object({ action: Type.Literal("notice_intent"), findings }),
+  object({ action: Type.Literal("notice_count"), category: Type.Optional(id) }),
   object({ action: Type.Literal("signal"), id }),
   object({ action: Type.Literal("source_list"), ...page }),
   object({
@@ -124,6 +134,8 @@ export const toolSchema = object({
   leaseId: Type.Optional(lease),
   sources: Type.Optional(outcomes),
   confirmedAtMs: Type.Optional(timestamp),
+  findings: Type.Optional(findings),
+  category: Type.Optional(id),
   minimumIntervalMinutes: Type.Optional(minutes),
 });
 
@@ -164,6 +176,13 @@ export type LedgerDatabase = {
   topics: Topic;
   sources: Source;
   topic_sources: { topicId: string; sourceId: string };
+  notices: {
+    findingKeyDigest: string;
+    id: string;
+    category: string;
+    topicId: string | null;
+    createdAtMs: number;
+  };
 };
 export type LedgerOperations = {
   request: { input: { request: Request; now: number }; output: unknown };
@@ -189,5 +208,10 @@ export const toolDescription =
   "Record throttling and Retry-After with retryAfterMinutes. lastFetchedAtMs records success only. " +
   "record_notification requires confirmedAtMs from a successful delivery record, never an intended send. " +
   "For scheduled notices, reconcile in a later turn after delivery; repeated or older confirmations " +
-  "do not advance lastNotifiedAtMs. No action fetches, sends, or schedules a job. " +
+  "do not advance lastNotifiedAtMs. Before a scheduled run returns a notice, call notice_intent " +
+  "once with every finding in it, each with a stable exact key (for example the story URL) and its " +
+  "category. recorded=false means a key already appeared within 7 days: drop duplicateKeys and " +
+  "call again, or send nothing. Use notice_count first to compare rolling 24-hour notices per " +
+  "category with the owner's limits. A recorded intent counts even if delivery fails; never resend it. " +
+  "No action fetches, sends, or schedules a job. " +
   "Use notifyBar to decide whether a finding merits a message; keep long findings outside the ledger.";

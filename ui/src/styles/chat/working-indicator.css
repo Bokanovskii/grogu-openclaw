@@ -289,6 +289,22 @@ button:is(.chat-working-indicator__child, .chat-working-indicator__subagents):is
   transform: rotate(-4deg);
 }
 
+/* Grogu (fork): parked at rest in place of the claw, at whole-pixel 1x so the
+   sprite stays crisp in the compact recap row. */
+.chat-turn-recap__grogu {
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-turn-recap__grogu .chat-grogu-eater__sprite {
+  width: 22px;
+  height: 14px;
+}
+
+.chat-turn-recap__grogu .chat-grogu-eater__pose {
+  animation: none;
+}
+
 .chat-turn-recap--continuation {
   margin-bottom: 0;
   font-size: var(--control-ui-text-sm);

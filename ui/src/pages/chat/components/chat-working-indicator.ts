@@ -223,12 +223,14 @@ export function renderChatWorkingIndicator(
 
 /** Post-turn recap row: once the run settles, the parked claw reports how
  * long the turn took and its latest known output usage. Sticky until the
- * next run replaces it. */
+ * next run replaces it. Grogu (fork) parks in place of the claw. */
 export function renderTurnRecapRow(
   recap: TurnRecap,
-  options: { presentation?: "standalone" | "continuation" } = {},
+  options: { presentation?: "standalone" | "continuation"; grogu?: boolean } = {},
 ) {
   const continuation = options.presentation === "continuation";
+  // Other theme brand icons stay the theme's choice.
+  const grogu = options.grogu === true && currentThemeBranding().brandIcon === "claw";
   // Sub-second turns still read as one second; terminal recaps favor full words.
   const duration =
     formatDurationLong(Math.max(1, Math.round(recap.runtimeMs / 1_000)) * 1_000) ?? "";
@@ -244,9 +246,11 @@ export function renderTurnRecapRow(
       ${
         continuation
           ? nothing
-          : html`<span class="chat-turn-recap__claw" aria-hidden="true"
-              >${renderThemeBrandIcon(icons.claw)}</span
-            >`
+          : grogu
+            ? html`<span class="chat-turn-recap__grogu">${renderGroguEater(false)}</span>`
+            : html`<span class="chat-turn-recap__claw" aria-hidden="true"
+                >${renderThemeBrandIcon(icons.claw)}</span
+              >`
       }
       <span>${t("chat.turnRecap.doneIn", { duration })}</span>
       ${

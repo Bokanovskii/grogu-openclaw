@@ -1,4 +1,5 @@
 /** Shared filter, sort, and page result types for cron job listing. */
+import type { CronGroup } from "../../../packages/gateway-protocol/src/schema/cron.types.js";
 import type { CronJob, CronRunStatus } from "../types.js";
 
 /** Stable sort keys supported by paginated cron listing. */
@@ -22,8 +23,8 @@ export type CronListPageOptions = {
   agentId?: string;
 };
 
-/** Offset-page result. Rows are deeply frozen snapshots; clone before editing locally. */
-export type CronListPageResult<TJobs extends readonly CronJob[] = CronJob[]> = {
+/** Internal offset-page result. Rows are deeply frozen snapshots; clone before editing locally. */
+export type CronListPageRowsResult<TJobs extends readonly CronJob[] = CronJob[]> = {
   jobs: TJobs;
   /** Opaque revision for the complete filtered, sorted result set. */
   snapshotRevision: string;
@@ -33,3 +34,9 @@ export type CronListPageResult<TJobs extends readonly CronJob[] = CronJob[]> = {
   hasMore: boolean;
   nextOffset: number | null;
 };
+
+/** Canonical cron.list response, including the registry used to organize its jobs. */
+export type CronListPageResult<TJobs extends readonly CronJob[] = CronJob[]> =
+  CronListPageRowsResult<TJobs> & {
+    groups: CronGroup[];
+  };

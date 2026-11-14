@@ -76,6 +76,17 @@ that label with `automations add|edit --display-name`. Use
 the stable name in list and detail views. The set and clear options cannot be
 combined.
 
+Use `--group <id>` on `automations add|edit` to assign a job to an automation
+group. Manage groups with `automations groups list`, `automations groups upsert
+--id <id> --label <label> [--description <text>] [--order <n>]`, and
+`automations groups delete <id>`. Group IDs are stable references; jobs keep
+working if a group is renamed or removed.
+
+Use `--description <text>` for a one-sentence explanation of what the job does.
+Use `--notification-description <text>` for a one-sentence explanation of what
+the job texts you about. These fields are optional, so older jobs need no
+migration. `cron.list` returns the registered groups alongside its jobs.
+
 ## Schedule types
 
 As an alternative to positional creation syntax, `automations add|create`

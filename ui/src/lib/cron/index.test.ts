@@ -24,7 +24,7 @@ import {
   updateCronJobsFilter,
 } from "../../lib/cron/index.ts";
 import type { CronState } from "../../lib/cron/types.ts";
-import { DEFAULT_CRON_FORM } from "../../test-helpers/cron.ts";
+import { cronJobsListResponse, DEFAULT_CRON_FORM } from "../../test-helpers/cron.ts";
 import { loadCronRuns, loadMoreCronRuns, updateCronRunsFilter } from "./runs.ts";
 
 function createState(overrides: Partial<CronState> = {}): CronState {
@@ -130,22 +130,6 @@ function requestPayload(call: readonly [method: string, payload?: unknown]) {
 
 function requestPatch(call: readonly [method: string, payload?: unknown]) {
   return requireRecord(requestPayload(call).patch, `${call[0]} patch`);
-}
-
-function cronJobsListResponse(
-  jobs: CronJob[] = [],
-  overrides: Partial<Omit<CronJobsListResult, "jobs">> = {},
-): CronJobsListResult {
-  return {
-    jobs,
-    snapshotRevision: "cron-jobs-fixture",
-    total: jobs.length,
-    offset: 0,
-    limit: 50,
-    hasMore: false,
-    nextOffset: null,
-    ...overrides,
-  };
 }
 
 function createCronRunsResult(

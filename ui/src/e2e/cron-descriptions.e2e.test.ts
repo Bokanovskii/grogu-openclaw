@@ -157,18 +157,18 @@ suite.define(() => {
 
   it("configured duration precision: shows exact saved intervals in rows and details", async () => {
     const cases = [
-      { id: "minute-control", name: "One-minute control", everyMs: 60_000, text: "Every 1m" },
+      { id: "minute-control", name: "One-minute control", everyMs: 60_000, text: "Every 1 minute" },
       {
         id: "mixed-interval",
         name: "Ninety-second cadence",
         everyMs: 90_000,
-        text: "Every 1m 30s",
+        text: "Every 1 minute 30 seconds",
       },
       {
         id: "precise-interval",
         name: "Full cadence",
         everyMs: 3_661_001,
-        text: "Every 1h 1m 1s 1ms",
+        text: "Every 1 hour 1 minute 1 second 1 millisecond",
       },
     ] as const;
     const jobs = cases.map(

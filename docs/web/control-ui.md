@@ -91,6 +91,8 @@ The sidebar loads automation status once per connection and refreshes after auto
 
 Automation inputs appear as compact, collapsed activity rows instead of message bubbles. Expand a row to read the full prompt and access its message actions. Each automation input stays separate, even when several jobs run in the same conversation. The expanded **From** link opens that automation's History tab and highlights the originating run; open the run's transcript from History when needed.
 
+The Automations page has three levels: group, automation, and run. Collapse a group to focus on another purpose. Automations without a saved group appear under Other. Each automation can have a friendly name, a description of its task, and a description of when it sends a message. The page derives schedule descriptions from the saved schedule.
+
 Thinking, speed, and context-window changes stay synchronized across panes showing the same session. While a change is pending, the latest selection remains visible. A rejected change restores the latest confirmed value. Delayed events from a replaced session leave the current transcript and unsent draft intact.
 
 While an agent works, completed commentary or preambles appear inline in the

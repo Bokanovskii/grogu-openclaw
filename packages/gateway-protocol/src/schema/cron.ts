@@ -498,6 +498,8 @@ export const CronJobSchema = closedObject({
   id: NonEmptyString,
   declarationKey: Type.Optional(CronDeclarationKeySchema),
   displayName: Type.Optional(CronDisplayNameSchema),
+  groupId: Type.Optional(NonEmptyString),
+  notificationDescription: Type.Optional(Type.String()),
   owner: Type.Optional(CronOwnerSchema),
   scheduledToolPolicy: Type.Optional(CronScheduledToolPolicySchema),
   agentId: Type.Optional(NonEmptyString),
@@ -530,6 +532,22 @@ export const CronJobSchema = closedObject({
   lastFailureNotificationDelivered: Type.Optional(Type.Boolean()),
   lastFailureNotificationDeliveryStatus: Type.Optional(CronDeliveryStatusSchema),
   lastFailureNotificationDeliveryError: Type.Optional(Type.String()),
+});
+
+/** User-maintained category metadata for related automation jobs. */
+export const CronGroupSchema = closedObject({
+  id: NonEmptyString,
+  label: NonEmptyString,
+  description: Type.Optional(Type.String()),
+  order: Type.Optional(Type.Integer()),
+});
+
+export const CronGroupsListParamsSchema = closedObject({});
+export const CronGroupsUpsertParamsSchema = closedObject({
+  group: CronGroupSchema,
+});
+export const CronGroupsDeleteParamsSchema = closedObject({
+  id: NonEmptyString,
 });
 
 /** Query params for listing cron jobs with filters and pagination. */
@@ -594,6 +612,8 @@ export const CronAddParamsSchema = closedObject({
   name: NonEmptyString,
   declarationKey: Type.Optional(CronDeclarationKeySchema),
   displayName: Type.Optional(CronDisplayNameSchema),
+  groupId: Type.Optional(NonEmptyString),
+  notificationDescription: Type.Optional(Type.String()),
   owner: Type.Optional(CronOwnerSchema),
   ...CronCommonOptionalFields,
   schedule: CronScheduleSchema,
@@ -636,6 +656,8 @@ export const CronAddResultSchema = Type.Union([
 const CronJobPatchSchema = closedObject({
   name: Type.Optional(NonEmptyString),
   displayName: Type.Optional(Type.Union([CronDisplayNameSchema, Type.Null()])),
+  groupId: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
+  notificationDescription: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   ...CronCommonOptionalFields,
   schedule: Type.Optional(CronScheduleSchema),
   pacing: Type.Optional(Type.Union([CronPacingSchema, Type.Null()])),

@@ -173,6 +173,7 @@ export function createPage(
 
 export function cronListResponse(jobs: CronJob[]): CronJobsListResult {
   return {
+    groups: [],
     jobs: jobs.map((job) => ({
       configRevision: job.configRevision ?? `config-revision-${job.id}`,
       ...job,

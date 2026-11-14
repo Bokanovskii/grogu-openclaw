@@ -1,10 +1,30 @@
 import type { CronCompactJob, CronJob, CronJobsListResult } from "../api/types.ts";
 import type { CronFormState } from "../lib/cron/types.ts";
 
+export function cronJobsListResponse(
+  jobs: CronJob[] = [],
+  overrides: Partial<Omit<CronJobsListResult, "jobs">> = {},
+): CronJobsListResult {
+  return {
+    jobs,
+    snapshotRevision: "cron-jobs-fixture",
+    groups: [],
+    total: jobs.length,
+    offset: 0,
+    limit: 50,
+    hasMore: false,
+    nextOffset: null,
+    ...overrides,
+  };
+}
+
 export function compactCronJobFixture(job: CronJob): CronCompactJob {
   return {
     id: job.id,
     name: job.name,
+    displayName: job.displayName,
+    groupId: job.groupId,
+    notificationDescription: job.notificationDescription,
     agentId: job.agentId,
     enabled: job.enabled,
     updatedAtMs: job.updatedAtMs,
@@ -25,20 +45,27 @@ export function compactCronJobFixture(job: CronJob): CronCompactJob {
   };
 }
 
+type CronListFixtureInput = Omit<CronJobsListResult, "groups"> &
+  Partial<Pick<CronJobsListResult, "groups">>;
+
 type CronListFixtureCase = {
   match?: Record<string, unknown>;
-  response: CronJobsListResult;
+  response: CronListFixtureInput;
 };
 
-export function cronListResponseFixture(input: CronJobsListResult | CronListFixtureCase[]) {
+export function cronListResponseFixture(input: CronListFixtureInput | CronListFixtureCase[]) {
   const cases: CronListFixtureCase[] = Array.isArray(input) ? input : [{ response: input }];
   return {
     cases: cases.flatMap((entry) => [
       {
         match: { ...entry.match, compact: true },
-        response: { ...entry.response, jobs: entry.response.jobs.map(compactCronJobFixture) },
+        response: {
+          groups: [],
+          ...entry.response,
+          jobs: entry.response.jobs.map(compactCronJobFixture),
+        },
       },
-      entry,
+      { ...entry, response: { groups: [], ...entry.response } },
     ]),
   };
 }
@@ -46,6 +73,9 @@ export function cronListResponseFixture(input: CronJobsListResult | CronListFixt
 export const DEFAULT_CRON_FORM: CronFormState = {
   name: "",
   description: "",
+  displayName: "",
+  groupId: "",
+  notificationDescription: "",
   agentId: "",
   sessionKey: "",
   clearAgent: false,

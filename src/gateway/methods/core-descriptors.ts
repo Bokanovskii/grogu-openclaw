@@ -722,4 +722,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["skills.workshop.changes", "skills", "operator.read", "2026.9"],
   ["skills.workshop.archive", "skills", "operator.admin", "2026.9"],
   ["skills.workshop.restore", "skills", "operator.admin", "2026.9"],
+  ["cron.groups.list", "cron", "operator.read", "2026.10"],
+  ["cron.groups.upsert", "cron", "operator.admin", "2026.10", CONTROL_PLANE_WRITE],
+  ["cron.groups.delete", "cron", "operator.admin", "2026.10", CONTROL_PLANE_WRITE],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];

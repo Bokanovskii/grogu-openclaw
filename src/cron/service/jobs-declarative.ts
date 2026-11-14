@@ -34,6 +34,8 @@ export function declarativeFields(job: CronStoredJob, includeEnabled: boolean) {
     runtimeAuthorityRecoveryRequired: job.runtimeAuthorityRecoveryRequired,
     delivery: job.delivery,
     displayName: job.displayName,
+    groupId: job.groupId,
+    notificationDescription: job.notificationDescription,
     ...(includeEnabled
       ? {
           enabled: job.enabled,

@@ -19,6 +19,7 @@ import {
   isMissingOperatorReadScopeError,
 } from "../gateway-errors.ts";
 import { parseCronDurationMs } from "./decimal.ts";
+import { DEFAULT_CRON_FORM } from "./defaults.ts";
 import {
   formatDateTimeLocal,
   parseEverySchedule,
@@ -50,52 +51,6 @@ function isCronFormSessionTarget(value: string): value is CronFormState["session
   );
 }
 
-const DEFAULT_CRON_FORM: CronFormState = {
-  name: "",
-  description: "",
-  agentId: "",
-  sessionKey: "",
-  clearAgent: false,
-  enabled: true,
-  deleteAfterRun: false,
-  scheduleKind: "every",
-  scheduleAt: "",
-  everyAmount: "30",
-  everyUnit: "minutes",
-  cronExpr: "0 7 * * *",
-  cronTz: "",
-  scheduleExact: false,
-  staggerAmount: "",
-  staggerUnit: "seconds",
-  triggerEnabled: false,
-  triggerScript: "",
-  triggerOnce: false,
-  sessionTarget: "isolated",
-  wakeMode: "now",
-  payloadKind: "agentTurn",
-  payloadLocked: false,
-  payloadText: "",
-  payloadModel: "",
-  payloadThinking: "",
-  payloadLightContext: false,
-  deliveryMode: "none",
-  deliveryChannel: "last",
-  deliveryTo: "",
-  deliveryAccountId: "",
-  deliveryBestEffort: false,
-  deliveryThreadId: undefined,
-  deliveryCompletionDestination: undefined,
-  deliveryFailureDestination: undefined,
-  failureAlertMode: "inherit",
-  failureAlertAfter: "",
-  failureAlertCooldownSeconds: "",
-  failureAlertChannel: "last",
-  failureAlertTo: "",
-  failureAlertDeliveryMode: "",
-  failureAlertAccountId: "",
-  timeoutSeconds: "",
-};
-
 export function createInitialCronState<Row = CronJob>(
   snapshot: Partial<Pick<CronState, "client" | "connected">> = {},
 ): CronState<Row> {
@@ -108,6 +63,7 @@ export function createInitialCronState<Row = CronJob>(
     cronJobsReloadPending: false,
     cronJobsReloadPendingTableFilters: false,
     cronJobs: [],
+    cronGroups: [],
     cronJobsSnapshotRevision: null,
     cronJobsTotal: 0,
     cronJobsHasMore: false,
@@ -484,6 +440,9 @@ function jobToForm(job: CronJob, prev: CronFormState): CronFormState {
     ...prev,
     name: job.name,
     description: job.description ?? "",
+    displayName: job.displayName ?? "",
+    groupId: job.groupId ?? "",
+    notificationDescription: job.notificationDescription ?? "",
     agentId: job.agentId ?? "",
     sessionKey: job.sessionKey ?? "",
     clearAgent: false,
@@ -762,6 +721,11 @@ export async function addCronJob(state: CronState): Promise<CronSaveResult> {
     const job: Record<string, unknown> = {
       name: form.name.trim(),
       description: form.description.trim(),
+      displayName: form.displayName.trim() || (editingJob?.displayName ? null : undefined),
+      groupId: form.groupId.trim() || (editingJob?.groupId ? null : undefined),
+      notificationDescription:
+        form.notificationDescription.trim() ||
+        (editingJob?.notificationDescription ? null : undefined),
       agentId: agentId === null ? null : agentId || undefined,
       sessionKey,
       enabled: form.enabled,

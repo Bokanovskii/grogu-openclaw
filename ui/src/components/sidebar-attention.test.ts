@@ -50,6 +50,7 @@ function cronJob(id: string): CronJob {
 
 function cronListResponse(jobs: CronJob[]): CronJobsListResult<CronCompactJob> {
   return {
+    groups: [],
     jobs: jobs.map(compactCronJobFixture),
     snapshotRevision: "sidebar-attention-cron-fixture",
     total: jobs.length,

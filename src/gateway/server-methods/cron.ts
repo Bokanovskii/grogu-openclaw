@@ -64,7 +64,11 @@ import {
   resolveCronRequesterProvenanceForJob,
   resolveCronScheduledToolPolicyForCaller,
 } from "./cron-caller-scope.js";
-import { isCronInvalidRequestError } from "./cron-error-classification.js";
+import {
+  CronJobConfigRevisionConflictError,
+  isCronInvalidRequestError,
+} from "./cron-error-classification.js";
+import { cronGroupHandlers } from "./cron-groups.js";
 import { cronHistoryHandler } from "./cron-history.js";
 import {
   assertValidCronUpdatePatch,
@@ -90,16 +94,8 @@ import { cronScratchHandlers } from "./cron-scratch.js";
 import type { GatewayRequestHandler, GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
-class CronJobConfigRevisionConflictError extends Error {
-  constructor(
-    readonly expectedConfigRevision: string,
-    readonly actualConfigRevision: string,
-  ) {
-    super("cron job definition no longer matches the loaded version");
-  }
-}
-
 export const cronHandlers: GatewayRequestHandlers = {
+  ...cronGroupHandlers,
   wake: async ({ params, respond, context, client, sessionMutationCommitGuard }) => {
     if (!assertValidParams(params, validateWakeParams, "wake", respond)) {
       return;

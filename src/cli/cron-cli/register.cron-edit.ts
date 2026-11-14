@@ -206,8 +206,19 @@ export function registerCronEditCommand(cron: Command) {
           if (displayName || opts.clearDisplayName) {
             patch.displayName = displayName ?? null;
           }
+          const groupId = parseCronStringOption(opts.group, "--group");
+          if (groupId) {
+            patch.groupId = groupId;
+          }
           if (typeof opts.description === "string") {
             patch.description = opts.description;
+          }
+          const notificationDescription = parseCronStringOption(
+            opts.notificationDescription,
+            "--notification-description",
+          );
+          if (notificationDescription) {
+            patch.notificationDescription = notificationDescription;
           }
           if (opts.enable && opts.disable) {
             throw new CronCliError("Choose --enable or --disable, not both");

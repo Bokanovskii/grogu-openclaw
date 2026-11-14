@@ -18,7 +18,7 @@ import {
   resolveJobLastRunStatus,
 } from "./jobs-scheduling.js";
 import { sortCronJobs } from "./list-page-sort.js";
-import type { CronListPageOptions, CronListPageResult } from "./list-page-types.js";
+import type { CronListPageOptions, CronListPageRowsResult } from "./list-page-types.js";
 import { locked } from "./locked.js";
 import { normalizeOptionalAgentId } from "./normalize.js";
 import { ensureLoadedForRead, resolveCurrentDefaultAgentId } from "./ops-shared.js";
@@ -180,7 +180,7 @@ export async function listPage(
   let enteredAt: number | undefined;
   let finishedAt: number | undefined;
   let sourceCount: number | undefined;
-  let result: CronListPageResult | undefined;
+  let result: CronListPageRowsResult | undefined;
   try {
     return await locked(
       state,
@@ -288,7 +288,7 @@ export async function listPage(
             limit,
             hasMore: nextOffset < total,
             nextOffset: nextOffset < total ? nextOffset : null,
-          } satisfies CronListPageResult);
+          } satisfies CronListPageRowsResult);
         } finally {
           finishedAt = performance.now();
         }

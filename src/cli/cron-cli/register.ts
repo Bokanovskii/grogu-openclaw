@@ -14,6 +14,7 @@ import {
 import { registerCronEditCommand } from "./register.cron-edit.js";
 import { registerCronScratchCommand } from "./register.cron-scratch.js";
 import { registerCronSimpleCommands } from "./register.cron-simple.js";
+import { registerCronGroupCommands } from "./register.groups.js";
 
 function inheritCronGatewayOptions(command: Command): void {
   for (const name of CRON_GATEWAY_OPTION_NAMES) {
@@ -45,6 +46,7 @@ export function registerCronCli(program: Command) {
   registerCronSimpleCommands(cron);
   registerCronScratchCommand(cron);
   registerCronEditCommand(cron);
+  registerCronGroupCommands(cron);
   setCommandJsonMode(cron, "output", ({ argv }) => isCronMachineOutput(argv));
 
   applyParentDefaultHelpAction(cron);

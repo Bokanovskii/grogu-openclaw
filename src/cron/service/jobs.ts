@@ -32,6 +32,7 @@ import type {
 } from "../types.js";
 import { resolveInitialCronDelivery } from "./initial-delivery.js";
 import { normalizeDeclarativeLabel } from "./jobs-declarative.js";
+import { applyCronGroupMetadata } from "./jobs-metadata.js";
 import {
   computeJobNextRunAtMs,
   normalizeStreamScheduleBounds,
@@ -216,6 +217,8 @@ export function createJob(
   const enabled = typeof input.enabled === "boolean" ? input.enabled : true;
   const declarationKey = normalizeDeclarativeLabel(input.declarationKey, "declarationKey");
   const displayName = normalizeDeclarativeLabel(input.displayName, "displayName");
+  const groupId = normalizeOptionalString(input.groupId);
+  const notificationDescription = normalizeOptionalString(input.notificationDescription);
   const ownerAgentId = normalizeOptionalAgentId(input.owner?.agentId);
   const ownerSessionKey = normalizeOptionalString(input.owner?.sessionKey);
   const ownerAccountId = normalizeOptionalAccountId(input.owner?.accountId);
@@ -230,6 +233,8 @@ export function createJob(
     id,
     ...(declarationKey ? { declarationKey } : {}),
     ...(displayName ? { displayName } : {}),
+    ...(groupId ? { groupId } : {}),
+    ...(notificationDescription ? { notificationDescription } : {}),
     ...(ownerAgentId || ownerSessionKey || ownerAccountId
       ? {
           owner: {
@@ -323,6 +328,7 @@ export function applyJobPatch(
       delete job.displayName;
     }
   }
+  applyCronGroupMetadata(job, patch);
   if (typeof patch.enabled === "boolean") {
     job.enabled = patch.enabled;
   }
@@ -485,6 +491,10 @@ export function applyDeclarativeJobSpec(
   } else {
     delete job.displayName;
   }
+  applyCronGroupMetadata(job, {
+    groupId: input.groupId,
+    notificationDescription: input.notificationDescription,
+  });
 
   job.schedule = normalizeJobSchedule(input.schedule, {
     kind: "declarative",

@@ -21,6 +21,7 @@ function listResult(
   return {
     jobs,
     snapshotRevision: CRON_LIST_SNAPSHOT_REVISION,
+    groups: [],
     total,
     offset,
     limit,

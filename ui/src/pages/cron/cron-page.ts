@@ -676,6 +676,7 @@ class CronPage extends OpenClawLightDomElement {
           canManage,
           status: this.cron.cronStatus,
           jobs: this.cron.cronJobs,
+          groups: this.cron.cronGroups,
           jobsLoadingMore: this.cron.cronJobsLoadingMore,
           jobsTotal: this.cron.cronJobsTotal,
           jobsHasMore: this.cron.cronJobsHasMore,

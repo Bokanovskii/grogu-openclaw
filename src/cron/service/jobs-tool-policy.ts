@@ -92,6 +92,8 @@ export function resolveCronRequesterExecutionRevision(job: CronStoredJob): strin
     operatorSource: _operatorSource,
     description: _description,
     displayName: _displayName,
+    groupId: _groupId,
+    notificationDescription: _notificationDescription,
     createdActor: _createdActor,
     toolsAllowProvenance: _toolsAllowProvenance,
     ...executableJob

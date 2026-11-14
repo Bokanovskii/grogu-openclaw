@@ -84,6 +84,11 @@ describe("scheduled tool policy provenance", () => {
     expect(toPublicCronJob(created)).not.toHaveProperty("operatorSource");
     const display = await update(state, created.id, { description: "Readable description" });
     expect(display.operatorSource).toEqual(created.operatorSource);
+    const grouped = await update(state, created.id, {
+      groupId: "daily",
+      notificationDescription: "Texts me when done",
+    });
+    expect(grouped.operatorSource).toEqual(created.operatorSource);
     const edited = await update(state, created.id, {
       payload: { kind: "agentTurn", message: "A different task" },
     });

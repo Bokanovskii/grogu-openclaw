@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { contextBudgetStatusFixture } from "../../../src/config/sessions/context-budget.test-support.js";
 import type { CronJob } from "../api/types.ts";
 import { i18n } from "../i18n/index.ts";
+import { registerCronEnglish } from "../i18n/locales/en-cron.ts";
 import { formatCronPayload, formatCronSchedule, formatSessionTokens } from "./presenter.ts";
+registerCronEnglish();
 
 function job(schedule: CronJob["schedule"]): CronJob {
   return {
@@ -26,11 +28,11 @@ describe("formatCronSchedule", () => {
   });
 
   it.each([
-    { everyMs: 60_000, expected: "Every 1m" },
-    { everyMs: 450, expected: "Every 450ms" },
-    { everyMs: 90_000, expected: "Every 1m 30s" },
-    { everyMs: 3_661_001, expected: "Every 1h 1m 1s 1ms" },
-    { everyMs: 604_800_000, expected: "Every 7d" },
+    { everyMs: 60_000, expected: "Every 1 minute" },
+    { everyMs: 450, expected: "Every 450 milliseconds" },
+    { everyMs: 90_000, expected: "Every 1 minute 30 seconds" },
+    { everyMs: 3_661_001, expected: "Every 1 hour 1 minute 1 second 1 millisecond" },
+    { everyMs: 604_800_000, expected: "Every 7 days" },
   ])("preserves configured duration precision for every $everyMs ms", ({ everyMs, expected }) => {
     expect(formatCronSchedule(job({ kind: "every", everyMs }))).toBe(expected);
   });
@@ -46,7 +48,7 @@ describe("formatCronSchedule", () => {
         new Intl.NumberFormat("fr", {
           style: "unit",
           unit,
-          unitDisplay: "narrow",
+          unitDisplay: "long",
           maximumFractionDigits: 0,
         }).format(value),
       )
@@ -55,7 +57,9 @@ describe("formatCronSchedule", () => {
   });
 
   it("formats cron schedules", () => {
-    expect(formatCronSchedule(job({ kind: "cron", expr: "0 * * * *" }))).toBe("Cron 0 * * * *");
+    expect(formatCronSchedule(job({ kind: "cron", expr: "0 * * * *" }))).toBe(
+      "Every hour at minute 00",
+    );
   });
 
   it("formats on-exit schedules with the watched command instead of falling through to cron", () => {

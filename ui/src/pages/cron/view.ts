@@ -2,7 +2,6 @@ import "../../styles/chat/startup-layout.css";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { html, nothing } from "lit";
 import { ifDefined } from "lit/directives/if-defined.js";
-import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { isSystemMonitorDeclaration } from "../../../../src/cron/system-owned-declaration.js";
 import type { CronJob, CronJobsEnabledFilter } from "../../api/types.ts";
@@ -10,7 +9,6 @@ import "../../styles/chat/text.css";
 import "../../styles/cron.css";
 import { renderAgentRowChip } from "../../components/agent-row-chip.ts";
 import { renderChannelPicker, type ChannelPickerOption } from "../../components/channel-picker.ts";
-import { renderCronJobsPagination } from "../../components/cron-jobs-pagination.ts";
 import { renderHubTabs } from "../../components/hub-tabs.ts";
 import { icon, icons } from "../../components/icons.ts";
 import { highlightCodeHtml } from "../../components/markdown-code-blocks.ts";
@@ -29,7 +27,7 @@ import {
 } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
 import { registerCronEnglish } from "../../i18n/locales/en-cron.ts";
-import { isCronJobActiveFailure, isCronJobRunning } from "../../lib/cron-status.ts";
+import { isCronJobRunning } from "../../lib/cron-status.ts";
 import { parseCronDurationMs } from "../../lib/cron/decimal.ts";
 import type { CronFieldErrors, CronFieldKey, CronFormState } from "../../lib/cron/types.ts";
 import { formatRelativeTimestamp, formatMs } from "../../lib/format.ts";
@@ -43,6 +41,7 @@ import {
   renderTriggerIndicator,
 } from "./view-job-status.ts";
 import { renderJobsFilterPopover } from "./view-jobs-filter.ts";
+import { renderJobsTable } from "./view-jobs-table.ts";
 import { renderRunsSection } from "./view-runs.ts";
 import { renderCronSuggestionLists } from "./view-suggestions.ts";
 import type { CronDetailTab, CronProps } from "./view-types.ts";
@@ -378,7 +377,10 @@ function renderListView(props: CronProps) {
                 html`<div class="cron-activity">${renderRunsSection(props)}</div>`,
               )
             : [
-                renderSettingsSection({}, renderJobsTable(props, hasAnyJobsFilters)),
+                renderSettingsSection(
+                  {},
+                  renderJobsTable(props, hasAnyJobsFilters, (job) => renderJobRow(job, props)),
+                ),
                 showStarterAutomations ? renderSuggestions(props) : nothing,
               ]
         }
@@ -483,73 +485,6 @@ function renderToolbar(props: CronProps, hasAdvancedJobsFilters: boolean) {
   `;
 }
 
-function renderJobsTable(props: CronProps, hasAnyJobsFilters: boolean) {
-  // A snapshot revision is the successful-list fact. Until one exists, show
-  // pending or failure, never completed-empty guidance.
-  const initialPending = props.loading && !props.hasLoaded;
-  const tableBusy = props.loading || props.jobsLoadingMore;
-  const jobs = props.jobs.toSorted(
-    (left, right) => Number(isCronJobActiveFailure(right)) - Number(isCronJobActiveFailure(left)),
-  );
-  return html`
-    <div
-      class="cron-table ${props.canManage ? "" : "cron-table--read-only"}"
-      aria-busy=${tableBusy ? "true" : nothing}
-    >
-      <div class="cron-table__head">
-        <span>${t("cron.jobs.name")}</span>
-        <span>${t("cron.jobs.schedule")}</span>
-        <span>${t("cron.jobs.nextRun")}</span>
-        <span>${t("cron.jobs.lastRun")}</span>
-        ${props.canManage ? html`<span aria-hidden="true"></span>` : nothing}
-      </div>
-      ${
-        jobs.length === 0
-          ? initialPending
-            ? html`
-                <div
-                  class="cron-empty-state"
-                  role="status"
-                  aria-live="polite"
-                  data-test-id="cron-jobs-loading"
-                >
-                  <div class="cron-empty-state__title">${t("cron.list.loading")}</div>
-                </div>
-              `
-            : props.hasLoaded
-              ? html`
-                  <div class="cron-empty-state">
-                    <div class="cron-empty-state__title">
-                      ${hasAnyJobsFilters ? t("cron.list.noMatching") : t("cron.list.emptyTitle")}
-                    </div>
-                    ${
-                      hasAnyJobsFilters
-                        ? nothing
-                        : html`<div class="cron-empty-state__copy">
-                            ${t("cron.list.emptyHint")}
-                          </div>`
-                    }
-                  </div>
-                `
-              : nothing
-          : repeat(
-              jobs,
-              (job) => job.id,
-              (job) => renderJobRow(job, props),
-            )
-      }
-      ${renderCronJobsPagination({
-        jobsShown: props.jobs.length,
-        jobsTotal: props.jobsTotal,
-        hasMore: props.jobsHasMore,
-        loading: props.loading,
-        loadingMore: props.jobsLoadingMore,
-        onLoadMore: props.onLoadMoreJobs,
-      })}
-    </div>
-  `;
-}
-
 function renderJobRow(job: CronJob, props: CronProps) {
   const displayName = job.displayName ?? job.name;
   const description = job.description?.trim();
@@ -576,9 +511,13 @@ function renderJobRow(job: CronJob, props: CronProps) {
           </span>
           ${systemOwned ? nothing : renderAgentRowChip(job.agentId)}
           ${
-            description || !job.enabled
+            description ||
+            job.notificationDescription ||
+            job.payload.kind === "agentTurn" ||
+            !job.enabled
               ? html`
                   <span class="cron-table__name-meta">
+                    ${job.payload.kind === "agentTurn" ? html`<span class="cron-model-chip">${job.payload.model || t("cron.groups.defaultModel")}</span>` : nothing}
                     ${
                       description
                         ? html`
@@ -591,11 +530,7 @@ function renderJobRow(job: CronJob, props: CronProps) {
                           `
                         : nothing
                     }
-                    ${
-                      description && !job.enabled
-                        ? html`<span class="cron-table__meta-separator" aria-hidden="true">·</span>`
-                        : nothing
-                    }
+                    ${job.notificationDescription ? html`<span class="cron-table__notification"><span>${t("cron.groups.textsWhen")}</span> ${job.notificationDescription}</span>` : nothing}
                     ${job.enabled ? nothing : renderDisabledNote(job)}
                   </span>
                 `
@@ -1154,6 +1089,26 @@ function renderGeneralSection(props: CronProps) {
         errorKey: "name",
         placeholder: t("cron.form.namePlaceholder"),
       })}
+      ${renderCronInput(props, "displayName", {
+        label: t("cron.groups.friendlyName"),
+        help: t("cron.groups.friendlyNameHint"),
+      })}
+      ${renderCronSelect(props, "groupId", {
+        label: t("cron.groups.group"),
+        options: [
+          { value: "", label: t("cron.groups.ungrouped") },
+          ...(props.groups ?? []).map((group) => ({ value: group.id, label: group.label })),
+          ...(props.form.groupId &&
+          !(props.groups ?? []).some((group) => group.id === props.form.groupId)
+            ? [{ value: props.form.groupId, label: props.form.groupId }]
+            : []),
+        ],
+      })}
+      ${renderCronInput(props, "description", { label: t("cron.groups.whatItDoes") })}
+      ${renderCronInput(props, "notificationDescription", {
+        label: t("cron.groups.textsWhen"),
+        help: t("cron.groups.notificationHint"),
+      })}
       ${renderCronInput(props, "agentId", {
         label: t("cron.form.agentId"),
         help: t("cron.form.agentHelp"),
@@ -1416,10 +1371,6 @@ function renderAdvanced(
         <p class="settings-section__desc">${t("cron.form.advancedHelp")}</p>
         <div class="settings-group">
           ${renderTriggerRows(props)}
-          ${renderCronInput(props, "description", {
-            label: t("cron.form.description"),
-            placeholder: t("cron.form.descriptionPlaceholder"),
-          })}
           ${
             ctx.mode === "create"
               ? renderToggleRow(props, "enabled", {

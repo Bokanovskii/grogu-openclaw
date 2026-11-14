@@ -3,7 +3,7 @@ import type { CronCompactJob } from "../../../packages/gateway-protocol/src/inde
 import { tryResolveCronJobEffectiveAgentId } from "../../cron/agent-id.js";
 import { cronJobReadView } from "../../cron/job-read-view.js";
 import type { CronServiceContract } from "../../cron/service-contract.js";
-import type { CronListPageResult } from "../../cron/service/list-page-types.js";
+import type { CronListPageRowsResult } from "../../cron/service/list-page-types.js";
 import type { CronJob } from "../../cron/types.js";
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import { registerSerializedJsonArray } from "../serialized-json.js";
@@ -14,7 +14,7 @@ const projections = new WeakMap<CronServiceContract, { compact?: Page; full?: Pa
 /** Each owner's revision covers the filtered rows; the default agent completes presentation identity. */
 export function projectCronListJobs(
   owner: CronServiceContract,
-  page: CronListPageResult,
+  page: CronListPageRowsResult,
   compact: boolean,
 ) {
   const defaultAgentId = owner.getDefaultAgentId();
@@ -52,6 +52,8 @@ function compactCronListJob(job: CronJob): CronCompactJob {
     updatedAtMs: job.updatedAtMs,
     declarationKey: job.declarationKey || undefined,
     displayName: job.displayName || undefined,
+    groupId: job.groupId || undefined,
+    notificationDescription: job.notificationDescription || undefined,
     owner: job.owner,
     enabled: job.enabled,
     // Keep epoch fields for existing clients; readable dates avoid model timestamp arithmetic.

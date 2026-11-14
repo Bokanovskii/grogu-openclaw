@@ -56,6 +56,11 @@ describe("cron edit", () => {
     [["--enable", "--json"], { enabled: true }],
     [["--display-name", "Daily summary"], { displayName: "Daily summary" }],
     [["--clear-display-name"], { displayName: null }],
+    [["--group", "daily"], { groupId: "daily" }],
+    [
+      ["--notification-description", "Texts you when the report is ready."],
+      { notificationDescription: "Texts you when the report is ready." },
+    ],
     [["--clear-model"], { payload: { kind: "agentTurn", model: null } }],
     [["--clear-thinking"], { payload: { kind: "agentTurn", thinking: null } }],
     [["--command-input", ""], { payload: { kind: "command", input: "" } }],
@@ -381,6 +386,32 @@ describe("automation mutation options", () => {
     await reject(
       [...addArgs, "--every", "1h", "--system-event", "tick", "--timeout-seconds", "bogus"],
       "--timeout-seconds is not supported for systemEvent jobs.",
+    );
+  });
+
+  it("adds friendly group and notification metadata", async () => {
+    await run([
+      ...addArgs,
+      "--every",
+      "1h",
+      "--message",
+      "Summarize updates.",
+      "--group",
+      "daily",
+      "--display-name",
+      "Daily brief",
+      "--notification-description",
+      "Texts you when the brief is ready.",
+    ]);
+
+    expect(callGatewayFromCli).toHaveBeenCalledWith(
+      "cron.add",
+      expect.anything(),
+      expect.objectContaining({
+        groupId: "daily",
+        displayName: "Daily brief",
+        notificationDescription: "Texts you when the brief is ready.",
+      }),
     );
   });
 

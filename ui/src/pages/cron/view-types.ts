@@ -1,3 +1,4 @@
+import type { CronGroup } from "@openclaw/gateway-protocol";
 import type {
   ChannelUiMetaEntry,
   CronJob,
@@ -31,6 +32,7 @@ export type CronProps = {
   jobsLoadingMore: boolean;
   status: CronStatus | null;
   jobs: CronJob[];
+  groups?: CronGroup[];
   jobsTotal: number;
   jobsHasMore: boolean;
   jobsQuery: string;

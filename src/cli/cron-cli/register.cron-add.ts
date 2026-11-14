@@ -327,6 +327,11 @@ export function registerCronAddCommand(cron: Command) {
             const description = normalizeOptionalString(opts.description);
             const declarationKey = parseCronStringOption(opts.declarationKey, "--declaration-key");
             const displayName = parseCronStringOption(opts.displayName, "--display-name");
+            const groupId = parseCronStringOption(opts.group, "--group");
+            const notificationDescription = parseCronStringOption(
+              opts.notificationDescription,
+              "--notification-description",
+            );
             const pacingMin = parseCronStringOption(opts.pacingMin, "--pacing-min");
             const pacingMax = parseCronStringOption(opts.pacingMax, "--pacing-max");
 
@@ -358,6 +363,8 @@ export function registerCronAddCommand(cron: Command) {
               name,
               declarationKey,
               displayName,
+              groupId,
+              notificationDescription,
               description,
               ...(declarationKey && cmd.getOptionValueSource("disabled") !== "cli"
                 ? {}

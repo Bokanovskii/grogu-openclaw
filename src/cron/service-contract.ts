@@ -1,5 +1,5 @@
 /** Public cron service interface shared by callers and implementations. */
-import type { CronListPageOptions, CronListPageResult } from "./service/list-page-types.js";
+import type { CronListPageOptions, CronListPageRowsResult } from "./service/list-page-types.js";
 import type {
   CronAddInput,
   CronAddOptions,
@@ -47,7 +47,7 @@ export interface CronServiceContract {
   listPage(
     opts?: CronListPageOptions,
     matchesJob?: (job: CronJob) => boolean,
-  ): Promise<CronListPageResult>;
+  ): Promise<CronListPageRowsResult>;
   add(input: CronAddInput, opts?: CronAddOptions): Promise<CronAddResult>;
   update(id: string, patch: CronUpdateInput, opts?: CronUpdateOptions): Promise<CronUpdateResult>;
   updateWithPrecondition(

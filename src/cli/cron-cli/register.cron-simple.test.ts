@@ -84,10 +84,14 @@ describe("cron output routing", () => {
       ["--timeout", "250", "--expect-final"],
       ["--log-level", "debug", "--port", "18789"],
     ];
+    // A parent command is machine output only when every registered subcommand is.
+    const isAlwaysJson = (command: Command): boolean =>
+      command.commands.length > 0
+        ? command.commands.every((subcommand) => isAlwaysJson(subcommand))
+        : command.options.find((option) => option.long === "--json")?.description ===
+          "Explicit machine-output spelling (command results are JSON by default)";
     for (const command of cron!.commands) {
-      const alwaysJson =
-        command.options.find((option) => option.long === "--json")?.description ===
-        "Explicit machine-output spelling (command results are JSON by default)";
+      const alwaysJson = isAlwaysJson(command);
       for (const name of [command.name(), ...command.aliases()]) {
         for (const root of ["cron", "automations"]) {
           for (const options of gatewayOptions) {

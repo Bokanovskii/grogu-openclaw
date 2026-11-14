@@ -353,6 +353,8 @@ export type CronJob = CronJobBase<
 > & {
   declarationKey?: string;
   displayName?: string;
+  groupId?: string;
+  notificationDescription?: string;
   owner?: {
     agentId?: string;
     sessionKey?: string;
@@ -455,6 +457,8 @@ export type CronJobPatch = Partial<
     | "failureAlert"
     | "declarationKey"
     | "displayName"
+    | "groupId"
+    | "notificationDescription"
     | "owner"
     | "scheduledToolPolicy"
     | "pacing"
@@ -462,6 +466,8 @@ export type CronJobPatch = Partial<
   >
 > & {
   displayName?: string | null;
+  groupId?: string | null;
+  notificationDescription?: string | null;
   pacing?: CronPacing | null;
   trigger?: CronTrigger | null;
   payload?: CronPayloadPatch;

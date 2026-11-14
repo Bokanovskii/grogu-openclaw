@@ -55,7 +55,7 @@ export function normalizeCronAddRequest(params: unknown): {
   enabledExplicit: boolean;
 } {
   const rawParams = asOptionalObjectRecord(params);
-  for (const key of ["declarationKey", "displayName"]) {
+  for (const key of ["declarationKey", "displayName", "groupId", "notificationDescription"]) {
     const value = rawParams?.[key];
     if (typeof value === "string" && value.trim().length === 0) {
       throw new Error(`${key} must not be blank`);
@@ -87,6 +87,12 @@ export function normalizeCronUpdateRequest(params: unknown): {
   const rawDisplayName = patchFields?.displayName;
   if (typeof rawDisplayName === "string" && rawDisplayName.trim().length === 0) {
     throw new Error("displayName must not be blank");
+  }
+  for (const key of ["groupId", "notificationDescription"] as const) {
+    const value = patchFields?.[key];
+    if (typeof value === "string" && value.trim().length === 0) {
+      throw new Error(`${key} must not be blank`);
+    }
   }
   assertCronDeliveryInputNonBlankFields(patchFields?.delivery);
   const normalizedPatch = normalizeCronJobPatch(rawPatch);

@@ -95,6 +95,7 @@ SafeSearch level.
 - **No API key** -- works once DuckDuckGo is selected as the `web_search` provider.
 - **Experimental** -- scrapes DuckDuckGo's non-JavaScript HTML search pages, not an official API or SDK. Results depend on page structure, which can change without notice.
 - **Bot-challenge risk** -- DuckDuckGo may serve CAPTCHAs or block requests under heavy or automated use.
+- **Retry delays** -- HTTP errors show positive `Retry-After` delays in seconds. The plugin does not retry automatically.
 - **Explicit selection only** -- OpenClaw's auto-detect only considers providers with usable credentials, so a key-free provider like DuckDuckGo is never chosen automatically; you must set `provider: "duckduckgo"`.
 - **SafeSearch defaults to `moderate`** when not configured.
 

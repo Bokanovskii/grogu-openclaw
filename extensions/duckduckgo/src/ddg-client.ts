@@ -2,13 +2,15 @@ import { createRequire } from "node:module";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { readPluginPackageVersion } from "openclaw/plugin-sdk/extension-shared";
 import { decodeHtmlEntities as decodeHtmlEntity } from "openclaw/plugin-sdk/html-entity-runtime";
-import { ProviderHttpError, readProviderTextResponse } from "openclaw/plugin-sdk/provider-http";
+import {
+  createProviderHttpError,
+  readProviderTextResponse,
+} from "openclaw/plugin-sdk/provider-http";
 import {
   DEFAULT_CACHE_TTL_MINUTES,
   DEFAULT_SEARCH_COUNT,
   normalizeCacheKey,
   readCache,
-  readResponseText,
   resolveCacheTtlMs,
   resolveSearchCount,
   resolveSiteName,
@@ -178,11 +180,10 @@ export async function runDuckDuckGoSearch(params: {
     },
     async (response) => {
       if (!response.ok) {
-        const detail = (await readResponseText(response, { maxBytes: 64_000 })).text;
-        throw new ProviderHttpError(
-          `DuckDuckGo search error (${response.status}): ${detail || response.statusText}`,
-          { status: response.status },
-        );
+        throw await createProviderHttpError(response, "DuckDuckGo search error", {
+          maxBodyBytes: 64_000,
+          signal: params.signal,
+        });
       }
 
       const html = await readProviderTextResponse(response, "DuckDuckGo search");

@@ -308,6 +308,57 @@ export async function reconcileManagedJobs(profile: OperatorProfile, apply = fal
   };
 }
 
+export async function bootstrapGroguWidgetSandbox(profile: OperatorProfile, apply = false) {
+  const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
+  const configuration = z.object({
+    mcp: z
+      .object({
+        apps: z.object({ sameOriginSandbox: z.boolean().optional() }).optional(),
+      })
+      .optional(),
+  });
+  const snapshot = z
+    .object({
+      valid: z.literal(true),
+      hash: z.string().min(1),
+      config: configuration,
+    })
+    .parse(await callNative(profile, "config.get", {}, directory));
+  const current = snapshot.config.mcp?.apps?.sameOriginSandbox;
+  const changed = current === undefined;
+  const planReceipt = await writePrivateReceipt(directory, "widget-sandbox-plan.json", {
+    apply,
+    changed,
+    sameOriginSandbox: current ?? true,
+    restartRequired: changed,
+  });
+  if (apply && changed) {
+    const result = z.object({ ok: z.literal(true), config: configuration }).parse(
+      await callNative(
+        profile,
+        "config.patch",
+        {
+          baseHash: snapshot.hash,
+          raw: JSON.stringify({ mcp: { apps: { sameOriginSandbox: true } } }),
+          note: "Enable Grogu's single-origin widget sandbox",
+        },
+        directory,
+      ),
+    );
+    if (result.config.mcp?.apps?.sameOriginSandbox !== true) {
+      throw new Error("Native configuration did not enable the widget sandbox");
+    }
+  }
+  return {
+    mode: apply ? "applied" : "preview",
+    sameOriginSandbox: current ?? true,
+    changed,
+    restartRequired: changed,
+    planReceipt,
+    privateReceipts: directory,
+  };
+}
+
 export async function reconcileWorkerTriggers(profile: OperatorProfile, apply = false) {
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
   const desiredWorkers = managedWorkerTriggers(profile);

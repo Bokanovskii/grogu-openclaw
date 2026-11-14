@@ -124,7 +124,7 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `backup`                        | Retired. Exits with an error without creating a local full backup.                                                                                                                          |
 | `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                                           |
 | `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                                               |
-| `bootstrap [--apply]`           | Reconciles bound job metadata and installs the small-disk storage policy; preview by default.                                                                                               |
+| `bootstrap [--apply]`           | Reconciles job metadata, storage policy, and default widget isolation; preview by default. Applying can restart the Gateway.                                                                |
 | `storage-bootstrap [--apply]`   | Disables local full-backup schedules and installs one hourly native cleanup job without a model call; preview by default.                                                                   |
 | `storage-cleanup [--apply]`     | Disables local full-backup schedules and retires eligible temporary artifacts; preview by default.                                                                                          |
 | `plugins-bootstrap [--apply]`   | Previews or installs Grogu's pinned plugin packages with OpenClaw's native installer.                                                                                                       |
@@ -134,6 +134,22 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `upstream-check --source <dir>` | Reads the designated stable upstream release; no mutation.                                                                                                                                  |
 
 Native calls write owner-only receipts under the profile's `recoveryDir`.
+
+### Widget hosting
+
+Bootstrap enables `mcp.apps.sameOriginSandbox` only when the field is absent.
+It preserves an explicit `false` or `true`. This Grogu default lets widgets use
+the Gateway's existing HTTPS origin without another port or hostname.
+Upstream OpenClaw keeps its dedicated-origin default.
+
+Install a release that supports the option before running bootstrap.
+Applying the change uses native, revision-checked configuration and requires
+a Gateway restart. Bootstrap applies it last because the native patch can
+schedule that restart. Reload the Control UI afterward.
+
+Both sandbox frames remain isolated from the application DOM, cookies, and
+storage. Saved widgets keep their original bytes and digests.
+See [single-origin sandbox setup and limits](https://docs.openclaw.ai/cli/mcp/apps#single-origin-sandbox).
 
 ### Plugin setup
 

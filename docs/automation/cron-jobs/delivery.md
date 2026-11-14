@@ -111,6 +111,34 @@ When an agent creates an isolated reminder from an active chat, OpenClaw stores 
 
 Implicit announce delivery uses configured channel allowlists to validate and reroute stale targets. DM pairing-store approvals are not fallback automation recipients; set `delivery.to` or configure the channel `allowFrom` entry when a scheduled job should proactively send to a DM.
 
+### Notice-only output
+
+For an agent-turn job that sends notices, add this exact line to its message:
+
+```text
+Delivery contract: notice-only
+```
+
+The agent must return exactly `NO_REPLY` when there is no notice. For a notice,
+the agent must return one complete envelope:
+
+```text
+<notification>Your flight leaves at noon.</notification>
+```
+
+Automatic announce delivery sends only the text inside the envelope. Text outside
+the envelope stays in the run transcript. The notice must not contain ledger
+updates, checkpoints, selection rationale, or other internal status. Use automatic
+announce delivery for these jobs, not direct `message` sends.
+
+A missing, empty, duplicate, or incomplete envelope blocks delivery. Known internal
+status preambles and split `NO_REPLY` fragments, such as `NO` or `_REPLY`, also
+block legacy announcements without this contract. The original output stays in the run transcript and history.
+The delivery error records `Notification withheld` and the reason. No notification
+or recipient transcript mirror is created for rejected output. Ordinary legacy
+notices, attachments, runtime errors, and explicit automation failure reports
+keep their existing delivery behavior.
+
 ### Failure notifications
 
 Failure-alert webhooks stay **Unknown** when the request may have reached the

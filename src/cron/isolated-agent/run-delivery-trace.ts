@@ -24,6 +24,7 @@ import type {
   CronRunDiagnostics,
   CronStoredJob,
 } from "../types.js";
+import { CRON_NOTIFICATION_GUIDANCE, isCronNoticeOnlyJob } from "./notification-text.js";
 import { logWarn } from "./run.runtime.js";
 import { resolveCronSourceDeliveryPlan } from "./source-delivery-plan.js";
 
@@ -314,45 +315,50 @@ export async function resolveCronDeliveryContext(params: {
 }
 
 /** Adds delivery guidance for the run's final tool surface to the prompt. */
-export function finalizeCronPromptForResolvedTools(params: {
-  prompt: string;
-  messageToolAvailable: boolean;
-  deliveryRequested: boolean;
-  resolvedDelivery: SourceDeliveryPlan["target"] & { ok: boolean };
-  sourceDelivery: SourceDeliveryPlan;
-  messageToolFormatPrompt?: string;
-}): string {
-  const { sourceDelivery, resolvedDelivery } = params;
-  const messageToolAvailable = sourceDelivery.messageTool.enabled && params.messageToolAvailable;
+export function finalizeCronPromptForResolvedTools(
+  context: {
+    job: Pick<CronJob, "payload">;
+    deliveryRequested: boolean;
+    resolvedDelivery: SourceDeliveryPlan["target"] & { ok: boolean };
+    sourceDelivery: SourceDeliveryPlan;
+    messageToolFormatPrompt?: string;
+  },
+  input: { prompt: string; messageToolAvailable: boolean },
+): string {
+  const { sourceDelivery, resolvedDelivery } = context;
+  const messageToolAvailable = sourceDelivery.messageTool.enabled && input.messageToolAvailable;
   if (sourceDelivery.sourceReplyDeliveryMode === "message_tool_only" && !messageToolAvailable) {
     throw new Error(
       "Cron source delivery requires the message tool, but the selected runtime does not expose it. Allow the message tool, choose a compatible runtime, or use automatic delivery.",
     );
   }
-  let promptWithDeliveryGuidance = params.prompt;
-  if (params.deliveryRequested) {
+  let promptWithDeliveryGuidance = input.prompt;
+  if (context.deliveryRequested) {
     if (messageToolAvailable) {
       const targetHint =
         sourceDelivery.messageTool.requireExplicitTarget || !resolvedDelivery.ok
           ? "with an explicit target"
           : "for the current chat";
       promptWithDeliveryGuidance =
-        `${params.prompt}\n\nUse the message tool if you need to notify the user directly ${targetHint}. If you do not send directly, your final plain-text reply will be delivered automatically. When relying on automatic delivery, write only the exact user-facing message to send. Do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...".`.trim();
+        `${input.prompt}\n\nUse the message tool if you need to notify the user directly ${targetHint}. If you do not send directly, your final plain-text reply will be delivered automatically. When relying on automatic delivery, write only the exact user-facing message to send. Do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...".`.trim();
     } else {
       promptWithDeliveryGuidance =
-        `${params.prompt}\n\nYour response will be delivered automatically. Write only the exact user-facing message to send; do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...". If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
+        `${input.prompt}\n\nYour response will be delivered automatically. Write only the exact user-facing message to send; do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...". If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
     }
   }
   // The message-tool contract waits for the final tool surface: a runtime without
   // `message` must not be told how to format sends it cannot make.
   const appended = [
+    context.deliveryRequested && isCronNoticeOnlyJob(context.job)
+      ? CRON_NOTIFICATION_GUIDANCE
+      : undefined,
     buildCronDeliveryTargetRuntimeContext({
       resolvedDeliveryOk: resolvedDelivery.ok,
       messageToolAvailable,
       resolvedDelivery,
       sourceDelivery,
     }),
-    messageToolAvailable ? params.messageToolFormatPrompt : undefined,
+    messageToolAvailable ? context.messageToolFormatPrompt : undefined,
   ].filter(Boolean);
   return appended.length
     ? `${promptWithDeliveryGuidance}\n\n${appended.join("\n\n")}`.trim()

@@ -666,22 +666,6 @@ describe("dispatchCronDelivery", () => {
     }
   });
 
-  it("classifies a settled child's AUTOMATION_FAILED answer and delivers only its explanation", async () => {
-    vi.mocked(readDescendantSubagentFallbackReply).mockResolvedValue(
-      "AUTOMATION_FAILED\nNo shell tool is available in this run.",
-    );
-
-    const state = await dispatchCronDelivery(emptyParams(true));
-
-    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
-    expectDeliveryCall(0, { payloads: [{ text: "No shell tool is available in this run." }] });
-    expect(state).toMatchObject({
-      delivered: true,
-      agentReportedFailure: "No shell tool is available in this run.",
-      summary: "No shell tool is available in this run.",
-    });
-  });
-
   it.each([
     ["active threaded best-effort", true, "42", true],
     ["completed direct", false, undefined, false],

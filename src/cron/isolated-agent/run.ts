@@ -139,6 +139,14 @@ async function runCronIsolatedAgentTurnInTrace(
           // One invocation owns retries and fallbacks; persistent transcripts outlive that identity.
           const runId = randomUUID();
           const initialSessionId = prepared.context.cronSession.sessionEntry.sessionId;
+          params.onTranscriptIdentity?.({
+            jobId: params.job.id,
+            agentId: prepared.context.agentId,
+            storePath: prepared.context.cronSession.storePath,
+            sessionKey: prepared.context.runSessionKey,
+            sessionId: initialSessionId,
+            runId,
+          });
           const ownsSessionRuntime = params.job.sessionTarget === "isolated";
           let runContextOwnerToken: string | undefined;
           let runLifecycleGeneration = admittedLifecycleGeneration;
@@ -156,6 +164,7 @@ async function runCronIsolatedAgentTurnInTrace(
             params.onExecutionStarted?.({
               jobId: params.job.id,
               agentId: prepared.context.agentId,
+              storePath: prepared.context.cronSession.storePath,
               sessionId: prepared.context.currentRunSessionId(),
               sessionKey: prepared.context.runSessionKey,
               runId,
@@ -171,7 +180,9 @@ async function runCronIsolatedAgentTurnInTrace(
           ) => {
             params.onExecutionPhase?.({
               jobId: params.job.id,
+              runId,
               agentId: prepared.context.agentId,
+              storePath: prepared.context.cronSession.storePath,
               sessionId: prepared.context.currentRunSessionId(),
               sessionKey: prepared.context.runSessionKey,
               provider: prepared.context.liveSelection.provider,

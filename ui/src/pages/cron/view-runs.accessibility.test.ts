@@ -2,9 +2,9 @@ import { render } from "lit";
 import { describe, expect, it } from "vitest";
 import { i18n } from "../../i18n/index.ts";
 import { captureI18nStateForTesting } from "../../i18n/lib/translate.test-support.ts";
-import { renderRunsSection } from "./view-runs.ts";
+import { renderRunHistory } from "./view-runs.ts";
 
-type CronRunsSectionProps = Parameters<typeof renderRunsSection>[0];
+type CronRunsSectionProps = Parameters<typeof renderRunHistory>[0];
 
 function createRunsProps(overrides: Partial<CronRunsSectionProps> = {}): CronRunsSectionProps {
   return {
@@ -25,7 +25,7 @@ function createRunsProps(overrides: Partial<CronRunsSectionProps> = {}): CronRun
 
 function renderRuns(overrides: Partial<CronRunsSectionProps> = {}) {
   const container = document.createElement("div");
-  render(renderRunsSection(createRunsProps(overrides)), container);
+  render(renderRunHistory(createRunsProps(overrides)), container);
   return container;
 }
 
@@ -149,7 +149,7 @@ describe("cron run filter accessibility", () => {
     try {
       Object.defineProperty(globalThis, "document", { configurable: true, value: undefined });
       expect(() =>
-        renderRunsSection(createRunsProps({ runsStatuses: ["ok", "error", "skipped"] })),
+        renderRunHistory(createRunsProps({ runsStatuses: ["ok", "error", "skipped"] })),
       ).not.toThrow();
     } finally {
       Object.defineProperty(globalThis, "document", documentDescriptor);

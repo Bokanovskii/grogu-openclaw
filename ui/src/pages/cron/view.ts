@@ -42,7 +42,7 @@ import {
 } from "./view-job-status.ts";
 import { renderJobsFilterPopover } from "./view-jobs-filter.ts";
 import { renderJobsTable } from "./view-jobs-table.ts";
-import { renderRunsSection } from "./view-runs.ts";
+import { renderRunHistory } from "./view-runs.ts";
 import { renderCronSuggestionLists } from "./view-suggestions.ts";
 import type { CronDetailTab, CronProps } from "./view-types.ts";
 
@@ -374,7 +374,7 @@ function renderListView(props: CronProps) {
           props.listTab === "activity"
             ? renderSettingsSection(
                 {},
-                html`<div class="cron-activity">${renderRunsSection(props)}</div>`,
+                html`<div class="cron-activity">${renderRunHistory(props)}</div>`,
               )
             : [
                 renderSettingsSection(
@@ -692,7 +692,7 @@ function renderDetailView(props: CronProps, mode: CronPanelMode) {
             ? renderSettingsSection(
                 { title: t("cron.detail.historyTitle") },
                 html`<div class="cron-history">
-                  ${renderRunsSection({ ...props, conditionActivity })}
+                  ${renderRunHistory({ ...props, conditionActivity }, selectedJob)}
                 </div>`,
               )
             : renderEditor(props, mode)

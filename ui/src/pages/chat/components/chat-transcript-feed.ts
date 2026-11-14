@@ -42,14 +42,14 @@ type Entry = { key: string; timestamp: number | null } & (
       activity: ReturnType<typeof readPreparedActivity>;
     }
   | {
-      kind: "user" | "assistant" | "block";
+      kind: "user" | "assistant" | "block" | "reasoning";
       text: string;
       cappedMessageId?: string;
       senderSession?: NormalizedMessage["senderSession"];
     }
 );
 
-function entries(messages: unknown[]): Entry[] {
+function entries(messages: unknown[], showReasoning = false): Entry[] {
   const result: Entry[] = [];
   // Give inferred calls the canonical block type before message normalization,
   // which otherwise drops untyped blocks without text.
@@ -106,13 +106,17 @@ function entries(messages: unknown[]): Entry[] {
             activity: call.activity ? [call.activity] : [],
           });
         }
+      } else if (block.type === "thinking" && showReasoning) {
+        if (block.thinking.trim()) {
+          result.push({ kind: "reasoning", key, timestamp, text: block.thinking });
+        }
       } else if (
         isToolResultContentType(block.type) ||
         ["thinking", "commentary"].includes(block.type)
       ) {
         continue;
       } else if (block.type === "text") {
-        if (resolveAssistantMessagePhase(item.message) === "commentary") {
+        if (resolveAssistantMessagePhase(item.message) === "commentary" && !showReasoning) {
           continue;
         }
         const text =
@@ -173,7 +177,7 @@ function toolIcon(call: ToolCard) {
   }
 }
 
-function renderToolLine(originalCall: ToolCard) {
+function renderToolLine(originalCall: ToolCard, showOutput = false) {
   const call = resolveToolCardDisplay(originalCall);
   const view = resolveToolCallView(call);
   const raw = redactToolPayloadText(
@@ -202,10 +206,18 @@ function renderToolLine(originalCall: ToolCard) {
       <span class="chat-task-feed__chevron" aria-hidden="true">${icons.chevronRight}</span>
     </summary>
     <pre class="chat-task-feed__tool-line--full"><code>${raw}</code></pre>
+    ${
+      showOutput && call.outputText
+        ? html`<div class="chat-task-feed__label">${t("cron.groups.toolOutput")}</div>
+            <pre
+              class="chat-task-feed__tool-line--full"
+            ><code>${redactToolPayloadText(call.outputText)}</code></pre>`
+        : nothing
+    }
   </details>`;
 }
 
-function renderToolGroup(entry: Extract<Entry, { kind: "tools" }>) {
+function renderToolGroup(entry: Extract<Entry, { kind: "tools" }>, showOutput = false) {
   const overview = describeToolGroup(entry.activity, {
     ownSessionLaunches: ownSessionLaunchCalls(entry.calls.map(({ card }) => card)),
   });
@@ -226,16 +238,19 @@ function renderToolGroup(entry: Extract<Entry, { kind: "tools" }>) {
       ${repeat(
         entry.calls,
         ({ key }) => key,
-        ({ card }) => renderToolLine(card),
+        ({ card }) => renderToolLine(card, showOutput),
       )}
     </div>
   </details>`;
 }
 
-export function renderChatTranscriptFeed(messages: unknown[]): TemplateResult {
+export function renderChatTranscriptFeed(
+  messages: unknown[],
+  options: { showReasoning?: boolean; showToolOutput?: boolean } = {},
+): TemplateResult {
   return html`<div class="chat-task-feed">
     ${repeat(
-      entries(messages),
+      entries(messages, options.showReasoning),
       (entry) => entry.key,
       (entry) => html` <div class="chat-task-feed__entry" data-task-feed-entry=${entry.key}>
         <span class="chat-task-feed__icon" aria-hidden="true"
@@ -251,18 +266,23 @@ export function renderChatTranscriptFeed(messages: unknown[]): TemplateResult {
           }
           ${
             entry.kind === "tools"
-              ? renderToolGroup(entry)
-              : entry.kind === "assistant"
-                ? renderMessageMarkdown(
-                    entry.text,
-                    entry.key,
-                    {
-                      role: "assistant",
-                      isStreaming: false,
-                    },
-                    {},
-                  )
-                : html`<div class="chat-task-feed__${entry.kind}">${entry.text}</div>`
+              ? renderToolGroup(entry, options.showToolOutput)
+              : entry.kind === "reasoning"
+                ? html`<details class="chat-task-feed__reasoning">
+                    <summary>${t("cron.groups.reasoning")}</summary>
+                    <div class="chat-task-feed__block">${entry.text}</div>
+                  </details>`
+                : entry.kind === "assistant"
+                  ? renderMessageMarkdown(
+                      entry.text,
+                      entry.key,
+                      {
+                        role: "assistant",
+                        isStreaming: false,
+                      },
+                      {},
+                    )
+                  : html`<div class="chat-task-feed__${entry.kind}">${entry.text}</div>`
           }
         </div>
         ${entry.timestamp !== null ? html`<time class="chat-task-feed__time" datetime=${new Date(entry.timestamp).toISOString()}>${new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</time>` : nothing}

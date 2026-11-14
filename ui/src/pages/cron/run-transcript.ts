@@ -1,16 +1,23 @@
 import type { CronHistoryResult } from "@openclaw/gateway-protocol";
 import { html, nothing, type ReactiveController, type ReactiveControllerHost } from "lit";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import type { CronRunLogEntry } from "../../api/types.ts";
+import type { CronJob, CronRunLogEntry } from "../../api/types.ts";
 import { t } from "../../i18n/index.ts";
+import { registerCronEnglish } from "../../i18n/locales/en-cron.ts";
 import { visibleChatHistoryMessages } from "../../lib/chat/message-visibility.ts";
+import { isCronJobRunning } from "../../lib/cron-status.ts";
+import type { CronState } from "../../lib/cron/types.ts";
 import { formatUiError } from "../../lib/format-error.ts";
+import type { GatewayPageController } from "../../lit/gateway-page-controller.ts";
 import { attachHistoryActivity } from "../chat/chat-history-request.ts";
 import { mergeChatTranscriptPages } from "../chat/chat-transcript-pages.ts";
 import { renderChatHistoryBoundary } from "../chat/components/chat-history-boundary.ts";
 import { renderChatTranscriptFeed } from "../chat/components/chat-transcript-feed.ts";
+import type { CronProps } from "./view-types.ts";
 
 type Scope = { client: GatewayBrowserClient; isCurrent: () => boolean };
+type Owner = { gateway: GatewayPageController; cron: CronState };
+registerCronEnglish();
 
 /** The run log owns transcript identity; never resolve a client-selected session alias. */
 export class CronRunTranscript implements ReactiveController {
@@ -19,17 +26,41 @@ export class CronRunTranscript implements ReactiveController {
   private trigger: HTMLButtonElement | null = null;
   private scope: Scope | null = null;
   private messages: unknown[] = [];
+  private latestMessages: unknown[] = [];
+  private earlierMessages: unknown[] = [];
   private nextCursor: string | undefined;
   private readonly cursors = new Set<string>();
   private loading = false;
   private error: string | null = null;
   private failedCursor: string | undefined;
+  private live = false;
+  private refreshPending = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly host: HTMLElement & ReactiveControllerHost,
-    private readonly capture: () => Scope | null,
+    private readonly owner: () => Owner,
   ) {
     host.addController(this);
+  }
+
+  private capture(): Scope | null {
+    const { gateway, cron } = this.owner();
+    const scope = gateway.capture();
+    return scope
+      ? {
+          client: scope.client,
+          isCurrent: () => gateway.isCurrent(scope) && this.owner().cron === cron,
+        }
+      : null;
+  }
+
+  viewProps(): Pick<CronProps, "onViewRunTranscript" | "onViewLiveRun" | "runTranscript"> {
+    return {
+      onViewRunTranscript: (entry, trigger) => void this.open(entry, trigger),
+      onViewLiveRun: (job, trigger) => void this.openLive(job, trigger),
+      runTranscript: this.render(),
+    };
   }
 
   hostDisconnected() {
@@ -43,11 +74,16 @@ export class CronRunTranscript implements ReactiveController {
     this.entry = null;
     this.scope = null;
     this.messages = [];
+    this.latestMessages = [];
+    this.earlierMessages = [];
     this.nextCursor = undefined;
     this.cursors.clear();
     this.loading = false;
     this.error = null;
     this.failedCursor = undefined;
+    this.live = false;
+    this.refreshPending = false;
+    this.clearTimer();
     this.host.requestUpdate();
     if (restoreFocus && trigger?.isConnected) {
       trigger.focus();
@@ -64,11 +100,31 @@ export class CronRunTranscript implements ReactiveController {
     this.trigger = trigger;
     this.scope = scope;
     await this.load();
-    if (this.entry !== entry || this.scope !== scope || !scope.isCurrent()) {
+    await this.focusTranscript(scope);
+  }
+
+  async openLive(job: CronJob, trigger: HTMLButtonElement) {
+    if (!isCronJobRunning(job) || job.state.runningAtMs === undefined) {
       return;
     }
+    const opening = this.open(
+      {
+        jobId: job.id,
+        jobName: job.displayName ?? job.name,
+        action: "finished",
+        ts: job.state.runningAtMs,
+        runAtMs: job.state.runningAtMs,
+      },
+      trigger,
+    );
+    this.live = true;
+    await opening;
+    this.scheduleRefresh();
+  }
+
+  private async focusTranscript(scope: Scope, attempt = this.attempt) {
     await this.host.updateComplete;
-    if (this.entry !== entry || this.scope !== scope || !scope.isCurrent()) {
+    if (this.attempt !== attempt || this.scope !== scope || !scope.isCurrent()) {
       return;
     }
     const region = this.host.querySelector<HTMLElement>("[data-cron-run-transcript]");
@@ -76,6 +132,66 @@ export class CronRunTranscript implements ReactiveController {
     region?.scrollIntoView({ block: "start", behavior: "instant" });
   }
 
+  refresh(entries?: CronRunLogEntry[], job?: CronJob | null) {
+    if (!this.live || !this.scope?.isCurrent() || document.visibilityState === "hidden") {
+      return;
+    }
+    let becameRecorded = false;
+    if (this.entry && entries) {
+      const completed = entries.find(
+        (entry) => entry.jobId === this.entry?.jobId && entry.runAtMs === this.entry.runAtMs,
+      );
+      if (completed) {
+        this.entry = completed;
+        becameRecorded = true;
+      } else if (job?.id === this.entry.jobId && !isCronJobRunning(job)) {
+        becameRecorded = true;
+      }
+    }
+    if (becameRecorded) {
+      this.live = false;
+      this.clearTimer();
+      this.attempt++;
+      this.loading = false;
+      this.refreshPending = false;
+      this.messages = [];
+      this.latestMessages = [];
+      this.earlierMessages = [];
+      this.nextCursor = undefined;
+      this.cursors.clear();
+      this.error = null;
+      this.failedCursor = undefined;
+      this.host.requestUpdate();
+      void this.load();
+      return;
+    }
+    if (this.loading) {
+      this.refreshPending = true;
+    } else {
+      void this.load();
+    }
+  }
+
+  private clearTimer() {
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private scheduleRefresh() {
+    this.clearTimer();
+    if (!this.live || !this.host.isConnected || !this.scope?.isCurrent()) {
+      return;
+    }
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (document.visibilityState !== "hidden") {
+        this.refresh();
+      }
+      this.scheduleRefresh();
+    }, 5_000);
+  }
   private async load(cursor?: string) {
     const { entry, scope, attempt } = this;
     if (!entry || !scope || this.loading || !scope.isCurrent()) {
@@ -109,11 +225,18 @@ export class CronRunTranscript implements ReactiveController {
       if (cursor) {
         this.cursors.add(cursor);
       }
-      this.messages = cursor
-        ? mergeChatTranscriptPages(messages, this.messages).messages
-        : messages;
-      this.nextCursor =
-        result.nextCursor && !this.cursors.has(result.nextCursor) ? result.nextCursor : undefined;
+      if (cursor) {
+        this.earlierMessages = mergeChatTranscriptPages(messages, this.earlierMessages).messages;
+      } else {
+        this.latestMessages = messages;
+      }
+      this.messages = this.earlierMessages.length
+        ? mergeChatTranscriptPages(this.earlierMessages, this.latestMessages).messages
+        : this.latestMessages;
+      const nextCursor = result.nextCursor;
+      if (cursor || this.cursors.size === 0) {
+        this.nextCursor = nextCursor && !this.cursors.has(nextCursor) ? nextCursor : undefined;
+      }
       this.failedCursor = undefined;
     } catch (error) {
       if (!current()) {
@@ -124,6 +247,10 @@ export class CronRunTranscript implements ReactiveController {
     if (current()) {
       this.loading = false;
       this.host.requestUpdate();
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        void this.load();
+      }
     }
   }
 
@@ -132,16 +259,17 @@ export class CronRunTranscript implements ReactiveController {
       return nothing;
     }
     return html`<section
-      class="card"
+      class="cron-run-transcript"
       role="region"
       tabindex="-1"
       aria-label=${t("cron.runEntry.transcript")}
       data-cron-run-transcript
     >
-      <div class="row">
-        <h2>${t("cron.runEntry.transcript")}</h2>
+      <div class="cron-run-transcript__header">
+        <h2>${this.live ? t("cron.groups.live") : t("cron.runEntry.transcript")}</h2>
         <button class="btn btn--sm" @click=${() => this.close(true)}>${t("common.close")}</button>
       </div>
+      ${this.live ? html`<p class="muted" role="status">${t("cron.groups.liveUpdating")}</p>` : nothing}
       ${
         this.error
           ? html`<p role="alert">${this.error}</p>
@@ -165,7 +293,28 @@ export class CronRunTranscript implements ReactiveController {
           : nothing
       }
       ${!this.loading && !this.error && this.messages.length === 0 ? html`<p>${t("cron.runEntry.transcriptEmpty")}</p>` : nothing}
-      ${renderChatTranscriptFeed(this.messages)}
+      ${renderChatTranscriptFeed(this.messages, { showReasoning: true, showToolOutput: true })}
+      ${
+        this.entry
+          ? html`<div class="cron-run-delivery">
+              <strong>${t("cron.groups.delivery")}</strong>
+              <p>
+                ${t(
+                  this.live
+                    ? "cron.groups.deliveryPending"
+                    : this.entry.deliveryStatus === "delivered"
+                      ? "cron.groups.delivered"
+                      : this.entry.deliveryStatus === "not-delivered"
+                        ? "cron.groups.notDelivered"
+                        : this.entry.deliveryStatus === "not-requested"
+                          ? "cron.groups.noDelivery"
+                          : "cron.groups.deliveryUnknown",
+                )}
+              </p>
+              ${this.entry.deliveryError ? html`<p role="alert">${this.entry.deliveryError}</p>` : nothing}
+            </div>`
+          : nothing
+      }
     </section>`;
   }
 }

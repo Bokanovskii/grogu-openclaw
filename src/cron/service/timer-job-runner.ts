@@ -7,6 +7,7 @@ import {
   type CronActiveJobMarker,
   isCronActiveJobMarkerCurrent,
 } from "../active-jobs.js";
+import { bindActiveCronRunTranscript } from "../active-run-transcript.js";
 import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 import type { CronCompletionDeliveryFence } from "../delivery-attempt-fence.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
@@ -48,6 +49,7 @@ import { resolveDeliveryState } from "./timer-trigger.js";
 type CronRunTimeout = { timeoutMs: number; reason: string };
 type CronCoreRunOptions = {
   runId?: string;
+  publicRunId?: string;
   activeJobMarker?: CronActiveJobMarker;
   owningCronLaneTaskMarker?: CommandLaneTaskMarker;
   streamBatch?: string;
@@ -327,6 +329,10 @@ async function executeJobCoreWithTimeoutUnfinalized(
       watchdog?.noteLaneWait();
     };
     const noteRunnerStarted = (info?: CronAgentExecutionStarted) => {
+      bindActiveCronRunTranscript(opts?.activeJobMarker, info, [opts?.publicRunId, opts?.runId]);
+      if (!trackExecution) {
+        return;
+      }
       if (watchdog) {
         watchdog.noteRunnerStarted(info);
       } else {
@@ -346,8 +352,15 @@ async function executeJobCoreWithTimeoutUnfinalized(
       // Conditions own their pending tools; main payloads hand work to a shared
       // heartbeat. Release cancellation before that handoff can produce effects.
       onPayloadExecutionStarted: detachedPayload ? undefined : releaseCronTaskRun,
-      onExecutionStarted: trackExecution ? noteRunnerStarted : undefined,
-      onExecutionPhase: trackExecution ? (watchdog?.notePhase ?? accumulateExecution) : undefined,
+      onExecutionStarted: noteRunnerStarted,
+      onTranscriptIdentity: (info) =>
+        bindActiveCronRunTranscript(opts?.activeJobMarker, info, [opts?.publicRunId, opts?.runId]),
+      onExecutionPhase: (info) => {
+        bindActiveCronRunTranscript(opts?.activeJobMarker, info, [opts?.publicRunId, opts?.runId]);
+        if (trackExecution) {
+          (watchdog?.notePhase ?? accumulateExecution)(info);
+        }
+      },
       onLaneWait: watchdog && deferTimeoutUntilExecutionStart ? noteLaneState : undefined,
       // Trigger and preflight keep the cron deadline; the heartbeat gets its own.
       onHeartbeatExecutionStarted:

@@ -57,7 +57,7 @@ import {
   resolveConversationTargetSuggestions,
   THINKING_SUGGESTIONS,
 } from "./form-suggestions.ts";
-import { resolveCronRouteData } from "./route-model.ts";
+import { defaultCronDetailTab, resolveCronRouteData } from "./route-model.ts";
 import { CronRunTranscript } from "./run-transcript.ts";
 import type { CronDetailTab, CronListTab } from "./view-types.ts";
 import { renderCron } from "./view.ts";
@@ -82,16 +82,10 @@ class CronPage extends OpenClawLightDomElement {
   @state() private detailTab: CronDetailTab = "settings";
   @state() private heartbeatScratch = "";
 
-  private readonly runTranscript = new CronRunTranscript(this, () => {
-    const scope = this.gateway.capture();
-    const cron = this.cron;
-    return scope
-      ? {
-          client: scope.client,
-          isCurrent: () => this.gateway.isCurrent(scope) && this.cron === cron,
-        }
-      : null;
-  });
+  private readonly runTranscript = new CronRunTranscript(this, () => ({
+    gateway: this.gateway,
+    cron: this.cron,
+  }));
   private pendingRouteData: ReturnType<typeof resolveCronRouteData> | null = null;
   private routeJobRequested = false;
   private highlightedRunId: string | null = null;
@@ -188,6 +182,7 @@ class CronPage extends OpenClawLightDomElement {
           if (this.gateway.gateway === gateway && this.context.gateway === gateway) {
             if (event.event === "cron") {
               void this.refreshCron({ coalesce: true });
+              this.runTranscript.refresh();
             } else if (modelCatalogEventInvalidation(event)) {
               void this.loadModelSuggestions(this.cron);
             }
@@ -282,7 +277,7 @@ class CronPage extends OpenClawLightDomElement {
     if (panelKey !== this.lastPanelKey) {
       this.lastPanelKey = panelKey;
       this.runTranscript.close();
-      this.detailTab = editingJobId && this.highlightedRunId ? "history" : "settings";
+      this.detailTab = defaultCronDetailTab(this.cron.cronEditingJob, this.highlightedRunId);
       const scroller = this.closest(".content");
       if (scroller instanceof HTMLElement && typeof scroller.scrollTo === "function") {
         scroller.scrollTo({ top: 0 });
@@ -342,7 +337,12 @@ class CronPage extends OpenClawLightDomElement {
   }
 
   private loadRuns(coalesce = false) {
-    return this.runCronTask((cronState) => loadCronRuns(cronState, { coalesce }));
+    return this.runCronTask(async (cronState) => {
+      await loadCronRuns(cronState, { coalesce });
+      if (this.cron === cronState) {
+        this.runTranscript.refresh(cronState.cronRuns, cronState.cronEditingJob);
+      }
+    });
   }
 
   private updateJobsFilters(patch: Parameters<typeof updateCronJobsFilter>[1]) {
@@ -667,7 +667,6 @@ class CronPage extends OpenClawLightDomElement {
               selection: this.context.agentSelection,
             }),
       })}
-      ${this.runTranscript.render()}
       ${renderSettingsWorkspace(
         renderCron({
           loading: this.cron.cronLoading,
@@ -726,6 +725,7 @@ class CronPage extends OpenClawLightDomElement {
             this.listTab = tab;
           },
           onDetailTabChange: (tab) => {
+            this.runTranscript.close();
             this.detailTab = tab;
           },
           onFormChange: (patch) => this.patchForm(patch),
@@ -760,7 +760,7 @@ class CronPage extends OpenClawLightDomElement {
               updateCronRunsFilter(cronState, patch);
               await loadCronRuns(cronState);
             }),
-          onViewRunTranscript: (entry, trigger) => void this.runTranscript.open(entry, trigger),
+          ...this.runTranscript.viewProps(),
         }),
       )}
     `;

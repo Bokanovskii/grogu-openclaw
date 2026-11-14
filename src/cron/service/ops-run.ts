@@ -56,6 +56,7 @@ async function finishPreparedManualRun(
     try {
       coreResult = await executeJobCoreWithTimeout(state, executionJob, {
         runId: taskRunId,
+        publicRunId: prepared.runId,
         activeJobMarker: prepared.activeJobMarker,
         owningCronLaneTaskMarker: prepared.owningCronLaneTaskMarker,
         streamBatch: prepared.streamBatch,

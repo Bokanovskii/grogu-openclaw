@@ -419,6 +419,7 @@ async function executeDetachedCronJob(
     message: job.payload.message,
     abortSignal,
     onExecutionStarted: options?.onExecutionStarted,
+    onTranscriptIdentity: options?.onTranscriptIdentity,
     onExecutionPhase: options?.onExecutionPhase,
     onLaneWait: options?.onLaneWait,
     executionIdentity: options?.executionIdentity,

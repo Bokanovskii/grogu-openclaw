@@ -174,13 +174,10 @@ describe("sidebar projection memo", () => {
       key("second"),
     );
     await expectRowRefresh(sidebar, () => {
-      sidebar.sessionsShowCron = true;
-    });
-    expect(row(key("cron:daily"))).not.toBeNull();
-    await expectRowRefresh(sidebar, () => {
       sidebar.sessionsShowSystem = true;
     });
     expect(row(key("explicit:healthcheck"))).not.toBeNull();
+    expect(row(key("cron:daily"))).toBeNull();
     await expectRowRefresh(sidebar, () => {
       sidebar.sessionsStatusFilter = "all";
     });

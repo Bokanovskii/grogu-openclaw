@@ -67,7 +67,6 @@ export async function activateSessionMenuValue(sidebar: SidebarLifecycleState, v
   } else if (value.startsWith("show-")) {
     const ids: Record<string, string> = {
       "show-preview": "preview",
-      "show-cron": "cron",
       "show-system": "system",
     };
     menu.querySelector<HTMLButtonElement>(`#sidebar-sessions-${ids[value]}`)!.click();

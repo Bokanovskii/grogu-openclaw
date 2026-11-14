@@ -1,6 +1,7 @@
-import { html } from "lit";
+import { html, nothing } from "lit";
 import type { CronJob } from "../../api/types.ts";
 import { icon, type IconName } from "../../components/icons.ts";
+import { renderSettingsToggle } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
 import {
   isCronJobActiveFailure,
@@ -10,6 +11,7 @@ import {
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { formatRelativeTimestamp } from "../../lib/format.ts";
 import { runStatusLabel } from "./view-runs.ts";
+import type { CronProps } from "./view-types.ts";
 
 export function renderJobStateIndicator(job: CronJob) {
   const autoDisabled = job.state?.autoDisabled;
@@ -90,6 +92,32 @@ export function renderLastRunCell(job: CronJob) {
     <span class="cron-table__last-run" role="img" aria-label=${label} title=${label}>
       ${glyph}
       <span class="cron-table__last-time">${label} · ${rel}</span>
+    </span>
+  `;
+}
+
+export function renderEnabledSwitch(props: CronProps, job: CronJob, compact = false) {
+  const stateLabel = job.enabled ? t("cron.detail.active") : t("cron.detail.paused");
+  const actionLabel = t(job.enabled ? "cron.actions.pauseJob" : "cron.actions.resumeJob", {
+    name: job.displayName ?? job.name,
+  });
+  return html`
+    <span
+      class="cron-enabled-toggle"
+      data-test-id=${compact ? `cron-row-toggle-${job.id}` : "cron-toggle-enabled"}
+      title=${compact ? actionLabel : nothing}
+    >
+      ${renderSettingsToggle({
+        checked: job.enabled,
+        disabled: props.busy || !props.canManage,
+        ariaLabel: compact ? actionLabel : stateLabel,
+        onChange: (checked) => {
+          if (props.canManage) {
+            props.onToggle(job, checked);
+          }
+        },
+      })}
+      ${compact ? nothing : html`<span class="cron-detail-sub">${stateLabel}</span>`}
     </span>
   `;
 }

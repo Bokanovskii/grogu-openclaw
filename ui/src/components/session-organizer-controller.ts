@@ -22,7 +22,6 @@ import {
   storeSidebarSessionStatusFilter,
   storeCollapsedSessionSections,
   storeSidebarSessionsGrouping,
-  storeSidebarSessionsShowCron,
   storeSidebarSessionsShowPreview,
   storeSidebarSessionsShowSystem,
   type SidebarRecentSession,
@@ -669,11 +668,6 @@ export class SessionOrganizerController {
   setSessionsGrouping(grouping: SidebarSessionsGrouping) {
     this.host.sessionsGrouping = grouping;
     storeSidebarSessionsGrouping(grouping);
-  }
-
-  setSessionsShowCron(show: boolean) {
-    this.host.sessionsShowCron = show;
-    storeSidebarSessionsShowCron(show);
   }
 
   setSessionsShowPreview(show: boolean) {

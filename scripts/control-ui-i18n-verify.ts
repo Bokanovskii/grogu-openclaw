@@ -37,7 +37,7 @@ const FALLBACK_BASELINE_PATH = path.join(I18N_ASSETS_DIR, "catalog-fallbacks.jso
 const FALLBACK_BASELINE_VERSION = 1;
 const CONTROL_UI_TEST_FILE_PATTERN = /\.(?:test|browser\.test|node\.test)\.tsx?$/u;
 const AUTOMATIONS_FEATURE_KEYS =
-  `sessionsView.showCronSessions sessionsView.subagentPrefix sessionsView.automationPrefix agents.cronPanel.schedulerSubtitle agents.cronPanel.agentJobsTitle configForm.sections.cron.label configView.sections.cron subtitles.automation memoryPage.dreaming.intro attention.cronFailed attention.cronOverdue palette.items.scheduled`.split(
+  `sessionsView.subagentPrefix sessionsView.automationPrefix agents.cronPanel.schedulerSubtitle agents.cronPanel.agentJobsTitle configForm.sections.cron.label configView.sections.cron subtitles.automation memoryPage.dreaming.intro attention.cronFailed attention.cronOverdue palette.items.scheduled`.split(
     " ",
   );
 
@@ -230,7 +230,7 @@ async function buildCatalogFallbackBaseline(
         prepared = undefined;
       }
       const localeFlat = flattenControlUiCatalog(localeMap, entry.locale);
-      const invalid = AUTOMATIONS_FEATURE_KEYS.slice(1, 3).filter((key) =>
+      const invalid = AUTOMATIONS_FEATURE_KEYS.slice(0, 2).filter((key) =>
         /\bcron\b/i.test(localeFlat.get(key) ?? ""),
       );
       if (invalid.length > 0) {

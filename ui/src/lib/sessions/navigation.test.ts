@@ -50,9 +50,7 @@ describe("resolveSessionNavigation", () => {
     expect(navigation.visibleSessions.map((row) => row.key)).toEqual([office.key, wake.key]);
   });
 
-  it("hides cron sessions unless showCron opts in", () => {
-    // Cron creation stamps a system actor; the automation toggle alone must
-    // reveal cron rows without also enabling showSystem.
+  it("keeps automation-owned sessions out of navigation even when selected", () => {
     const rows: GatewaySessionRow[] = [
       { key: "agent:main:chat", kind: "direct", updatedAt: 300 },
       {
@@ -62,6 +60,13 @@ describe("resolveSessionNavigation", () => {
         createdVia: "cron",
         createdActor: { type: "system" },
       },
+      {
+        key: "agent:main:background:research",
+        kind: "direct",
+        automationJobIds: ["research"],
+        updatedAt: 100,
+      },
+      { key: "agent:main:main", kind: "direct", hasAutomation: true, updatedAt: 50 },
     ];
 
     const hidden = resolveSessionNavigation({
@@ -69,17 +74,19 @@ describe("resolveSessionNavigation", () => {
       resultAgentId: "main",
       sessionKey: "agent:main:chat",
     });
-    expect(hidden.visibleSessions.map((row) => row.key)).toEqual(["agent:main:chat"]);
+    expect(hidden.visibleSessions.map((row) => row.key)).toEqual([
+      "agent:main:chat",
+      "agent:main:main",
+    ]);
 
-    const shown = resolveSessionNavigation({
+    const selected = resolveSessionNavigation({
       result: sessionsResult(rows),
       resultAgentId: "main",
-      sessionKey: "agent:main:chat",
-      showCron: true,
+      sessionKey: "agent:main:background:research",
     });
-    expect(shown.visibleSessions.map((row) => row.key)).toEqual([
+    expect(selected.visibleSessions.map((row) => row.key)).toEqual([
       "agent:main:chat",
-      "agent:main:cron:job",
+      "agent:main:main",
     ]);
   });
 

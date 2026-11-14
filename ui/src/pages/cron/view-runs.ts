@@ -217,6 +217,22 @@ export function renderRunHistory(props: CronRunHistoryProps, job?: CronJob) {
   ${props.runTranscript}${renderRunsSection(props)}`;
 }
 
+export function renderWorkspaceAction(props: Pick<CronProps, "onViewWorkspace">, job?: CronJob) {
+  if (!job?.sessionTarget.startsWith("session:")) {
+    return nothing;
+  }
+  return html`<button
+    class="btn btn--sm"
+    @click=${(event: MouseEvent) => {
+      if (event.currentTarget instanceof HTMLButtonElement) {
+        props.onViewWorkspace?.(job, event.currentTarget);
+      }
+    }}
+  >
+    ${t("cron.groups.viewWorkspace")}
+  </button>`;
+}
+
 function renderRunsSection(props: CronRunsSectionProps) {
   const formatTimestamp = createMsFormatter();
   const runs = props.runs.toSorted((a, b) =>

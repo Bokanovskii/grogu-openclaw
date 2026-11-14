@@ -59,7 +59,9 @@ it("rebuilds only changed automation bindings and preserves complete unrelated r
       const bound = snapshot();
       expect(bound).toEqual(
         before.map((row) =>
-          row.key === keys[0] ? Object.assign({}, row, { hasAutomation: true }) : row,
+          row.key === keys[0]
+            ? Object.assign({}, row, { hasAutomation: true, automationJobIds: ["binding"] })
+            : row,
         ),
       );
 
@@ -70,9 +72,17 @@ it("rebuilds only changed automation bindings and preserves complete unrelated r
       expect(projection.materializedCount - count).toBe(2);
       expect(snapshot()).toEqual(
         before.map((row) =>
-          row.key === keys[1] ? Object.assign({}, row, { hasAutomation: true }) : row,
+          row.key === keys[1]
+            ? Object.assign({}, row, { hasAutomation: true, automationJobIds: ["binding"] })
+            : row,
         ),
       );
+      binding.enabled = false;
+      invalidateSessionAutomationIndex();
+      await projection.ensureMaterialized();
+      const paused = snapshot().find((row) => row.key === keys[1]);
+      expect(paused?.automationJobIds).toEqual(["binding"]);
+      expect(paused?.hasAutomation).toBeUndefined();
       expect(databaseReads).not.toHaveBeenCalled();
       expect(sharedReads).not.toHaveBeenCalled();
 

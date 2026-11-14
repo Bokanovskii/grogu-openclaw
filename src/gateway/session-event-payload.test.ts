@@ -2,6 +2,16 @@ import { expect, it } from "vitest";
 import { contextBudgetStatusFixture } from "../config/sessions/context-budget.test-support.js";
 import { buildGatewaySessionSnapshot } from "./session-event-payload.js";
 
+it("publishes and clears automation ownership for subscribed chat lists", () => {
+  const sessionRow = { key: "agent:main:research", kind: "direct" as const, updatedAt: 1 };
+  const previous = buildGatewaySessionSnapshot({
+    sessionRow: { ...sessionRow, automationJobIds: ["research"] },
+  });
+  expect(previous.automationJobIds).toEqual(["research"]);
+  const cleared = buildGatewaySessionSnapshot({ sessionRow });
+  expect({ ...previous, ...cleared }.automationJobIds).toEqual([]);
+});
+
 it("clears automatic-label metadata when a subscribed client merges a later snapshot", () => {
   const sessionRow = { key: "agent:main:node-device", kind: "direct" as const, updatedAt: 1 };
   const previous = buildGatewaySessionSnapshot({

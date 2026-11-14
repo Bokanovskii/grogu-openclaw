@@ -1,3 +1,4 @@
+import { isAutomationOwnedSessionRow } from "../../../src/shared/session-list-visibility.ts";
 import type { GatewaySessionRow } from "../api/types.ts";
 import {
   isSubagentSessionKey,
@@ -114,6 +115,7 @@ export function projectSessionTree(params: {
         ? []
         : (childKeysByParent.get(normalizeDefaultMainSessionAliasForUi(row.key)) ?? []).filter(
             (key) =>
+              !isAutomationOwnedSessionRow(rowsByKey.get(key) ?? { key }) &&
               !hasRootCategory(rowsByKey.get(key)) &&
               (params.isChildSessionVisible?.(row.key, key, rowsByKey.get(key)) ?? true),
           );
@@ -204,7 +206,7 @@ export function projectSessionTree(params: {
   const reattachedRoots = new Set<string>();
   const projectedRoots = roots
     .filter((row) => {
-      if (isSubagentSessionKey(row.key)) {
+      if (isSubagentSessionKey(row.key) || isAutomationOwnedSessionRow(row)) {
         return false;
       }
       if (hasRootCategory(row)) {

@@ -330,7 +330,6 @@ export function sidebarSessionStateId(key: string): string {
 const SIDEBAR_SESSION_GROUPING_STORAGE_KEY = "openclaw:sidebar:sessions:grouping";
 const SIDEBAR_SESSION_CATALOG_GROUPING_STORAGE_KEY = "openclaw:sidebar:sessions:catalog-grouping";
 const SIDEBAR_SESSION_SHOW_PREVIEW_STORAGE_KEY = "openclaw:sidebar:sessions:show-preview";
-const SIDEBAR_SESSION_SHOW_CRON_STORAGE_KEY = "openclaw:sidebar:sessions:show-cron";
 const SIDEBAR_SESSION_SHOW_SYSTEM_STORAGE_KEY = "openclaw:sidebar:sessions:show-system";
 const SIDEBAR_SESSION_STATUS_FILTER_STORAGE_KEY = "openclaw:sidebar:sessions:status-filter";
 const SIDEBAR_SESSION_SORT_MODE_STORAGE_KEY = "openclaw:sidebar:sessions:sort-mode";
@@ -352,10 +351,6 @@ export function loadStoredSidebarCatalogGrouping(): CatalogProjectGrouping {
   return normalizeCatalogProjectGrouping(
     getSafeLocalStorage()?.getItem(SIDEBAR_SESSION_CATALOG_GROUPING_STORAGE_KEY),
   );
-}
-
-export function loadStoredSidebarSessionsShowCron(): boolean {
-  return getSafeLocalStorage()?.getItem(SIDEBAR_SESSION_SHOW_CRON_STORAGE_KEY) === "true";
 }
 
 export function loadStoredSidebarSessionsShowPreview(): boolean {
@@ -444,10 +439,6 @@ export function storeSidebarSessionsGrouping(grouping: SidebarSessionsGrouping) 
 
 export function storeSidebarCatalogGrouping(value: CatalogProjectGrouping) {
   getSafeLocalStorage()?.setItem(SIDEBAR_SESSION_CATALOG_GROUPING_STORAGE_KEY, value);
-}
-
-export function storeSidebarSessionsShowCron(show: boolean) {
-  storeSidebarSessionPreference(SIDEBAR_SESSION_SHOW_CRON_STORAGE_KEY, String(show));
 }
 
 export function storeSidebarSessionsShowPreview(show: boolean) {

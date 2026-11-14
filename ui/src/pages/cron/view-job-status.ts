@@ -89,7 +89,7 @@ export function renderLastRunCell(job: CronJob) {
   return html`
     <span class="cron-table__last-run" role="img" aria-label=${label} title=${label}>
       ${glyph}
-      <span class="cron-table__last-time">${rel}</span>
+      <span class="cron-table__last-time">${label} · ${rel}</span>
     </span>
   `;
 }

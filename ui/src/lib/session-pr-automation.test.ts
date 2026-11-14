@@ -37,6 +37,7 @@ function job(option: CiAutomationOption, overrides: Partial<CronJob> = {}): Cron
 
 function page(jobs: CronJob[], overrides: Partial<CronJobsListResult> = {}): CronJobsListResult {
   return {
+    groups: [],
     jobs,
     snapshotRevision: "inventory-1",
     total: jobs.length,

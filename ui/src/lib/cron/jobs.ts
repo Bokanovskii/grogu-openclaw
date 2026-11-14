@@ -158,6 +158,7 @@ async function loadCronJobsProjectionPage<Row>(
   // retained rows and late responses before a failed replacement can expose them.
   if (cronInventoryScopes.has(state) && cronInventoryScopes.get(state) !== scope) {
     state.cronJobs = [];
+    state.cronGroups = [];
     state.cronJobsSnapshotRevision = null;
     state.cronJobsTotal = 0;
     state.cronJobsHasMore = false;
@@ -216,6 +217,7 @@ async function loadCronJobsProjectionPage<Row>(
     assertCanonicalCronJobsCursor(page, offset);
     const jobs = projection.readRows(page.jobs);
     state.cronJobs = append ? [...state.cronJobs, ...jobs] : jobs;
+    state.cronGroups = page.groups ?? [];
     state.cronJobsSnapshotRevision = page.snapshotRevision;
     state.cronJobsTotal = page.total;
     state.cronJobsHasMore = page.hasMore;

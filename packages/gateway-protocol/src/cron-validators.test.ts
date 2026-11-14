@@ -12,7 +12,15 @@ import {
   validateCronRunsParams,
   validateCronUpdateParams,
 } from "./index.js";
-import { CronAddResultSchema, CronJobSchema, CronRunLogEntrySchema } from "./schema/cron.js";
+import {
+  CronAddResultSchema,
+  CronGroupSchema,
+  CronGroupsDeleteParamsSchema,
+  CronGroupsListParamsSchema,
+  CronGroupsUpsertParamsSchema,
+  CronJobSchema,
+  CronRunLogEntrySchema,
+} from "./schema/cron.js";
 
 /**
  * Cron validator regressions for public scheduler RPC payloads.
@@ -47,6 +55,36 @@ function expectCases(
 describe("cron protocol validators", () => {
   it("accepts minimal add params", () => {
     expectCases(validateCronAddParams, true, [minimalAddParams]);
+  });
+
+  it("accepts optional friendly job fields and cron group registry contracts", () => {
+    expectCases(validateCronAddParams, true, [
+      add({
+        displayName: "Morning brief",
+        groupId: "daily",
+        notificationDescription: "Texts you when the morning brief is ready.",
+      }),
+    ]);
+    expect(
+      Value.Check(CronJobSchema, {
+        ...minimalAddParams,
+        id: "job-1",
+        enabled: true,
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        state: {},
+        groupId: "daily",
+        notificationDescription: "Texts you when the brief is ready.",
+      }),
+    ).toBe(true);
+    expect(Value.Check(CronGroupSchema, { id: "daily", label: "Daily" })).toBe(true);
+    expect(Value.Check(CronGroupsListParamsSchema, {})).toBe(true);
+    expect(
+      Value.Check(CronGroupsUpsertParamsSchema, {
+        group: { id: "daily", label: "Daily", description: "Daily checks", order: 2 },
+      }),
+    ).toBe(true);
+    expect(Value.Check(CronGroupsDeleteParamsSchema, { id: "daily" })).toBe(true);
   });
 
   it("accepts create results with a dry-run delivery preview", () => {

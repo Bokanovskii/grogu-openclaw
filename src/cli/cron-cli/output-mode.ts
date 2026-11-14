@@ -64,5 +64,5 @@ export function isCronMachineOutput(argv: readonly string[]): boolean {
       valueFlags: CRON_GATEWAY_VALUE_FLAGS,
       maxPositionals: 1,
     }) ?? [];
-  return command !== undefined && MACHINE_OUTPUT_COMMANDS.has(command);
+  return command !== undefined && (command === "groups" || MACHINE_OUTPUT_COMMANDS.has(command));
 }

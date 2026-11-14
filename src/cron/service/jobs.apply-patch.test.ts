@@ -24,6 +24,27 @@ function makeJob(overrides: Partial<CronJob> = {}): CronJob {
   };
 }
 
+describe("applyJobPatch group metadata", () => {
+  it("updates group metadata independently of displayName and preserves omitted fields", () => {
+    const job = makeJob({ displayName: "Morning check", groupId: "old" });
+    applyJobPatch(job, {
+      groupId: " daily ",
+      notificationDescription: " Texts you when a check fails. ",
+    });
+    expect(job).toMatchObject({
+      displayName: "Morning check",
+      groupId: "daily",
+      notificationDescription: "Texts you when a check fails.",
+    });
+    applyJobPatch(job, { groupId: "" });
+    expect(job.groupId).toBeUndefined();
+    expect(job.notificationDescription).toBe("Texts you when a check fails.");
+    applyJobPatch(job, { notificationDescription: "" });
+    expect(job.notificationDescription).toBeUndefined();
+    expect(job.displayName).toBe("Morning check");
+  });
+});
+
 describe("applyJobPatch schedule retention", () => {
   it.each([
     { schedule: { kind: "every" as const, everyMs: 60_000 }, deleteAfterRun: false },

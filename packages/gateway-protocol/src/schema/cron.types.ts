@@ -7,6 +7,10 @@ import type {
   CronDeliveryPreviewSchema,
   CronDeclarativeAddResultSchema,
   CronGetParamsSchema,
+  CronGroupSchema,
+  CronGroupsDeleteParamsSchema,
+  CronGroupsListParamsSchema,
+  CronGroupsUpsertParamsSchema,
   CronJobSchema,
   CronListParamsSchema,
   CronRemoveParamsSchema,
@@ -25,7 +29,16 @@ export type CronJob = Static<typeof CronJobSchema>;
 /** Definition-free row returned by cron.list when compact is true. */
 export type CronCompactJob = Pick<
   CronJob,
-  "id" | "name" | "declarationKey" | "displayName" | "owner" | "agentId" | "enabled" | "updatedAtMs"
+  | "id"
+  | "name"
+  | "declarationKey"
+  | "displayName"
+  | "groupId"
+  | "notificationDescription"
+  | "owner"
+  | "agentId"
+  | "enabled"
+  | "updatedAtMs"
 > &
   Pick<
     CronJob["state"],
@@ -50,6 +63,10 @@ export type CronCompactJob = Pick<
     lastRunError: string | null;
   };
 export type CronListParams = Static<typeof CronListParamsSchema>;
+export type CronGroup = Static<typeof CronGroupSchema>;
+export type CronGroupsListParams = Static<typeof CronGroupsListParamsSchema>;
+export type CronGroupsUpsertParams = Static<typeof CronGroupsUpsertParamsSchema>;
+export type CronGroupsDeleteParams = Static<typeof CronGroupsDeleteParamsSchema>;
 export type CronStatusParams = Static<typeof CronStatusParamsSchema>;
 export type CronGetParams = Static<typeof CronGetParamsSchema>;
 export type CronAddParams = Static<typeof CronAddParamsSchema>;

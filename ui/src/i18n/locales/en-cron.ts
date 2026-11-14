@@ -3,6 +3,36 @@ import { en } from "./en.ts";
 
 const enCron = {
   cron: {
+    groups: {
+      other: "Other",
+      otherDescription: "Automations without a group.",
+      defaultModel: "Agent default model",
+      textsWhen: "Texts you when",
+      group: "Group",
+      friendlyName: "Friendly name",
+      friendlyNameHint: "Use a short name that says what this automation does.",
+      whatItDoes: "What it does",
+      notificationHint:
+        "Describe when a result is worth sending. This text does not change delivery rules.",
+      ungrouped: "Other (no group)",
+    },
+    scheduleWords: {
+      daily: "Every day at {time}",
+      weekdays: "Weekdays at {time}",
+      weekly: "{days} at {time}",
+      everyMinute: "Every minute",
+      everyMinutes: "Every {count} minutes",
+      hourly: "Every hour at minute {minute}",
+      day0: "Sundays",
+      day1: "Mondays",
+      day2: "Tuesdays",
+      day3: "Wednesdays",
+      day4: "Thursdays",
+      day5: "Fridays",
+      day6: "Saturdays",
+      fields:
+        "At seconds {seconds}, minutes {minute}, hours {hour}, days {day}, months {month}, weekdays {weekday}",
+    },
     suggestions: {
       title: "Starter automations",
       schedules: {
@@ -59,7 +89,7 @@ const enCron = {
       filters: "Filters",
       shownOf: "{shown} of {total}",
       emptyTitle: "No automations yet",
-      emptyHint: "Describe what OpenClaw should do and when — it runs on schedule.",
+      emptyHint: "Describe what OpenClaw does and when it runs.",
       noMatching: "No automations match the current filters.",
       loadMore: "Load more",
       loading: "Loading...",

@@ -9,6 +9,7 @@ import {
   formatMs,
   formatUnknownText,
 } from "../lib/format.ts";
+import { describeCronExpression } from "./cron/schedule-description.ts";
 import { resolveSessionContextLimit } from "./sessions/context-budget.ts";
 
 export function formatNextRun(ms?: number | null) {
@@ -57,7 +58,9 @@ export function formatCronSchedule(job: CronJob) {
     return Number.isFinite(atMs) ? `At ${formatMs(atMs)}` : `At ${s.at}`;
   }
   if (s.kind === "every") {
-    const duration = resolveExactDurationParts(s.everyMs)?.map(formatUnit).join(" ");
+    const duration = resolveExactDurationParts(s.everyMs)
+      ?.map((part) => formatUnit({ ...part, unitDisplay: "long" }))
+      .join(" ");
     return `Every ${duration ?? t("common.na")}`;
   }
   if (s.kind === "on-exit") {
@@ -68,7 +71,7 @@ export function formatCronSchedule(job: CronJob) {
   if (s.kind === "stream") {
     return `Stream: ${s.command.join(" ")}${s.cwd ? ` (cwd: ${s.cwd})` : ""}`;
   }
-  return `Cron ${s.expr}${s.tz ? ` (${s.tz})` : ""}`;
+  return `${describeCronExpression(s.expr)}${s.tz ? ` (${s.tz})` : ""}`;
 }
 
 export function formatCronPayload(job: CronJob) {

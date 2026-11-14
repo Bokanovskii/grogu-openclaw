@@ -291,7 +291,12 @@ export function normalizeCronJobInput(
   const base = snapshotOwnCronRecord(raw);
   const next = snapshotOwnCronRecord(base);
 
-  for (const field of ["declarationKey", "displayName"] as const) {
+  for (const field of [
+    "declarationKey",
+    "displayName",
+    "groupId",
+    "notificationDescription",
+  ] as const) {
     if (field in base && typeof base[field] === "string") {
       const trimmed = base[field].trim();
       if (trimmed) {

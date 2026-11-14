@@ -1,8 +1,9 @@
 import { validateCronListParams } from "../../../packages/gateway-protocol/src/index.js";
 import { tryResolveCronJobEffectiveAgentId } from "../../cron/agent-id.js";
 import { resolveCronDeliveryPreviews } from "../../cron/delivery-preview.js";
+import { listCronGroups } from "../../cron/groups.js";
 import { resolveCronJobBoundSessionKeys } from "../../cron/job-session-bindings.js";
-import type { CronListPageResult } from "../../cron/service/list-page-types.js";
+import type { CronListPageRowsResult } from "../../cron/service/list-page-types.js";
 import type { CronJob } from "../../cron/types.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
@@ -148,7 +149,7 @@ export const cronListHandler = createPreparedReadHandler((options) => {
             return matched;
           };
         }
-        let page: CronListPageResult;
+        let page: CronListPageRowsResult;
         const finishPage = diagnostics?.startSourcePage();
         try {
           page = await context.cron.listPage(listOptions, matchesJob);
@@ -165,10 +166,12 @@ export const cronListHandler = createPreparedReadHandler((options) => {
         diagnostics?.mark("projection");
         const jobs = projectCronListJobs(context.cron, page, p.compact === true);
         if (p.compact === true || p.includeDeliveryPreviews === false) {
+          const groups = await listCronGroups();
+          assertPageCurrent();
           // Full job rows are the default because editors need their payloads. Delivery
           // previews are independently suppressible so list-only callers avoid per-job I/O
           // without weakening the shipped full-response default.
-          respond(true, { ...page, jobs }, undefined);
+          respond(true, { ...page, jobs, groups }, undefined);
           return;
         }
         diagnostics?.mark("previews");
@@ -178,7 +181,9 @@ export const cronListHandler = createPreparedReadHandler((options) => {
           jobs: page.jobs,
         });
         assertPageCurrent();
-        respond(true, { ...page, jobs, deliveryPreviews }, undefined);
+        const groups = await listCronGroups();
+        assertPageCurrent();
+        respond(true, { ...page, jobs, deliveryPreviews, groups }, undefined);
       },
     };
   } catch (error) {

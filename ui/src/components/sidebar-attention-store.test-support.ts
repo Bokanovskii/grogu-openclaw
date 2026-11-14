@@ -25,6 +25,7 @@ export function cronPage(id?: string): CompactCronPage {
     : [];
   return {
     jobs,
+    groups: [],
     snapshotRevision: id ?? "empty",
     total: jobs.length,
     offset: 0,

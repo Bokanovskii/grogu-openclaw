@@ -139,6 +139,7 @@ suite.define(() => {
       viewport: { height: 900, width: 1280 },
     });
     const automationPage: CronJobsListResult = {
+      groups: [],
       jobs: [
         {
           id: "nightly-invoices",

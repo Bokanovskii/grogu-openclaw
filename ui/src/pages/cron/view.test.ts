@@ -160,7 +160,7 @@ describe("cron view list pane", () => {
     expect(rows[0]?.querySelector(".cron-table__last-run")?.getAttribute("aria-label")).toBe(
       "Error",
     );
-    expect(rows[1]?.textContent).toContain("Cron 0 9 * * *");
+    expect(rows[1]?.textContent).toContain("Every day at 09:00");
     expect(rows[1]?.querySelector(".cron-last-glyph--ok")).toBeNull();
     expect(rows[1]?.textContent).toContain("n/a");
     expect(rows[1]?.querySelector(".cron-trigger-icon")?.getAttribute("aria-label")).toBe(
@@ -190,7 +190,7 @@ describe("cron view list pane", () => {
     expect(loadedEmpty.querySelector('[data-test-id="cron-jobs-loading"]')).toBeNull();
     const empty = getElement(loadedEmpty, ".cron-empty-state", HTMLDivElement);
     expect(empty.textContent).toContain("No automations yet");
-    expect(empty.textContent).toContain("Describe what OpenClaw should do");
+    expect(empty.textContent).toContain("Describe what OpenClaw does");
     expect(
       getElement(loadedEmpty, ".cron-table", HTMLDivElement).getAttribute("aria-busy"),
     ).toBeNull();

@@ -1,3 +1,4 @@
+import type { CronGroup } from "@openclaw/gateway-protocol";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
   CronJob,
@@ -22,6 +23,9 @@ type CronFormAnnounceDelivery = Extract<CronDelivery, { mode: "announce" }>;
 export type CronFormState = {
   name: string;
   description: string;
+  displayName: string;
+  groupId: string;
+  notificationDescription: string;
   agentId: string;
   sessionKey: string;
   clearAgent: boolean;
@@ -100,6 +104,7 @@ export type CronJobsState<Row = CronJob> = {
   cronJobsReloadPending: boolean;
   cronJobsReloadPendingTableFilters: boolean;
   cronJobs: Row[];
+  cronGroups?: CronGroup[];
   cronJobsSnapshotRevision: string | null;
   cronJobsTotal: number;
   cronJobsHasMore: boolean;

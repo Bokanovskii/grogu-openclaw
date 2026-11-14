@@ -60,6 +60,7 @@ function cronListResponse(
   return {
     jobs,
     snapshotRevision: "agents-page-cron-fixture",
+    groups: [],
     total,
     offset,
     limit,

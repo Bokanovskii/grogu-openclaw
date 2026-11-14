@@ -63,6 +63,7 @@ jobs:
         run: |
           node --import ./scripts/tsx.mjs --input-type=module -e "import { assertWorkflowIsolation } from './grogu/workflows.ts'; await assertWorkflowIsolation(process.cwd());"
           node scripts/run-tsgo.mjs -p grogu/tsconfig.json --noEmit
+          node scripts/run-tsgo.mjs -p grogu/plugins/research-topics/tsconfig.json --noEmit
       # pnpm lint (Control UI i18n verify, type-aware Oxlint/tsgolint, Stylelint) is skipped here:
       # tsgolint peaks near 6.5 GB RSS on a ~7.7 GB runner and repeatedly killed hosted attempts.
       # Focused pull requests use pnpm check:changed and tests for the touched contract.
@@ -74,6 +75,7 @@ jobs:
         run: >-
           pnpm test test/scripts/grogu-upstream.test.ts test/scripts/grogu-upstream-pr.test.ts
           test/scripts/grogu-bootstrap.test.ts test/scripts/grogu-policy.test.ts
+          test/scripts/grogu-research-topics.test.ts
           test/scripts/grogu-operator.test.ts test/scripts/grogu-release.test.ts test/scripts/grogu-storage.test.ts test/scripts/grogu-workflows.test.ts
           src/infra/update-recovery-capture-retirement.test.ts src/flows/doctor-health.legacy-update.test.ts
           packages/ai/src/transports/sparky-policy.test.ts packages/ai/src/transports/openai-completions-transport.test.ts

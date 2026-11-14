@@ -599,9 +599,9 @@ describe("cron method validation", () => {
           clock += 1100;
           return await listPage(...args);
         });
-        const matches = cronCallerScope.cronJobMatchesCallerScope;
+        const matches = cronCallerScope.cronJobMatchesCallerReadScope;
         const failure = new Error("scope failure");
-        vi.spyOn(cronCallerScope, "cronJobMatchesCallerScope").mockImplementation((params) => {
+        vi.spyOn(cronCallerScope, "cronJobMatchesCallerReadScope").mockImplementation((params) => {
           clock += 1;
           if (fails && params.job.id === "private-job-200") {
             throw failure;
@@ -1459,7 +1459,7 @@ describe("cron method validation", () => {
     );
   });
 
-  it("binds scheduled authority access to its exact creator session", async () => {
+  it("shares scheduled authority reads but binds changes to its exact creator session", async () => {
     const ownerSessionKey = "agent:ops:discord:work:group:creator";
     const accountJob = createCronJob({
       owner: { agentId: "ops", sessionKey: ownerSessionKey, accountId: "work" },
@@ -1480,7 +1480,7 @@ describe("cron method validation", () => {
     );
     expect(siblingList.respond).toHaveBeenCalledWith(
       true,
-      expect.objectContaining({ total: 0, jobs: [] }),
+      expect.objectContaining({ total: 1 }),
       undefined,
     );
 
@@ -1517,7 +1517,7 @@ describe("cron method validation", () => {
     );
   });
 
-  it("preserves only current-job self-management for a capped scheduled run", async () => {
+  it("shares account reads but limits a capped scheduled run's changes to its current job", async () => {
     const ownerSessionKey = "agent:ops:discord:work:group:creator";
     const accountJob = createCronJob({
       agentId: "ops",
@@ -1546,7 +1546,7 @@ describe("cron method validation", () => {
     const list = await invokeCron("cron.list", { compact: true }, { context, client: runClient });
     expect(list.respond).toHaveBeenCalledWith(
       true,
-      expect.objectContaining({ total: 1 }),
+      expect.objectContaining({ total: 2 }),
       undefined,
     );
 
@@ -1558,9 +1558,20 @@ describe("cron method validation", () => {
       { id: siblingJob.id },
       { context, client: runClient },
     );
-    expectResponseError(siblingGet.respond, {
+    expect(siblingGet.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ id: siblingJob.id }),
+      undefined,
+    );
+
+    const siblingRemove = await invokeCron(
+      "cron.remove",
+      { id: siblingJob.id },
+      { context, client: runClient },
+    );
+    expectResponseError(siblingRemove.respond, {
       code: "INVALID_REQUEST",
-      messageIncludes: `cron job not found: ${siblingJob.id}`,
+      messageIncludes: `Automation not found: ${siblingJob.id}`,
     });
 
     const expiredRunClient = callerClient(
@@ -1570,15 +1581,16 @@ describe("cron method validation", () => {
       accountJob.id,
       Date.now() - 1,
     );
-    const expiredGet = await invokeCron(
-      "cron.get",
+    const expiredRemove = await invokeCron(
+      "cron.remove",
       { id: accountJob.id },
       { context, client: expiredRunClient },
     );
-    expectResponseError(expiredGet.respond, {
+    expectResponseError(expiredRemove.respond, {
       code: "INVALID_REQUEST",
-      messageIncludes: `cron job not found: ${accountJob.id}`,
+      messageIncludes: `Automation not found: ${accountJob.id}`,
     });
+    expect(context.cron.remove).not.toHaveBeenCalled();
 
     const runs = await invokeCron(
       "cron.runs",
@@ -1599,21 +1611,6 @@ describe("cron method validation", () => {
     expect(remove.respond).toHaveBeenCalledWith(true, { ok: true, removed: true }, undefined);
     expect(context.cron.remove).toHaveBeenCalledWith(accountJob.id, {
       commitGuard: expect.any(Function),
-    });
-
-    cronRunRecordsOverride.mockImplementationOnce(async () => {
-      runClient.internal!.agentRuntimeIdentity!.cronSelfManagementContext!.expiresAtMs =
-        Date.now() - 1;
-      return [];
-    });
-    const expiredHistory = await invokeCron(
-      "cron.runs",
-      { id: accountJob.id },
-      { context, client: runClient },
-    );
-    expectResponseError(expiredHistory.respond, {
-      code: "INVALID_REQUEST",
-      messageIncludes: "Automation not found",
     });
 
     const update = await invokeCron(
@@ -2442,19 +2439,19 @@ describe("cron method validation", () => {
     });
   });
 
-  it("rejects caller-scoped cron.runs all-scope history", async () => {
+  it("rejects caller-scoped cron.runs all-scope history for a foreign agentId", async () => {
     const context = createCronContext(createCronJob({ id: "cron-1", agentId: "ops" }));
 
     const { respond } = await invokeCron(
       "cron.runs",
-      { scope: "all" },
+      { scope: "all", agentId: "worker" },
       { context, client: callerClient("ops") },
     );
 
     expect(context.cron.list).not.toHaveBeenCalled();
     expectResponseError(respond, {
       code: "INVALID_REQUEST",
-      messageIncludes: "scope all is not allowed by caller scope",
+      messageIncludes: "agentId outside caller scope",
     });
   });
 

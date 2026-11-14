@@ -16,7 +16,9 @@ import type { CronRunHistoryWrite, CronRunRecord } from "./run-history.types.js"
 import type { CronRunReceiptWriteSchema } from "./run-receipt-write-admission.js";
 
 const query = (db: DatabaseSync) =>
-  getNodeSqliteKysely<Pick<DB, "task_runs" | "execution_owner_lifecycle_bindings">>(db);
+  getNodeSqliteKysely<
+    Pick<DB, "task_runs" | "task_delivery_state" | "execution_owner_lifecycle_bindings">
+  >(db);
 const RETENTION_MS = 7 * 24 * 60 * 60_000;
 const LOST_RETENTION_MS = 24 * 60 * 60_000;
 const CRON_HISTORY_KEEP_PER_JOB = 2000;
@@ -267,6 +269,53 @@ export function pruneCronRunHistoryInDatabase(
   schema: CronRunReceiptWriteSchema,
   records = readCronRunRecordsInDatabase(db),
 ): number {
+  // Retired non-Cron producers no longer run their old retention loop.
+  // Keep active work and any delivery or lifecycle owner, even after the time limit.
+  executeSqliteQuerySync(
+    db,
+    query(db)
+      .deleteFrom("task_runs")
+      .where(
+        "task_id",
+        "in",
+        query(db)
+          .selectFrom("task_runs")
+          .select("task_id")
+          .where("runtime", "!=", "cron")
+          .where("status", "in", ["succeeded", "failed", "timed_out", "cancelled", "lost"])
+          .where("ended_at", "<", now - RETENTION_MS)
+          .where("delivery_status", "in", [
+            "delivered",
+            "dismissed",
+            "parent_missing",
+            "not_applicable",
+          ])
+          .where((eb) =>
+            eb.not(
+              eb.exists(
+                eb
+                  .selectFrom("task_delivery_state")
+                  .select("task_id")
+                  .whereRef("task_delivery_state.task_id", "=", "task_runs.task_id"),
+              ),
+            ),
+          )
+          .where((eb) =>
+            schema.executionOwnerLifecycleBindings
+              ? eb.not(
+                  eb.exists(
+                    eb
+                      .selectFrom("execution_owner_lifecycle_bindings")
+                      .select("owner_id")
+                      .where("owner_kind", "=", "task")
+                      .whereRef("owner_id", "=", "task_runs.task_id"),
+                  ),
+                )
+              : eb.val(1),
+          )
+          .limit(500),
+      ),
+  );
   const ids = [...collectExpiredCronRunIds(records, now)];
   for (let offset = 0; offset < ids.length; offset += 500) {
     const batch = ids.slice(offset, offset + 500);

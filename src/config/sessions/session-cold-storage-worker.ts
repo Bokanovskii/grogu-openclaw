@@ -27,6 +27,13 @@ import {
 } from "./session-accessor.sqlite-delete-snapshot.js";
 import { resolveTranscriptAppendRefusal } from "./session-accessor.sqlite-transcript-write-guard.js";
 import {
+  assertSessionColdRetentionCurrent,
+  readSessionColdRetentionEligibility,
+  retireRestoredAutomationArchive,
+} from "./session-cold-retention.worker.js";
+import {
+  MAX_COLD_ARCHIVE_BYTES,
+  decodeSessionColdRecords,
   readVerifiedSessionColdArchive,
   resolveSessionColdArchivePath,
   sessionColdRecordSchema,
@@ -55,6 +62,7 @@ import type {
   SessionColdMutationResult,
   SessionColdPlan,
   SessionColdPrepared,
+  SessionColdRetentionProbe,
 } from "./session-cold-storage.types.js";
 import type { SessionSourceValidation } from "./session-source-authority.js";
 import { readSessionSourceValidation } from "./session-source-predicate.worker.js";
@@ -73,8 +81,6 @@ import {
 } from "./session-turn.kernel.js";
 import { resolveSessionWorkStartError } from "./session-work-start.js";
 import { prepareTranscriptPayload, transcriptEventJsonSql } from "./transcript-payload.js";
-
-const MAX_COLD_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
 export type SessionColdPreparationWorkerData = {
   type: "sqlite-transcript-archive-v2";
@@ -104,6 +110,7 @@ export type SessionColdMutationPlan = { databaseOptions: SessionColdPlan["databa
       sessionId: string;
       archive: Omit<SessionColdArchive, "archive_blob">;
       guard?: SessionColdRestorationGuard;
+      retention?: SessionColdRetentionProbe;
     }
 );
 export type SessionColdWorkerData = {
@@ -414,35 +421,6 @@ export async function prepareSessionColdBatchInWorker(
   return result;
 }
 
-function decodeSessionColdRecords(
-  bytes: Uint8Array,
-  archive: SessionColdArchive,
-): SessionColdRecord[] {
-  const records = zlib
-    .zstdDecompressSync(bytes, { maxOutputLength: MAX_COLD_ARCHIVE_BYTES })
-    .toString("utf8")
-    .trimEnd()
-    .split("\n")
-    .map((line) => sessionColdRecordSchema.parse(JSON.parse(line)));
-  const header = records[0];
-  const events = records.filter((record) => record.kind === "event");
-  if (
-    header?.kind !== "header" ||
-    header.sessionId !== archive.session_id ||
-    header.generation !== archive.generation ||
-    records.slice(1).some((record) => record.kind === "header") ||
-    events.length !== archive.event_count ||
-    events.at(-1)?.row.seq !== archive.last_seq ||
-    events.reduce((sum, event) => sum + Buffer.byteLength(event.row.event_json), 0) +
-      events.length -
-      1 !==
-      archive.raw_bytes
-  ) {
-    throw new Error("Cold transcript archive metadata does not match its contents");
-  }
-  return records;
-}
-
 export async function prepareSessionColdRestoreInWorker(
   plan: Extract<SessionColdMutationPlan, { kind: "cold-restore" }>,
 ): Promise<SessionColdRecord[]> {
@@ -477,8 +455,9 @@ export function mutateSessionColdTranscriptInWorker(
   onCommit: (database: OpenClawAgentDatabase, validation?: SessionSourceValidation) => void,
   sourceGuard?: ReturnType<typeof prepareSessionColdSourceGuard>,
 ): SessionColdMutationResult {
-  return runOpenClawAgentWriteTransaction(
+  const outcome = runOpenClawAgentWriteTransaction(
     (database) => {
+      assertSessionColdRetentionCurrent(database, plan);
       const db = getNodeSqliteKysely<DB>(database.db);
       const result: SessionColdMutationResult = {
         archivedTranscripts: 0,
@@ -622,6 +601,13 @@ export function mutateSessionColdTranscriptInWorker(
           throw new Error("Cold transcript changed during restoration");
         }
         const session_id = plan.sessionId;
+        if (!readSessionColdRetentionEligibility(database, plan, records, result)) {
+          result.transcriptPublication = readStagedSessionTranscriptAuthority(database);
+          assertSessionColdRetentionCurrent(database, plan);
+          onCommit(database, sourceValidation);
+          sourceGuard?.assertForeign();
+          return result;
+        }
         const insertFts = createSessionTranscriptFtsInserter(database.db, session_id);
         for (const record of records) {
           switch (record.kind) {
@@ -687,6 +673,7 @@ export function mutateSessionColdTranscriptInWorker(
         publishUnchangedSessionTranscriptAuthority(database, result.sessionKey);
       }
       result.transcriptPublication = readStagedSessionTranscriptAuthority(database);
+      assertSessionColdRetentionCurrent(database, plan);
       onCommit(database, sourceValidation);
       sourceGuard?.assertForeign();
       return result;
@@ -694,6 +681,8 @@ export function mutateSessionColdTranscriptInWorker(
     plan.databaseOptions,
     { operationLabel: "session cold storage" },
   );
+  retireRestoredAutomationArchive(plan, outcome);
+  return outcome;
 }
 
 export function readSessionColdStorageInventoryInWorker(options: OpenClawAgentDatabaseOptions) {

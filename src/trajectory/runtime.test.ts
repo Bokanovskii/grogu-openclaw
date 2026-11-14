@@ -411,7 +411,7 @@ describe("trajectory runtime", () => {
     ).toBeNull();
   });
 
-  it("stores bounded oversized runtime events in SQLite", async () => {
+  it("stores message counts instead of repeated completion snapshots in SQLite", async () => {
     const tempDir = tempDirs.make("openclaw-trajectory-runtime-");
     const storePath = path.join(tempDir, "agents", "main", "sessions", "sessions.json");
     const sessionKey = "agent:main:main";
@@ -447,8 +447,7 @@ describe("trajectory runtime", () => {
     expect(event).toMatchObject({
       type: "model.completed",
       data: {
-        truncated: true,
-        reason: "trajectory-event-size-limit",
+        messageCount: 12,
         usage,
       },
     });
@@ -497,7 +496,7 @@ describe("trajectory runtime", () => {
     expect(parsed.data.truncated).toBeUndefined();
   });
 
-  it("preserves usage when truncating oversized runtime events", async () => {
+  it.each([1, 12])("preserves usage without retaining %i completion snapshots", async (count) => {
     const writes: string[] = [];
     const usage = {
       input: 384_954,
@@ -515,7 +514,7 @@ describe("trajectory runtime", () => {
       promptCache,
       assistantTexts: ["done"],
       finalPromptText: "inspect",
-      messagesSnapshot: Array.from({ length: 12 }, (_value, index) => ({
+      messagesSnapshot: Array.from({ length: count }, (_value, index) => ({
         role: index % 2 === 0 ? "user" : "assistant",
         content: `message-${index} ${"x".repeat(32_000)}`,
       })),
@@ -525,8 +524,7 @@ describe("trajectory runtime", () => {
     const parsed = JSON.parse(expectDefined(writes[0], "writes[0] test invariant"));
     expect(parsed.type).toBe("model.completed");
     expect(parsed.data).toMatchObject({
-      truncated: true,
-      reason: "trajectory-event-size-limit",
+      messageCount: count,
       usage,
       promptCache,
       assistantTexts: ["done"],
@@ -534,7 +532,7 @@ describe("trajectory runtime", () => {
     });
     expect(parsed.data.finalPromptTextOriginalLength).toBeUndefined();
     expect(parsed.data.messagesSnapshot).toBeUndefined();
-    expect(parsed.data.droppedFields).toEqual(["messagesSnapshot"]);
+    expect(parsed.data.truncated).toBeUndefined();
     expect(
       Buffer.byteLength(expectDefined(writes[0], "writes[0] test invariant"), "utf8"),
     ).toBeLessThanOrEqual(TRAJECTORY_RUNTIME_EVENT_MAX_BYTES + 1);
@@ -708,7 +706,7 @@ describe("trajectory runtime", () => {
     const first = JSON.parse(expectDefined(writes[0], "writes[0] test invariant"));
     const second = JSON.parse(expectDefined(writes[1], "writes[1] test invariant"));
     expect(first.data).toMatchObject({
-      truncated: true,
+      messageCount: 12,
       usage: firstUsage,
       promptCache: { readTokens: 333_824 },
     });
@@ -753,7 +751,7 @@ describe("trajectory runtime", () => {
     expect(writes).toHaveLength(1);
     const parsed = JSON.parse(expectDefined(writes[0], "writes[0] test invariant"));
     const preservedUsage = JSON.stringify(parsed.data.usage);
-    expect(parsed.data.truncated).toBe(true);
+    expect(parsed.data.messageCount).toBe(12);
     expect(preservedUsage).toContain("redacted");
     expect(preservedUsage).not.toContain("sk-inline-secret-token");
     expect(preservedUsage).not.toContain("sk-test-secret-token");

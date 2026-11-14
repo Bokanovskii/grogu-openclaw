@@ -260,6 +260,7 @@ async function runCronIsolatedAgentTurnInTrace(
               runId,
               {
                 sessionKey: prepared.context.runSessionKey,
+                storePath: prepared.context.cronSession.storePath,
                 sessionId: initialSessionId,
                 agentId: prepared.context.agentId,
                 lifecycleGeneration: runLifecycleGeneration,

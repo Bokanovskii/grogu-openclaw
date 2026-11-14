@@ -165,6 +165,27 @@ and run the command again.
 
 ### Small-disk storage policy
 
+Automation detail expires after seven days by default through
+`cron.runDetailRetention`. The hourly sweep preserves personal chats and active
+runs. Mixed chats require explicit cron provenance and matching reply run IDs.
+Uncorrelated legacy replies remain intact. Runtime completions retain message
+counts rather than repeated full message snapshots.
+Pending or uncertain work remains protected. A running cron receipt defers
+detail cleanup for the whole agent until a later sweep.
+
+Existing owners also bound audit events to 30 days and 100,000 rows, retain
+plugin captures while native code needs them, and reclaim free SQLite pages
+incrementally. Terminal non-cron task records expire after seven days only when
+delivery and lifecycle owners no longer reference them. These policies do not
+delete durable research topics or sources.
+
+After large logical deletions, offline Doctor compaction can repack SQLite files.
+The deployment owner stops the Gateway and runs
+`openclaw doctor --session-sqlite compact --session-sqlite-all-agents --json`,
+then `openclaw doctor --state-sqlite compact --json`.
+Do not run online `VACUUM` or create a routine full backup for this cleanup.
+Compaction does not restore expired detail.
+
 Grogu does not create routine local full backups or retain historical release
 packages. Git preserves source, not conversations, credentials, or databases.
 Removing recovery copies permanently loses the ability to restore those earlier

@@ -6,17 +6,21 @@ import {
   resolveConfiguredAgentDatabaseTargets,
   runSessionRegistryMaintenanceForStore,
 } from "../config/sessions.js";
+import { isAutomationRetentionDeferredError } from "../config/sessions/session-automation-retention.errors.js";
+import { runAutomationDetailRetentionForStore } from "../config/sessions/session-automation-retention.js";
 import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { createRetainedAgentDatabaseMatcherFromSnapshot } from "../state/agent-deletion-discovery.js";
 import { prepareAgentDatabaseDeletionSnapshotRead } from "../state/agent-deletion-journal.read.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
+import { resolveCronDetailRetentionMs } from "./detail-retention.js";
 import { loadCronJobsStore, resolveCronJobsStorePath } from "./store.js";
 
 const log = createSubsystemLogger("cron/maintenance");
 
 const SESSION_REGISTRY_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const detailSweptAt = new Map<string, number>();
 
 type SessionRegistryMaintenanceStoreIdentity = {
   agentId: string;
@@ -32,7 +36,7 @@ type SessionRegistryMaintenanceStoreSummary =
       skippedReason: "agent-deletion-pending" | "agent-deletion-complete";
     })
   | (SessionRegistryMaintenanceStoreIdentity & {
-      skippedReason: "agent-store-held";
+      skippedReason: "agent-store-held" | "automation-retention-deferred";
       warning: string;
     });
 
@@ -92,6 +96,7 @@ export async function runSessionRegistryMaintenance(params: {
 }): Promise<SessionRegistryMaintenanceSummary> {
   params.assertCurrent?.();
   const cfg = getRuntimeConfig();
+  const detailRetentionMs = resolveCronDetailRetentionMs(cfg);
   const runningCronJobs = await readRunningCronJobIds();
   params.assertCurrent?.();
   if (!runningCronJobs.ok) {
@@ -158,6 +163,34 @@ export async function runSessionRegistryMaintenance(params: {
           log.warn(warning);
           stores.push({ ...target, skippedReason: "agent-store-held", warning });
           continue;
+        }
+        const now = Date.now();
+        const lastSweep = detailSweptAt.get(databasePath);
+        if (
+          params.apply &&
+          detailRetentionMs !== undefined &&
+          (lastSweep === undefined || now < lastSweep || now - lastSweep >= 60 * 60_000)
+        ) {
+          try {
+            const detail = await runAutomationDetailRetentionForStore({
+              ...target,
+              cutoff: now - detailRetentionMs,
+              assertCurrent,
+            });
+            assertCurrent();
+            detailSweptAt.set(databasePath, now);
+            if (detail.rewritten || detail.runtimeDeleted) {
+              log.info("Expired automation detail", { agentId: target.agentId, ...detail });
+            }
+          } catch (error) {
+            if (!isAutomationRetentionDeferredError(error)) {
+              throw error;
+            }
+            const warning = `Skipped automation detail retention for ${target.agentId}; active or unresolved work still owns its target.`;
+            log.warn(warning);
+            stores.push({ ...target, skippedReason: "automation-retention-deferred", warning });
+            continue;
+          }
         }
         const result = await runSessionRegistryMaintenanceForStore({
           ...target,

@@ -5,6 +5,7 @@ import {
   type OperationalRunInstanceRef,
 } from "../agents/admitted-run-context.js";
 import type { CommandLaneTaskMarker } from "../process/command-queue.js";
+import type { SessionTranscriptOwnership } from "../sessions/session-lifecycle-identity.js";
 import type { PreparedEffectUse } from "../shared/effect-authority.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import type { CronActiveRunTranscript } from "./active-run-transcript.js";
@@ -220,6 +221,7 @@ export function bindCronSelfRemovalCommitGuard(
 export type CronActiveJobMarker = {
   jobId: string;
   transcript?: CronActiveRunTranscript;
+  priorTranscripts?: CronActiveRunTranscript[];
   transcriptPreparation?: { storePath?: string; sessionKey?: string; agentId?: string };
   standingGrantAuthority?: CronStandingGrantAuthority;
   agentId?: string;
@@ -292,6 +294,48 @@ export function getCurrentCronActiveJobMarker(jobId: string): CronActiveJobMarke
   const state = getCronActiveJobState();
   const marker = state.activeJobs.get(jobId);
   return marker && isMarkerActiveInGeneration(marker, state.generation) ? marker : undefined;
+}
+
+/** Custody survives cancellation and revoked permissions until marker settlement. */
+export function readCronTranscriptOwnership(): readonly SessionTranscriptOwnership[] {
+  return [...getCronActiveJobState().activeJobs.values()].flatMap((marker) => {
+    let receiptCurrent = false;
+    const authority = marker.standingGrantAuthority;
+    try {
+      if (!authority?.assertReceiptCurrent) {
+        receiptCurrent = false;
+      } else {
+        authority.assertReceiptCurrent();
+        receiptCurrent = true;
+      }
+    } catch {
+      // Unavailable/revoked authority does not settle physical execution custody.
+      receiptCurrent = false;
+    }
+    const transcripts = [
+      ...(marker.priorTranscripts ?? []),
+      ...(marker.transcript ? [marker.transcript] : []),
+    ];
+    const result: SessionTranscriptOwnership[] = transcripts.map((physical) => ({
+      ownerId: `${marker.jobId}:${marker.token}`,
+      agentId: physical.agentId ?? marker.agentId,
+      storePath: physical.storePath,
+      sessionKey: physical.sessionKey,
+      sessionId: physical.sessionId,
+      state: receiptCurrent && physical.storePath ? "bound" : "unknown",
+    }));
+    if (marker.transcriptPreparation || transcripts.length === 0) {
+      const physical = marker.transcriptPreparation;
+      result.push({
+        ownerId: `${marker.jobId}:${marker.token}`,
+        agentId: physical?.agentId ?? marker.agentId,
+        storePath: physical?.storePath,
+        sessionKey: physical?.sessionKey,
+        state: receiptCurrent ? "pending" : "unknown",
+      });
+    }
+    return result;
+  });
 }
 
 function notifyActiveCronJobWaitersIfEmpty(state: CronActiveJobState) {

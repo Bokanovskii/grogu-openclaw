@@ -19,12 +19,15 @@ export type SessionColdExternalization = {
   archive: Omit<SessionColdArchive, "archive_blob">;
   envelopeBytes: number;
 };
+export type SessionColdRetentionProbe = { protectionKeys: string[]; cutoff: number };
 
 export type SessionColdMutationResult = {
   transcriptPublication?: readonly import("./session-transcript-authority.js").SessionTranscriptAuthorityReceipt[];
   archivedTranscripts: number;
   externalizedTranscripts: number;
   restored: boolean;
+  retentionEligible?: boolean;
+  retentionDetailAt?: number;
   sessionKey?: string;
   turnRebound?: SqliteExpectedSessionTranscriptTurnResult;
   refusedSource?: NonNullable<SessionSourceValidation["refusedSource"]>;

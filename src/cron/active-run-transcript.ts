@@ -60,6 +60,9 @@ export function bindActiveCronRunTranscript(
     ];
     return;
   }
+  if (marker.transcript) {
+    (marker.priorTranscripts ??= []).push(marker.transcript);
+  }
   marker.transcriptPreparation = undefined;
   marker.transcript = {
     binding,

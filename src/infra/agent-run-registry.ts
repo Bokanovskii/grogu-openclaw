@@ -148,7 +148,7 @@ export function registerAgentRunContext(
   }
   const runIndexInputBefore = projectedAgentRunInputKey(existing);
   const previous = { sessionKey: existing.sessionKey, agentId: existing.agentId };
-  for (const key of ["sessionKey", "sessionId", "agentId"] as const) {
+  for (const key of ["sessionKey", "sessionId", "agentId", "storePath"] as const) {
     if (context[key] && existing[key] !== context[key]) {
       existing[key] = context[key];
     }

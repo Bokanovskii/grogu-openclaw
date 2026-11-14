@@ -132,12 +132,15 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
     );
     isCliProviderMock.mockReturnValue(true);
     let modelPrompt: string | undefined;
+    let invocationRunId: string | undefined;
     runCliAgentMock.mockImplementationOnce(
       async (runParams: {
         prompt: string;
+        runId: string;
         userTurnTranscriptRecorder: UserTurnTranscriptRecorder;
       }) => {
         modelPrompt = runParams.prompt;
+        invocationRunId = runParams.runId;
         await runParams.userTurnTranscriptRecorder.persistApproved({ cwd: dir });
         return { payloads: [{ text: "Monitor complete" }], meta: { agentMeta: {} } };
       },
@@ -180,7 +183,8 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
           sourceTool: "cron",
           sourcePromptPrefix: `[cron:${jobId} Daily monitor]`,
           jobId,
-          runId: sessionId,
+          // Retention pairs the prompt with replies by the invocation run, not the session.
+          runId: invocationRunId,
           sourceSessionKey: runSessionKey,
         },
       },

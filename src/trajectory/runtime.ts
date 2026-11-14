@@ -370,7 +370,17 @@ export async function createTrajectoryRuntimeRecorder(input: TrajectoryRuntimeIn
         provider: params.provider,
         modelId: params.modelId,
         modelApi: params.modelApi,
-        data: data ? sanitizeTrajectoryPayload(data) : undefined,
+        data: data
+          ? sanitizeTrajectoryPayload(
+              type === "model.completed" && Array.isArray(data.messagesSnapshot)
+                ? {
+                    ...data,
+                    messagesSnapshot: undefined,
+                    messageCount: data.messagesSnapshot.length,
+                  }
+                : data,
+            )
+          : undefined,
       };
       const line = safeJsonStringify(event);
       if (!line) {

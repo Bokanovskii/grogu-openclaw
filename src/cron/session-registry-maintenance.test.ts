@@ -26,7 +26,25 @@ import { runSessionRegistryMaintenance } from "./session-registry-maintenance.js
 const DAY_MS = 24 * 60 * 60_000;
 const mocks = vi.hoisted(() => ({
   cronStoreLoadError: undefined as Error | undefined,
+  retentionDeferredAgentId: undefined as string | undefined,
 }));
+
+vi.mock("../config/sessions/session-automation-retention.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../config/sessions/session-automation-retention.js")>();
+  const errors = await import("../config/sessions/session-automation-retention.errors.js");
+  return {
+    ...actual,
+    runAutomationDetailRetentionForStore: async (
+      input: Parameters<typeof actual.runAutomationDetailRetentionForStore>[0],
+    ) => {
+      if (mocks.retentionDeferredAgentId === input.agentId) {
+        throw new errors.AutomationRetentionDeferredError("target is still owned");
+      }
+      return actual.runAutomationDetailRetentionForStore(input);
+    },
+  };
+});
 
 vi.mock("./store.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./store.js")>();
@@ -83,6 +101,7 @@ async function withMaintenanceState(run: (state: OpenClawTestState) => Promise<v
 describe("runSessionRegistryMaintenance", () => {
   afterEach(async () => {
     mocks.cronStoreLoadError = undefined;
+    mocks.retentionDeferredAgentId = undefined;
     resetConfigRuntimeState();
     closeOpenClawAgentDatabasesForTest();
   });
@@ -103,6 +122,36 @@ describe("runSessionRegistryMaintenance", () => {
       expect(summary.pruned).toBe(0);
       // The possibly-running cron transcript survives until cron facts are readable.
       expect(loadSessionEntry({ sessionKey: staleCronKey, storePath })).toBeDefined();
+    });
+  });
+
+  it("continues later agents after one agent defers automation retention", async () => {
+    await withMaintenanceState(async (state) => {
+      await state.writeConfig({
+        agents: { ownership: "explicit", entries: { main: {}, beta: {} } },
+      });
+      const scopes = new Map<string, { sessionKey: string; storePath: string }>();
+      for (const agentId of ["main", "beta"]) {
+        const storePath = path.join(state.sessionsDir(agentId), "sessions.json");
+        const sessionKey = await writeStaleCronSession(storePath, agentId);
+        scopes.set(agentId, { sessionKey, storePath });
+      }
+      mocks.retentionDeferredAgentId = "main";
+
+      const summary = await runSessionRegistryMaintenance({ apply: true });
+
+      expect(summary.pruned).toBe(1);
+      expect(summary.skippedStores).toBe(1);
+      expect(summary.stores.find((store) => store.agentId === "main")).toMatchObject({
+        skippedReason: "automation-retention-deferred",
+      });
+      expect(summary.stores.find((store) => store.agentId === "beta")).toMatchObject({
+        pruned: 1,
+      });
+      const main = scopes.get("main")!;
+      const beta = scopes.get("beta")!;
+      expect(loadSessionEntry(main)).toBeDefined();
+      expect(loadSessionEntry(beta)).toBeUndefined();
     });
   });
 

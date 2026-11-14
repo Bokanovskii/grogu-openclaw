@@ -1,4 +1,6 @@
 export const AUTOMATION_FIELD_HELP: Record<string, string> = {
+  "cron.runDetailRetention":
+    'Retains detailed automation inputs, correlated replies, and runtime snapshots for this duration (default "7d"). Active sessions and unmarked personal chat messages are protected. Small expiry markers preserve transcript identities. Set false to disable detail expiry; run-history and session-retention limits remain independent.',
   session:
     "Global session routing, reset, delivery policy, and maintenance controls for conversation history behavior. Keep defaults unless you need stricter isolation, retention, or delivery constraints.",
   "session.scope":

@@ -405,6 +405,8 @@ export const OpenClawSchemaShape = {
        * Default: "24h".
        */
       sessionRetention: z.union([z.string(), z.literal(false)]).optional(),
+      /** Detailed automation transcripts and runtime events. Default: "7d". */
+      runDetailRetention: z.union([z.string(), z.literal(false)]).optional(),
       failureAlert: z
         .strictObject({
           enabled: z.boolean().optional(),
@@ -419,6 +421,19 @@ export const OpenClawSchemaShape = {
         .optional(),
     })
     .superRefine((val, ctx) => {
+      if (typeof val.runDetailRetention === "string") {
+        try {
+          if (parseDurationMs(val.runDetailRetention, { defaultUnit: "d" }) <= 0) {
+            throw new Error("nonpositive retention");
+          }
+        } catch {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["runDetailRetention"],
+            message: "use a positive duration (ms, s, m, h, d), or false",
+          });
+        }
+      }
       if (val.sessionRetention !== undefined && val.sessionRetention !== false) {
         try {
           parseDurationMs(normalizeStringifiedOptionalString(val.sessionRetention) ?? "", {

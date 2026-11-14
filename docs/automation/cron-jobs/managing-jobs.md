@@ -162,6 +162,11 @@ Run history shows a loading indicator while the selected history is unavailable.
 
 Choose **View transcript** on a run to read that run’s recorded conversation, including earlier pages. Transcript selection stays bound to the recorded run when the scheduler reuses its session alias. Gateway clients use `cron.history` with a job `id` and an exact `runId` or `runAtMs`; the response contains `messages`, optional `activity`, and an opaque `nextCursor`. Missing or ambiguous run records remain unavailable rather than opening a different run. The selected run identifies its recorded conversation generation: isolated runs have a fresh generation, while custom sessions retain their shared conversation history across runs. Current job and session permissions apply to every page.
 
+For a running job, use its exact `state.runningAtMs` as `runAtMs`.
+The transcript shows saved reasoning, tool results, and output before completion.
+If the run loses its recorded session identity or the configured store changes,
+the request remains unavailable rather than opening another conversation.
+
 Intentional silence (`NO_REPLY`), intentionally empty output, heartbeat acknowledgments, and channel reply transforms record `deliverySuppressionReason` without claiming delivery or triggering delivery-failure alerts. These successful non-outcomes and successful executions with explicit `delivery.bestEffort: true` delete one-shots normally. A transport hook veto instead records a delivery error without an intentional-suppression reason. Active descendants without a final reply, stale interim output, and output emptied by TTS instead record a delivery error. Retained one-shot jobs do not automatically rerun; inspect their history and delivery outcome before retrying or removing them.
 
 Direct Gateway event sources can use `cron.run` with `mode: "if-enabled"` to run immediately without overriding an operator-disabled or auto-disabled job. Explicit operator run-now commands continue to use `force`.
@@ -232,6 +237,14 @@ Disable automations: `cron.enabled: false` or `OPENCLAW_SKIP_CRON=1`.
   </Accordion>
   <Accordion title="Maintenance">
     `cron.sessionRetention` (default `24h`, `false` or `"0h"` disables) prunes isolated run-session entries. Terminal run history is retained for 7 days (`lost` rows for 24 hours), with the newest 2000 rows per job and history class enforced as an additional ceiling.
+
+    `cron.runDetailRetention` (default `7d`, `false` disables) expires automation detail during the hourly sweep. It also covers automation turns inside persistent sessions. Personal chat messages remain unchanged. Mixed chats require explicit cron provenance and matching run IDs for replies. Legacy replies without that correlation remain unchanged.
+
+    The sweep preserves event identities with small custom markers, not copies of expired content. It also covers historical windows and restores cold transcripts through their owner. After restoration, it removes the verified external archive copy. It skips active sessions and rechecks authority before each bounded write. Expired detail cannot be recovered by disabling retention. SQLite can reuse freed pages immediately. Physical file sizes fall after incremental reclamation or [offline Doctor compaction](/cli/doctor/sqlite-maintenance).
+
+    Pending work, cleanup still in progress, and uncertain ownership also prevent expiry.
+    A running cron receipt currently defers detail cleanup for its whole agent, even for an unrelated run.
+    Each write holds the existing cron authority lock until it settles, so another host cannot admit a run during that write.
 
     Gateway retention waits for deferred agent database startup preparation before its first sweep, logging the wait as an intentional deferral. Retention continues even when scheduled execution is disabled.
 

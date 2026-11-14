@@ -7,5 +7,7 @@ export type CronStandingGrantAuthority = {
   context: OpenClawStateWorkerContext;
   handle: CronRunReceiptHandle;
   assertCurrent: () => void;
+  /** Fresh synchronous observation; throws while receipt facts are unavailable. */
+  assertReceiptCurrent?: () => void;
   acquireUse: (assertCurrent: () => void, signal?: AbortSignal) => Promise<CronReceiptAuthorityUse>;
 };

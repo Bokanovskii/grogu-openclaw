@@ -1,5 +1,14 @@
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 
+export type SessionTranscriptOwnership = {
+  ownerId: string;
+  agentId?: string;
+  storePath?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  state: "bound" | "pending" | "unknown";
+};
+
 export function normalizeSessionIdentities(
   scope: string,
   identities: Iterable<string | undefined>,

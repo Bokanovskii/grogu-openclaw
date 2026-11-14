@@ -17,6 +17,16 @@ describe("config schema regressions", () => {
     expect(OpenClawSchema.safeParse({ cron: { sessionRetention: "1h30m" } }).success).toBe(true);
   });
 
+  it.each(["1h30m", "7d", false] as const)("accepts automation detail retention %s", (value) => {
+    expect(
+      OpenClawSchema.parse({ cron: { runDetailRetention: value } }).cron?.runDetailRetention,
+    ).toBe(value);
+  });
+
+  it.each(["0h", "-1d", "abc"])("rejects unsafe automation detail retention %s", (value) => {
+    expect(OpenClawSchema.safeParse({ cron: { runDetailRetention: value } }).success).toBe(false);
+  });
+
   it("leaves skipMissedJobs unset when omitted", () => {
     expect(OpenClawSchema.parse({ cron: {} }).cron?.skipMissedJobs).toBeUndefined();
   });

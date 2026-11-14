@@ -37,6 +37,17 @@ export class WebSearchProviderError extends Error {
             : "Check this search provider's configuration and connection, or choose another provider.";
       message = `Search failed${status ? ` (HTTP ${status})` : ""}. ${hint}`;
     }
+    const retryAfterMs: unknown =
+      this.cause instanceof Error
+        ? Object.getOwnPropertyDescriptor(this.cause, "retryAfterMs")?.value
+        : undefined;
+    if (
+      typeof retryAfterMs === "number" &&
+      Number.isSafeInteger(retryAfterMs) &&
+      retryAfterMs > 0
+    ) {
+      message += ` Retry after at least ${Math.ceil(retryAfterMs / 1_000)} seconds.`;
+    }
     return {
       provider: this.provider,
       result: {

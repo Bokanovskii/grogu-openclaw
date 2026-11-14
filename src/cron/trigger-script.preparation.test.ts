@@ -65,6 +65,17 @@ beforeEach(async () => {
             }
           };
         }, { names: ["cold_probe"] });
+        api.registerTool({
+          contextVersion: 2,
+          create: (ctx) => ({
+            name: "invocation_probe", label: "Invocation probe", description: "Fixture invocation authority probe",
+            parameters: { type: "object", properties: {} },
+            async execute() {
+              ctx.assertInvocationCurrent();
+              return { content: [], details: { current: true } };
+            }
+          })
+        }, { names: ["invocation_probe"] });
       }
     };`;
     writePlugin({
@@ -83,7 +94,7 @@ beforeEach(async () => {
     JSON.stringify({
       id: "cold-probe",
       configSchema: { type: "object", properties: { generation: { type: "integer" } } },
-      contracts: { tools: ["cold_probe"] },
+      contracts: { tools: ["cold_probe", "invocation_probe"] },
     }),
   );
   config = {
@@ -124,15 +135,16 @@ function readRegistrations() {
     .map((line) => JSON.parse(line) as { artifact: string; mode: string });
 }
 
-async function executeProbe({ ctx }: HeadlessParams): Promise<CodeModeHeadlessResult> {
-  const tool = ctx.catalogRef?.current?.entries.find(
-    (entry) => entry.tool.name === "cold_probe",
-  )?.tool;
+async function executeProbe(
+  { ctx }: HeadlessParams,
+  name = "cold_probe",
+): Promise<CodeModeHeadlessResult> {
+  const tool = ctx.catalogRef?.current?.entries.find((entry) => entry.tool.name === name)?.tool;
   const runtime = new ToolSearchRuntime(ctx, resolveToolSearchConfig(ctx.runtimeConfig), {
     prepareInput: true,
     validateInput: true,
   });
-  const result = tool ? await runtime.callValue("cold_probe", {}) : null;
+  const result = tool ? await runtime.callValue(name, {}) : null;
   return {
     status: "completed",
     value: { state: result },
@@ -291,6 +303,35 @@ describe("cron preparation plugin ownership", () => {
       });
     },
   );
+
+  it("lets versioned plugin tools assert their admitted condition invocation", async () => {
+    setCurrentPluginMetadataSnapshot(
+      loadPluginMetadataSnapshot({ config, workspaceDir: state.workspaceDir }),
+      { config },
+    );
+    const runtime = createCronScriptRuntime({
+      config,
+      runHeadless: async (params) => {
+        const result = await executeProbe(params, "invocation_probe");
+        return result.status === "completed"
+          ? { ...result, value: { fire: true, state: result.value } }
+          : result;
+      },
+    });
+    await expect(
+      runtime.evaluateTrigger({
+        jobId: "invocation",
+        agentId: "main",
+        toolsAllow: ["invocation_probe"],
+        script: "return { fire: true }",
+        state: null,
+      }),
+    ).resolves.toMatchObject({
+      kind: "evaluated",
+      fire: true,
+      state: { state: { current: true } },
+    });
+  });
 
   it.each(["scoped", "global"] as const)(
     "uses only %s registry ownership during downstream loading without a model runtime",

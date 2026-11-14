@@ -7,7 +7,7 @@ import { withFileLock } from "../src/infra/file-lock.js";
 import { isPathInside } from "../src/infra/path-guards.js";
 import type { OperatorProfile } from "./operator.js";
 
-export const TEMPORARY_ARTIFACT_LIFETIME_MS = 24 * 60 * 60_000;
+const RELEASE_CANDIDATE_LIFETIME_MS = 24 * 60 * 60_000;
 
 const artifactDirectory = /^\d{4}-\d{2}-\d{2}T[\d.-]+Z-[a-f0-9-]{36}$/;
 const archiveReceipt = z.object({
@@ -185,8 +185,8 @@ export async function cleanupGroguArtifacts(
         }
         lastWrite = Math.max(lastWrite, stat.mtimeMs);
       }
-      if (now - lastWrite < TEMPORARY_ARTIFACT_LIFETIME_MS) {
-        result.protected.push({ path: candidate, reason: "temporary-artifact-within-24-hours" });
+      if (kind === "release" && !failedRelease && now - lastWrite < RELEASE_CANDIDATE_LIFETIME_MS) {
+        result.protected.push({ path: candidate, reason: "release-candidate-within-24-hours" });
         continue;
       }
       options.assertCurrent();

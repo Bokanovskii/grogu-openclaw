@@ -6,6 +6,7 @@ import { assert, expect, it, vi } from "vitest";
 import { parseUpdateRecoveryBackupManifest } from "../../commands/backup-verify-manifest.js";
 import * as nodeRuntimeDiagnostics from "../../commands/node-runtime-diagnostics.js";
 import * as tempRoot from "../../infra/tmp-openclaw-dir.js";
+import { resolveUpdateCaptureRoot } from "../../infra/update-capture-paths.js";
 import * as updateCheck from "../../infra/update-check.js";
 import { createManagedHandoffLeaseStore } from "../../infra/update-managed-service-handoff-lease.js";
 import { createUpdateRun, finishUpdateRun, getUpdateRun } from "../../infra/update-run-ledger.js";
@@ -104,6 +105,7 @@ export function registerOriginalCaptureTests({
     { schema: OPENCLAW_STATE_SCHEMA_VERSION, existing: false, refused: false },
     { schema: OPENCLAW_STATE_SCHEMA_VERSION + 1, existing: false, refused: false },
     { schema: OPENCLAW_STATE_SCHEMA_VERSION, existing: true, refused: false },
+    { schema: OPENCLAW_STATE_SCHEMA_VERSION, existing: true, refused: false, grogu: true },
     { schema: OPENCLAW_STATE_SCHEMA_VERSION, existing: true, refused: true },
     {
       schema: OPENCLAW_STATE_SCHEMA_VERSION,
@@ -112,8 +114,15 @@ export function registerOriginalCaptureTests({
       releaseDenied: true,
     },
   ])(
-    "captures original state before parent history (schema=$schema, existing=$existing, refused=$refused, release denied=$releaseDenied)",
-    async ({ schema, existing, refused, releaseDenied = false }) => {
+    "applies original-state capture policy before parent history (schema=$schema, existing=$existing, refused=$refused, release denied=$releaseDenied, grogu=$grogu)",
+    async ({ schema, existing, refused, releaseDenied = false, grogu = false }) => {
+      if (grogu) {
+        const directory = fs.realpathSync(dirs.make("grogu-profile-"));
+        fs.chmodSync(directory, 0o700);
+        const profile = path.join(directory, "profile.json");
+        fs.writeFileSync(profile, '{"schemaVersion":1,"bindings":{}}', { mode: 0o600 });
+        vi.stubEnv("GROGU_PROFILE_FILE", profile);
+      }
       const previousRunId = existing ? createUpdateRun({ trigger: "cli" }).runId : undefined;
       if (previousRunId) {
         finishUpdateRun(previousRunId, { status: "succeeded" });
@@ -206,6 +215,8 @@ export function registerOriginalCaptureTests({
             db.close();
           }
         });
+      let createdCapturePath: string | undefined;
+      let captureDirectoryExists: boolean | undefined;
       const execute = vi
         .spyOn(execution, "executeMutableUpdate")
         .mockImplementation(async (params) => {
@@ -221,14 +232,21 @@ export function registerOriginalCaptureTests({
           }
           expect(getUpdateRun(run.runId, { env: run.env })?.status).toBe("running");
           const ref = run.originalRecoveryCapture;
-          assert(ref);
-          expectOriginalCapture({
-            runId: run.runId,
-            manifestPath: ref.manifestPath,
-            installRoot: captureRoot,
-            databasePath: fixture.databasePath,
-            previousRunId,
-          });
+          if (grogu) {
+            createdCapturePath = ref?.directory;
+            captureDirectoryExists = fs.existsSync(
+              resolveUpdateCaptureRoot(run.env.OPENCLAW_STATE_DIR!),
+            );
+          } else {
+            assert(ref);
+            expectOriginalCapture({
+              runId: run.runId,
+              manifestPath: ref.manifestPath,
+              installRoot: captureRoot,
+              databasePath: fixture.databasePath,
+              previousRunId,
+            });
+          }
           finishUpdateRun(
             run.runId,
             { status: "skipped", reason: "fixture-before-forward-migration" },
@@ -304,6 +322,10 @@ export function registerOriginalCaptureTests({
         await update;
         expect(execute).toHaveBeenCalledOnce();
         expect(stage.close).toHaveBeenCalledOnce();
+        if (grogu) {
+          expect(createdCapturePath).toBeUndefined();
+          expect(captureDirectoryExists).toBe(false);
+        }
       }
       expect(doctor.mock.calls.length).toBe(0);
     },

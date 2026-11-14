@@ -124,3 +124,7 @@ Its brief selects the work; this shared policy governs how the work is done.
   completed investigation or spend an entire run retrying a blocked source.
 - Only the owner/operator controls persistent job lifecycle, schedules and routing.
   Work independently where useful, but do not rewrite or disable sibling jobs.
+- Never create, schedule or retain backups. The native five-minute storage cleanup
+  owns removal of completed artifacts; do not add another cleanup job. Temporary
+  rollback files needed by an active update or repair remain protected until that
+  operation's owner settles them. Never delete an active writer's files.

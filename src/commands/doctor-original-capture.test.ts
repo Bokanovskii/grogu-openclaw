@@ -12,9 +12,42 @@ import { preserveDoctorOriginalState } from "./doctor-original-capture.js";
 
 afterEach(() => vi.restoreAllMocks());
 
-it.each(["ancestry-unverified", "missing-capture"] as const)(
-  "preserves the original capture refusal classification for %s",
-  async (failure) => {
+function writeGroguProfile(root: string): string {
+  const directory = fs.realpathSync(root);
+  fs.chmodSync(directory, 0o700);
+  const profile = path.join(directory, "grogu-profile.json");
+  fs.writeFileSync(profile, '{"schemaVersion":1,"bindings":{}}', { mode: 0o600 });
+  return profile;
+}
+
+it("skips optional Doctor originals for a Grogu profile without changing live state", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const profile = writeGroguProfile(state.root);
+    const before = fs.readFileSync(state.configPath);
+    const log = vi.fn();
+
+    const result = await preserveDoctorOriginalState({
+      root: process.cwd(),
+      env: { ...state.env, GROGU_PROFILE_FILE: profile },
+      runtime: { log, error: vi.fn(), exit: vi.fn() },
+      signal: new AbortController().signal,
+      assertCurrent() {},
+    });
+
+    expect(result).toBeUndefined();
+    expect(fs.existsSync(resolveUpdateCaptureRoot(state.stateDir))).toBe(false);
+    expect(fs.readFileSync(state.configPath)).toEqual(before);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Grogu no-backup policy"));
+  });
+});
+
+it.each([
+  ["ancestry-unverified", false],
+  ["missing-capture", false],
+  ["missing-capture", true],
+] as const)(
+  "preserves the original capture refusal classification for %s (Grogu=%s)",
+  async (failure, grogu) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const driver = readUpdateRunDriver();
       expect(driver).toBeDefined();
@@ -27,7 +60,9 @@ it.each(["ancestry-unverified", "missing-capture"] as const)(
       const directory = state.path("missing-original-capture");
       const refusal = await preserveDoctorOriginalState({
         root: process.cwd(),
-        env: state.env,
+        env: grogu
+          ? { ...state.env, GROGU_PROFILE_FILE: writeGroguProfile(state.root) }
+          : state.env,
         runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
         signal: new AbortController().signal,
         assertCurrent() {},

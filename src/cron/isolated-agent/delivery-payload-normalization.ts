@@ -1,9 +1,14 @@
 // Normalizes direct cron payloads before TTS, custody, transport, or mirroring.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
+import {
+  copyReplyPayloadMetadata,
+  setReplyPayloadMetadata,
+  type ReplyPayload,
+} from "../../auto-reply/reply-payload.js";
 import type { NormalizeReplyOutcome } from "../../auto-reply/reply/normalize-reply.js";
 import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { normalizeSilentReplyText } from "./delivery-dispatch-policy.js";
+import { projectCronNotificationText } from "./notification-text.js";
 
 type CronChannelTransform = {
   apply: (payload: ReplyPayload) => ReplyPayload | null;
@@ -32,14 +37,39 @@ export function normalizeDirectCronDeliveryPayloads(params: {
   summary?: string;
   synthesizedText?: string;
   channelTransform?: CronChannelTransform;
-}): NormalizeReplyOutcome<ReplyPayload[]> {
-  const fallback = normalizeSilentReplyText(
+  noticeOnly?: boolean;
+}): NormalizeReplyOutcome<ReplyPayload[]> | { kind: "blocked"; reason: string } {
+  const projected: ReplyPayload[] = [];
+  for (const payload of params.deliveryPayloads) {
+    if (payload.isError) {
+      projected.push(payload);
+      continue;
+    }
+    const notice = projectCronNotificationText(payload.text, params.noticeOnly);
+    if (notice.kind === "blocked") {
+      return notice;
+    }
+    const next = copyReplyPayloadMetadata(payload, { ...payload, text: notice.text });
+    if (notice.text !== payload.text) {
+      // Authored speech belongs to the original text, not the notice projection.
+      setReplyPayloadMetadata(next, { tts: undefined });
+    }
+    projected.push(next);
+  }
+  const rawFallback =
     normalizeOptionalString(params.outputText) ??
-      normalizeOptionalString(params.summary) ??
-      normalizeOptionalString(params.synthesizedText),
-  );
+    normalizeOptionalString(params.summary) ??
+    normalizeOptionalString(params.synthesizedText);
+  let fallback = normalizeSilentReplyText(rawFallback);
+  if (!params.deliveryPayloads.some((payload) => payload.isError)) {
+    const fallbackNotice = projectCronNotificationText(rawFallback, params.noticeOnly);
+    if (fallbackNotice.kind === "blocked") {
+      return fallbackNotice;
+    }
+    fallback = normalizeSilentReplyText(fallbackNotice.text);
+  }
   const fallbackText = fallback.strippedTrailingSilentToken ? undefined : fallback.text;
-  const candidates = params.deliveryPayloads
+  const candidates = projected
     .map(normalizeDirectPayload)
     .filter((payload) => hasReplyPayloadContent(payload, { trimText: true }));
   if (candidates.length === 0 && fallbackText) {

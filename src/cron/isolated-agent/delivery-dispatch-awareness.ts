@@ -1,6 +1,7 @@
 import { isAudioFileName } from "@openclaw/media-core/mime";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { copyReplyPayloadMetadata, type ReplyPayload } from "../../auto-reply/reply-payload.js";
+import { resolveSessionStorePathCore } from "../../config/sessions/inbound.runtime.js";
 import { resolveSessionWorkStartError } from "../../config/sessions/lifecycle.js";
 import {
   canonicalizeMainSessionAlias,
@@ -11,6 +12,10 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { NormalizedOutboundPayload } from "../../infra/outbound/deliver.js";
 import type { OutboundSessionRoute } from "../../infra/outbound/outbound-session.js";
+import {
+  createOutboundPayloadPlan,
+  projectOutboundPayloadPlanForMirror,
+} from "../../infra/outbound/payloads.js";
 import type {
   SourceDeliveryOutcome,
   SourceDeliveryVisibleDelivery,
@@ -26,7 +31,10 @@ import {
   logCronDeliveryWarn,
   normalizeDeliveryTarget,
 } from "./delivery-dispatch-policy.js";
-import type { SuccessfulCronDeliveryTarget } from "./delivery-dispatch-types.js";
+import type {
+  DispatchCronDeliveryParams,
+  SuccessfulCronDeliveryTarget,
+} from "./delivery-dispatch-types.js";
 import { selectCronRouteCurrentSessionKey } from "./delivery-route-session-key.js";
 import type { DeliveryTargetResolution } from "./delivery-target.js";
 import { pickLastNonEmptyTextFromPayloads } from "./helpers.js";
@@ -45,6 +53,51 @@ export type DirectCronTranscriptMirror = {
   deliveryMirror?: { kind: typeof CRON_DIRECT_DELIVERY_CONTEXT_KIND };
   config: OpenClawConfig;
 };
+
+export function buildDirectCronTranscriptMirror(params: {
+  run: DispatchCronDeliveryParams;
+  sessionKey: string;
+  channel: string;
+  deliveredPayloads: NormalizedOutboundPayload[];
+  fallbackPayloads: ReplyPayload[];
+  targetsDeletingRunSession: boolean;
+  hasTargetAwareness: boolean;
+  idempotencyKey: string;
+}): DirectCronTranscriptMirror {
+  const { run } = params;
+  const projection =
+    params.deliveredPayloads.length > 0
+      ? projectDeliveredDirectCronPayloadsForMirror(params.deliveredPayloads)
+      : projectOutboundPayloadPlanForMirror(
+          createOutboundPayloadPlan(
+            buildDirectCronTranscriptMirrorPayloads(params.fallbackPayloads),
+            {
+              cfg: run.cfgWithAgentDefaults,
+              sessionKey: params.sessionKey,
+              surface: params.channel,
+            },
+          ),
+        );
+  return {
+    sessionKey: params.sessionKey,
+    agentId: run.agentId,
+    ...(params.targetsDeletingRunSession
+      ? { expectedSessionId: run.sessionId, expectedLifecycleRevision: run.lifecycleRevision }
+      : {}),
+    text: resolveDirectCronTranscriptMirrorText(projection),
+    // Non-audio attachment names stay in mirrorText so media cannot replace delivered text.
+    mediaUrls: undefined,
+    // The admitted run owns the store; route aliases cannot select another agent.
+    storePath: resolveSessionStorePathCore(run.cfgWithAgentDefaults.session?.store, {
+      agentId: run.agentId,
+    }),
+    idempotencyKey: params.idempotencyKey,
+    ...(!params.hasTargetAwareness
+      ? { deliveryMirror: { kind: CRON_DIRECT_DELIVERY_CONTEXT_KIND } }
+      : {}),
+    config: run.cfgWithAgentDefaults,
+  };
+}
 
 const deliveryOutboundRuntimeLoader = createLazyImportLoader(
   () => import("./delivery-outbound.runtime.js"),

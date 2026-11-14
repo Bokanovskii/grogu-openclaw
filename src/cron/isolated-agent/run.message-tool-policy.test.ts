@@ -14,6 +14,7 @@ import type { PreparedCliRunContext, RunCliAgentParams } from "../../agents/cli-
 import { mockCall } from "../../test-utils/mock-call-assertions.js";
 import { applyJobPatch } from "../service/jobs.js";
 import { makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
+import { CRON_NOTIFICATION_GUIDANCE } from "./notification-text.js";
 import {
   buildSafeExternalPromptMock,
   callGatewayMock,
@@ -462,6 +463,16 @@ describe("runCronIsolatedAgentTurn delivery policy", () => {
       expect(buildSafeExternalPromptMock).toHaveBeenCalledWith(
         expect.objectContaining({ content: "send a message", jobName: "Message Tool Policy" }),
       );
+    });
+
+    it.each([
+      ["Delivery contract: notice-only\nCheck my flights.", true],
+      ["Check my flights.", false],
+    ])("adds notice-only guidance from the job message %j", async (message, expected) => {
+      mockAnnounce();
+      resolveDeliveryTargetMock.mockResolvedValue(resolvedTarget());
+      await runCronIsolatedAgentTurn(makeParams(makeJob(announce, { message })));
+      expect(runPrompt(embedded()).includes(CRON_NOTIFICATION_GUIDANCE)).toBe(expected);
     });
 
     it("wraps injection-shaped delivery targets as untrusted prompt data", async () => {

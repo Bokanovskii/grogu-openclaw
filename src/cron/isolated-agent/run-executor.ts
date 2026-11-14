@@ -160,21 +160,10 @@ function createCronPromptExecutor(
       senderPolicyMode: "never",
     });
   }
-  const finalizePromptForResolvedTools = ({
-    prompt,
-    messageToolAvailable,
-  }: {
+  const finalizePromptForResolvedTools = (input: {
     prompt: string;
     messageToolAvailable: boolean;
-  }) =>
-    finalizeCronPromptForResolvedTools({
-      prompt,
-      messageToolAvailable,
-      deliveryRequested: params.deliveryRequested,
-      resolvedDelivery: params.resolvedDelivery,
-      sourceDelivery,
-      messageToolFormatPrompt: params.messageToolFormatPrompt,
-    });
+  }) => finalizeCronPromptForResolvedTools(params, input);
   let pendingUserTurn:
     | {
         promptText: string;

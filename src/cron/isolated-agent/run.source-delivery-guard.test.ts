@@ -94,26 +94,28 @@ describe("cron source delivery policy", () => {
 
   it("rejects required message-tool delivery when the runtime cannot expose the tool", () => {
     expect(() =>
-      finalizeCronPromptForResolvedTools({
-        prompt: "send a message",
-        messageToolAvailable: false,
-        deliveryRequested: true,
-        resolvedDelivery: { ok: true, channel: "messagechat", to: "123" },
-        sourceDelivery: {
-          owner: "message_tool_then_direct_fallback",
-          reason: "cron_announce",
-          target: { channel: "messagechat", to: "123" },
-          normalFinal: "private",
-          sourceReplyDeliveryMode: "message_tool_only",
-          messageTool: {
-            enabled: true,
-            force: true,
-            requireExplicitTarget: false,
-            requireExplicitTargetEvidence: false,
+      finalizeCronPromptForResolvedTools(
+        {
+          job: { payload: { kind: "agentTurn", message: "send a message" } },
+          deliveryRequested: true,
+          resolvedDelivery: { ok: true, channel: "messagechat", to: "123" },
+          sourceDelivery: {
+            owner: "message_tool_then_direct_fallback",
+            reason: "cron_announce",
+            target: { channel: "messagechat", to: "123" },
+            normalFinal: "private",
+            sourceReplyDeliveryMode: "message_tool_only",
+            messageTool: {
+              enabled: true,
+              force: true,
+              requireExplicitTarget: false,
+              requireExplicitTargetEvidence: false,
+            },
+            fallback: { directDelivery: true, skipWhenMessageToolSentToTarget: true },
           },
-          fallback: { directDelivery: true, skipWhenMessageToolSentToTarget: true },
         },
-      }),
+        { prompt: "send a message", messageToolAvailable: false },
+      ),
     ).toThrow("Cron source delivery requires the message tool");
   });
 

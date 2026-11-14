@@ -1,39 +1,31 @@
 import type { NormalizeReplySkipReason } from "../../auto-reply/reply/normalize-reply-skip-reason.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import { resolveControlUiSessionUrl } from "../../config/control-ui-link-base.js";
-import { resolveSessionStorePathCore } from "../../config/sessions/inbound.runtime.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type {
   NormalizedOutboundPayload,
   OutboundDeliveryResult,
 } from "../../infra/outbound/deliver.js";
 import { outboundDeliveryQueueName } from "../../infra/outbound/delivery-queue-namespaces.js";
-import {
-  createOutboundPayloadPlan,
-  projectOutboundPayloadPlanForMirror,
-} from "../../infra/outbound/payloads.js";
 import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { isCronSessionKey } from "../../routing/session-key.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
-import { CRON_DIRECT_DELIVERY_CONTEXT_KIND } from "../../shared/transcript-only-openclaw-assistant.js";
 import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 import { normalizeCronRunErrorText } from "../service/execution-errors.js";
 import type { CronResolvedDeliveryState } from "../types.js";
 import { commitCurrentSessionCronCompletion } from "./current-session-completion.js";
 import {
   appendAdmittedDirectCronDeliveryTranscriptMirror,
-  buildDirectCronTranscriptMirrorPayloads,
+  buildDirectCronTranscriptMirror,
   type DirectCronTranscriptMirror,
   formatTargetCronDeliveryFailureAwarenessText,
-  projectDeliveredDirectCronPayloadsForMirror,
   queueCronAwarenessSystemEvent,
   queueCronMessageToolDeliveryAwareness,
   resolveCronAwarenessMainSessionKey,
   resolveCronAwarenessText,
   commitDirectCronOutboundRoute,
   resolveCronDeliveryRouteSessionKey,
-  resolveDirectCronTranscriptMirrorText,
   isSameSessionKey,
   shouldQueueCronAwareness,
 } from "./delivery-dispatch-awareness.js";
@@ -64,6 +56,7 @@ import {
 } from "./delivery-payload-normalization.js";
 import { requiresExternalCronDelivery } from "./delivery-target.js";
 import { pickSummaryFromOutput, readAutomationFailedReport } from "./helpers.js";
+import { isCronNoticeOnlyJob } from "./notification-text.js";
 import { cleanupCronRunSessionAfterRun } from "./session-cleanup.js";
 import { isLikelyInterimCronMessage } from "./subagent-followup-hints.js";
 
@@ -91,6 +84,8 @@ export async function dispatchCronDelivery(
   let outputText = params.outputText;
   let synthesizedText = params.synthesizedText;
   let deliveryPayloads = params.deliveryPayloads;
+  const noticeOnly = isCronNoticeOnlyJob(params.job);
+  let notificationPrepared = false;
   let agentReportedFailure: string | undefined;
   // A settled descendant answer is the run's terminal answer; classify it like the parent's
   // own reply so a reported failure is recorded as one and never delivered as a token.
@@ -100,7 +95,7 @@ export async function dispatchCronDelivery(
     outputText = reply;
     summary = pickSummaryFromOutput(reply) ?? summary;
     synthesizedText = reply;
-    deliveryPayloads = [{ text: reply }];
+    deliveryPayloads = [{ text: reply, ...(agentReportedFailure ? { isError: true } : {}) }];
   };
 
   const deliveryState: CronResolvedDeliveryState = {
@@ -189,6 +184,11 @@ export async function dispatchCronDelivery(
     recordDelivery("not-delivered", undefined, reason);
     return { kind: "suppressed" };
   };
+  const blockNotification = (reason: string): CronDeliveryDisposition => {
+    deliveryAttempted = true;
+    recordDelivery("not-delivered", `Notification withheld: ${reason}. Inspect the run output.`);
+    return { kind: "suppressed" };
+  };
   const deliverViaDirect = async (
     delivery: SuccessfulCronDeliveryTarget,
   ): Promise<CronDeliveryDisposition | null> => {
@@ -205,16 +205,21 @@ export async function dispatchCronDelivery(
       outputText,
       summary,
       synthesizedText,
+      noticeOnly: noticeOnly && !notificationPrepared,
       channelTransform: resolveCronChannelReplyTransform({
         channel: delivery.channel,
         cfg: params.cfgWithAgentDefaults,
         accountId: delivery.accountId,
       }),
     });
+    if (payloadNormalization.kind === "blocked") {
+      return blockNotification(payloadNormalization.reason);
+    }
     if (payloadNormalization.kind === "suppress") {
       return finishSilentReplyDelivery(payloadNormalization.reason);
     }
     const normalizedPayloads = payloadNormalization.payload;
+    deliveryPayloads = normalizedPayloads;
     const deliveryIdempotencyKey = buildDirectCronDeliveryIdempotencyKey({
       jobId: params.job.id,
       runStartedAt: params.runStartedAt,
@@ -489,43 +494,16 @@ export async function dispatchCronDelivery(
         !deliveryWillReachAwarenessMainSession &&
         !mirrorWouldBypassIsolatedAwarenessPolicy
       ) {
-        const mirrorProjection =
-          attemptedPayloadsForMirror.length > 0
-            ? projectDeliveredDirectCronPayloadsForMirror(attemptedPayloadsForMirror)
-            : projectOutboundPayloadPlanForMirror(
-                createOutboundPayloadPlan(
-                  buildDirectCronTranscriptMirrorPayloads(linkedPayloadsForDelivery),
-                  {
-                    cfg: params.cfgWithAgentDefaults,
-                    sessionKey: deliverySessionKey,
-                    surface: delivery.channel,
-                  },
-                ),
-              );
-        const transcriptMirror = {
+        const transcriptMirror = buildDirectCronTranscriptMirror({
+          run: params,
           sessionKey: deliverySessionKey,
-          agentId: params.agentId,
-          ...(mirrorTargetsDeletingRunSession
-            ? {
-                expectedSessionId: params.sessionId,
-                expectedLifecycleRevision: params.lifecycleRevision,
-              }
-            : {}),
-          text: resolveDirectCronTranscriptMirrorText(mirrorProjection),
-          // Non-audio attachment names stay in mirrorText so media cannot replace delivered text.
-          mediaUrls: undefined,
-          storePath: resolveSessionStorePathCore(params.cfgWithAgentDefaults.session?.store, {
-            // This mirror already carries the admitted run owner. Re-parsing a
-            // route alias can reject legacy keys or select a different store.
-            agentId: params.agentId,
-          }),
+          channel: delivery.channel,
+          deliveredPayloads: attemptedPayloadsForMirror,
+          fallbackPayloads: linkedPayloadsForDelivery,
+          targetsDeletingRunSession: mirrorTargetsDeletingRunSession,
+          hasTargetAwareness: targetSessionAwarenessText !== undefined,
           idempotencyKey: deliveryIdempotencyKey,
-          // The durable marker is a fallback only when target awareness is absent.
-          ...(targetSessionAwarenessText === undefined
-            ? { deliveryMirror: { kind: CRON_DIRECT_DELIVERY_CONTEXT_KIND } }
-            : {}),
-          config: params.cfgWithAgentDefaults,
-        };
+        });
         if (mirrorTargetsDeletingRunSession) {
           deferredDeletingSessionMirror = transcriptMirror;
         } else {
@@ -631,16 +609,28 @@ export async function dispatchCronDelivery(
         outputText,
         summary,
         synthesizedText,
+        noticeOnly,
       });
+      if (normalizedPayloads.kind === "blocked") {
+        return blockNotification(normalizedPayloads.reason);
+      }
       if (normalizedPayloads.kind === "suppress") {
         return finishSilentReplyDelivery(normalizedPayloads.reason);
       }
       deliveryPayloads = normalizedPayloads.payload;
+      notificationPrepared = true;
+      synthesizedText =
+        deliveryPayloads
+          .map((payload) => payload.text ?? "")
+          .filter(Boolean)
+          .join("\n") || undefined;
     }
-    synthesizedText = normalizedSynthesizedText.strippedTrailingSilentToken
-      ? undefined
-      : normalizedSynthesizedText.text;
-    if (synthesizedText) {
+    if (!requiresSessionCompletion) {
+      synthesizedText = normalizedSynthesizedText.strippedTrailingSilentToken
+        ? undefined
+        : normalizedSynthesizedText.text;
+    }
+    if (synthesizedText && !requiresSessionCompletion) {
       outputText = synthesizedText;
     }
     if (params.isAborted()) {

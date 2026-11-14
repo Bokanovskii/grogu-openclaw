@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { Locator } from "playwright";
 import { expect, it } from "vitest";
 import { buildWidgetDocument } from "../../../src/canvas/wrap.js";
 import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
@@ -85,6 +86,15 @@ suite.define(() => {
         const preview = card.locator("iframe:not([hidden])").contentFrame();
         await preview.getByRole("heading", { name: "Build results" }).waitFor();
         expect(await card.count()).toBe(1);
+        // The frame must end just below its last line: no clipping, no reserved blank space.
+        const expectFrameFits = async (lastLine: Locator) => {
+          const frame = await card.locator("iframe:not([hidden])").boundingBox();
+          const line = await lastLine.boundingBox();
+          const gap = frame!.y + frame!.height - (line!.y + line!.height);
+          expect(gap).toBeGreaterThanOrEqual(0);
+          expect(gap).toBeLessThan(64);
+        };
+        await expectFrameFits(preview.getByText("Compile: passed"));
         const frame = await takeControlUiScreenshotFrame(page, surface, [composer], {
           animations: "disabled",
         });
@@ -115,7 +125,9 @@ suite.define(() => {
         });
         await preview.getByText("Tests: passed").waitFor();
         console.info(`[widget-draft] arrival-to-visible ${Date.now() - arrival}ms`);
-        expect(await card.locator("iframe:not([hidden])").getAttribute("sandbox")).toBe("");
+        expect(await card.locator("iframe:not([hidden])").getAttribute("sandbox")).toBe(
+          "allow-same-origin",
+        );
         expect(await preview.locator("script,meta[http-equiv=refresh],iframe").count()).toBe(0);
         expect(requests).toEqual([]);
         const after = await takeControlUiScreenshotFrame(page, surface, [card], {
@@ -168,6 +180,34 @@ suite.define(() => {
           );
         }
         await preview.getByText("Deploy: queued").waitFor();
+        // A reader following the stream stays at the end while the preview grows.
+        const thread = page.locator(".chat-thread");
+        const distanceToEnd = () =>
+          thread.evaluate(
+            (element) => element.scrollHeight - element.clientHeight - element.scrollTop,
+          );
+        await thread.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+        await expect.poll(distanceToEnd).toBeLessThanOrEqual(8);
+        const rows = Array.from({ length: 40 }, (_, index) => `<p>Check ${index + 1}: passed</p>`);
+        await emit("tool", {
+          phase: "input_delta",
+          name: "show_widget",
+          toolCallId: "widget-1",
+          widgetDraft: {
+            title: "Build results",
+            receivedChars: htmlLength + rows.join("").length,
+            offset: htmlLength,
+            html: rows.join(""),
+          },
+        });
+        const lastRow = preview.getByText("Check 40: passed");
+        await lastRow.waitFor();
+        const tall = await takeControlUiScreenshotFrame(page, surface, [composer], {
+          animations: "disabled",
+        });
+        await writeFile(path.join(suite.artifactDir, "widget-preview-tall.png"), tall.png);
+        await expectFrameFits(lastRow);
+        await expect.poll(distanceToEnd).toBeLessThanOrEqual(8);
         await emit("tool", {
           phase: "result",
           name: "show_widget",

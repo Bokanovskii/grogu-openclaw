@@ -111,12 +111,12 @@ const WIDGET_PROMPT_OFFER_MESSAGE_TYPE = "openclaw:widget-prompt-offer";
 const WIDGET_PROMPT_MESSAGE_TYPE = "openclaw:widget-prompt";
 const WIDGET_PROMPT_HOST_READY_MESSAGE_TYPE = "openclaw:widget-prompt-host-ready";
 const WIDGET_CHAT_HOST_MESSAGE_TYPE = "openclaw:widget-chat-host";
-const WIDGET_FRAME_MIN_HEIGHT = 48;
+export const WIDGET_FRAME_MIN_HEIGHT = 48;
 // The ceiling is an abuse bound, not a layout preference: a widget that reports
 // a runaway size cannot blow up the transcript, but ordinary tall widgets must
 // fit their content here — a frame shorter than its document scrolls inside the
 // row, which hides content behind a nested scrollbar the transcript cannot see.
-const WIDGET_FRAME_MAX_HEIGHT = 8000;
+export const WIDGET_FRAME_MAX_HEIGHT = 8000;
 // Preview frames render inside lit shadow roots, so a document query cannot
 // find them; frames register themselves on load and are dropped once detached.
 const widgetFrameRegistry = new Set<HTMLIFrameElement>();

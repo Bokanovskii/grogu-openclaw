@@ -12,6 +12,7 @@ import { extractToolCardsCached } from "../../../lib/chat/tool-cards.ts";
 import type { WidgetDraft } from "../../../lib/chat/widget-draft.ts";
 import { buildWidgetThemeMessage } from "../../../lib/widget-theme.ts";
 import { OpenClawLitElement } from "../../../lit/openclaw-element.ts";
+import { WIDGET_FRAME_MAX_HEIGHT, WIDGET_FRAME_MIN_HEIGHT } from "./widget-card.ts";
 
 const sanitizers = new WeakMap<Window, ReturnType<typeof DOMPurify>>();
 
@@ -47,8 +48,10 @@ function draftDocument(code: string): string {
   const tokens = Object.entries(theme.tokens)
     .map(([key, value]) => `--${key}:${value.replaceAll("<", "\\3c ")};`)
     .join("");
-  // The frame has an opaque origin and no capabilities. Sanitizing also removes
-  // declarative navigation, which a script-denying CSP alone does not prevent.
+  // The frame runs no scripts. It shares the app origin only so the host can
+  // measure its content; the CSP blocks every subresource request, so nothing
+  // credentialed can leave it. Sanitizing also removes declarative navigation,
+  // which a script-denying CSP alone does not prevent.
   return `<!doctype html><html><head><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'">
     <meta name="referrer" content="no-referrer">
@@ -57,6 +60,19 @@ function draftDocument(code: string): string {
     img:not([src^="data:" i]){visibility:hidden}
     *,*::before,*::after{animation:none!important;transition:none!important}</style>
     </head><body>${clean}</body></html>`;
+}
+
+// Same body measurement as the hosted widget's size reporter (src/canvas/wrap.ts),
+// so the draft and the finished widget settle at the same height.
+function draftHeight(frame: HTMLIFrameElement): number | undefined {
+  const body = frame.contentDocument?.body;
+  if (!body) {
+    return undefined;
+  }
+  const height = Math.ceil(
+    Math.max(body.scrollHeight, body.offsetHeight, body.getBoundingClientRect().height),
+  );
+  return Math.min(Math.max(height, WIDGET_FRAME_MIN_HEIGHT), WIDGET_FRAME_MAX_HEIGHT);
 }
 
 class WidgetDraftCard extends OpenClawLitElement {
@@ -70,6 +86,7 @@ class WidgetDraftCard extends OpenClawLitElement {
   private loadingCode: string | null = null;
   private loadTimer?: ReturnType<typeof setTimeout>;
   @state() private previewFailed = false;
+  @state() private frameHeight = WIDGET_FRAME_MIN_HEIGHT;
 
   static override styles = css`
     :host {
@@ -117,10 +134,8 @@ class WidgetDraftCard extends OpenClawLitElement {
       margin-inline-start: auto;
       font-variant-numeric: tabular-nums;
     }
-    /* Opaque frames cannot be measured, so the preview reserves the hosted
-       widget frame's starting height (tool-cards.css) for a stable hand-off. */
     .preview {
-      min-height: 420px;
+      position: relative;
       margin-top: 8px;
       border: 1px solid var(--border);
       border-radius: var(--radius);
@@ -130,12 +145,15 @@ class WidgetDraftCard extends OpenClawLitElement {
     iframe {
       display: block;
       width: 100%;
-      height: 420px;
+      height: 100%;
       border: 0;
       pointer-events: none;
     }
+    /* The loading buffer keeps the preview's width so it can be measured. */
     iframe[hidden] {
-      display: none;
+      position: absolute;
+      inset: 0;
+      visibility: hidden;
     }
     .note {
       margin: 6px 0 0;
@@ -183,11 +201,14 @@ class WidgetDraftCard extends OpenClawLitElement {
     }, 5000);
   }
 
-  private loaded(slot: number): void {
+  private loaded(slot: number, frame: EventTarget | null): void {
     if (!this.isConnected || this.loadingCode === null || this.draft?.status !== "building") {
       return;
     }
     clearTimeout(this.loadTimer);
+    if (frame instanceof HTMLIFrameElement) {
+      this.frameHeight = draftHeight(frame) ?? this.frameHeight;
+    }
     this.renderedCode = this.loadingCode;
     this.loadingCode = null;
     this.visible = slot;
@@ -217,21 +238,25 @@ class WidgetDraftCard extends OpenClawLitElement {
       </div>
       ${
         building && !draft.unavailable && !this.previewFailed && draft.html
-          ? html`<div class="preview" aria-label=${t("chat.toolCards.widgetDraft.preview")}>
+          ? html`<div
+              class="preview"
+              style="height:${this.frameHeight}px"
+              aria-label=${t("chat.toolCards.widgetDraft.preview")}
+            >
               ${this.documents.map((document, slot) =>
                 document === null
                   ? nothing
                   : keyed(
                       this.loads[slot],
                       html`<iframe
-                        sandbox=""
+                        sandbox="allow-same-origin"
                         inert
                         tabindex="-1"
                         referrerpolicy="no-referrer"
                         title=${t("chat.toolCards.widgetDraft.preview")}
                         ?hidden=${slot !== this.visible}
                         .srcdoc=${document}
-                        @load=${() => this.loaded(slot)}
+                        @load=${(event: Event) => this.loaded(slot, event.currentTarget)}
                       ></iframe>`,
                     ),
               )}

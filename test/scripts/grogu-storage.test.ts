@@ -15,7 +15,7 @@ const directories = useAutoCleanupTempDirTracker(afterEach);
 const oldName = "2026-01-01T00-00-00.000Z-11111111-1111-4111-8111-111111111111";
 const freshName = "2026-01-01T00-00-00.000Z-22222222-2222-4222-8222-222222222222";
 
-function job(id: string, payload: CronJob["payload"], declarationKey?: string): CronJob {
+function makeJob(id: string, payload: CronJob["payload"], declarationKey?: string): CronJob {
   return {
     id,
     declarationKey,
@@ -125,7 +125,7 @@ async function artifact(root: string, name: string, kind: "backup" | "release", 
         : { filename, sourceCommit: "1".repeat(40), sha256: "1".repeat(64) },
     ),
   );
-  const time = new Date(Date.now() - (aged ? 24 : 23) * 60 * 60_000);
+  const time = new Date(Date.now() - (aged ? 24 : 0) * 60 * 60_000);
   for (const file of await fs.readdir(directory)) {
     await fs.utimes(path.join(directory, file), time, time);
   }
@@ -134,9 +134,9 @@ async function artifact(root: string, name: string, kind: "backup" | "release", 
 }
 
 describe("Grogu small-disk storage policy", () => {
-  it("previews then retires completed old artifacts while retaining candidates and unknown content", async () => {
+  it("retires completed backups immediately while retaining release candidates and unknown content", async () => {
     const { profile } = await fixture();
-    const archive = await artifact(profile.recoveryDir, oldName, "backup");
+    const archive = await artifact(profile.recoveryDir, oldName, "backup", false);
     const release = await artifact(profile.releasesDir, oldName, "release");
     const candidate = await artifact(profile.releasesDir, freshName, "release", false);
     const failed = path.join(
@@ -146,9 +146,6 @@ describe("Grogu small-disk storage policy", () => {
     await fs.mkdir(failed, { mode: 0o700 });
     const failureReceipt = path.join(failed, "release-build-failed.json");
     await fs.writeFile(failureReceipt, JSON.stringify({ sourceCommit: "1".repeat(40) }));
-    const old = new Date(Date.now() - 48 * 60 * 60_000);
-    await fs.utimes(failureReceipt, old, old);
-    await fs.utimes(failed, old, old);
     const unknown = await artifact(profile.recoveryDir, freshName, "backup");
     await fs.writeFile(path.join(unknown, "unfinished-restore.json"), "{}");
     await fs.writeFile(profile.configFile, "preserve live configuration");
@@ -201,31 +198,31 @@ describe("Grogu small-disk storage policy", () => {
     expect((await fs.stat(archive)).isDirectory()).toBe(true);
   });
 
-  it("converges one native cleanup job and disables only local full-backup producers", async () => {
+  it("converges one frequent cleanup job and disables all scheduled backup producers", async () => {
     const { profile, readJobs, maintenance } = await fixture([
-      job(
+      makeJob(
         "local",
         { kind: "command", argv: ["openclaw", "backup", "create", "--to", "disk"] },
         "openclaw-backup-offsite-scheduled",
       ),
-      job(
+      makeJob(
         "remote",
         { kind: "command", argv: ["openclaw", "backup", "create", "--to", "remote"] },
         "openclaw-backup-offsite-scheduled",
       ),
-      job(
+      makeJob(
         "git",
         { kind: "command", argv: ["openclaw", "backup", "git", "create"] },
         "openclaw-backup-scheduled",
       ),
-      job("legacy", {
+      makeJob("legacy", {
         kind: "agentTurn",
         message: "GROGU_BACKUP_OBSERVABILITY_V1: old backup task",
       }),
-      job("research", { kind: "agentTurn", message: "Research synthetic sources." }),
+      makeJob("research", { kind: "agentTurn", message: "Research synthetic sources." }),
     ]);
     const preview = await bootstrapGroguStorage(profile);
-    expect(preview.backups.disabled).toEqual(["local", "legacy"]);
+    expect(preview.backups.disabled).toEqual(["local", "remote", "git", "legacy"]);
     expect((await readJobs()).every((job) => job.enabled)).toBe(true);
     await fs.writeFile(maintenance, 'throw new Error("unknown command: storage-cleanup");');
     await expect(bootstrapGroguStorage(profile, true)).rejects.toThrow("unknown command");
@@ -234,11 +231,16 @@ describe("Grogu small-disk storage policy", () => {
     const applied = await bootstrapGroguStorage(profile, true);
     await bootstrapGroguStorage(profile, true);
     const jobs = await readJobs();
-    expect(jobs.filter((job) => !job.enabled).map((job) => job.id)).toEqual(["local", "legacy"]);
+    expect(jobs.filter((job) => !job.enabled).map((job) => job.id)).toEqual([
+      "local",
+      "remote",
+      "git",
+      "legacy",
+    ]);
     const cleanup = jobs.filter((job) => job.declarationKey === "grogu-storage-cleanup-v1");
     expect(cleanup).toHaveLength(1);
     expect(cleanup[0]).toMatchObject({
-      schedule: { kind: "every", everyMs: 3_600_000 },
+      schedule: { kind: "every", everyMs: 300_000 },
       payload: {
         kind: "command",
         argv: [
@@ -251,21 +253,21 @@ describe("Grogu small-disk storage policy", () => {
         ],
       },
     });
-    const old = new Date(Date.now() - 24 * 60 * 60_000);
-    for (const file of await fs.readdir(applied.privateReceipts)) {
-      await fs.utimes(path.join(applied.privateReceipts, file), old, old);
-    }
-    await fs.utimes(applied.privateReceipts, old, old);
     await cleanupGroguStorage(profile, true);
     await expect(fs.stat(applied.privateReceipts)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await readJobs()).filter((job) => !job.enabled).map((job) => job.id)).toEqual([
       "local",
+      "remote",
+      "git",
       "legacy",
     ]);
   });
 
   it("reports an active legacy backup instead of cancelling its writer", async () => {
-    const running = job("running", { kind: "agentTurn", message: "GROGU_BACKUP_OBSERVABILITY_V1" });
+    const running = makeJob("running", {
+      kind: "agentTurn",
+      message: "GROGU_BACKUP_OBSERVABILITY_V1",
+    });
     running.state.runningAtMs = 1;
     const { profile, readJobs } = await fixture([running]);
     expect(await cleanupGroguStorage(profile, true)).toMatchObject({

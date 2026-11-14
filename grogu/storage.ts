@@ -9,10 +9,7 @@ import {
   CronJobSchema,
 } from "../packages/gateway-protocol/src/schema/cron.js";
 import type { CronJob, CronAddParams } from "../packages/gateway-protocol/src/schema/cron.types.js";
-import {
-  backupScheduleModeForDeclaration,
-  isScheduledBackupCommand,
-} from "../src/cron/backup-command.js";
+import { isScheduledBackupCommand } from "../src/cron/backup-command.js";
 import { retireCompletedUpdateRecoveryCaptures } from "../src/infra/update-recovery-capture-retirement.js";
 import {
   callNative,
@@ -21,11 +18,7 @@ import {
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
-import {
-  cleanupGroguArtifacts,
-  TEMPORARY_ARTIFACT_LIFETIME_MS,
-  withGroguStorageLock,
-} from "./storage-artifacts.js";
+import { cleanupGroguArtifacts, withGroguStorageLock } from "./storage-artifacts.js";
 
 const STORAGE_CLEANUP_DECLARATION = "grogu-storage-cleanup-v1";
 const LEGACY_BACKUP_MARKER = "GROGU_BACKUP_OBSERVABILITY_V1";
@@ -36,37 +29,17 @@ const storageConfigSchema = z
     runtimeConfig: z
       .object({
         cron: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
-        storage: z
-          .object({
-            locations: z
-              .record(z.string(), z.object({ provider: z.string() }).passthrough())
-              .optional(),
-          })
-          .passthrough()
-          .optional(),
       })
       .passthrough(),
   })
   .passthrough();
 
-function localFullBackupJobs(
-  jobs: readonly CronJob[],
-  filesystemLocations: ReadonlySet<string>,
-): CronJob[] {
+function scheduledBackupJobs(jobs: readonly CronJob[]): CronJob[] {
   return jobs.filter((job) => {
     if (job.payload.kind === "agentTurn") {
       return job.payload.message.includes(LEGACY_BACKUP_MARKER);
     }
-    if (
-      job.payload.kind !== "command" ||
-      backupScheduleModeForDeclaration(job.declarationKey) !== "offsite" ||
-      !isScheduledBackupCommand(job)
-    ) {
-      return false;
-    }
-    const locationFlag = job.payload.argv.indexOf("--to");
-    const location = locationFlag === -1 ? undefined : job.payload.argv[locationFlag + 1];
-    return location !== undefined && filesystemLocations.has(location);
+    return isScheduledBackupCommand(job);
   });
 }
 
@@ -75,9 +48,9 @@ function storageCleanupJob(profile: OperatorProfile): CronAddParams {
     declarationKey: STORAGE_CLEANUP_DECLARATION,
     name: "Grogu temporary storage cleanup",
     description:
-      "Disable local full-backup schedules and retire completed temporary recovery and release artifacts. No model calls.",
+      "Enforce no scheduled backups and retire completed temporary recovery and release artifacts. No model calls.",
     enabled: true,
-    schedule: { kind: "every", everyMs: 60 * 60_000 },
+    schedule: { kind: "every", everyMs: 5 * 60_000 },
     sessionTarget: "isolated",
     wakeMode: "now",
     payload: {
@@ -96,20 +69,19 @@ function storageCleanupJob(profile: OperatorProfile): CronAddParams {
   };
 }
 
-async function disableLocalBackups(profile: OperatorProfile, directory: string, apply: boolean) {
+async function disableScheduledBackups(
+  profile: OperatorProfile,
+  directory: string,
+  apply: boolean,
+) {
   const snapshot = storageConfigSchema.parse(
     await callNative(profile, "config.get", {}, directory),
-  );
-  const filesystemLocations = new Set(
-    Object.entries(snapshot.runtimeConfig.storage?.locations ?? {})
-      .filter(([, location]) => location.provider === "filesystem")
-      .map(([name]) => name),
   );
   const jobs = await listNativeJobs(profile, directory);
   if (apply && snapshot.runtimeConfig.cron?.enabled === false) {
     throw new Error("Enable the native cron scheduler before applying Grogu storage policy");
   }
-  const selected = localFullBackupJobs(jobs, filesystemLocations).filter((job) => job.enabled);
+  const selected = scheduledBackupJobs(jobs).filter((job) => job.enabled);
   const disabled: string[] = [];
   const deferred: string[] = [];
   for (const job of selected) {
@@ -118,7 +90,7 @@ async function disableLocalBackups(profile: OperatorProfile, directory: string, 
       continue;
     }
     if (!job.configRevision) {
-      throw new Error("A local backup job has no configuration revision; rerun after upgrading");
+      throw new Error("A backup job has no configuration revision; rerun after upgrading");
     }
     if (apply) {
       const updated = await callNative(
@@ -149,7 +121,7 @@ export async function bootstrapGroguStorage(profile: OperatorProfile, apply = fa
       });
     }
     const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
-    const backups = await disableLocalBackups(profile, directory, apply);
+    const backups = await disableScheduledBackups(profile, directory, apply);
     if (!backups.cronEnabled) {
       throw new Error("Enable the native cron scheduler before installing Grogu storage cleanup");
     }
@@ -181,7 +153,7 @@ export async function bootstrapGroguStorage(profile: OperatorProfile, apply = fa
 export async function cleanupGroguStorage(profile: OperatorProfile, apply = false) {
   return withGroguStorageLock(profile, async (assertCurrent) => {
     const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
-    const backups = await disableLocalBackups(profile, directory, apply);
+    const backups = await disableScheduledBackups(profile, directory, apply);
     const artifacts = await cleanupGroguArtifacts(profile, { apply, assertCurrent });
     const updateCaptures = await retireCompletedUpdateRecoveryCaptures({
       env: {
@@ -191,7 +163,7 @@ export async function cleanupGroguStorage(profile: OperatorProfile, apply = fals
         OPENCLAW_OAUTH_DIR: profile.oauthDir,
       },
       apply,
-      minimumAgeMs: TEMPORARY_ARTIFACT_LIFETIME_MS,
+      minimumAgeMs: 0,
     });
     await writePrivateReceipt(directory, "storage-maintenance.json", {
       schemaVersion: 1,

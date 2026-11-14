@@ -9,6 +9,7 @@ import { runIsolatedCompletion } from "../../agents/isolated-completion.js";
 import { splitTrailingAuthProfile } from "../../agents/model-ref-profile.js";
 import { resolveCompatibleAgentRuntimeForProvider } from "../../agents/session-runtime-compat.js";
 import { resolveSimpleCompletionSelectionForAgent } from "../../agents/simple-completion-runtime.js";
+import { sparkyUtilityBounds } from "../../agents/sparky-request-queue.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 
 const DEFAULT_MAX_LABEL_LENGTH = 128;
@@ -44,7 +45,7 @@ type ConversationLabelFallbackParams = ConversationLabelParams & {
   regularModelRef: string;
   preferredProfile?: string;
   normalizeLabel?: (label: string) => string | null;
-  /** Speculative callers: one utility attempt at most, never the regular model. */
+  /** Speculative callers: one short utility attempt at most, never the regular model. */
   utilityOnly?: boolean;
 };
 
@@ -100,7 +101,6 @@ async function runLabelAttempts(
     normalizeLabel?: (label: string) => string | null;
   },
 ): Promise<string | null> {
-  const timeoutMs = resolvePositiveInteger(params.timeoutMs, TIMEOUT_MS);
   const maxLength = resolvePositiveInteger(params.maxLength, DEFAULT_MAX_LABEL_LENGTH);
   const assertCurrent = () => {
     params.assertCurrent?.();
@@ -133,10 +133,19 @@ async function runLabelAttempts(
         runtime: params.agentHarnessRuntimeOverride,
         cfg: params.cfg,
       });
+      const provider = selection.runtimeProvider ?? selection.provider;
+      // Sparky queues helpers behind replies and recaps on the same local model, so
+      // the label budget must cover that wait plus reasoning before the visible name.
+      const timeoutMs = resolvePositiveInteger(
+        params.timeoutMs,
+        provider === "sparky"
+          ? sparkyUtilityBounds(`${provider}/${selection.modelId}`).timeoutMs
+          : TIMEOUT_MS,
+      );
       const completion = await runIsolatedCompletion({
         purpose: "conversation-label",
         config: params.cfg,
-        provider: selection.runtimeProvider ?? selection.provider,
+        provider,
         model: selection.modelId,
         authProfileId: selection.profileId ?? attempt.preferredProfile,
         agentId: params.agentId,
@@ -230,9 +239,16 @@ export async function generateConversationLabelWithFallback(
   return await runLabelAttempts({
     ...params,
     agentId,
-    // Utility-only callers pre-claim the regular selection so a utility ref that
-    // resolves onto the primary model is skipped instead of spending on it.
-    attempts: params.utilityOnly ? utilityAttempts : [...utilityAttempts, regularAttempt],
-    ...(params.utilityOnly ? { skipAttempts: [regularAttempt] } : {}),
+    ...(params.utilityOnly
+      ? {
+          // Speculation is optional and its client stops waiting quickly; it must not
+          // hold a shared Sparky slot for the background naming budget.
+          timeoutMs: params.timeoutMs ?? TIMEOUT_MS,
+          // Utility-only callers pre-claim the regular selection so a utility ref that
+          // resolves onto the primary model is skipped instead of spending on it.
+          attempts: utilityAttempts,
+          skipAttempts: [regularAttempt],
+        }
+      : { attempts: [...utilityAttempts, regularAttempt] }),
   });
 }

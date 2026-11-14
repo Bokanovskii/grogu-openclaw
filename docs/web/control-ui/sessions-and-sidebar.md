@@ -42,7 +42,10 @@ name. Explicit worktree names are preserved, and typing never creates a worktree
 or runs setup.
 
 Automatic naming uses a short, tool-free request with at most the first 1,000
-characters of the first message. If naming fails, the Gateway logs the failure
+characters of the first message. It waits up to 15 seconds for most models. With
+Sparky, it waits up to two minutes, because naming queues behind replies and
+recaps on the same local model. The optional name prepared while you type always
+stops after 15 seconds. If naming fails, the Gateway logs the failure
 and leaves the session unnamed. A later message retries naming from the original
 first message, not the follow-up. Manual names always take priority, including
 renames made while a naming request is running.

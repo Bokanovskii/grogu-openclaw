@@ -62,6 +62,26 @@ describe("generateConversationLabel", () => {
     );
   });
 
+  it("budgets for the shared Sparky queue unless the caller sets a timeout", async () => {
+    for (const [modelRef, timeoutMs] of [
+      ["sparky/qwen-flash", undefined],
+      ["sparky/qwen-flash", 900],
+      ["openai/gpt-mini", undefined],
+    ] as const) {
+      await generateConversationLabel({
+        userMessage: "Message",
+        prompt: "Prompt",
+        cfg: {},
+        modelRef,
+        timeoutMs,
+      });
+    }
+
+    expect(runIsolatedCompletion.mock.calls.map(([request]) => request.timeoutMs)).toEqual([
+      120_000, 900, 15_000,
+    ]);
+  });
+
   it.each(["active", "retired", "aborted"] as const)(
     "allows utility fallback only while its caller is active (%s)",
     async (state) => {
@@ -223,6 +243,18 @@ describe("generateConversationLabelWithFallback", () => {
       }),
     ).resolves.toBeNull();
     expect(runIsolatedCompletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps speculative Sparky naming short so it cannot hold a queue slot", async () => {
+    await generateConversationLabelWithFallback({
+      ...params,
+      utilityModelRef: "sparky/qwen-mini",
+      regularModelRef: "sparky/qwen-flash",
+      utilityOnly: true,
+    });
+    expect(runIsolatedCompletion).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ provider: "sparky", model: "qwen-mini", timeoutMs: 15_000 }),
+    );
   });
 
   it("uses the regular candidate directly when no utility model exists", async () => {

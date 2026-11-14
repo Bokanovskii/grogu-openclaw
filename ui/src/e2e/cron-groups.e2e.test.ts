@@ -12,6 +12,7 @@ const suite = createControlUiE2eSuite({
   startServerBeforeBrowser: true,
 });
 const now = Date.parse("2026-11-12T18:00:00Z");
+const newsDescription = "Stay informed without checking the headlines.";
 const groups = [
   {
     id: "research",
@@ -22,7 +23,7 @@ const groups = [
   {
     id: "news",
     label: "News",
-    description: "Stay informed without checking the headlines.",
+    description: newsDescription,
     order: 1,
   },
   {
@@ -176,6 +177,9 @@ suite.define(() => {
           ]),
         );
         const news = page.locator('[data-cron-group="news"]');
+        const newsHeading = news.locator("summary");
+        expect(await newsHeading.textContent()).not.toContain(newsDescription);
+        expect(await newsHeading.getAttribute("title")).toBe(newsDescription);
         expect(await news.textContent()).toContain("Every day at 08:00");
         expect(await row.textContent()).toContain("Texts you when");
         expect(await row.textContent()).toContain("example/research-model");

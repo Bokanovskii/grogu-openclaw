@@ -46,6 +46,7 @@ import {
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
 import { withSqliteMutationWorkerLifetime } from "./session-accessor.sqlite-worker-request.js";
+import { recordSessionColdRetentionProbe } from "./session-cold-retention.js";
 import type { SessionColdRestorationGuard } from "./session-cold-storage-guard.types.js";
 import type { SessionColdReadPreparation } from "./session-cold-storage-read.js";
 import { readSessionColdTranscript } from "./session-cold-storage-state.js";
@@ -60,6 +61,7 @@ import type {
   SessionColdBatchResult,
   SessionColdMaintenanceResult,
   SessionColdMutationResult,
+  SessionColdRetentionProbe,
 } from "./session-cold-storage.types.js";
 import { reclaimSqliteFreePages } from "./session-history-archive-pruning.js";
 import { captureIncognitoSessionSource } from "./session-incognito-binding.js";
@@ -432,7 +434,8 @@ export async function restoreSessionColdTranscript(
   preparation?: SessionColdReadPreparation,
   guard?: SessionColdRestorationGuard,
   signal?: AbortSignal,
-): Promise<void> {
+  retention?: SessionColdRetentionProbe,
+): Promise<boolean | undefined> {
   signal?.throwIfAborted();
   assertCurrent?.();
   const binding = captureIncognitoSessionSource(scope);
@@ -444,7 +447,7 @@ export async function restoreSessionColdTranscript(
       binding.actor.assertReadable();
     }
     // An actor has no cold archive to restore; loss must still reject this continuation.
-    return;
+    return undefined;
   }
   let resolved = preparation?.target;
   if (
@@ -486,7 +489,7 @@ export async function restoreSessionColdTranscript(
           throw error;
         }
         // First writers may create this store; there is no cold transcript to restore yet.
-        return;
+        return undefined;
       }
       const source = createOpenClawAgentDatabasePathMatcher();
       source(target.path, target.path);
@@ -520,6 +523,7 @@ export async function restoreSessionColdTranscript(
             },
             guard,
             signal,
+            retention,
           );
         },
         projectionLane,
@@ -543,9 +547,9 @@ export async function restoreSessionColdTranscript(
     assertCurrent?.();
   }
   if (!initial) {
-    return;
+    return undefined;
   }
-  await runQueuedStoreWrite({
+  return await runQueuedStoreWrite({
     queues: operations,
     storePath,
     label: "session.cold.restore",
@@ -558,7 +562,7 @@ export async function restoreSessionColdTranscript(
         assertCurrent?.();
       }
       if (!archive) {
-        return;
+        return undefined;
       }
       const result = await runColdMutation(
         {
@@ -567,6 +571,7 @@ export async function restoreSessionColdTranscript(
           sessionId: resolved.sessionId,
           archive,
           guard,
+          retention,
         },
         assertCurrent,
         signal,
@@ -587,6 +592,9 @@ export async function restoreSessionColdTranscript(
       }
       signal?.throwIfAborted();
       assertCurrent?.();
+      if (recordSessionColdRetentionProbe(resolved.sessionId, archive, retention, result)) {
+        return false;
+      }
       // Keep viewed history hot without changing canonical transcript timestamps or bytes.
       const now = Date.now();
       for (const [id, until] of restoredUntil) {
@@ -595,6 +603,7 @@ export async function restoreSessionColdTranscript(
         }
       }
       restoredUntil.set(key, now + RESTORE_COOLDOWN_MS);
+      return true;
     },
   });
 }

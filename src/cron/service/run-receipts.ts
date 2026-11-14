@@ -151,6 +151,9 @@ export function markServiceCronJobActive(
     marker.standingGrantAuthority = {
       context,
       handle: { ...runReceipt },
+      assertReceiptCurrent() {
+        assertFacts(observation.readForPreparation().facts);
+      },
       assertCurrent() {
         context.admission.assertCurrent();
         if (

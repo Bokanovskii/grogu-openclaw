@@ -116,6 +116,7 @@ const {
 } = SESSION_LIFECYCLE_ADMISSION_STATE;
 const {
   collectSessionWorkAdmissions,
+  readSessionWorkAdmissionProtection,
   getSessionWorkAdmissionRelease,
   getSessionWorkAdmissionOwnerRelease,
   getCompetingSessionWorkAdmissionRelease,
@@ -124,6 +125,7 @@ const {
   CURRENT_SESSION_WORK_ADMISSIONS.getStore(),
 );
 export {
+  readSessionWorkAdmissionProtection,
   getSessionWorkAdmissionRelease,
   getSessionWorkAdmissionOwnerRelease,
   getCompetingSessionWorkAdmissionRelease,
@@ -442,7 +444,7 @@ export function isCompetingSessionWorkAdmissionActive(
   );
 }
 
-/** Active session identities grouped by their authoritative store/lifecycle scope. */
+/** Acquired identities only; pending reservations are exposed by the protection read. */
 export function collectActiveSessionWorkAdmissions(
   owners?: ReadonlySet<object>,
 ): Map<string, Set<string>> {
@@ -525,7 +527,12 @@ export async function beginSessionWorkAdmission(params: {
   const resolveGatewayContext = Object.hasOwn(params, "resolveGatewayContext")
     ? params.resolveGatewayContext
     : getPluginRuntimeGatewayRequestScope()?.resolveGatewayContext;
-  const identities = normalizeSessionIdentities(params.scope, rawIdentities);
+  const normalizedIdentities = normalizeSessionIdentities(params.scope, rawIdentities);
+  // Keep identity-less pending work visible in the existing store-scoped index.
+  const identities =
+    normalizedIdentities.length > 0
+      ? normalizedIdentities
+      : [JSON.stringify([params.scope.trim(), ""])];
   const inheritedAdmissions = CURRENT_SESSION_WORK_ADMISSIONS.getStore();
   const predecessors =
     params.serializeOwner && params.owner

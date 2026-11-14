@@ -186,7 +186,7 @@ it("removes an aborted cold restoration from its store queue", async ({ signal }
     }
     return undefined;
   });
-  let canceled: Promise<void> | undefined;
+  let canceled: ReturnType<typeof restoreSessionColdTranscript> | undefined;
   try {
     await awaitGateBeforeSettlement(entered.promise, blocked, "First restore did not enter");
     canceled = restoreSessionColdTranscript(

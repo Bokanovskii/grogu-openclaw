@@ -23,7 +23,7 @@ import {
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
 import * as historyWorkers from "../../config/sessions/session-history-worker-runtime.js";
-import { getCurrentCronActiveJobMarker } from "../../cron/active-jobs.js";
+import { readCronTranscriptOwnership } from "../../cron/active-jobs.js";
 import { runCronIsolatedAgentTurn } from "../../cron/isolated-agent/run.js";
 import { CronService } from "../../cron/service.js";
 import { createNoopLogger } from "../../cron/service.test-harness.js";
@@ -226,10 +226,15 @@ it("reads and refreshes the real in-progress cron transcript, then releases its 
         signal,
       );
       const runAtMs = expectDefined(cron.getJob(job.id)?.state.runningAtMs, "active occurrence");
-      expect(getCurrentCronActiveJobMarker(job.id)?.transcript).toMatchObject({
-        agentId: "main",
-        storePath: resolveSessionStorePathCore(undefined, { agentId: "main" }),
-      });
+      expect(readCronTranscriptOwnership()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            state: "bound",
+            agentId: "main",
+            storePath: resolveSessionStorePathCore(undefined, { agentId: "main" }),
+          }),
+        ]),
+      );
       let historyConfig = cfg;
       const context = await createHistoryReadContext({
         cron,
@@ -397,7 +402,11 @@ it("reads and refreshes the real in-progress cron transcript, then releases its 
           ),
           signal,
         );
-        expect(getCurrentCronActiveJobMarker(job.id)?.transcript).toBeDefined();
+        expect(
+          readCronTranscriptOwnership().some(
+            (owner) => owner.ownerId.startsWith(`${job.id}:`) && owner.sessionId !== undefined,
+          ),
+        ).toBe(true);
         releaseFinalization.resolve();
         expect(JSON.stringify(await withinTest(finalizingHistory, signal))).toContain(
           "Research finished.",
@@ -410,7 +419,9 @@ it("reads and refreshes the real in-progress cron transcript, then releases its 
         transcriptSpy.mockRestore();
       }
       expect(await withinTest(running, signal)).toMatchObject({ ok: true, ran: true });
-      expect(getCurrentCronActiveJobMarker(job.id)).toBeUndefined();
+      expect(
+        readCronTranscriptOwnership().some((owner) => owner.ownerId.startsWith(`${job.id}:`)),
+      ).toBe(false);
     } finally {
       continueRun.resolve();
       finishRun.resolve();

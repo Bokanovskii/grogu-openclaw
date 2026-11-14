@@ -388,7 +388,8 @@ vi.mock("./model-preflight.runtime.js", () => ({
   preflightCronModelProvider: preflightCronModelProviderMock,
 }));
 
-vi.mock("./helpers.js", () => ({
+vi.mock("./helpers.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./helpers.js")>()),
   pickLastNonEmptyTextFromPayloads: pickLastNonEmptyTextFromPayloadsMock,
   pickSummaryFromOutput: vi.fn().mockReturnValue("summary"),
   resolveCronPayloadOutcome: resolveCronPayloadOutcomeMock,
@@ -438,10 +439,7 @@ export function makeCronSession(overrides?: Record<string, unknown>): CronSessio
 function makeDefaultModelFallbackResult() {
   return {
     result: {
-      result: {
-        payloads: [{ text: "test output" }],
-        meta: { agentMeta: {} },
-      },
+      result: makeDefaultEmbeddedResult(),
     },
     provider: "openai",
     model: "gpt-5.4",

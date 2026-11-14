@@ -1,4 +1,4 @@
-/** Normalizes isolated cron run output into summaries, delivery payloads, and error state. */
+/** Normalizes isolated cron prompts, output, delivery payloads, and error state. */
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -13,6 +13,13 @@ import {
 } from "../../auto-reply/reply-payload.js";
 import { AUTOMATION_FAILED_TOKEN, isSilentReplyPayloadText } from "../../auto-reply/tokens.js";
 import { truncateUtf16Safe } from "../../utils.js";
+
+const COMMAND_STYLE_CRON_PREFIX =
+  /^(?:(?:[A-Z_][A-Z0-9_]*=\S+\s+)+)?(?:cd\s+\S+|(?:\.{1,2}|~)?\/\S+|[A-Za-z]:[\\/]\S+|(?:bash|bun|cargo|deno|docker|gh|git|go|make|node|npm|npx|pnpm|python|python3|ruby|sh|tsx|uv|zsh)\b)/u;
+
+export function isCommandStyleCronMessage(message: string): boolean {
+  return !message.trim().includes("\n") && COMMAND_STYLE_CRON_PREFIX.test(message.trim());
+}
 
 type DeliveryPayload = Pick<
   ReplyPayload,

@@ -384,6 +384,41 @@ it("retains legacy identities and raw details without inventing a store partitio
   );
 });
 
+it("expires retired terminal tasks but preserves live, unsettled, and referenced work", async () => {
+  await withOpenClawTestState({ layout: "state-only" }, async () => {
+    runOpenClawStateWriteTransaction(({ db }) => {
+      const now = Date.now();
+      const old = now - 8 * 86_400_000;
+      const insert = db.prepare(
+        "INSERT INTO task_runs (task_id, runtime, owner_key, scope_kind, task, delivery_status, notify_policy, created_at, ended_at, status) VALUES (?, 'subagent', 'owner', 'session', 'task', ?, 'silent', ?, ?, ?)",
+      );
+      for (const [id, status, delivery, ended] of [
+        ["expired", "succeeded", "delivered", old],
+        ["running", "running", "not_applicable", old],
+        ["unsettled", "succeeded", "pending", old],
+        ["recent", "succeeded", "delivered", now],
+        ["delivery-owned", "succeeded", "delivered", old],
+        ["lifecycle-owned", "failed", "not_applicable", old],
+      ] as const) {
+        insert.run(id, delivery, old, ended, status);
+      }
+      db.prepare("INSERT INTO task_delivery_state (task_id) VALUES ('delivery-owned')").run();
+      ensureExecutionOwnerLifecycleBindingSchema(db);
+      db.prepare(
+        "INSERT INTO execution_owner_lifecycle_bindings (owner_kind, owner_id, context_id, execution_id) VALUES ('task', 'lifecycle-owned', 'context', 'execution')",
+      ).run();
+      pruneCronRunHistoryInDatabase(db, now, prepareCronRunReceiptWriteSchema(db));
+      expect(db.prepare("SELECT task_id FROM task_runs ORDER BY task_id").all()).toEqual([
+        { task_id: "delivery-owned" },
+        { task_id: "lifecycle-owned" },
+        { task_id: "recent" },
+        { task_id: "running" },
+        { task_id: "unsettled" },
+      ]);
+    });
+  });
+});
+
 it("normalizes released lifecycle rows before history, recovery, and retention", async () => {
   await withOpenClawTestState(
     { layout: "state-only", prefix: "cron-history-row-normalization-" },

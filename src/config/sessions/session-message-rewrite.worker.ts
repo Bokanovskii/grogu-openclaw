@@ -64,6 +64,13 @@ import type {
   TranscriptMessageAppendResult,
 } from "./session-accessor.types.js";
 import {
+  commitSessionAutomationRetention,
+  listAutomationRetentionSessions,
+  prepareSessionAutomationRetention,
+  type AutomationRetentionInput,
+  type AutomationRetentionPlan,
+} from "./session-automation-retention.worker.js";
+import {
   assertSessionTranscriptHot,
   readSessionColdTranscript,
 } from "./session-cold-storage-state.js";
@@ -93,6 +100,18 @@ import { readMessageIdempotencyKey } from "./transcript-message-identity.js";
 import { transcriptEventJsonSql } from "./transcript-payload.js";
 
 export type SessionMessageRewriteOperations = {
+  "session.automation.retention.list": {
+    input: Record<string, never>;
+    output: ReturnType<typeof listAutomationRetentionSessions>;
+  };
+  "session.automation.retention.prepare": {
+    input: AutomationRetentionInput;
+    output: AutomationRetentionPlan;
+  };
+  "session.automation.retention": {
+    input: AutomationRetentionPlan;
+    output: ReturnType<typeof commitSessionAutomationRetention>;
+  };
   "session.transcript.lock.cold": {
     input: { scope: ResolvedTranscriptScope };
     output: { archive: ReturnType<typeof readSessionColdTranscript> };
@@ -166,6 +185,12 @@ export function bindSqliteWorkerBackend(
   return {
     execute(command) {
       switch (command.type) {
+        case "session.automation.retention.list":
+          return listAutomationRetentionSessions(database);
+        case "session.automation.retention":
+          return commitSessionAutomationRetention(command.input, context);
+        case "session.automation.retention.prepare":
+          return prepareSessionAutomationRetention(database, command.input, context);
         case "session.transcript.lock.cold":
           return { archive: readSessionColdTranscript(database.db, command.input.scope.sessionId) };
         case "session.transcript.lock.read":

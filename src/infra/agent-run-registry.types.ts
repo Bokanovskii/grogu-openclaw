@@ -18,6 +18,8 @@ export type AgentRunContext = {
   /** Retained background work cannot add automatic delivery to a private run. */
   sessionEventDelivery?: false;
   sessionKey?: string;
+  /** Physical scope supplied by preparation, never inferred from current configuration. */
+  storePath?: string;
   /** Resolved agent owner, including for unscoped session keys. */
   agentId?: string;
   /** Owning run's sessionId; stamped onto lifecycle events. */

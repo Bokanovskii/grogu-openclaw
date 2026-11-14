@@ -32,6 +32,33 @@ export function createSessionWorkAdmissionQueries<T extends ReleasableSessionWor
     return matching;
   }
 
+  /** Includes queued and settling custody; callers supply fresh aliases and IDs. */
+  function readSessionWorkAdmissionProtection(
+    params: SessionWorkAdmissionReleaseParams,
+  ): "active" | "pending" | "inactive" | "unknown" {
+    if (!params.scope.trim()) {
+      return "unknown";
+    }
+    const identities = normalizeSessionIdentities(params.scope, params.identities);
+    if (identities.length === 0) {
+      return "unknown";
+    }
+    const unresolved = admissionsByIdentity.get(JSON.stringify([params.scope.trim(), ""]));
+    if ((unresolved?.size ?? 0) > 0) {
+      return "unknown";
+    }
+    let pending = false;
+    for (const identity of identities) {
+      for (const admission of admissionsByIdentity.get(identity) ?? []) {
+        if (admission.phase === "acquired") {
+          return "active";
+        }
+        pending = true;
+      }
+    }
+    return pending ? "pending" : "inactive";
+  }
+
   function sessionWorkAdmissionRelease(
     params: SessionWorkAdmissionReleaseParams,
     matches: (admission: T) => boolean,
@@ -100,6 +127,7 @@ export function createSessionWorkAdmissionQueries<T extends ReleasableSessionWor
 
   return {
     collectSessionWorkAdmissions,
+    readSessionWorkAdmissionProtection,
     getSessionWorkAdmissionRelease,
     getSessionWorkAdmissionOwnerRelease,
     getCompetingSessionWorkAdmissionRelease,

@@ -80,7 +80,10 @@ export async function handleBoardHttpRequest(
         res.setHeader("Content-Length", String(Buffer.byteLength(html)));
         res.setHeader(
           "Content-Security-Policy",
-          buildBoardWidgetContentSecurityPolicy(authorized.document),
+          buildBoardWidgetContentSecurityPolicy(
+            authorized.document,
+            opts.resolveGatewayContext?.()?.getRuntimeConfig().mcp?.apps?.sameOriginSandbox,
+          ),
         );
         res.setHeader("Cache-Control", "no-cache");
         res.end(req.method === "HEAD" ? undefined : html);

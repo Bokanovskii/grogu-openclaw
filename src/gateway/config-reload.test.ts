@@ -154,16 +154,6 @@ describe("diffConfigPaths", () => {
     expect(diffConfigPaths(prev, next)).toStrictEqual([]);
   });
 
-  it.each([
-    { prev: {}, next: { mcp: { apps: { enabled: true } } } },
-    { prev: { mcp: { apps: { enabled: true } } }, next: {} },
-  ])("preserves the Apps restart boundary for whole MCP changes", ({ prev, next }) => {
-    const changedPaths = diffGatewayReloadPaths(prev, next, listConfigReloadRefinementPrefixes());
-    const plan = buildGatewayReloadPlan(changedPaths);
-    expect(plan.restartGateway).toBe(true);
-    expect(plan.restartReasons).toEqual(changedPaths);
-  });
-
   it("reloads only changed Talk speech owners", () => {
     const configure = (provider: string, model?: string) => ({
       talk: { providers: { [provider]: { model } } },

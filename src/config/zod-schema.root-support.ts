@@ -305,6 +305,7 @@ export const McpConfigSchema = z
     apps: z
       .strictObject({
         enabled: z.boolean().optional(),
+        sameOriginSandbox: z.boolean().optional(),
         sandboxOrigin: z
           .string()
           .url()

@@ -21,6 +21,7 @@ export const CanvasDocumentViewResultSchema = closedObject({
   sandboxUrl: Type.String(),
   sandboxPort: Type.Integer({ minimum: 1, maximum: 65535 }),
   sandboxOrigin: Type.Optional(Type.String()),
+  sameOriginSandbox: Type.Optional(Type.Boolean()),
 });
 
 export type CanvasDocumentPreviewParams = Static<typeof CanvasDocumentPreviewParamsSchema>;

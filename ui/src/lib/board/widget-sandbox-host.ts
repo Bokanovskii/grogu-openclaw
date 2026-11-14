@@ -15,6 +15,7 @@ type BoardWidgetSandboxHostOptions = {
   connected?: boolean;
   sandboxOrigin: string;
   sandboxUrl: string;
+  onMessage?: (event: MessageEvent) => void;
   sourceOrigin: string;
   controlUiBaseUrl?: string;
   client?: BoardWidgetBridgeGatewayClient;
@@ -67,6 +68,14 @@ export class BoardWidgetSandboxHost {
 
   get frame(): HTMLIFrameElement {
     return this.options.frame;
+  }
+
+  acceptsMessage(event: MessageEvent): boolean {
+    return this.documentHost.acceptsMessage(event);
+  }
+
+  send(message: unknown): boolean {
+    return this.documentHost.send(message);
   }
 
   setActive(active: boolean): void {
@@ -154,10 +163,7 @@ export class BoardWidgetSandboxHost {
   }
 
   handleMessage(event: MessageEvent): void {
-    if (
-      event.source !== this.options.frame.contentWindow ||
-      event.origin !== this.options.sandboxOrigin
-    ) {
+    if (!this.acceptsMessage(event)) {
       return;
     }
     this.documentHost.handleMessage(event);
@@ -336,6 +342,14 @@ export class BoardWidgetSandboxHost {
       frame: options.frame,
       sandboxOrigin: options.sandboxOrigin,
       sandboxUrl: options.sandboxUrl,
+      sameOriginSandbox: options.widget.sameOriginSandbox,
+      onMessage: (event) => {
+        if (this.options.onMessage) {
+          this.options.onMessage(event);
+        } else {
+          this.handleMessage(event);
+        }
+      },
       documentKey: this.documentKey(),
       loadDocument: (signal) => this.fetchDocument(options, signal),
       retryDocument: retryableDocumentError,

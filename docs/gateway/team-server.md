@@ -386,6 +386,12 @@ Enable MCP Apps separately only if you need that capability; see
 [MCP Apps](/cli/mcp/apps). Test a real widget after setup: a healthy chat page
 does not prove its iframe can load.
 
+For one cookie-protected HTTPS origin instead, enable
+`mcp.apps.sameOriginSandbox` and restart the Gateway. This opt-in mode serves an
+opaque shell through the existing Gateway route and needs no separate DNS
+record or tunnel ingress. Install a release that supports the option first.
+See [single-origin setup and limits](/cli/mcp/apps#single-origin-sandbox).
+
 ## 7. Share selected sessions from another Gateway
 
 To show release-server conversations on the collaboration server, configure
@@ -504,14 +510,14 @@ to establish that the service can complete work.
 
 ## Troubleshooting
 
-| Symptom                                                       | Check                                                                                                            |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Browser works; agent cannot provide session links             | Set this server's `gateway.publicOrigin`; prepare a new turn after reload.                                       |
-| Access succeeds but Gateway rejects the connection            | Check loopback trust, forwarded client addresses, required identity headers, and `allowedOrigins`.               |
-| Administrator signs in as an observer                         | Assign the real profile's administrative role and grant the verified identity `operator.admin`, then reconnect.  |
-| OIDC migration creates another person                         | Verify the sign-in email and explicitly link its alias to the existing profile.                                  |
-| GitHub login looks right but publication uses another account | Check the system/agent/personal publication selection and repository Git authentication separately.              |
-| Chat works but widgets fail                                   | Check the distinct sandbox origin, tunnel port, and absence of an interactive Access challenge on that hostname. |
-| Node join receives HTTP 302                                   | Supply machine Access authentication on every required route.                                                    |
-| Shared sessions are missing or names do not link              | Check source group, node account/state, two-command allowlist, receiver role, and verified numeric GitHub IDs.   |
-| Update fails despite free disk                                | Check service temporary-space quota, filesystem metadata, and retained snapshots before retrying.                |
+| Symptom                                                       | Check                                                                                                                                                                                                       |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browser works; agent cannot provide session links             | Set this server's `gateway.publicOrigin`; prepare a new turn after reload.                                                                                                                                  |
+| Access succeeds but Gateway rejects the connection            | Check loopback trust, forwarded client addresses, required identity headers, and `allowedOrigins`.                                                                                                          |
+| Administrator signs in as an observer                         | Assign the real profile's administrative role and grant the verified identity `operator.admin`, then reconnect.                                                                                             |
+| OIDC migration creates another person                         | Verify the sign-in email and explicitly link its alias to the existing profile.                                                                                                                             |
+| GitHub login looks right but publication uses another account | Check the system/agent/personal publication selection and repository Git authentication separately.                                                                                                         |
+| Chat works but widgets fail                                   | In default mode, check the distinct sandbox origin, tunnel port, and absence of an interactive Access challenge. In single-origin mode, make sure that the Gateway restarted and serves `/mcp-app-sandbox`. |
+| Node join receives HTTP 302                                   | Supply machine Access authentication on every required route.                                                                                                                                               |
+| Shared sessions are missing or names do not link              | Check source group, node account/state, two-command allowlist, receiver role, and verified numeric GitHub IDs.                                                                                              |
+| Update fails despite free disk                                | Check service temporary-space quota, filesystem metadata, and retained snapshots before retrying.                                                                                                           |

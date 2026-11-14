@@ -15,28 +15,35 @@ function grantedConnectOrigins(document: BoardWidgetSandboxMetadata): string[] |
   return origins?.length ? origins : undefined;
 }
 
-export function buildBoardWidgetSandboxPath(document: BoardWidgetSandboxMetadata): string {
+export function buildBoardWidgetSandboxPath(
+  document: BoardWidgetSandboxMetadata,
+  sameOriginSandbox = false,
+): string {
   const connectDomains = grantedConnectOrigins(document);
-  return buildSandboxHostPath({
-    // Best-effort hardening for the documented WebRTC residual; the DOM guard
-    // reduces fresh descendant realms but is not an authorization boundary.
-    blockDescendantFrames: true,
-    mediaDomains: [...WIDGET_MEDIA_SOURCES, ...(document.resourceOrigins ?? [])],
-    resourceDomains: [...new Set([...WIDGET_CDN_ORIGINS, ...(document.resourceOrigins ?? [])])],
-    ...(connectDomains ? { connectDomains } : {}),
-  });
+  return buildSandboxHostPath(
+    {
+      // Best-effort hardening for the documented WebRTC residual; the DOM guard
+      // reduces fresh descendant realms but is not an authorization boundary.
+      blockDescendantFrames: true,
+      mediaDomains: [...WIDGET_MEDIA_SOURCES, ...(document.resourceOrigins ?? [])],
+      resourceDomains: [...new Set([...WIDGET_CDN_ORIGINS, ...(document.resourceOrigins ?? [])])],
+      ...(connectDomains ? { connectDomains } : {}),
+    },
+    sameOriginSandbox,
+  );
 }
 
 /** Defense in depth for direct/legacy widget document loads outside the proxy host. */
 export function buildBoardWidgetContentSecurityPolicy(
   document: BoardWidgetSandboxMetadata,
+  sameOriginSandbox = false,
 ): string {
   const connectSources = grantedConnectOrigins(document)?.join(" ") ?? "'none'";
   const resourceSources = document.resourceOrigins?.join(" ") ?? "";
   const cdnSources = WIDGET_CDN_ORIGINS.join(" ");
   return [
     "default-src 'none'",
-    `script-src 'unsafe-inline' ${cdnSources} ${resourceSources}`.trim(),
+    `script-src 'unsafe-inline' ${sameOriginSandbox ? "data: " : ""}${cdnSources} ${resourceSources}`.trim(),
     `style-src 'unsafe-inline' ${cdnSources}`,
     `font-src data: ${cdnSources}`,
     `img-src data: ${resourceSources}`.trim(),

@@ -417,6 +417,10 @@ export async function createGatewayHttpTransport(params: {
     if (params.updateCanary) {
       throw new Error("Sandbox host is disabled during update validation");
     }
+    if (params.cfg.mcp?.apps?.sameOriginSandbox === true) {
+      mcpAppSandboxPort = params.port;
+      return params.port;
+    }
     if (sandboxHostStartPromise) {
       return await sandboxHostStartPromise;
     }

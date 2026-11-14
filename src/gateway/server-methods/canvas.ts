@@ -12,6 +12,10 @@ import { isCoreCanvasHostEnabled } from "../../canvas/config.js";
 import { readCanvasDocumentHtmlSource } from "../../canvas/documents.js";
 import { isGatewaySubordinateWorkAdmissionClosed } from "../../process/gateway-work-admission.js";
 import { buildBoardWidgetSandboxPath } from "../board-sandbox.js";
+import {
+  embedSandboxPublicScripts,
+  prepareSandboxPublicScripts,
+} from "../sandbox-public-resources.js";
 import type { GatewayRequestHandlerOptions, GatewayRequestHandlers } from "./types.js";
 import { defineValidatedGatewayMethod } from "./validation.js";
 
@@ -25,7 +29,7 @@ async function respondWithCanvasHtml(
   invocation: GatewayRequestHandlerOptions,
   readHtml: () => string | Promise<string>,
   unavailableMessage: string,
-  sandboxUrl: string,
+  sandboxUrl: (sameOriginSandbox: boolean) => string,
 ): Promise<void> {
   const { context, client, respond } = invocation;
   const resolveContext = context.resolveGatewayContext;
@@ -57,11 +61,21 @@ async function respondWithCanvasHtml(
     if (sandboxPort === undefined) {
       throw new Error(unavailableMessage);
     }
-    const configuredOrigin = context.getRuntimeConfig().mcp?.apps?.sandboxOrigin;
+    const apps = context.getRuntimeConfig().mcp?.apps;
+    const sameOriginSandbox = apps?.sameOriginSandbox === true;
+    const configuredOrigin = !sameOriginSandbox && apps?.sandboxOrigin;
+    const deliveredHtml = sameOriginSandbox
+      ? embedSandboxPublicScripts(
+          html,
+          await prepareSandboxPublicScripts(methodRegistry?.pluginRegistry),
+        )
+      : html;
+    assertActive();
     const result: CanvasDocumentViewResult = {
-      html,
-      sandboxUrl,
+      html: deliveredHtml,
+      sandboxUrl: sandboxUrl(sameOriginSandbox),
       sandboxPort,
+      ...(sameOriginSandbox ? { sameOriginSandbox: true } : {}),
       ...(configuredOrigin ? { sandboxOrigin: new URL(configuredOrigin).origin } : {}),
     };
     respond(true, result);
@@ -90,7 +104,8 @@ export const canvasHandlers: GatewayRequestHandlers = {
           return document.html;
         },
         CANVAS_WIDGET_UNAVAILABLE,
-        buildBoardWidgetSandboxPath({ grantState: "none" }),
+        (sameOriginSandbox) =>
+          buildBoardWidgetSandboxPath({ grantState: "none" }, sameOriginSandbox),
       ),
   ),
   "canvas.document.preview": defineValidatedGatewayMethod(
@@ -114,7 +129,8 @@ export const canvasHandlers: GatewayRequestHandlers = {
         invocation,
         () => html,
         CANVAS_PREVIEW_UNAVAILABLE,
-        buildSandboxHostPath({ blockDescendantFrames: true }),
+        (sameOriginSandbox) =>
+          buildSandboxHostPath({ blockDescendantFrames: true }, sameOriginSandbox),
       );
     },
   ),

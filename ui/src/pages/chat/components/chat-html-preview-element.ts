@@ -6,6 +6,7 @@ import type {
 import { html, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import { keyed } from "lit/directives/keyed.js";
+import { sandboxHostFramePermissions } from "../../../../../src/shared/sandbox-host-transport.ts";
 import { applicationContext, type ApplicationContext } from "../../../app/context.ts";
 import { resolveSandboxHostUrl } from "../../../components/sandbox-host.ts";
 import { t } from "../../../i18n/index.ts";
@@ -161,6 +162,8 @@ export class ChatHtmlPreview extends OpenClawLightDomContentsElement {
           view.sandboxOrigin,
           context.gateway.connection.gatewayUrl,
           window.location.origin,
+          undefined,
+          view.sameOriginSandbox,
         );
         this.sandboxOrigin = new URL(this.sandboxUrl).origin;
         this.view = view;
@@ -194,6 +197,8 @@ export class ChatHtmlPreview extends OpenClawLightDomContentsElement {
       frame,
       sandboxUrl: this.sandboxUrl,
       sandboxOrigin: this.sandboxOrigin,
+      sameOriginSandbox: view.sameOriginSandbox,
+      onMessage: this.handleMessage,
       documentKey: String(this.frameGeneration),
       allowScripts,
       loadDocument: async () => {
@@ -236,14 +241,14 @@ export class ChatHtmlPreview extends OpenClawLightDomContentsElement {
 
   private readonly handleMessage = (event: MessageEvent): void => {
     const host = this.sandboxHost;
-    if (!host || event.source !== host.frame.contentWindow) {
+    if (!host || !host.acceptsMessage(event)) {
       return;
     }
     // Close this frame's unsupported ports without interfering with sibling widgets.
     for (const port of event.ports) {
       port.close();
     }
-    if (!this.isCurrent(this.binding) || event.origin !== this.sandboxOrigin) {
+    if (!this.isCurrent(this.binding)) {
       return;
     }
     host.handleMessage(event);
@@ -285,7 +290,7 @@ export class ChatHtmlPreview extends OpenClawLightDomContentsElement {
           class="chat-html-preview__frame"
           title=${this.title}
           src=${this.sandboxUrl}
-          sandbox="allow-scripts allow-same-origin allow-forms"
+          sandbox=${sandboxHostFramePermissions(this.view.sameOriginSandbox)}
           referrerpolicy="origin"
           @error=${(event: Event) => {
             if (

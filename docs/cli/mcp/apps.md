@@ -16,7 +16,7 @@ Enable the host bridge:
 openclaw config set mcp.apps.enabled true --strict-json
 ```
 
-Restart the Gateway after changing this setting. When enabled, OpenClaw starts a sandbox-only HTTP(S) listener on the Gateway port plus one (for the default Gateway, `18790`). The Control UI loads Apps from that separate origin; the listener never serves Control UI, authenticated Gateway routes, or user data.
+Restart the Gateway after changing this setting. By default, OpenClaw starts a sandbox-only HTTP(S) listener on the Gateway port plus one (for the default Gateway, `18790`). The Control UI loads Apps from that separate origin. The listener never serves Control UI, authenticated Gateway routes, or user data.
 
 Direct Gateway connections need access to both ports. If a reverse proxy or TLS terminator exposes the Control UI, give Apps a dedicated public origin and proxy only that origin to the sandbox listener:
 
@@ -32,7 +32,7 @@ Direct Gateway connections need access to both ports. If a reverse proxy or TLS 
 }
 ```
 
-The sandbox origin must differ from the Control UI origin. Do not host other authenticated or sensitive content on it.
+The sandbox origin must differ from the Control UI origin. Do not host other authenticated or sensitive content on it. For one HTTPS origin instead, use the [single-origin sandbox](/cli/mcp/apps#single-origin-sandbox).
 
 For example, the official basic React demo can be configured as:
 
@@ -49,6 +49,37 @@ For example, the official basic React demo can be configured as:
   },
 }
 ```
+
+## Single-origin sandbox
+
+Set `mcp.apps.sameOriginSandbox` to `true` to serve the sandbox shell through the
+Gateway's existing HTTP origin. This opt-in mode needs no extra hostname, exposed
+port, or `sandboxOrigin`:
+
+```bash
+openclaw config set mcp.apps.sameOriginSandbox true --strict-json
+```
+
+Install a version that supports this option before setting it. Restart the
+Gateway after changing it, then reload the Control UI. This mode ignores
+`mcp.apps.sandboxOrigin` and `mcp.apps.sandboxPort`. An absent or `false` value
+preserves the default dedicated-origin mode.
+
+Both iframe layers have opaque origins, which prevent access to the application
+DOM, cookies, and storage. A source-checked handshake opens a private message
+channel for documents and subsequent messages. The shell response also enforces
+isolation through its Content Security Policy.
+
+With cookie-protected ingress, the browser authenticates the initial shell
+navigation. OpenClaw embeds registered public JavaScript renderers in the
+delivered document, including scripts loaded by retained widgets. Saved document
+bytes and approved digests do not change. This does not forward Gateway
+credentials or proxy arbitrary URLs. Other assets and external services retain
+their CSP and authentication requirements.
+
+The option applies to inline widgets, dashboard documents, HTML previews, and
+MCP Apps. Strict previews remain script-free. It does not change
+[portal isolation](/gateway/portals).
 
 ## Plugin extensions
 
@@ -107,7 +138,7 @@ Current server and session policies still apply and are checked again before exe
 
 - OpenClaw advertises the `io.modelcontextprotocol/ui` extension only when Apps are enabled.
 - Only `ui://` resources with the exact `text/html;profile=mcp-app` MIME type render.
-- UI resources are capped at 2 MiB, placed behind a double-iframe proxy on a dedicated outer origin, loaded into an opaque inner App origin, and constrained by CSP derived from the resource metadata.
+- UI resources are capped at 2 MiB and constrained by CSP derived from their metadata. The double-iframe proxy uses a dedicated outer origin by default. Both layers use opaque origins in single-origin mode.
 - App-only tools (`_meta.ui.visibility: ["app"]`) stay out of model tool lists. Apps can call only app-visible tools on their owning server that also pass the effective OpenClaw tool policy for the run that created the view.
 - Same-server resource listing and reads require that same current App-interaction authority. OpenClaw rechecks after upstream resource work, so a grant revoked in flight cannot return resource data to the App.
 - Origin-bound App permissions such as camera, microphone, and geolocation are not granted while inner App documents use opaque origins for cross-App isolation.

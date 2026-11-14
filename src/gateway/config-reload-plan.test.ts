@@ -17,6 +17,21 @@ describe("Gateway core reload policy", () => {
   beforeEach(() => setActivePluginRegistry(createEmptyPluginRegistry()));
   afterEach(() => resetPluginRuntimeStateForTest());
 
+  it.each([
+    { prev: {}, next: { mcp: { apps: { enabled: true } } } },
+    { prev: { mcp: { apps: { enabled: true } } }, next: {} },
+    { prev: {}, next: { mcp: { apps: { sameOriginSandbox: true } } } },
+    {
+      prev: { mcp: { apps: { sameOriginSandbox: true } } },
+      next: { mcp: { apps: { sameOriginSandbox: false } } },
+    },
+  ])("preserves the Apps restart boundary for whole MCP changes", ({ prev, next }) => {
+    const changedPaths = diffGatewayReloadPaths(prev, next, listConfigReloadRefinementPrefixes());
+    const plan = buildGatewayReloadPlan(changedPaths);
+    expect(plan.restartGateway).toBe(true);
+    expect(plan.restartReasons).toEqual(changedPaths);
+  });
+
   it.each(["memory-core", "none"])(
     "reloads the selected memory index service for provider changes (memory slot: %s)",
     async (memorySlot) => {

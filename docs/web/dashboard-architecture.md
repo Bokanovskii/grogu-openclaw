@@ -175,7 +175,10 @@ puts fail with an enable-and-retry error and existing cells render as disabled.
 
 The A2UI implementation composes a small document that references its renderer
 bundle. Ticketed board documents use the capability-scoped Gateway asset route.
-Inline documents load the same public static renderer from the sandbox origin.
+Inline documents load the same public static renderer from the sandbox origin
+by default. In single-origin mode, the Gateway embeds registered public
+JavaScript renderers in the delivered copy. Stored documents and grant digests
+stay unchanged.
 Core adds the same CSP, theme bridge, size reporter, and private-port host bridge
 used by HTML widgets. v0.8 and v0.9 use separate renderer bundles because their
 Lit custom elements share tag names but their processors and action contracts
@@ -191,8 +194,8 @@ host-tool capability.
 Shared hosting infrastructure:
 
 - **One sandbox host.** `html` widgets render through the same hardened
-  pipeline MCP apps shipped with (double-iframe on the dedicated sandbox
-  origin, per-widget CSP declared and fail-closed decoded) instead of a second
+  pipeline MCP apps shipped with (double-iframe with a dedicated outer origin
+  by default, per-widget CSP declared and fail-closed decoded) instead of a second
   bespoke iframe host. The proxy receives HTML by value, so local content is
   the natural case.
 - **Authenticated loading.** The trusted Control UI reads inline Canvas HTML
@@ -242,13 +245,20 @@ Shared hosting infrastructure:
   channel. The host opens links with `noopener,noreferrer`. Size reporting and
   theme tokens remain separate host notifications.
 
-The outer proxy runs on a different origin from both the Control UI and the
-Gateway. Its iframe allows `allow-same-origin` so the host can authenticate
+By default, the outer proxy runs on a different origin from the Control UI and
+the Gateway. Its iframe allows `allow-same-origin` so the host can authenticate
 proxy messages against that dedicated origin. The proxy puts widget bytes in
 an inner `srcdoc` iframe with `allow-scripts allow-forms`, without
 `allow-same-origin`. Widget code therefore has neither application-origin
 access nor the proxy's origin. Inline views adopt only the wrapper's private
 prompt channel. Dashboard views initialize their separate ticket-bound bridge.
+
+With `mcp.apps.sameOriginSandbox: true`, the Gateway serves the shell on its
+existing HTTP origin. Both iframe layers omit `allow-same-origin`, and the shell
+response also carries a sandbox CSP. The host checks the exact frame and URL
+before transferring a private message channel. Documents, themes, and subsequent
+messages use that channel. Neither frame gains application-origin access.
+See [single-origin setup and limits](/cli/mcp/apps#single-origin-sandbox).
 
 The public proxy shell uses a URL fingerprint of its HTML and security headers.
 Browsers can cache that exact version for repeated widget mounts; changing the

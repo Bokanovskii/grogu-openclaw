@@ -5,7 +5,9 @@ import { runWithSessionMcpRequestSignal } from "../agents/agent-bundle-mcp-reque
 import { buildMcpAppSandboxPath, resolveMcpAppSandboxPort } from "../agents/mcp-app-sandbox.js";
 import { getMcpAppViewLease, type McpAppViewLease } from "../agents/mcp-ui-resource.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import type { PluginRegistry } from "../plugins/registry-types.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
+import { createSandboxHostTransport } from "../shared/sandbox-host-transport.js";
 import { respondPlainText } from "./control-ui-http-utils.js";
 import {
   classifyMcpAppStandalonePath,
@@ -21,6 +23,10 @@ import {
   withMcpAppActiveView,
 } from "./mcp-app-operations.js";
 import { runStandaloneMcpAppHost } from "./mcp-app-standalone-host.js";
+import {
+  embedSandboxPublicScripts,
+  prepareSandboxPublicScripts,
+} from "./sandbox-public-resources.js";
 
 const MCP_APP_STANDALONE_TICKET_SCOPE = "mcp-app-standalone-view";
 const MCP_APP_STANDALONE_INITIAL_LOAD_TIMEOUT_MS = 30_000;
@@ -220,13 +226,14 @@ function sendJsonRepresentation(
   res.end(req.method === "HEAD" ? undefined : serialized);
 }
 
-function standaloneHostHtml(): { html: string; scriptHash: string } {
+function standaloneHostHtml(sameOriginSandbox = false): { html: string; scriptHash: string } {
   const serializedConfig = JSON.stringify({
     protocolVersion: MCP_APP_STABLE_PROTOCOL_VERSION,
     viewPath: MCP_APP_STANDALONE_VIEW_PATH,
     initialLoadTimeoutMs: MCP_APP_STANDALONE_INITIAL_LOAD_TIMEOUT_MS,
+    sameOriginSandbox,
   });
-  const clientSource = `;(() => { const __name = (target) => target; (${runStandaloneMcpAppHost.toString()})(${serializedConfig}); })();`;
+  const clientSource = `;(() => { const __name = (target) => target; (${runStandaloneMcpAppHost.toString()})(${serializedConfig}, ${createSandboxHostTransport.toString()}); })();`;
   const escapedSource = clientSource.replaceAll("</script", "<\\/script");
   return {
     html: `<!doctype html>
@@ -262,6 +269,8 @@ export async function handleMcpAppStandaloneHttpRequest(
     gatewayPort?: number;
     sandboxPort?: number;
     sandboxOrigin?: string;
+    sameOriginSandbox?: boolean;
+    pluginRegistry?: PluginRegistry;
   } = {},
 ): Promise<boolean> {
   const url = URL.parse(req.url ?? "/", "http://localhost");
@@ -288,7 +297,9 @@ export async function handleMcpAppStandaloneHttpRequest(
   }
   let sandboxPort: number;
   try {
-    sandboxPort = resolveMcpAppSandboxPort(gatewayPort, options.sandboxPort);
+    sandboxPort = options.sameOriginSandbox
+      ? gatewayPort
+      : resolveMcpAppSandboxPort(gatewayPort, options.sandboxPort);
   } catch {
     respondPlainText(res, 503, "MCP App host unavailable");
     return true;
@@ -298,12 +309,14 @@ export async function handleMcpAppStandaloneHttpRequest(
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
   if (route === "shell") {
-    const frameOrigin = resolveShellSandboxOrigin({
-      req,
-      sandboxOrigin: options.sandboxOrigin,
-      sandboxPort,
-    });
-    const shell = standaloneHostHtml();
+    const frameOrigin = options.sameOriginSandbox
+      ? "'self'"
+      : resolveShellSandboxOrigin({
+          req,
+          sandboxOrigin: options.sandboxOrigin,
+          sandboxPort,
+        });
+    const shell = standaloneHostHtml(options.sameOriginSandbox);
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Content-Length", String(Buffer.byteLength(shell.html)));
@@ -374,11 +387,25 @@ export async function handleMcpAppStandaloneHttpRequest(
       const { runtime, view } = active;
       const serverResources =
         runtime.readResource !== undefined && (await supportsStandaloneResourceOperations(view));
+      const html = options.sameOriginSandbox
+        ? embedSandboxPublicScripts(
+            view.html,
+            await prepareSandboxPublicScripts(options.pluginRegistry),
+          )
+        : view.html;
+      const current = ticket ? resolveTicketActiveView(ticket, Date.now()) : undefined;
+      if (current?.view !== view || current.runtime !== runtime) {
+        throw new Error("MCP App ticket was rejected");
+      }
       sendJsonRepresentation(req, res, 200, {
-        sandboxUrl: buildMcpAppSandboxPath(view.csp),
+        sandboxUrl: buildMcpAppSandboxPath(view.csp, options.sameOriginSandbox),
         sandboxPort,
-        ...(options.sandboxOrigin ? { sandboxOrigin: new URL(options.sandboxOrigin).origin } : {}),
-        html: view.html,
+        ...(options.sameOriginSandbox
+          ? { sameOriginSandbox: true }
+          : options.sandboxOrigin
+            ? { sandboxOrigin: new URL(options.sandboxOrigin).origin }
+            : {}),
+        html,
         ...(view.csp ? { csp: view.csp } : {}),
         toolInput: view.toolInput,
         toolResult: view.toolResult,

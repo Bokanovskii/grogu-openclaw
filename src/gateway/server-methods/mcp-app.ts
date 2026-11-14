@@ -26,6 +26,10 @@ import {
 } from "../mcp-app-operations.js";
 import { createMcpAppStandaloneTicket } from "../mcp-app-standalone.js";
 import { authorizeOperatorScopesForMethod } from "../method-scopes.js";
+import {
+  embedSandboxPublicScripts,
+  prepareSandboxPublicScripts,
+} from "../sandbox-public-resources.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { readGatewayRequestMutationAuthority } from "./session-mutation-guards.js";
 import { retainSessionScopedRead } from "./session-scoped-read.js";
@@ -276,7 +280,17 @@ export const mcpAppHandlers: GatewayRequestHandlers = {
         if (sandboxPort === undefined) {
           throw new Error("MCP App sandbox listener is unavailable; restart the Gateway");
         }
-        const configuredOrigin = context.getRuntimeConfig().mcp?.apps?.sandboxOrigin;
+        const apps = context.getRuntimeConfig().mcp?.apps;
+        const sameOriginSandbox = apps?.sameOriginSandbox === true;
+        const configuredOrigin = !sameOriginSandbox && apps?.sandboxOrigin;
+        const html = sameOriginSandbox
+          ? embedSandboxPublicScripts(
+              view.html,
+              await prepareSandboxPublicScripts(
+                context.getGatewayMethodRegistry?.().pluginRegistry,
+              ),
+            )
+          : view.html;
         let standalone: ReturnType<typeof createMcpAppStandaloneTicket> = undefined;
         try {
           standalone = createMcpAppStandaloneTicket({
@@ -294,10 +308,11 @@ export const mcpAppHandlers: GatewayRequestHandlers = {
         }
         assertRequestCurrent();
         return {
-          sandboxUrl: buildMcpAppSandboxPath(view.csp),
+          sandboxUrl: buildMcpAppSandboxPath(view.csp, sameOriginSandbox),
           sandboxPort,
+          ...(sameOriginSandbox ? { sameOriginSandbox: true } : {}),
           ...(configuredOrigin ? { sandboxOrigin: new URL(configuredOrigin).origin } : {}),
-          html: view.html,
+          html,
           ...(view.csp ? { csp: view.csp } : {}),
           toolInput: view.toolInput,
           toolResult: view.toolResult,

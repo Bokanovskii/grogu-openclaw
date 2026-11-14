@@ -18,6 +18,7 @@ export function resolveSandboxHostUrl(
   gatewayUrl: string,
   hostOrigin: string,
   invalidMessage = "Sandbox host URL is invalid",
+  sameOriginSandbox = false,
 ): string {
   if (!Number.isInteger(sandboxPort) || sandboxPort < 1 || sandboxPort > 65535) {
     throw new Error(invalidMessage);
@@ -28,17 +29,20 @@ export function resolveSandboxHostUrl(
   } catch {
     throw new Error(invalidMessage);
   }
-  const base = sandboxOrigin ? new URL(sandboxOrigin) : new URL(activeGatewayOrigin);
-  if (sandboxOrigin) {
-    if (
-      base.origin !== sandboxOrigin.replace(/\/$/u, "") ||
-      base.username !== "" ||
-      base.password !== ""
-    ) {
-      throw new Error(invalidMessage);
+  const base =
+    sandboxOrigin && !sameOriginSandbox ? new URL(sandboxOrigin) : new URL(activeGatewayOrigin);
+  if (!sameOriginSandbox) {
+    if (sandboxOrigin) {
+      if (
+        base.origin !== sandboxOrigin.replace(/\/$/u, "") ||
+        base.username !== "" ||
+        base.password !== ""
+      ) {
+        throw new Error(invalidMessage);
+      }
+    } else {
+      base.port = String(sandboxPort);
     }
-  } else {
-    base.port = String(sandboxPort);
   }
   base.pathname = "/";
   base.search = "";
@@ -46,8 +50,8 @@ export function resolveSandboxHostUrl(
   const resolved = new URL(value, base);
   if (
     (base.protocol !== "http:" && base.protocol !== "https:") ||
-    base.origin === new URL(hostOrigin).origin ||
-    base.origin === activeGatewayOrigin ||
+    (!sameOriginSandbox &&
+      (base.origin === new URL(hostOrigin).origin || base.origin === activeGatewayOrigin)) ||
     resolved.origin !== base.origin ||
     resolved.pathname !== "/mcp-app-sandbox"
   ) {

@@ -543,5 +543,8 @@ function preserveBoardWidgetViewContract(widget: BoardWidget, previous: BoardWid
     ...(previous.sandboxUrl !== undefined ? { sandboxUrl: previous.sandboxUrl } : {}),
     ...(previous.sandboxPort !== undefined ? { sandboxPort: previous.sandboxPort } : {}),
     ...(previous.sandboxOrigin !== undefined ? { sandboxOrigin: previous.sandboxOrigin } : {}),
+    ...(previous.sameOriginSandbox !== undefined
+      ? { sameOriginSandbox: previous.sameOriginSandbox }
+      : {}),
   };
 }

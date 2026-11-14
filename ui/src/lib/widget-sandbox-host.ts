@@ -1,5 +1,6 @@
 import { DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS } from "@openclaw/gateway-client/browser";
 import { racePromiseWithAbortSignal } from "@openclaw/retry";
+import { createSandboxHostTransport } from "../../../src/shared/sandbox-host-transport.ts";
 import { generateUUID } from "./uuid.ts";
 
 // A slow resource gets a notice without throwing away its in-flight work. The
@@ -12,6 +13,8 @@ type WidgetSandboxHostOptions = {
   frame: HTMLIFrameElement;
   sandboxOrigin: string;
   sandboxUrl: string;
+  sameOriginSandbox?: boolean;
+  onMessage?: (event: MessageEvent) => void;
   documentKey: string;
   /** Restricts the untrusted inner document, not the trusted transport shell. */
   allowScripts?: boolean;
@@ -37,8 +40,10 @@ export class WidgetSandboxHost {
   private pendingDocument: string | null = null;
   private activeLoad: { controller: AbortController; timeout: number; notice: number } | null =
     null;
+  private transport: ReturnType<typeof createSandboxHostTransport>;
 
   constructor(private options: WidgetSandboxHostOptions) {
+    this.transport = this.createTransport();
     // Owners finish installing their bridge before an immediate load can report back.
     queueMicrotask(() => this.start());
   }
@@ -55,9 +60,34 @@ export class WidgetSandboxHost {
     return this.documentLoaded;
   }
 
+  private createTransport() {
+    return createSandboxHostTransport({
+      frame: this.options.frame,
+      sandboxUrl: this.options.sandboxUrl,
+      sameOriginSandbox: this.options.sameOriginSandbox,
+      onMessage: (event) => {
+        if (this.options.onMessage) {
+          this.options.onMessage(event);
+        } else {
+          this.handleMessage(event);
+        }
+      },
+    });
+  }
+
+  acceptsMessage(event: MessageEvent): boolean {
+    return this.transport.acceptsMessage(event);
+  }
+
+  send(message: unknown): boolean {
+    return this.transport.send(message);
+  }
+
   update(options: WidgetSandboxHostOptions): void {
     const sandboxChanged =
-      this.options.frame !== options.frame || this.options.sandboxUrl !== options.sandboxUrl;
+      this.options.frame !== options.frame ||
+      this.options.sandboxUrl !== options.sandboxUrl ||
+      this.options.sameOriginSandbox !== options.sameOriginSandbox;
     const documentChanged = this.options.documentKey !== options.documentKey;
     this.options = options;
     if (sandboxChanged || documentChanged) {
@@ -66,6 +96,8 @@ export class WidgetSandboxHost {
     if (sandboxChanged) {
       // Bytes may arrive early, but only the new proxy can enforce the new CSP.
       this.proxyReady = false;
+      this.transport.dispose();
+      this.transport = this.createTransport();
     }
     this.start();
   }
@@ -97,10 +129,11 @@ export class WidgetSandboxHost {
     this.active = false;
     this.reset();
     this.proxyReady = false;
+    this.transport.dispose();
   }
 
   handleMessage(event: MessageEvent): void {
-    if (event.source !== this.frame.contentWindow || event.origin !== this.options.sandboxOrigin) {
+    if (!this.acceptsMessage(event)) {
       return;
     }
     if (event.data?.method === "ui/notifications/sandbox-resource-loaded") {
@@ -179,6 +212,7 @@ export class WidgetSandboxHost {
 
   private retrySandboxFrame(): void {
     this.proxyReady = false;
+    this.transport.reset();
     this.reset();
     this.options.onReadyTimeout();
     this.scheduleRetry(() => {
@@ -279,18 +313,15 @@ export class WidgetSandboxHost {
     }
     this.renderId = generateUUID();
     this.scheduleReadyTimeout();
-    this.frame.contentWindow?.postMessage(
-      {
-        jsonrpc: "2.0",
-        method: "ui/notifications/sandbox-resource-ready",
-        params: {
-          html: document,
-          renderId: this.renderId,
-          ...(this.options.allowScripts === false ? { allowScripts: false } : {}),
-        },
+    this.transport.send({
+      jsonrpc: "2.0",
+      method: "ui/notifications/sandbox-resource-ready",
+      params: {
+        html: document,
+        renderId: this.renderId,
+        ...(this.options.allowScripts === false ? { allowScripts: false } : {}),
       },
-      this.options.sandboxOrigin,
-    );
+    });
     this.pendingDocument = null;
     this.documentLoaded = true;
     this.retryDelayMs = 1_000;

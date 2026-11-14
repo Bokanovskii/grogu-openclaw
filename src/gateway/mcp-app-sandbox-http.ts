@@ -11,19 +11,19 @@ import {
   decodeSandboxHostCsp,
   SANDBOX_HOST_PATH,
 } from "../agents/sandbox-host.js";
-import type { PluginBoardWidgetContentKind } from "../plugins/board-widget-content-kind.types.js";
 import {
   capturePluginRegistryLifecycleEpoch,
   isPluginRegistryLifecycleEpochActive,
 } from "../plugins/registry-lifecycle.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
 import { respondPlainText } from "./control-ui-http-utils.js";
+import { getSandboxPublicResourceReaders } from "./sandbox-public-resources.js";
 
-type PublicResourceReader = NonNullable<
-  PluginBoardWidgetContentKind["resources"]["readPublicResource"]
->;
-
-function handleMcpAppSandboxHttpRequest(req: IncomingMessage, res: ServerResponse): boolean {
+export function handleMcpAppSandboxHttpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sameOriginSandbox = false,
+): boolean {
   const url = URL.parse(req.url ?? "/", "http://localhost");
   if (!url) {
     respondPlainText(res, 400, "Bad Request");
@@ -41,7 +41,7 @@ function handleMcpAppSandboxHttpRequest(req: IncomingMessage, res: ServerRespons
     return true;
   }
 
-  const { html, headers, version } = buildSandboxHostDocument(csp);
+  const { html, headers, version } = buildSandboxHostDocument(csp, sameOriginSandbox);
   res.statusCode = 200;
   for (const [name, value] of Object.entries(headers)) {
     res.setHeader(name, value);
@@ -63,8 +63,6 @@ export function createSandboxHostHttpServer(
   tlsOptions?: TlsOptions,
   resolvePluginRegistry?: () => PluginRegistry,
 ): HttpServer {
-  // One activation owns each prepared map; reactivation cannot revive stale readers.
-  const readersByEpoch = new WeakMap<object, Map<string, PublicResourceReader>>();
   const serveResource = async (req: IncomingMessage, res: ServerResponse) => {
     const registry = resolvePluginRegistry?.();
     const epoch = registry ? capturePluginRegistryLifecycleEpoch(registry) : undefined;
@@ -72,19 +70,7 @@ export function createSandboxHostHttpServer(
       respondPlainText(res, 404, "Not Found");
       return;
     }
-    let readers = readersByEpoch.get(epoch);
-    if (!readers) {
-      readers = new Map();
-      for (const { definition } of registry.boardWidgetContentKinds.values()) {
-        const read = definition.resources.readPublicResource;
-        if (read) {
-          for (const resourcePath of definition.resources.paths) {
-            readers.set(resourcePath, read);
-          }
-        }
-      }
-      readersByEpoch.set(epoch, readers);
-    }
+    const { readers } = getSandboxPublicResourceReaders(registry);
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
     const reader = readers.get(pathname);
     const resource = reader ? await reader(pathname) : undefined;

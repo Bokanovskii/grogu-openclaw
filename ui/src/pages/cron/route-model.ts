@@ -1,3 +1,14 @@
+import type { CronJob } from "../../api/types.ts";
+import { isCronJobRunning } from "../../lib/cron-status.ts";
+import type { CronDetailTab } from "./view-types.ts";
+
+export function defaultCronDetailTab(
+  job: CronJob | null,
+  linkedRunId: string | null,
+): CronDetailTab {
+  return job && (linkedRunId || isCronJobRunning(job)) ? "history" : "settings";
+}
+
 export function resolveCronRouteData(search: string): {
   jobId: string | null;
   runId: string | null;

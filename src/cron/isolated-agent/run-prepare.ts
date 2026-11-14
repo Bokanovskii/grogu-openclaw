@@ -163,6 +163,12 @@ export async function prepareCronRunContext(params: {
     payloadHookExternalContentSource ?? resolveHookExternalContentSource(baseSessionKey);
 
   const isGmailHook = hookExternalContentSource === "gmail";
+  input.onTranscriptIdentity?.({
+    jobId: input.job.id,
+    agentId,
+    storePath: resolveSessionStorePathCore(runtimeCfg.session?.store, { agentId }),
+    sessionKey: agentSessionKey,
+  });
   const prepareSession = () =>
     withCronSessionPreparation(
       {
@@ -216,6 +222,13 @@ export async function prepareCronRunContext(params: {
     const runSessionKey = usesExactRunSession
       ? `${agentSessionKey}:run:${runSessionId}`
       : agentSessionKey;
+    input.onTranscriptIdentity?.({
+      jobId: input.job.id,
+      agentId,
+      storePath: cronSession.storePath,
+      sessionKey: runSessionKey,
+      sessionId: runSessionId,
+    });
     const sessionWorkAdmission = await beginCronSessionWorkAdmission({
       cronSession,
       agentSessionKey,

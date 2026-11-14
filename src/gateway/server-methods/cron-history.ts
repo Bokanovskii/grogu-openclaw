@@ -8,6 +8,7 @@ import {
 import { CronHistoryResultSchema } from "../../../packages/gateway-protocol/src/schema/cron.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { readSessionHistoryPageInWorker } from "../../config/sessions/session-history-worker-runtime.js";
+import { acquireActiveCronRunTranscript } from "../../cron/active-run-transcript.js";
 import { cronStoreKey } from "../../cron/store/key.js";
 import { readCronRunHistoryBinding } from "../../cron/store/read-only.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
@@ -50,6 +51,7 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
       ),
     );
   const storeKey = cronStoreKey(context.cronStorePath);
+  let activeTranscript: Awaited<ReturnType<typeof acquireActiveCronRunTranscript>>;
   const sessionVisibility = createCronSessionVisibility(client, () => context.getRuntimeConfig());
   const assertAllowed = (sessionKey?: string, agentId?: string) => {
     assertCronReadCurrent(opts);
@@ -88,7 +90,17 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
         runId: params.runId,
         runAtMs: params.runAtMs,
       });
-    const selected = await select();
+    // A recorded row is authoritative once written; the active marker may still be retiring.
+    let selected = await select();
+    if (!selected) {
+      activeTranscript = await acquireActiveCronRunTranscript(
+        storeKey,
+        params.id,
+        { runId: params.runId, runAtMs: params.runAtMs },
+        opts.signal,
+      );
+      selected = activeTranscript;
+    }
     assertAllowed();
     if (!selected) {
       fail();
@@ -113,11 +125,12 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
     const scope = {
       agentId,
       sessionId,
-      storePath: resolveSessionStorePathCore(context.getRuntimeConfig().session?.store, {
-        agentId,
-      }),
+      storePath:
+        activeTranscript?.storePath ??
+        resolveSessionStorePathCore(context.getRuntimeConfig().session?.store, { agentId }),
     };
     const assertCurrent = (transcriptSessionKey?: string) => {
+      activeTranscript?.assertCurrent();
       if (
         cronStoreKey(context.cronStorePath) !== storeKey ||
         resolveSessionStorePathCore(context.getRuntimeConfig().session?.store, { agentId }) !==
@@ -154,6 +167,12 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
       retainedTranscript: {
         sessionId,
         verifyRetainedState: async () => {
+          if (activeTranscript) {
+            // Its held receipt gate already owns current job facts; do not
+            // reacquire the cron lock behind a writer waiting for this gate.
+            assertCurrent(physical.sessionKey);
+            return activeTranscript.binding === binding;
+          }
           await context.cron.readJob(params.id);
           assertCurrent(physical.sessionKey);
           const current = await select();
@@ -199,6 +218,7 @@ export const cronHistoryHandler: GatewayRequestHandler = async (opts) => {
   } catch {
     fail();
   } finally {
+    activeTranscript?.release();
     sessionVisibility.release();
   }
 };

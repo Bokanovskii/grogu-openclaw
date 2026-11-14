@@ -7,6 +7,7 @@ import {
 import type { CommandLaneTaskMarker } from "../process/command-queue.js";
 import type { PreparedEffectUse } from "../shared/effect-authority.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import type { CronActiveRunTranscript } from "./active-run-transcript.js";
 import type { CronStandingGrantAuthority } from "./standing-grant-authority.types.js";
 
 type CronActiveJobState = {
@@ -218,6 +219,8 @@ export function bindCronSelfRemovalCommitGuard(
 
 export type CronActiveJobMarker = {
   jobId: string;
+  transcript?: CronActiveRunTranscript;
+  transcriptPreparation?: { storePath?: string; sessionKey?: string; agentId?: string };
   standingGrantAuthority?: CronStandingGrantAuthority;
   agentId?: string;
   stateIdentityKey?: string;
@@ -282,7 +285,7 @@ function isMarkerActiveInGeneration(marker: CronActiveJobMarker, generation: num
   return marker.generation === generation || marker.preserveAcrossGenerationAdvance === true;
 }
 
-function getCurrentCronActiveJobMarker(jobId: string): CronActiveJobMarker | undefined {
+export function getCurrentCronActiveJobMarker(jobId: string): CronActiveJobMarker | undefined {
   if (!jobId) {
     return undefined;
   }

@@ -1,11 +1,17 @@
 import { html, nothing } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import type { CronRunLogEntry, CronDeliveryStatus, CronRunsStatusValue } from "../../api/types.ts";
+import type {
+  CronJob,
+  CronRunLogEntry,
+  CronDeliveryStatus,
+  CronRunsStatusValue,
+} from "../../api/types.ts";
 import { icon } from "../../components/icons.ts";
 import "../../components/web-awesome.ts";
 import { toSanitizedMarkdownHtml } from "../../components/markdown.ts";
 import { i18n, t } from "../../i18n/index.ts";
 import { registerCronEnglish } from "../../i18n/locales/en-cron.ts";
+import { isCronJobRunning } from "../../lib/cron-status.ts";
 import { formatDurationCompact, formatDurationHuman } from "../../lib/format-duration.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import {
@@ -186,7 +192,32 @@ function renderFilterDropdown(params: {
   `;
 }
 
-export function renderRunsSection(props: CronRunsSectionProps) {
+type CronRunHistoryProps = CronRunsSectionProps &
+  Pick<CronProps, "onViewLiveRun" | "runTranscript">;
+
+function renderLiveRunNotice(props: CronRunHistoryProps, job: CronJob) {
+  return html`<div class="cron-live-run">
+    <span class="cron-table__running">${t("cron.groups.runningNow")}</span>
+    <span class="muted">${t("cron.groups.liveHint")}</span>
+    <button
+      class="btn btn--sm"
+      @click=${(event: MouseEvent) => {
+        if (event.currentTarget instanceof HTMLButtonElement) {
+          props.onViewLiveRun?.(job, event.currentTarget);
+        }
+      }}
+    >
+      ${t("cron.groups.viewLive")}
+    </button>
+  </div>`;
+}
+
+export function renderRunHistory(props: CronRunHistoryProps, job?: CronJob) {
+  return html`${job && isCronJobRunning(job) ? renderLiveRunNotice(props, job) : nothing}
+  ${props.runTranscript}${renderRunsSection(props)}`;
+}
+
+function renderRunsSection(props: CronRunsSectionProps) {
   const formatTimestamp = createMsFormatter();
   const runs = props.runs.toSorted((a, b) =>
     props.runsSortDir === "asc" ? a.ts - b.ts : b.ts - a.ts,

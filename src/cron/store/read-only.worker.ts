@@ -39,7 +39,7 @@ function selectTranscriptBinding(
     }
     // A matching row without transcript identity still makes the selector ambiguous.
     if (selected) {
-      return undefined;
+      throw new Error("The cron history selector matches multiple recorded runs");
     }
     selected = { record, entry };
   }
@@ -48,7 +48,7 @@ function selectTranscriptBinding(
   }
   const { record, entry } = selected;
   if (!entry.sessionKey || !entry.sessionId) {
-    return undefined;
+    throw new Error("The recorded cron run has no exact transcript identity");
   }
   return {
     // Keep cursor identity bytes stable, including both internal and public run IDs.

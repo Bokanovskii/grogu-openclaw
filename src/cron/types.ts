@@ -197,6 +197,7 @@ export type CronAgentExecutionPhase = EmbeddedAgentExecutionPhase;
 /** Watchdog-visible execution metadata for an in-flight cron agent run. */
 export type CronAgentExecutionStarted = {
   jobId: string;
+  storePath?: string;
   agentId?: string;
   sessionId?: string;
   sessionKey?: string;

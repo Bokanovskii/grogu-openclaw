@@ -147,6 +147,105 @@ suite.define(() => {
     });
   }
 
+  it("rebinds paging and retires an in-flight live cursor when the run finishes", async () => {
+    await suite.withPage({ viewport: { width: 1100, height: 900 } }, async ({ page }) => {
+      const liveJob: CronJob = {
+        id: entry.jobId,
+        name: "daily-report",
+        configRevision: "live-revision",
+        enabled: true,
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        schedule: { kind: "every", everyMs: 60_000 },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: { kind: "agentTurn", message: "Synthetic live run" },
+        state: { runningAtMs: entry.runAtMs },
+      };
+      const completedJob: CronJob = {
+        ...liveJob,
+        state: { lastRunAtMs: entry.runAtMs, lastRunStatus: "ok" },
+      };
+      const listResponse = (job: CronJob) =>
+        cronListResponseFixture({
+          jobs: [job],
+          snapshotRevision: "live-revision",
+          total: 1,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        });
+      const completedRun = {
+        ...entry,
+        runId: "recorded-run",
+        sessionKey: undefined,
+        ts: entry.runAtMs + 1,
+        summary: "Completed report",
+      };
+      const gateway = await installMockGateway(page, {
+        methodResponses: {
+          ...cron,
+          "cron.list": listResponse(liveJob),
+          "cron.get": liveJob,
+          "cron.runs": { ...cron["cron.runs"], entries: [], total: 0 },
+          "cron.history": {
+            messages: [{ role: "assistant", content: "Live latest page" }],
+            nextCursor: "active-older",
+          },
+        },
+      });
+      await page.goto(`${suite.server.baseUrl}cron`);
+      await page.locator(`[data-test-id="cron-row-${liveJob.id}"] .cron-table__name`).click();
+      await page.getByRole("button", { name: "View live run", exact: true }).click();
+      const transcript = page.locator("[data-cron-run-transcript]");
+      await transcript.getByText("Live latest page", { exact: true }).waitFor();
+      await gateway.deferNext("cron.history", {
+        id: liveJob.id,
+        runAtMs: entry.runAtMs,
+        limit: 100,
+        cursor: "active-older",
+      });
+      await transcript.getByRole("button", { name: /Show earlier/ }).click();
+      await gateway.waitForRequest("cron.history", { match: { cursor: "active-older" } });
+      await gateway.setMethodResponse("cron.history", {
+        messages: [{ role: "assistant", content: "Recorded latest page" }],
+        nextCursor: "recorded-older",
+      });
+      await gateway.setMethodResponse("cron.runs", {
+        ...cron["cron.runs"],
+        entries: [completedRun],
+        total: 1,
+      });
+      await gateway.setMethodResponse("cron.list", listResponse(completedJob));
+      await gateway.setMethodResponse("cron.get", completedJob);
+      await gateway.emitGatewayEvent("cron", { jobId: liveJob.id, action: "finished" });
+      const recordedRequest = await gateway.waitForRequest("cron.history", {
+        match: { runId: "recorded-run" },
+      });
+      await transcript.getByText("Recorded latest page", { exact: true }).waitFor();
+      await gateway.resolveDeferred("cron.history", {
+        messages: [{ role: "assistant", content: "Stale live page" }],
+        nextCursor: "active-stale-next",
+      });
+      expect(await transcript.getByText("Stale live page", { exact: true }).count()).toBe(0);
+      expect(recordedRequest.params).toMatchObject({
+        id: liveJob.id,
+        runId: "recorded-run",
+        limit: 100,
+      });
+      expect(recordedRequest.params).not.toHaveProperty("cursor");
+      await transcript.getByRole("button", { name: /Show earlier/ }).click();
+      await gateway.waitForRequest("cron.history", { match: { cursor: "recorded-older" } });
+      const finalRequests = await gateway.getRequests("cron.history");
+      expect(finalRequests.at(-1)?.params).toMatchObject({
+        id: liveJob.id,
+        runId: "recorded-run",
+        cursor: "recorded-older",
+      });
+    });
+  });
+
   it("retires loaded and pending transcripts when the automation panel changes", async () => {
     await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
       const jobs: CronJob[] = [

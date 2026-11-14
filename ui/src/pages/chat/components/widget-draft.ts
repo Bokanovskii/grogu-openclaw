@@ -95,6 +95,20 @@ class WidgetDraftCard extends OpenClawLitElement {
       width: 14px;
       height: 14px;
     }
+    /* Global spinner keyframes do not reach this shadow root. */
+    .status[data-building] svg {
+      animation: widget-draft-spin 0.7s linear infinite;
+    }
+    @keyframes widget-draft-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .status[data-building] svg {
+        animation: none;
+      }
+    }
     .title {
       color: var(--text-strong);
       overflow-wrap: anywhere;
@@ -188,7 +202,7 @@ class WidgetDraftCard extends OpenClawLitElement {
     const label = t(`chat.toolCards.widgetDraft.${draft.status}`);
     return html`
       <div class="header">
-        <span class="status" role="status"
+        <span class="status" role="status" ?data-building=${building}
           >${building ? icons.loader : icons.alertTriangle}${label}</span
         >
         ${draft.title ? html`<span class="title">${draft.title}</span>` : nothing}

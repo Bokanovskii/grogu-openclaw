@@ -903,7 +903,6 @@ it("keeps a prepared worktree session in Coding before canonical metadata arrive
       sessions: [{ key, kind: "direct", updatedAt: 1 }],
     },
     sessionsAgentId: null,
-    showCron: false,
     showSystem: false,
     statusFilter: "active",
     compareSessions: () => 0,

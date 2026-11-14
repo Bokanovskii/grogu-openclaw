@@ -1,19 +1,21 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { CronJob } from "../cron/types.js";
+import { makeCronJob } from "../cron/delivery.test-helpers.js";
+import type { CronJob, CronStoredJob } from "../cron/types.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import {
   invalidateSessionAutomationIndex,
   claimSessionAutomationEpoch,
   registerSessionAutomationSource,
   sessionHasAutomation,
+  sessionAutomationJobIds,
   unregisterSessionAutomationSource,
 } from "./session-automation-index.js";
 
 const cfg: OpenClawConfig = {};
 
-function job(partial: Partial<CronJob> & Pick<CronJob, "id">): CronJob {
-  return { enabled: true, sessionTarget: "isolated", ...partial } as CronJob;
+function job(partial: Partial<CronStoredJob> & Pick<CronStoredJob, "id">): CronStoredJob {
+  return { ...makeCronJob({}), ...partial };
 }
 
 afterEach(() => {
@@ -21,6 +23,57 @@ afterEach(() => {
 });
 
 describe("session automation index", () => {
+  test("owns persistent execution chats while paused, but never delivery, source, Home, or creator chats", () => {
+    let jobs = [
+      job({
+        id: "research",
+        enabled: false,
+        sessionTarget: "session:agent:main:background:research",
+        sessionKey: "agent:main:personal",
+        sourceConversation: { sessionKey: "agent:main:source", sessionId: "source-session" },
+      }),
+      job({ id: "review", sessionTarget: "session:agent:main:background:research" }),
+      job({ id: "home", sessionTarget: "session:agent:main:main" }),
+      job({
+        id: "pr-autofix",
+        enabled: false,
+        sessionTarget: "session:agent:main:dashboard:pr",
+        owner: { agentId: "main", sessionKey: "agent:main:dashboard:pr" },
+      }),
+      job({
+        id: "remind-here",
+        sessionTarget: "session:agent:main:dashboard:reminders",
+        sessionKey: "agent:main:dashboard:reminders",
+      }),
+    ];
+    registerSessionAutomationSource({ getJobs: () => jobs, getDefaultAgentId: () => "main" });
+    expect(sessionAutomationJobIds("agent:main:background:research", cfg)).toEqual([
+      "research",
+      "review",
+    ]);
+    for (const key of [
+      "agent:main:personal",
+      "agent:main:source",
+      "agent:main:main",
+      "agent:main:dashboard:pr",
+      "agent:main:dashboard:reminders",
+    ]) {
+      expect(sessionAutomationJobIds(key, cfg)).toBeUndefined();
+    }
+    const changed = vi.fn();
+    const stop = sessionChanges.subscribe(changed);
+    try {
+      jobs = jobs.filter((entry) => entry.id !== "research");
+      invalidateSessionAutomationIndex();
+      expect(sessionAutomationJobIds("agent:main:background:research", cfg)).toEqual(["review"]);
+      expect(
+        changed.mock.calls.some(([event]) => event.sessionKey === "agent:main:background:research"),
+      ).toBe(true);
+    } finally {
+      stop();
+    }
+  });
+
   test("unchanged bindings publish nothing, including shared bindings and in-place edits", () => {
     const first = job({ id: "a", sessionTarget: "main" });
     const second = job({ id: "b", sessionTarget: "main" });

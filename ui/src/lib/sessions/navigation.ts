@@ -4,7 +4,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import {
-  isCronSessionDisplayKey,
+  isAutomationOwnedSessionRow,
   isSystemCreatedSessionRow,
 } from "../../../../src/shared/session-list-visibility.ts";
 import type { GatewayHelloOk } from "../../api/gateway.ts";
@@ -33,7 +33,6 @@ type SessionNavigationInput = {
   sessionKey: string;
   assistantAgentId?: string | null;
   hello?: GatewayHelloOk | null;
-  showCron?: boolean;
   showSystem?: boolean;
   archivedFilter?: SessionArchivedFilter;
   compareSessions?: (a: GatewaySessionRow, b: GatewaySessionRow) => number;
@@ -148,7 +147,6 @@ type VisibleSessionRowOptions = {
   agentId: string;
   defaultAgentId: string;
   filterByAgent?: boolean;
-  showCron?: boolean;
   showSystem?: boolean;
   archivedFilter?: SessionArchivedFilter;
 };
@@ -172,7 +170,7 @@ export function sessionMatchesVisibleSessionScope(
     row.kind !== "global" &&
     row.kind !== "unknown" &&
     row.isDock !== true &&
-    (options.showCron === true || !isCronSessionDisplayKey(row.key)) &&
+    !isAutomationOwnedSessionRow(row) &&
     (options.showSystem === true || !isSystemCreatedSessionRow(row)) &&
     (!options.filterByAgent ||
       isSessionKeyTiedToAgent(row.key, options.agentId, options.defaultAgentId))
@@ -184,6 +182,9 @@ export function filterVisibleSessionRows(
   options: VisibleSessionRowOptions,
 ): GatewaySessionRow[] {
   return rows.filter((row) => {
+    if (isAutomationOwnedSessionRow(row)) {
+      return false;
+    }
     if (
       row.key === options.currentSessionKey &&
       row.isDock !== true &&
@@ -249,7 +250,6 @@ export function resolveSessionNavigation(input: SessionNavigationInput) {
     agentId: selectedAgentId,
     defaultAgentId,
     filterByAgent: shouldFilterByAgent,
-    showCron: input.showCron,
     showSystem: input.showSystem,
     archivedFilter: input.archivedFilter,
   }).toSorted(input.compareSessions ?? compareSessionRowsByUpdatedAt);
@@ -261,6 +261,7 @@ export function resolveSessionNavigation(input: SessionNavigationInput) {
   if (
     !activeRow &&
     activeSession &&
+    !isAutomationOwnedSessionRow(activeSession) &&
     activeSession.isDock !== true &&
     input.archivedFilter !== "archived"
   ) {

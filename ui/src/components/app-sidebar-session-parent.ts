@@ -1,5 +1,5 @@
 import {
-  isCronSessionDisplayKey,
+  isAutomationOwnedSessionRow,
   isSystemCreatedSessionRow,
 } from "../../../src/shared/session-list-visibility.ts";
 import type { GatewaySessionRow } from "../api/types.ts";
@@ -138,7 +138,6 @@ export function collectPromotedMainChildRows(input: {
   childKeysByParent: ReadonlyMap<string, readonly string[]>;
   mainSessionKeys: ReadonlySet<string>;
   scopedRootKeys: ReadonlySet<string>;
-  showCron: boolean;
   showSystem: boolean;
   archivedFilter: SessionArchivedFilter;
 }): GatewaySessionRow[] {
@@ -160,7 +159,7 @@ export function collectPromotedMainChildRows(input: {
       !input.scopedRootKeys.has(row.key) &&
       !isSubagentSessionKey(row.key) &&
       sessionMatchesArchivedFilter(row, input.archivedFilter) &&
-      (input.showCron || !isCronSessionDisplayKey(row.key)) &&
+      !isAutomationOwnedSessionRow(row) &&
       (input.showSystem || !isSystemCreatedSessionRow(row)),
   );
 }

@@ -93,7 +93,7 @@ Automation inputs appear as compact, collapsed activity rows instead of message 
 
 The Automations page has three levels: group, automation, and run. Collapse a group to focus on another purpose. Automations without a saved group appear under Other. Each automation can have a friendly name, a description of its task, and a description of when it sends a message. The page derives schedule descriptions from the saved schedule.
 
-View live run shows recorded reasoning, tool calls, output, and delivery status. It updates while the page is visible. Completed runs use their recorded transcript identity, not a session alias that can change.
+Automation execution chats stay inside Automations, not in the normal chat list. This includes persistent chats that an automation targets, even when it is paused. Home, personal chats, and conversations that receive automation messages stay visible. Open an automation to view its workspace chat or a run. View live run shows recorded reasoning, tool calls, output, and delivery status. It updates while the page is visible. Completed runs use their recorded transcript identity, not a session alias that can change.
 
 Thinking, speed, and context-window changes stay synchronized across panes showing the same session. While a change is pending, the latest selection remains visible. A rejected change restores the latest confirmed value. Delayed events from a replaced session leave the current transcript and unsent draft intact.
 

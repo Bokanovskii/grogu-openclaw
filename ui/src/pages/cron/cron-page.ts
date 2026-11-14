@@ -760,7 +760,9 @@ class CronPage extends OpenClawLightDomElement {
               updateCronRunsFilter(cronState, patch);
               await loadCronRuns(cronState);
             }),
-          ...this.runTranscript.viewProps(),
+          ...this.runTranscript.viewProps(() => {
+            this.detailTab = "history";
+          }),
         }),
       )}
     `;

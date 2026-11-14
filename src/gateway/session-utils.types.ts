@@ -82,6 +82,7 @@ export type GatewaySessionRow = Omit<SessionRow, "archivedBy" | "updatedAt" | "w
   hasActiveRun?: boolean;
   activeRunIds?: string[];
   hasAutomation?: boolean;
+  automationJobIds?: string[];
   subagentRunState?: SubagentRunState;
   hasActiveSubagentRun?: boolean;
   startedAt?: number;

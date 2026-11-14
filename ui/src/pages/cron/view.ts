@@ -22,7 +22,6 @@ import {
   renderSettingsRow,
   renderSettingsSection,
   renderSettingsSegmented,
-  renderSettingsToggle,
   renderSettingsToggleRow,
 } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
@@ -36,13 +35,14 @@ import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { CRON_SUGGESTIONS, suggestionFormPatch } from "./suggestions.ts";
 import {
   renderDisabledNote,
+  renderEnabledSwitch,
   renderJobStateIndicator,
   renderLastRunCell,
   renderTriggerIndicator,
 } from "./view-job-status.ts";
 import { renderJobsFilterPopover } from "./view-jobs-filter.ts";
 import { renderJobsTable } from "./view-jobs-table.ts";
-import { renderRunHistory } from "./view-runs.ts";
+import { renderRunHistory, renderWorkspaceAction } from "./view-runs.ts";
 import { renderCronSuggestionLists } from "./view-suggestions.ts";
 import type { CronDetailTab, CronProps } from "./view-types.ts";
 
@@ -748,6 +748,7 @@ function renderDetailHeader(props: CronProps, mode: CronPanelMode, selectedJob?:
         </div>
       </div>
       <div class="cron-detail-actions">
+        ${renderWorkspaceAction(props, selectedJob)}
         ${
           mode === "job" && selectedJob && props.canManage
             ? html`
@@ -766,32 +767,6 @@ function renderDetailHeader(props: CronProps, mode: CronPanelMode, selectedJob?:
         }
       </div>
     </div>
-  `;
-}
-
-function renderEnabledSwitch(props: CronProps, job: CronJob, compact = false) {
-  const stateLabel = job.enabled ? t("cron.detail.active") : t("cron.detail.paused");
-  const actionLabel = t(job.enabled ? "cron.actions.pauseJob" : "cron.actions.resumeJob", {
-    name: job.displayName ?? job.name,
-  });
-  return html`
-    <span
-      class="cron-enabled-toggle"
-      data-test-id=${compact ? `cron-row-toggle-${job.id}` : "cron-toggle-enabled"}
-      title=${compact ? actionLabel : nothing}
-    >
-      ${renderSettingsToggle({
-        checked: job.enabled,
-        disabled: props.busy || !props.canManage,
-        ariaLabel: compact ? actionLabel : stateLabel,
-        onChange: (checked) => {
-          if (props.canManage) {
-            props.onToggle(job, checked);
-          }
-        },
-      })}
-      ${compact ? nothing : html`<span class="cron-detail-sub">${stateLabel}</span>`}
-    </span>
   `;
 }
 

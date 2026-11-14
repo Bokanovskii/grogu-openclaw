@@ -1,4 +1,5 @@
 import type { SessionCatalog } from "../../../packages/gateway-protocol/src/index.ts";
+import { isAutomationOwnedSessionRow } from "../../../src/shared/session-list-visibility.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../api/types.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import { filterVisibleSessionRows, sessionMatchesArchivedFilter } from "../lib/sessions/index.ts";
@@ -40,7 +41,6 @@ type AgentSessionRowsHost = {
   readonly sessionData: SessionDataController;
   visibleSessionCatalogs(): readonly SessionCatalog[];
   selectedAgentMainSessionKey(agentId: string): string;
-  readonly sessionsShowCron: boolean;
   readonly sessionsShowSystem: boolean;
   readonly sessionsStatusFilter: SidebarSessionStatusFilter;
   readonly sessionInvolvingMeFilterActive: boolean;
@@ -88,7 +88,6 @@ export function projectSidebarAgentSessionRows({
     agentId: selected,
     defaultAgentId,
     filterByAgent: !grouped,
-    showCron: host.sessionsShowCron,
     showSystem: host.sessionsShowSystem,
     archivedFilter: host.sessionsStatusFilter,
   } as const;
@@ -143,16 +142,20 @@ export function projectSidebarAgentSessionRows({
       (grouped ? inScope(session) : selected === routeAgentId || lineageAgentId === selected) &&
       session.key === navigationState.activeRowKey &&
       !isSessionHidden(session) &&
+      !isAutomationOwnedSessionRow(session) &&
       !adopted.has(session.key) &&
       !isMainSession(session.key),
   );
   const mainSessionKeys = new Set(canonicalMainKeys);
-  const scopedRootRows = rootRows.filter((row) => !isMainSession(row.key));
+  const scopedRootRows = rootRows.filter(
+    (row) => !isMainSession(row.key) && !isAutomationOwnedSessionRow(row),
+  );
   const lineageRouteAgentId = normalizeAgentId(
     parseAgentSessionKey(navigationState.routeSessionKey)?.agentId ?? "",
   );
   if (
     lineageRoot &&
+    !isAutomationOwnedSessionRow(lineageRoot) &&
     !isSessionHidden(lineageRoot) &&
     (areUiSessionKeysEquivalent(lineageRoot.key, navigationState.routeSessionKey) ||
       sessionMatchesArchivedFilter(lineageRoot, host.sessionsStatusFilter)) &&
@@ -240,7 +243,6 @@ export function projectSidebarAgentSessionRows({
     archivedFilter: host.sessionsStatusFilter,
     mainSessionKeys,
     scopedRootKeys,
-    showCron: host.sessionsShowCron,
     showSystem: host.sessionsShowSystem,
   });
   for (const row of promotedRows) {

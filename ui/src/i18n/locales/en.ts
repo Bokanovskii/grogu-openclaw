@@ -1083,7 +1083,6 @@ export const en: TranslationMap & {
     emptyGroupsWhenFiltering: "When filtering",
     emptyGroupsAlways: "Always",
     emptyGroupsNever: "Never",
-    showCronSessions: "Show automation sessions",
     showSystemSessions: "Show system sessions",
     groupByChannel: "Channel",
     groupByKind: "Kind",

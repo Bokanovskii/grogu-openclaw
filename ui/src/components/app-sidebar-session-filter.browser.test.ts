@@ -11,7 +11,6 @@ import {
   loadStoredSidebarSessionSortMode,
   loadStoredSidebarSessionStatusFilter,
   loadStoredSidebarSessionsGrouping,
-  loadStoredSidebarSessionsShowCron,
   loadStoredSidebarSessionsShowPreview,
   loadStoredSidebarSessionsShowSystem,
 } from "./app-sidebar-session-types.ts";
@@ -159,10 +158,6 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
       expect(loadStoredSidebarSessionStatusFilter()).toBe("archived");
       await userEvent.tab();
       await expect
-        .element(page.getByRole("switch", { name: "Show automation sessions", exact: true }))
-        .toHaveFocus();
-      await userEvent.tab();
-      await expect
         .element(page.getByRole("switch", { name: "Show system sessions", exact: true }))
         .toHaveFocus();
       await userEvent.tab();
@@ -273,9 +268,9 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
     expect(sheet.width).toBe(innerWidth);
     expect(sheet.bottom).toBeCloseTo(innerHeight, 0);
     await page.getByRole("heading", { name: "Filters", exact: true }).click();
-    const automation = page.getByRole("switch", { name: "Show automation sessions", exact: true });
-    await automation.click();
-    await expect.element(automation).toHaveAttribute("aria-checked", "true");
+    const system = page.getByRole("switch", { name: "Show system sessions", exact: true });
+    await system.click();
+    await expect.element(system).toHaveAttribute("aria-checked", "true");
     // A choice opens as a page covering the sheet, with Back and a title.
     await page.getByRole("button", { name: "Group by: Custom groups", exact: true }).click();
     const choices = sidebar.querySelector<HTMLElement>('[role="listbox"][aria-label="Group by"]')!;
@@ -481,7 +476,6 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
     }
     for (const [name, read] of [
       ["Show message preview", loadStoredSidebarSessionsShowPreview],
-      ["Show automation sessions", loadStoredSidebarSessionsShowCron],
       ["Show system sessions", loadStoredSidebarSessionsShowSystem],
     ] as const) {
       const before = read();
@@ -521,7 +515,6 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
     await page.getByRole("button", { name: "Reset", exact: true }).click();
     expect(loadStoredSidebarSessionStatusFilter()).toBe("active");
     expect(sidebar.sessionOwnerFilterId).toBeNull();
-    expect(loadStoredSidebarSessionsShowCron()).toBe(false);
     expect(loadStoredSidebarSessionsShowSystem()).toBe(false);
     expect(loadStoredSidebarSessionsGrouping()).toBe("category");
     expect(loadStoredSidebarSessionSortMode()).toBe("created");
@@ -532,10 +525,10 @@ describe.runIf("__vitest_browser__" in globalThis)("sidebar session filter popov
     await expectFilterCount(0);
     await expect.element(page.getByRole("radio", { name: "Active", exact: true })).toHaveFocus();
     expect(sidebar.querySelector(".sidebar-session-sort-menu")).toBe(menu);
-    await page.getByRole("switch", { name: "Show automation sessions", exact: true }).click();
+    await page.getByRole("switch", { name: "Show system sessions", exact: true }).click();
     await expectFilterCount(0, true);
     await page.getByRole("button", { name: "Reset", exact: true }).click();
-    expect(loadStoredSidebarSessionsShowCron()).toBe(false);
+    expect(loadStoredSidebarSessionsShowSystem()).toBe(false);
     await expectFilterCount(0);
     await page.getByRole("button", { name: /^Hide empty groups:/ }).click();
     await page.getByRole("option", { name: "Always", exact: true }).click();

@@ -7,10 +7,18 @@ export function isCronSessionDisplayKey(key: string): boolean {
   return /^(?:cron:|agent::*[^:]+:+cron:+[^:])/u.test(normalizeLowercaseStringOrEmpty(key));
 }
 
+/** Automation execution chats live in Automations, independent of sidebar preferences. */
+export function isAutomationOwnedSessionRow(row: {
+  key: string;
+  automationJobIds?: readonly string[];
+}): boolean {
+  return isCronSessionDisplayKey(row.key) || Boolean(row.automationJobIds?.length);
+}
+
 /**
  * Classify internal lanes from provenance or reserved keys, never transcript text.
  * Legacy rows without either and operator-named CLI sessions remain discoverable.
- * Cron rows belong to the separate automation filter even when a system created them.
+ * Cron rows are automation-owned and stay in Automations even when a system created them.
  */
 export function isSystemCreatedSessionRow(row: {
   key: string;

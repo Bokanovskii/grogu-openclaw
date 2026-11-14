@@ -358,7 +358,6 @@ export function renderSidebarSessionSortMenuForController(controller: SidebarMen
   // Reset covers the panel; the toolbar dot still counts only Owners and Status.
   const settingsChanged =
     countSidebarSessionFilters(host) > 0 ||
-    host.sessionsShowCron ||
     host.sessionsShowSystem ||
     host.sessionsShowPreview ||
     host.effectiveSessionSortMode() !== "created" ||
@@ -438,7 +437,6 @@ export function renderSidebarSessionSortMenuForController(controller: SidebarMen
                         ?.focus();
                       host.setSessionOwnerFilter(null);
                       host.sessionOrganizer.setSessionsStatusFilter("active");
-                      host.sessionOrganizer.setSessionsShowCron(false);
                       host.sessionOrganizer.setSessionsShowSystem(false);
                       host.sessionOrganizer.setSessionsShowPreview(false);
                       host.setSessionSortMode("created");
@@ -512,7 +510,6 @@ export function renderSidebarSessionSortMenuForController(controller: SidebarMen
             })),
             (statusFilter) => host.sessionOrganizer.setSessionsStatusFilter(statusFilter),
           )}
-          ${switchItem("sidebar-sessions-cron", t("sessionsView.showCronSessions"), host.sessionsShowCron, (show) => host.sessionOrganizer.setSessionsShowCron(show))}
           ${switchItem("sidebar-sessions-system", t("sessionsView.showSystemSessions"), host.sessionsShowSystem, (show) => host.sessionOrganizer.setSessionsShowSystem(show))}
         </section>
         <section

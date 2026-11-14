@@ -36,6 +36,7 @@ export class CronRunTranscript implements ReactiveController {
   private live = false;
   private refreshPending = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private workspace: CronJob | null = null;
 
   constructor(
     private readonly host: HTMLElement & ReactiveControllerHost,
@@ -55,10 +56,19 @@ export class CronRunTranscript implements ReactiveController {
       : null;
   }
 
-  viewProps(): Pick<CronProps, "onViewRunTranscript" | "onViewLiveRun" | "runTranscript"> {
+  viewProps(
+    onWorkspace: () => void,
+  ): Pick<
+    CronProps,
+    "onViewRunTranscript" | "onViewLiveRun" | "onViewWorkspace" | "runTranscript"
+  > {
     return {
       onViewRunTranscript: (entry, trigger) => void this.open(entry, trigger),
       onViewLiveRun: (job, trigger) => void this.openLive(job, trigger),
+      onViewWorkspace: (job, trigger) => {
+        onWorkspace();
+        void this.openWorkspace(job, trigger);
+      },
       runTranscript: this.render(),
     };
   }
@@ -82,6 +92,7 @@ export class CronRunTranscript implements ReactiveController {
     this.error = null;
     this.failedCursor = undefined;
     this.live = false;
+    this.workspace = null;
     this.refreshPending = false;
     this.clearTimer();
     this.host.requestUpdate();
@@ -119,6 +130,21 @@ export class CronRunTranscript implements ReactiveController {
     );
     this.live = true;
     await opening;
+    this.scheduleRefresh();
+  }
+
+  async openWorkspace(job: CronJob, trigger: HTMLButtonElement) {
+    this.close();
+    const scope = this.capture();
+    if (!scope || !job.sessionTarget.startsWith("session:")) {
+      return;
+    }
+    this.scope = scope;
+    this.workspace = job;
+    this.trigger = trigger;
+    this.live = true;
+    await this.load();
+    await this.focusTranscript(scope);
     this.scheduleRefresh();
   }
 
@@ -193,8 +219,8 @@ export class CronRunTranscript implements ReactiveController {
     }, 5_000);
   }
   private async load(cursor?: string) {
-    const { entry, scope, attempt } = this;
-    if (!entry || !scope || this.loading || !scope.isCurrent()) {
+    const { entry, scope, attempt, workspace } = this;
+    if ((!entry && !workspace) || !scope || this.loading || !scope.isCurrent()) {
       return;
     }
     const current = () => this.attempt === attempt && this.host.isConnected && scope.isCurrent();
@@ -204,16 +230,26 @@ export class CronRunTranscript implements ReactiveController {
     this.host.requestUpdate();
     try {
       if (
-        !entry.jobId ||
-        (!entry.runId && (typeof entry.runAtMs !== "number" || !Number.isFinite(entry.runAtMs)))
+        !workspace &&
+        (!entry?.jobId ||
+          (!entry.runId && (typeof entry.runAtMs !== "number" || !Number.isFinite(entry.runAtMs))))
       ) {
         throw new Error(t("cron.runEntry.transcriptMissingMetadata"));
       }
-      const result = await scope.client.request<CronHistoryResult>("cron.history", {
-        id: entry.jobId,
-        ...(entry.runId ? { runId: entry.runId } : { runAtMs: entry.runAtMs }),
+      const result = await scope.client.request<
+        CronHistoryResult & { hasMore?: boolean; nextOffset?: number }
+      >(workspace ? "chat.history" : "cron.history", {
+        ...(workspace
+          ? {
+              sessionKey: workspace.sessionTarget.slice("session:".length),
+              ...(workspace.agentId ? { agentId: workspace.agentId } : {}),
+            }
+          : {
+              id: entry!.jobId,
+              ...(entry!.runId ? { runId: entry!.runId } : { runAtMs: entry!.runAtMs }),
+            }),
         limit: 100,
-        ...(cursor ? { cursor } : {}),
+        ...(cursor ? (workspace ? { offset: Number(cursor) } : { cursor }) : {}),
       });
       if (!current()) {
         return;
@@ -233,7 +269,10 @@ export class CronRunTranscript implements ReactiveController {
       this.messages = this.earlierMessages.length
         ? mergeChatTranscriptPages(this.earlierMessages, this.latestMessages).messages
         : this.latestMessages;
-      const nextCursor = result.nextCursor;
+      const nextCursor =
+        workspace && result.hasMore && result.nextOffset !== undefined
+          ? String(result.nextOffset)
+          : result.nextCursor;
       if (cursor || this.cursors.size === 0) {
         this.nextCursor = nextCursor && !this.cursors.has(nextCursor) ? nextCursor : undefined;
       }
@@ -255,7 +294,7 @@ export class CronRunTranscript implements ReactiveController {
   }
 
   render() {
-    if (!this.entry) {
+    if (!this.entry && !this.workspace) {
       return nothing;
     }
     return html`<section
@@ -266,7 +305,9 @@ export class CronRunTranscript implements ReactiveController {
       data-cron-run-transcript
     >
       <div class="cron-run-transcript__header">
-        <h2>${this.live ? t("cron.groups.live") : t("cron.runEntry.transcript")}</h2>
+        <h2>
+          ${this.workspace ? t("cron.groups.workspace") : this.live ? t("cron.groups.live") : t("cron.runEntry.transcript")}
+        </h2>
         <button class="btn btn--sm" @click=${() => this.close(true)}>${t("common.close")}</button>
       </div>
       ${this.live ? html`<p class="muted" role="status">${t("cron.groups.liveUpdating")}</p>` : nothing}

@@ -42,7 +42,6 @@ export type SidebarProjectionHost = {
   readonly sessionSortMode: SidebarSessionSortMode;
   readonly sessionsStatusFilter: SidebarSessionStatusFilter;
   readonly sessionsEmptyGroupsMode: SidebarEmptyGroupsMode;
-  readonly sessionsShowCron: boolean;
   readonly sessionsShowSystem: boolean;
   readonly sessionsShowPreview: boolean;
   readonly sidebarLiveActivity: boolean;
@@ -114,7 +113,6 @@ export function sidebarNavigationInputs(
     context?.sessions.revision,
     host.sessionSortMode,
     host.sessionProjection.createdOrderRevision,
-    host.sessionsShowCron,
     host.sessionsShowSystem,
     host.sessionsStatusFilter,
     host.resolveSessionAttention,
@@ -206,7 +204,6 @@ export function projectSidebarNavigation(
     sessionsResult: roster?.result ?? host.sessionData.sessionsResult,
     activeSession: findActiveSidebarLineageRow(host.sessionData, routeSessionKey),
     sessionsAgentId: host.sessionData.sessionsAgentId,
-    showCron: host.sessionsShowCron,
     showSystem: host.sessionsShowSystem,
     statusFilter: host.sessionsStatusFilter,
     compareSessions,

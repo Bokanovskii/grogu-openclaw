@@ -67,7 +67,6 @@ import {
   loadStoredSidebarSessionSortMode,
   loadStoredSidebarSessionStatusFilter,
   loadStoredSidebarSessionsGrouping,
-  loadStoredSidebarSessionsShowCron,
   loadStoredSidebarSessionsShowPreview,
   loadStoredSidebarSessionsShowSystem,
   resolveSidebarSessionSortMode,
@@ -193,7 +192,6 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
 
   @state() selectedSessionKeys: ReadonlySet<string> = new Set();
   @state() sessionsGrouping: SidebarSessionsGrouping = loadStoredSidebarSessionsGrouping();
-  @state() sessionsShowCron = loadStoredSidebarSessionsShowCron();
   @state() sessionsShowPreview = loadStoredSidebarSessionsShowPreview();
   @state() sessionsShowSystem = loadStoredSidebarSessionsShowSystem();
   private readonly emptyGroups = new SidebarEmptyGroupsController(this, () => this.context);

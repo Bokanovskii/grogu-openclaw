@@ -141,7 +141,6 @@ export function buildSidebarSessionNavigationState(input: {
   sessionsResult: SessionsListResult | null;
   activeSession?: GatewaySessionRow | null;
   sessionsAgentId: string | null;
-  showCron: boolean;
   showSystem: boolean;
   statusFilter: SidebarSessionStatusFilter;
   compareSessions: (a: SessionRow, b: SessionRow) => number;
@@ -166,7 +165,6 @@ export function buildSidebarSessionNavigationState(input: {
     assistantAgentId:
       context?.agentSelection.state.selectedId ?? context?.gateway.snapshot.assistantAgentId,
     hello: context?.gateway.snapshot.hello,
-    showCron: input.showCron,
     showSystem: input.showSystem,
     archivedFilter: input.statusFilter,
     compareSessions: input.compareSessions,

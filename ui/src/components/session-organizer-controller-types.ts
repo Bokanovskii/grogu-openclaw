@@ -22,7 +22,6 @@ export interface SessionOrganizerControllerHost extends ReactiveControllerHost {
   >;
   readonly onUpdateSidebarEntries?: (entries: string[]) => void;
   sessionsGrouping: SidebarSessionsGrouping;
-  sessionsShowCron: boolean;
   sessionsShowPreview: boolean;
   sessionsShowSystem: boolean;
   sessionsStatusFilter: SidebarSessionStatusFilter;

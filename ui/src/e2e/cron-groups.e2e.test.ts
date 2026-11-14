@@ -125,12 +125,22 @@ const runMessages = [
 ];
 
 suite.define(() => {
-  it("groups automations and opens an updating run inside Automations", async () => {
+  it("groups automations, keeps personal chats, and opens an updating run inside Automations", async () => {
     await suite.withPage(
       { viewport: { width: 1440, height: 1100 }, locale: "en-US" },
       async ({ page }) => {
         await page.clock.setFixedTime(now);
         const gateway = await installMockGateway(page, {
+          sessions: [
+            { key: "agent:main:main", displayName: "Home" },
+            { key: "agent:main:personal", displayName: "Weekend plans" },
+            {
+              key: "agent:main:background:research",
+              displayName: "Research workspace",
+              automationJobIds: ["research"],
+            },
+            { key: "agent:main:cron:research", displayName: "Research run" },
+          ],
           methodResponses: {
             "cron.list": cronListResponseFixture(
               cronJobsListResponse(jobs, { groups, snapshotRevision: "group-proof" }),
@@ -169,6 +179,10 @@ suite.define(() => {
         expect(await news.textContent()).toContain("Every day at 08:00");
         expect(await row.textContent()).toContain("Texts you when");
         expect(await row.textContent()).toContain("example/research-model");
+        const sidebar = page.locator("openclaw-app-sidebar");
+        expect(await sidebar.textContent()).not.toContain("Research workspace");
+        expect(await sidebar.textContent()).not.toContain("Research run");
+        expect(await sidebar.textContent()).toContain("Weekend plans");
         await news.locator("summary").click();
         expect(await news.locator(".cron-table__row").isVisible()).toBe(false);
         await news.locator("summary").press("Enter");
@@ -266,6 +280,16 @@ suite.define(() => {
           { animations: "disabled" },
         );
         await writeFile(path.join(suite.artifactDir, "automation-run.png"), runFrame.png);
+        await gateway.setMethodResponse("chat.history", {
+          messages: [
+            { role: "assistant", content: "The workspace keeps the verified findings together." },
+          ],
+        });
+        await page.getByRole("button", { name: "View workspace chat", exact: true }).click();
+        await transcript
+          .getByText("The workspace keeps the verified findings together.", { exact: true })
+          .waitFor();
+        expect(new URL(page.url()).pathname).toBe("/cron");
         await page.locator('[data-test-id="cron-detail-tab-settings"]').click();
         expect(await transcript.count()).toBe(0);
       },

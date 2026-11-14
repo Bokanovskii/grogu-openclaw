@@ -96,5 +96,6 @@ export type CronProps = {
   }) => void | Promise<void>;
   onViewRunTranscript?: (entry: CronRunLogEntry, trigger: HTMLButtonElement) => void;
   onViewLiveRun?: (job: CronJob, trigger: HTMLButtonElement) => void;
+  onViewWorkspace?: (job: CronJob, trigger: HTMLButtonElement) => void;
   runTranscript?: unknown;
 };

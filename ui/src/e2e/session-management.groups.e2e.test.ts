@@ -589,12 +589,12 @@ suite.define(() => {
       const filterAndSortButton = page.getByRole("button", { name: "Filter & sort", exact: true });
       await filterAndSortButton.click();
       await openSidebarMenu(page);
-      const showAutomationSessions = page.getByRole("switch", {
-        name: "Show automation sessions",
+      const showSystemSessions = page.getByRole("switch", {
+        name: "Show system sessions",
         exact: true,
       });
-      await showAutomationSessions.click();
-      await expect.poll(() => showAutomationSessions.getAttribute("aria-checked")).toBe("true");
+      await showSystemSessions.click();
+      await expect.poll(() => showSystemSessions.getAttribute("aria-checked")).toBe("true");
       await expect.poll(() => filterAndSortButton.getAttribute("aria-expanded")).toBe("true");
       await openSidebarMenu(page);
       const groupBy = page.getByRole("button", { name: "Group by: Custom groups", exact: true });

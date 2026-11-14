@@ -27,7 +27,6 @@ export function projectSidebarSession(
     routeSessionKey: "agent:main:main",
     sessionsResult: null,
     sessionsAgentId: null,
-    showCron: false,
     showSystem: false,
     statusFilter: "active",
     compareSessions: () => 0,

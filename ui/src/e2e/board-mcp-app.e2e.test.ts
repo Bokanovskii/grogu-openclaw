@@ -4,6 +4,7 @@ import type { Server as HttpServer } from "node:http";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildSandboxHostPath } from "../../../src/agents/sandbox-host.js";
 import { createSandboxHostHttpServer } from "../../../src/gateway/mcp-app-sandbox-http.js";
 import { acquireGatewayE2ePortBlock } from "../../../src/gateway/test-helpers.listener.js";
 import type { TestPortClaim } from "../../../src/test-utils/port-claims.js";
@@ -20,6 +21,7 @@ import {
   type ControlUiE2eServer,
 } from "../test-helpers/control-ui-e2e.ts";
 import { focusChatSidePanel, restoreChatAsMain } from "./chat-side-panel.test-support.ts";
+import { close, startProtectedSource } from "./chat-widget-sandbox.fixture.test-support.ts";
 
 const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
 const chromiumAvailable = canRunPlaywrightChromium(chromiumExecutablePath);
@@ -34,6 +36,7 @@ let sandboxServer: HttpServer;
 let sandboxPort: number;
 let sandboxPortClaim: TestPortClaim | undefined;
 const contexts = new Set<BrowserContext>();
+const protectedServers = new Set<HttpServer>();
 
 function widget(index: number) {
   return {
@@ -59,8 +62,8 @@ function boardSnapshot(count: number, revision = 1) {
   };
 }
 
-async function openDashboard(page: Page): Promise<void> {
-  const settingsKey = controlUiBundledSettingsStorageKey(controlUi.baseUrl);
+async function openDashboard(page: Page, baseUrl = controlUi.baseUrl): Promise<void> {
+  const settingsKey = controlUiBundledSettingsStorageKey(baseUrl);
   await page.addInitScript(
     ({ key, storageKey }) => {
       const settings = JSON.parse(localStorage.getItem(storageKey) ?? "{}") as Record<
@@ -72,7 +75,7 @@ async function openDashboard(page: Page): Promise<void> {
     },
     { key: sessionKey, storageKey: settingsKey },
   );
-  await page.goto(controlUiSessionUrl(controlUi.baseUrl, sessionKey, "dashboard"));
+  await page.goto(controlUiSessionUrl(baseUrl, sessionKey, "dashboard"));
   await page.locator(".board-session-surface").waitFor();
 }
 
@@ -199,6 +202,9 @@ describeControlUiE2e("Control UI dashboard MCP Apps", () => {
       await context.close();
     }
     await browser?.close();
+    for (const server of protectedServers) {
+      await close(server);
+    }
     if (sandboxServer) {
       await new Promise<void>((resolve) => {
         sandboxServer.close(() => resolve());
@@ -391,38 +397,67 @@ describeControlUiE2e("Control UI dashboard MCP Apps", () => {
     );
   });
 
-  it("retains one board runtime across split, expanded, and inactive panel states", async () => {
-    const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
-    const artifactDir = artifactRoot
-      ? createControlUiE2eArtifactDir("board-panel-retention", artifactRoot)
-      : undefined;
-    const context = await browser.newContext({
-      permissions: ["local-network-access"],
-      viewport: { width: 1280, height: 800 },
-      ...(artifactDir ? { recordVideo: { dir: artifactDir } } : {}),
-    });
-    contexts.add(context);
-    const page = await context.newPage();
-    const gateway = await installMockGateway(page, {
-      sessionKey,
-      featureMethods: [
-        "board.get",
-        "board.widget.appView",
-        "chat.history",
-        "chat.metadata",
-        "chat.startup",
-        "mcp.app.view",
-        "sessions.patch",
-      ],
-      methodResponses: {
-        "board.get": boardSnapshot(1),
-        "board.widget.appView": {
-          viewId: "retained-view",
-          expiresAtMs: Date.now() + 3_600_000,
-        },
-        "mcp.app.view": {
-          ...appViewPayload(),
-          html: `<!doctype html><style>
+  it.each([false, true])(
+    "retains one board runtime across panel states (sameOriginSandbox=%s)",
+    async (sameOriginSandbox) => {
+      const proxy = sameOriginSandbox
+        ? await startProtectedSource({
+            html: "",
+            upstream: controlUi.baseUrl,
+            documentPath: "/__openclaw__/canvas/documents/mcp-fixture/index.html",
+            boardPath: "/__openclaw__/board/mcp-fixture/index.html",
+            sameOriginSandbox,
+          })
+        : undefined;
+      if (proxy) {
+        protectedServers.add(proxy.server);
+      }
+      const baseUrl = proxy?.baseUrl ?? controlUi.baseUrl;
+      const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+      const artifactDir = artifactRoot
+        ? createControlUiE2eArtifactDir("board-panel-retention", artifactRoot)
+        : undefined;
+      const context = await browser.newContext({
+        permissions: ["local-network-access"],
+        viewport: { width: 1280, height: 800 },
+        ...(artifactDir ? { recordVideo: { dir: artifactDir } } : {}),
+      });
+      contexts.add(context);
+      if (proxy) {
+        await context.addCookies([
+          {
+            name: "synthetic_widget_edge",
+            value: "allowed",
+            url: baseUrl,
+            httpOnly: true,
+            sameSite: "Strict",
+          },
+        ]);
+      }
+      const page = await context.newPage();
+      const gateway = await installMockGateway(page, {
+        sessionKey,
+        featureMethods: [
+          "board.get",
+          "board.widget.appView",
+          "chat.history",
+          "chat.metadata",
+          "chat.startup",
+          "mcp.app.view",
+          "sessions.patch",
+        ],
+        methodResponses: {
+          "board.get": boardSnapshot(1),
+          "board.widget.appView": {
+            viewId: "retained-view",
+            expiresAtMs: Date.now() + 3_600_000,
+          },
+          "mcp.app.view": {
+            ...appViewPayload(),
+            sandboxUrl: buildSandboxHostPath(undefined, sameOriginSandbox),
+            sandboxPort: proxy ? Number(new URL(baseUrl).port) : sandboxPort,
+            sameOriginSandbox,
+            html: `<!doctype html><style>
             body{margin:0;min-height:100vh;box-sizing:border-box;padding:28px;background:#11222d;color:#dbefed;font:16px system-ui}
             h1{font-size:36px;margin:8px 0 24px}.metrics{display:flex;gap:16px;margin:24px 0}
             .metric{flex:1;padding:24px;background:#193746;border:1px solid #38616b;border-radius:12px}
@@ -455,172 +490,180 @@ describeControlUiE2e("Control UI dashboard MCP Apps", () => {
               protocolVersion: ${JSON.stringify(LATEST_PROTOCOL_VERSION)}
             } });
           </script>`,
+          },
         },
-      },
-    });
-
-    await openDashboard(page);
-    await waitForMountedApp(page);
-    await captureBoardIdentity(page);
-    const stableCounts = {
-      boardGet: (await gateway.getRequests("board.get")).length,
-      appView: (await gateway.getRequests("board.widget.appView")).length,
-      mcpView: (await gateway.getRequests("mcp.app.view")).length,
-    };
-    const stablePatchCount = (await gateway.getRequests("sessions.patch")).length;
-    const stableListCount = (await gateway.getRequests("sessions.list", rosterMatch)).length;
-    const sidePanel = page.locator(".sidebar-region__right-runtime .side-panel");
-    const appContent = page
-      .frameLocator("mcp-app-view iframe")
-      .frameLocator("iframe")
-      .getByText("Dashboard app", { exact: true });
-    await expectRetainedBoardPresentation(page, "split");
-    if (artifactDir) {
-      await appContent.waitFor();
-      await writeFile(
-        `${artifactDir}/01-dashboard.png`,
-        await takeControlUiViewportScreenshot(page, page.locator(".shell"), [appContent]),
-      );
-    }
-
-    await focusChatSidePanel(page);
-    await expectRetainedBoardPresentation(page, "expanded");
-    const frameInsets = () =>
-      page.evaluate(() => {
-        const board = document.querySelector("openclaw-board-view");
-        const body = board?.querySelector(".board-widget__body");
-        const frame = board?.querySelector("mcp-app-view")?.shadowRoot?.querySelector("iframe");
-        if (!board || !body || !frame) {
-          throw new Error("Dashboard MCP App layout is unavailable");
-        }
-        const outer = board.getBoundingClientRect();
-        const available = body.getBoundingClientRect();
-        const inner = frame.getBoundingClientRect();
-        return {
-          top: Math.round(inner.top - outer.top),
-          bottom: Math.round(outer.bottom - inner.bottom),
-          bodyHeightGap: Math.round(available.height - inner.height),
-        };
       });
-    if (artifactDir) {
-      await appContent.waitFor();
-      await page.screenshot({ path: `${artifactDir}/fullscreen-dashboard.png` });
-    }
-    // Measure the frame on every poll: a viewport resize settles the board
-    // layout asynchronously, so a size read before polling can be stale.
-    const expectHostDimensions = async () => {
-      const frame = page.locator("mcp-app-view iframe");
-      await expect
-        .poll(async () => {
-          const size = await frame.evaluate((element) => {
-            const rect = element.getBoundingClientRect();
-            return { width: Math.round(rect.width), height: Math.round(rect.height) };
-          });
-          const reported = JSON.parse(
-            (await page
-              .frameLocator("mcp-app-view iframe")
-              .frameLocator("iframe")
-              .locator("html")
-              .getAttribute("data-host-dimensions")) ?? "null",
-          ) as { width?: number; height?: number } | null;
-          return { size, reported };
-        })
-        .toSatisfy(
-          ({ size, reported }) =>
-            reported?.width === size.width && reported?.height === size.height,
+
+      await openDashboard(page, baseUrl);
+      await waitForMountedApp(page);
+      await captureBoardIdentity(page);
+      const stableCounts = {
+        boardGet: (await gateway.getRequests("board.get")).length,
+        appView: (await gateway.getRequests("board.widget.appView")).length,
+        mcpView: (await gateway.getRequests("mcp.app.view")).length,
+      };
+      const stablePatchCount = (await gateway.getRequests("sessions.patch")).length;
+      const stableListCount = (await gateway.getRequests("sessions.list", rosterMatch)).length;
+      const sidePanel = page.locator(".sidebar-region__right-runtime .side-panel");
+      const appContent = page
+        .frameLocator("mcp-app-view iframe")
+        .frameLocator("iframe")
+        .getByText("Dashboard app", { exact: true });
+      await expectRetainedBoardPresentation(page, "split");
+      if (artifactDir) {
+        await appContent.waitFor();
+        await writeFile(
+          `${artifactDir}/01-dashboard.png`,
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [appContent]),
         );
-    };
-    await expect.poll(frameInsets).toEqual({ top: 0, bottom: 0, bodyHeightGap: 0 });
-    await expectHostDimensions();
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await expect.poll(frameInsets).toEqual({ top: 0, bottom: 0, bodyHeightGap: 0 });
-    await expectHostDimensions();
-    await expectRetainedBoardPresentation(page, "expanded");
-    if (artifactDir) {
-      await page.screenshot({ path: `${artifactDir}/fullscreen-dashboard-resized.png` });
-    }
-    await page.setViewportSize({ width: 1280, height: 800 });
+      }
 
-    await page
-      .locator(".chat-pane__header")
-      .getByRole("button", { name: "Restore split", exact: true })
-      .click();
-    await expectRetainedBoardPresentation(page, "split");
-    await expect.poll(async () => (await frameInsets()).bodyHeightGap).toBe(0);
-    await expectHostDimensions();
-    await restoreChatAsMain(page);
+      await focusChatSidePanel(page);
+      await expectRetainedBoardPresentation(page, "expanded");
+      const frameInsets = () =>
+        page.evaluate(() => {
+          const board = document.querySelector("openclaw-board-view");
+          const body = board?.querySelector(".board-widget__body");
+          const frame = board?.querySelector("mcp-app-view")?.shadowRoot?.querySelector("iframe");
+          if (!board || !body || !frame) {
+            throw new Error("Dashboard MCP App layout is unavailable");
+          }
+          const outer = board.getBoundingClientRect();
+          const available = body.getBoundingClientRect();
+          const inner = frame.getBoundingClientRect();
+          return {
+            top: Math.round(inner.top - outer.top),
+            bottom: Math.round(outer.bottom - inner.bottom),
+            bodyHeightGap: Math.round(available.height - inner.height),
+          };
+        });
+      if (artifactDir) {
+        await appContent.waitFor();
+        await page.screenshot({ path: `${artifactDir}/fullscreen-dashboard.png` });
+      }
+      // Measure the frame on every poll: a viewport resize settles the board
+      // layout asynchronously, so a size read before polling can be stale.
+      const expectHostDimensions = async () => {
+        const frame = page.locator("mcp-app-view iframe");
+        await expect
+          .poll(async () => {
+            const size = await frame.evaluate((element) => {
+              const rect = element.getBoundingClientRect();
+              return { width: Math.round(rect.width), height: Math.round(rect.height) };
+            });
+            const reported = JSON.parse(
+              (await page
+                .frameLocator("mcp-app-view iframe")
+                .frameLocator("iframe")
+                .locator("html")
+                .getAttribute("data-host-dimensions")) ?? "null",
+            ) as { width?: number; height?: number } | null;
+            return { size, reported };
+          })
+          .toSatisfy(
+            ({ size, reported }) =>
+              reported?.width === size.width && reported?.height === size.height,
+          );
+      };
+      await expect.poll(frameInsets).toEqual({ top: 0, bottom: 0, bodyHeightGap: 0 });
+      await expectHostDimensions();
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await expect.poll(frameInsets).toEqual({ top: 0, bottom: 0, bodyHeightGap: 0 });
+      await expectHostDimensions();
+      await expectRetainedBoardPresentation(page, "expanded");
+      if (artifactDir) {
+        await page.screenshot({ path: `${artifactDir}/fullscreen-dashboard-resized.png` });
+      }
+      await page.setViewportSize({ width: 1280, height: 800 });
 
-    const draftNote = page
-      .frameLocator("mcp-app-view iframe")
-      .frameLocator("iframe")
-      .getByRole("textbox", { name: "Draft note" });
-    await draftNote.fill("Keep this unsaved dashboard note");
-    if (artifactDir) {
-      await page.screenshot({ path: `${artifactDir}/04-note-before-minimize.png` });
-    }
-    await sidePanel
-      .locator('[data-region-header="side"]')
-      .getByRole("button", { name: "Close", exact: true })
-      .click();
-    await page.locator(".chat-thread").waitFor();
-    await expect
-      .poll(() => readBoardIdentity(page))
-      .toEqual({
-        connected: true,
-        hidden: true,
-        inert: true,
-        same: true,
-      });
-    await page.locator(".chat-side-panel-toggle").click();
-    await draftNote.waitFor();
-    if (artifactDir) {
-      await page.screenshot({ path: `${artifactDir}/05-note-after-reopen.png` });
-    }
-    await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
-    await expectRetainedBoardPresentation(page, "split");
+      await page
+        .locator(".chat-pane__header")
+        .getByRole("button", { name: "Restore split", exact: true })
+        .click();
+      await expectRetainedBoardPresentation(page, "split");
+      await expect.poll(async () => (await frameInsets()).bodyHeightGap).toBe(0);
+      await expectHostDimensions();
+      await restoreChatAsMain(page);
 
-    const typeMenu = sidePanel.locator("wa-dropdown.side-panel-type-menu");
-    await typeMenu.getByRole("button", { name: "Add side panel tab" }).click();
-    await typeMenu.locator("wa-dropdown-item").filter({ hasText: "Files" }).click();
-    await expect
-      .poll(() => typeMenu.evaluate((element) => Reflect.get(element, "open")))
-      .toBe(false);
-    await expect.poll(() => page.locator(".board-session-surface").isVisible()).toBe(false);
-    const inactiveIdentity = await readBoardIdentity(page);
-    if (artifactDir) {
-      await writeFile(
-        `${artifactDir}/02-files.png`,
-        await takeControlUiViewportScreenshot(page, page.locator(".shell"), [
-          sidePanel.getByRole("tab", { name: "Files", exact: true }),
-        ]),
-      );
-    }
+      const draftNote = page
+        .frameLocator("mcp-app-view iframe")
+        .frameLocator("iframe")
+        .getByRole("textbox", { name: "Draft note" });
+      await draftNote.fill("Keep this unsaved dashboard note");
+      if (artifactDir) {
+        await page.screenshot({ path: `${artifactDir}/04-note-before-minimize.png` });
+      }
+      await sidePanel
+        .locator('[data-region-header="side"]')
+        .getByRole("button", { name: "Close", exact: true })
+        .click();
+      await page.locator(".chat-thread").waitFor();
+      await expect
+        .poll(() => readBoardIdentity(page))
+        .toEqual({
+          connected: true,
+          hidden: true,
+          inert: true,
+          same: true,
+        });
+      await page.locator(".chat-side-panel-toggle").click();
+      await draftNote.waitFor();
+      if (artifactDir) {
+        await page.screenshot({ path: `${artifactDir}/05-note-after-reopen.png` });
+      }
+      await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
+      await expectRetainedBoardPresentation(page, "split");
 
-    await sidePanel.getByRole("tab", { name: "Dashboard", exact: true }).click();
-    await expectRetainedBoardPresentation(page, "expanded");
-    await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
-    await sidePanel
-      .locator('[data-region-header="side"]')
-      .getByRole("button", { name: "Restore split", exact: true })
-      .click();
-    await expectRetainedBoardPresentation(page, "split");
-    await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
-    if (artifactDir) {
-      await appContent.waitFor();
-      await writeFile(
-        `${artifactDir}/03-dashboard-restored.png`,
-        await takeControlUiViewportScreenshot(page, page.locator(".shell"), [appContent]),
-      );
-    }
-    expect(inactiveIdentity).toEqual({ connected: true, hidden: true, inert: true, same: true });
-    await expectRetainedBoardPresentation(page, "split");
-    expect(await gateway.getRequests("board.update")).toHaveLength(0);
-    expect(await gateway.getRequests("sessions.patch")).toHaveLength(stablePatchCount);
-    expect(await gateway.getRequests("sessions.list", rosterMatch)).toHaveLength(stableListCount);
-    expect(await gateway.getRequests("board.get")).toHaveLength(stableCounts.boardGet);
-    expect(await gateway.getRequests("board.widget.appView")).toHaveLength(stableCounts.appView);
-    expect(await gateway.getRequests("mcp.app.view")).toHaveLength(stableCounts.mcpView);
-  });
+      const typeMenu = sidePanel.locator("wa-dropdown.side-panel-type-menu");
+      await typeMenu.getByRole("button", { name: "Add side panel tab" }).click();
+      await typeMenu.locator("wa-dropdown-item").filter({ hasText: "Files" }).click();
+      await expect
+        .poll(() => typeMenu.evaluate((element) => Reflect.get(element, "open")))
+        .toBe(false);
+      await expect.poll(() => page.locator(".board-session-surface").isVisible()).toBe(false);
+      const inactiveIdentity = await readBoardIdentity(page);
+      if (artifactDir) {
+        await writeFile(
+          `${artifactDir}/02-files.png`,
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [
+            sidePanel.getByRole("tab", { name: "Files", exact: true }),
+          ]),
+        );
+      }
+
+      await sidePanel.getByRole("tab", { name: "Dashboard", exact: true }).click();
+      await expectRetainedBoardPresentation(page, "expanded");
+      await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
+      await sidePanel
+        .locator('[data-region-header="side"]')
+        .getByRole("button", { name: "Restore split", exact: true })
+        .click();
+      await expectRetainedBoardPresentation(page, "split");
+      await expect.poll(() => draftNote.inputValue()).toBe("Keep this unsaved dashboard note");
+      if (artifactDir) {
+        await appContent.waitFor();
+        await writeFile(
+          `${artifactDir}/03-dashboard-restored.png`,
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [appContent]),
+        );
+      }
+      expect(inactiveIdentity).toEqual({ connected: true, hidden: true, inert: true, same: true });
+      await expectRetainedBoardPresentation(page, "split");
+      expect(await gateway.getRequests("board.update")).toHaveLength(0);
+      expect(await gateway.getRequests("sessions.patch")).toHaveLength(stablePatchCount);
+      expect(await gateway.getRequests("sessions.list", rosterMatch)).toHaveLength(stableListCount);
+      expect(await gateway.getRequests("board.get")).toHaveLength(stableCounts.boardGet);
+      expect(await gateway.getRequests("board.widget.appView")).toHaveLength(stableCounts.appView);
+      expect(await gateway.getRequests("mcp.app.view")).toHaveLength(stableCounts.mcpView);
+      if (proxy) {
+        const frame = page.locator("mcp-app-view iframe");
+        expect(await frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
+        expect(new URL((await frame.getAttribute("src"))!).origin).toBe(new URL(baseUrl).origin);
+        expect(proxy.shellRequests.length).toBeGreaterThan(0);
+        expect(proxy.shellRequests.every(Boolean)).toBe(true);
+      }
+    },
+  );
 
   it("does not eagerly mint leases for all 48 offscreen cells", async () => {
     const context = await browser.newContext({

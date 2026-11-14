@@ -253,6 +253,8 @@ export const RUNTIME_FIELD_HELP: Record<string, string> = {
     "MCP Apps UI support. When enabled, configured MCP servers may provide interactive HTML views for their tool results.",
   "mcp.apps.enabled":
     "Opt-in MCP Apps rendering and app-to-server bridge. Keep disabled unless you trust the configured MCP servers that provide app UI resources.",
+  "mcp.apps.sameOriginSandbox":
+    "Serve the widget sandbox on the Gateway origin for single-origin proxies and tunnels. The outer iframe remains opaque and uses a private message channel. Disabled by default. When enabled, sandboxOrigin and sandboxPort are unused. Requires Gateway restart. Does not enable MCP Apps or change portals.",
   "mcp.apps.sandboxOrigin":
     "Optional dedicated public HTTP(S) origin for MCP Apps. Use this behind a reverse proxy or TLS terminator and proxy it only to the configured MCP Apps sandbox port. It must differ from the Control UI origin and must not serve authenticated content.",
   "mcp.apps.sandboxPort":

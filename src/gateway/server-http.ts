@@ -81,6 +81,7 @@ import {
   getManagedMediaAttachmentsModule,
   getArtifactDownloadsModule,
   getMcpAppStandaloneModule,
+  getMcpAppSandboxHttpModule,
   getModelsHttpModule,
   getOpenAiHttpModule,
   getOpenResponsesHttpModule,
@@ -610,15 +611,23 @@ export function createGatewayHttpServer(opts: {
           }),
         handleControlUiRequest,
       );
+      const mcpApps = configSnapshot.mcp?.apps;
       const mcpAppRoute = classifyMcpAppStandalonePath(scopedRequestPath);
       addAdmittedStage(
-        configSnapshot.mcp?.apps?.enabled === true &&
-          (mcpAppRoute === "shell" || mcpAppRoute === "view"),
+        mcpApps?.sameOriginSandbox === true && scopedRequestPath === "/mcp-app-sandbox",
+        async () =>
+          (await getMcpAppSandboxHttpModule()).handleMcpAppSandboxHttpRequest(req, res, true),
+      );
+      addAdmittedStage(
+        mcpApps?.enabled === true && (mcpAppRoute === "shell" || mcpAppRoute === "view"),
         async () => {
           const standalone = await getMcpAppStandaloneModule();
           return await standalone.handleMcpAppStandaloneHttpRequest(req, res, {
-            sandboxPort: configSnapshot.mcp?.apps?.sandboxPort,
-            sandboxOrigin: configSnapshot.mcp?.apps?.sandboxOrigin,
+            sandboxPort: mcpApps?.sandboxPort,
+            sandboxOrigin: mcpApps?.sandboxOrigin,
+            sameOriginSandbox: mcpApps?.sameOriginSandbox,
+            pluginRegistry: opts.getGatewayRequestContext?.()?.getGatewayMethodRegistry?.()
+              .pluginRegistry,
           });
         },
       );

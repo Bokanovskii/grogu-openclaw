@@ -5,6 +5,20 @@ import type { BrowserContext, Page } from "playwright";
 /** This fixture owns only synthetic widget documents and a mocked Gateway. */
 export async function installWidgetPromptDiagnostics(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
+    if (window === window.top) {
+      const NativeMessageChannel = MessageChannel;
+      window.MessageChannel = class extends NativeMessageChannel {
+        constructor() {
+          super();
+          // Observe ordered settlement without exposing private traffic on window.
+          this.port1.addEventListener("message", (event) => {
+            if (event.data?.type === "fixture-shortcut-attempted") {
+              Reflect.set(window, "shortcutForgerySettled", true);
+            }
+          });
+        }
+      };
+    }
     const events: unknown[] = [];
     Object.defineProperty(window, "openclawSyntheticWidgetTimeline", { value: events });
     const element = (value: EventTarget | null) =>

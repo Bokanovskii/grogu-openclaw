@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { readBoardHtml, createTestBoardStore } from "../boards/board-store.test-support.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
@@ -24,8 +25,9 @@ const store = createTestBoardStore({ stateDir });
 const mainSession = { sessionKey: "agent:main:main", agentId: "main" };
 const nowMs = 1_800_000_000_000;
 const statusHtml = "<!doctype html><p>Status 界</p>";
-const gatewayA = {} as GatewayRequestContext;
-const gatewayB = {} as GatewayRequestContext;
+let runtimeConfig: OpenClawConfig = {};
+const gatewayA = { getRuntimeConfig: () => runtimeConfig } as GatewayRequestContext;
+const gatewayB = { getRuntimeConfig: () => runtimeConfig } as GatewayRequestContext;
 let gatewayAActive = true;
 let requestGatewayContext: GatewayRequestContext | undefined = gatewayA;
 let server: Server;
@@ -240,6 +242,27 @@ describe("board widget HTTP", () => {
         expect(response.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
         expect(response.headers.get("cache-control")).toBe("no-cache");
       }
+    }
+  });
+
+  it("allows embedded public renderer scripts only when same-origin sandboxing is enabled", async () => {
+    const scriptSources = async () => {
+      const response = await request("status", { ticket: await ticketFor("status") });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(statusHtml);
+      return response.headers
+        .get("content-security-policy")
+        ?.split(";")
+        .find((directive) => directive.trim().startsWith("script-src"))
+        ?.trim()
+        .split(/\s+/u);
+    };
+    try {
+      expect(await scriptSources()).not.toContain("data:");
+      runtimeConfig = { mcp: { apps: { sameOriginSandbox: true } } };
+      expect(await scriptSources()).toContain("data:");
+    } finally {
+      runtimeConfig = {};
     }
   });
 

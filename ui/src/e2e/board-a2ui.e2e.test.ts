@@ -5,6 +5,7 @@ import { createServer, type Server as HttpServer } from "node:http";
 import path from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { WIDGET_HTML_MAX_UTF8_BYTES } from "../../../packages/gateway-protocol/src/schema/canvas.js";
 import { buildWidgetDocument } from "../../../src/canvas/wrap.js";
 import { buildBoardWidgetSandboxPath } from "../../../src/gateway/board-sandbox.js";
 import { createSandboxHostHttpServer } from "../../../src/gateway/mcp-app-sandbox-http.js";
@@ -22,6 +23,7 @@ import {
   type ControlUiE2eServer,
 } from "../test-helpers/control-ui-e2e.ts";
 import { installA2uiFailureDiagnostics } from "./board-a2ui.test-support.ts";
+import { close, startProtectedSource } from "./chat-widget-sandbox.fixture.test-support.ts";
 
 const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
 const chromiumAvailable = canRunPlaywrightChromium(chromiumExecutablePath);
@@ -40,9 +42,10 @@ let rendererServer: HttpServer;
 let rendererOrigin: string;
 let rendererBundle: Buffer;
 const contexts = new Set<BrowserContext>();
+const protectedSources = new Set<HttpServer>();
 
-async function openDashboard(page: Page): Promise<void> {
-  const settingsKey = controlUiBundledSettingsStorageKey(controlUi.baseUrl);
+async function openDashboard(page: Page, baseUrl = controlUi.baseUrl): Promise<void> {
+  const settingsKey = controlUiBundledSettingsStorageKey(baseUrl);
   await page.addInitScript(
     ({ key, storageKey }) => {
       // Init scripts also run in opaque widget frames; only the dashboard owns settings.
@@ -58,7 +61,7 @@ async function openDashboard(page: Page): Promise<void> {
     },
     { key: sessionKey, storageKey: settingsKey },
   );
-  await page.goto(controlUiSessionUrl(controlUi.baseUrl, sessionKey, "dashboard"));
+  await page.goto(controlUiSessionUrl(baseUrl, sessionKey, "dashboard"));
   await page.locator(".board-session-surface").waitFor();
 }
 
@@ -102,6 +105,9 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
       await context.close();
     }
     await browser?.close();
+    for (const server of protectedSources) {
+      await close(server);
+    }
     if (sandboxServer) {
       await new Promise<void>((resolve) => {
         sandboxServer.close(() => resolve());
@@ -164,16 +170,24 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
     });
   });
 
-  for (const { colorScheme, rejectsAction, name } of [
+  for (const { colorScheme, rejectsAction, sameOriginSandbox, name } of [
     ...(["dark", "light"] as const).map((theme) => ({
       colorScheme: theme,
       rejectsAction: false,
+      sameOriginSandbox: false,
       name: `renders a v0.9 widget with the ${theme} scrollbar theme`,
     })),
     {
       colorScheme: "light" as const,
       rejectsAction: true,
+      sameOriginSandbox: false,
       name: "shows rejected v0.9 actions and clears the widget on reset",
+    },
+    {
+      colorScheme: "light" as const,
+      rejectsAction: false,
+      sameOriginSandbox: true,
+      name: "renders public v0.9 bytes and delivers actions behind a cookie-protected same-origin edge",
     },
   ]) {
     it(name, async ({ onTestFailed }) => {
@@ -206,8 +220,8 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
           }),
         );
       });
-      const origin = new URL(controlUi.baseUrl).origin;
-      const rendererUrl = `${rendererOrigin}/__openclaw__/cap/canvas-proof/__openclaw__/a2ui/a2ui-v0.9.bundle.js`;
+      const resourcePath = "/__openclaw__/a2ui/a2ui-v0.9.bundle.js";
+      const rendererUrl = `${sameOriginSandbox ? "" : rendererOrigin}/__openclaw__/cap/canvas-proof${resourcePath}`;
       const messages = [
         {
           version: "v0.9",
@@ -238,10 +252,43 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
         `<script>globalThis.openclawA2UIBoot=${boot};</script><style>html,body{height:100%;background:var(--surface)}body{min-height:2400px}openclaw-a2ui-host{display:block;height:100%}</style><openclaw-a2ui-host></openclaw-a2ui-host><script src="${rendererUrl}"></script>`,
         { scriptOrigins: [rendererOrigin] },
       );
-      const frameUrl = `${origin}/__openclaw__/board/${encodeURIComponent(sessionKey)}/a2ui-controls/index.html?bt=ticket`;
-      await page.route("**/__openclaw__/board/**", (route) =>
-        route.fulfill({ status: 200, contentType: "text/html", body: documentHtml }),
-      );
+      const boardPath = `/__openclaw__/board/${encodeURIComponent(sessionKey)}/a2ui-controls/index.html`;
+      const proxy = sameOriginSandbox
+        ? await startProtectedSource({
+            html: documentHtml,
+            upstream: controlUi.baseUrl,
+            documentPath: "/__openclaw__/canvas/documents/a2ui-proof/index.html",
+            boardPath,
+            sameOriginSandbox,
+            scripts: new Map([[resourcePath, rendererBundle]]),
+          })
+        : undefined;
+      if (proxy) {
+        protectedSources.add(proxy.server);
+        await context.addCookies([
+          {
+            name: "synthetic_widget_edge",
+            value: "allowed",
+            url: proxy.baseUrl,
+            httpOnly: true,
+            sameSite: "Strict",
+          },
+        ]);
+        const deliveredBytes = Buffer.byteLength(proxy.html);
+        expect(deliveredBytes).toBeLessThanOrEqual(WIDGET_HTML_MAX_UTF8_BYTES);
+        console.info("[board-a2ui] public renderer delivery", {
+          rendererBytes: rendererBundle.byteLength,
+          sourceBytes: Buffer.byteLength(documentHtml),
+          deliveredBytes,
+        });
+      } else {
+        await page.route("**/__openclaw__/board/**", (route) =>
+          route.fulfill({ status: 200, contentType: "text/html", body: documentHtml }),
+        );
+      }
+      const baseUrl = proxy?.baseUrl ?? controlUi.baseUrl;
+      const origin = new URL(baseUrl).origin;
+      const frameUrl = `${origin}${boardPath}?bt=ticket`;
       const gateway = await installMockGateway(page, {
         sessionKey,
         featureMethods: ["board.event", "board.get", "chat.metadata", "chat.startup"],
@@ -269,11 +316,15 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
                 viewTicket: "ticket",
                 viewTicketTtlMs: 1_200_000,
                 viewGeneration: "0123456789abcdef0123456789abcdef",
-                sandboxUrl: buildBoardWidgetSandboxPath({
-                  grantState: "none",
-                  resourceOrigins: [rendererOrigin],
-                }),
-                sandboxPort,
+                sandboxUrl: buildBoardWidgetSandboxPath(
+                  {
+                    grantState: "none",
+                    resourceOrigins: [rendererOrigin],
+                  },
+                  sameOriginSandbox,
+                ),
+                sandboxPort: proxy ? Number(new URL(proxy.baseUrl).port) : sandboxPort,
+                sameOriginSandbox,
               },
             ],
           },
@@ -281,7 +332,7 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
         },
       });
 
-      await openDashboard(page);
+      await openDashboard(page, baseUrl);
       const outer = page.locator(".board-widget__frame");
       await outer.waitFor();
       const outerFrame = await outer.elementHandle().then((handle) => handle?.contentFrame());
@@ -309,6 +360,15 @@ describeControlUiE2e("Control UI dashboard A2UI", () => {
       const widgetFrame = outerFrame!.childFrames()[0]!;
       diagnostics.target(widgetFrame);
       await widgetFrame.getByText("A2UI board widget").waitFor();
+      if (proxy) {
+        const source = await outer.getAttribute("src");
+        expect(source && new URL(source).origin).toBe(origin);
+        expect(await outer.getAttribute("sandbox")).not.toContain("allow-same-origin");
+        expect(proxy.shellRequests.length).toBeGreaterThan(0);
+        expect(proxy.shellRequests.every(Boolean)).toBe(true);
+        expect(proxy.rendererRequests).toEqual([]);
+        expect(proxy.boardRequests).toEqual(["ticket"]);
+      }
       await expect
         .poll(() => outer.evaluate((element) => getComputedStyle(element).opacity))
         .toBe("1");

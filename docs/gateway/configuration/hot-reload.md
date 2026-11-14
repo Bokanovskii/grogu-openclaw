@@ -187,6 +187,11 @@ notification handoff.
 | Gateway server            | Other `gateway.*` settings (port, bind, auth mode, tailscale, TLS)                                                                                                                                                                                                 | **Yes**                                                                                        |
 | Infrastructure            | Other `discovery` and `browser` settings, MCP Apps listener settings, `secrets.egressProxy`                                                                                                                                                                        | **Yes**                                                                                        |
 
+Changing `mcp.apps.sameOriginSandbox` requires a Gateway restart because it
+changes the HTTP listener and iframe isolation mode. Reload the Control UI after
+the restart. `mcp.apps.sandboxOrigin` still hot-applies in dedicated-origin mode
+and is ignored in single-origin mode.
+
 Channel plugins declare which settings restart their channel
 (`reload.configPrefixes`) and which need no reload action (`reload.noopPrefixes`).
 For example, with WhatsApp loaded, `channels.whatsapp.enabled` restarts the

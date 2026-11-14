@@ -2,6 +2,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { buildSandboxHostPath } from "../agents/sandbox-host.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   getActiveGatewayRootWorkCount,
@@ -56,6 +57,55 @@ afterEach(() => {
 });
 
 describe("standalone MCP App HTTP admission", () => {
+  it.each([undefined, false, true])(
+    "serves an opaque main-listener shell only for sameOriginSandbox=%s",
+    async (sameOriginSandbox) => {
+      await withGatewayServer({
+        prefix: "main-listener-sandbox",
+        resolvedAuth: AUTH_NONE,
+        overrides: {
+          getRuntimeConfig: () => ({ mcp: { apps: { enabled: false, sameOriginSandbox } } }),
+        },
+        run: async (server) => {
+          const path = buildSandboxHostPath(undefined, sameOriginSandbox);
+          const get = createResponse();
+          await dispatchRequest(server, createRequest({ path }), get.res);
+          expect(get.res.statusCode).toBe(sameOriginSandbox ? 200 : 404);
+          if (!sameOriginSandbox) {
+            return;
+          }
+          expect(get.setHeader).toHaveBeenCalledWith(
+            "Content-Security-Policy",
+            expect.stringContaining("; sandbox allow-scripts allow-forms"),
+          );
+          expect(get.setHeader).not.toHaveBeenCalledWith(
+            "Content-Security-Policy",
+            expect.stringContaining("allow-same-origin"),
+          );
+          expect(get.setHeader).toHaveBeenCalledWith(
+            "Cache-Control",
+            "public, max-age=31536000, immutable",
+          );
+          const head = createResponse();
+          await dispatchRequest(server, createRequest({ path, method: "HEAD" }), head.res);
+          expect(head.res.statusCode).toBe(200);
+          expect(head.getBody()).toBe("");
+          expect(head.setHeader).toHaveBeenCalledWith(
+            "Content-Length",
+            String(Buffer.byteLength(get.getBody())),
+          );
+          const oldMode = createResponse();
+          await dispatchRequest(
+            server,
+            createRequest({ path: buildSandboxHostPath() }),
+            oldMode.res,
+          );
+          expect(oldMode.setHeader).toHaveBeenCalledWith("Cache-Control", "no-store");
+        },
+      });
+    },
+  );
+
   it("keeps deferred handler work visible until it settles", async () => {
     const started = createDeferred();
     const finish = createDeferred();

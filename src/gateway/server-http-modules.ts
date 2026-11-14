@@ -20,6 +20,9 @@ export const getArtifactDownloadsModule = createLazyRuntimeModule(
 export const getMcpAppStandaloneModule = createLazyRuntimeModule(
   () => import("./mcp-app-standalone.js"),
 );
+export const getMcpAppSandboxHttpModule = createLazyRuntimeModule(
+  () => import("./mcp-app-sandbox-http.js"),
+);
 export const getModelsHttpModule = createLazyRuntimeModule(() => import("./models-http.js"));
 export const getOpenAiHttpModule = createLazyRuntimeModule(() => import("./openai-http.js"));
 export const getOpenResponsesHttpModule = createLazyRuntimeModule(

@@ -6,6 +6,10 @@ import {
   resolveBoardWidgetContentKindResourceUrls,
 } from "../plugins/board-widget-content-kinds.js";
 import { requireBoardViewTicketAuthority, verifyBoardViewTicket } from "./board-view-ticket.js";
+import {
+  embedSandboxPublicScripts,
+  prepareSandboxPublicScripts,
+} from "./sandbox-public-resources.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 
 type AuthorizedBoardWidgetView = BoardSessionTarget & {
@@ -23,6 +27,10 @@ export async function withAuthorizedBoardWidgetView<T>(
   if (!claims) {
     throw new BoardValidationError("invalid_operation", "board widget view ticket is invalid");
   }
+  const initialAuthority = requireBoardViewTicketAuthority(claims, options.gatewayContext);
+  const scripts = options.gatewayContext?.getRuntimeConfig().mcp?.apps?.sameOriginSandbox
+    ? await prepareSandboxPublicScripts(initialAuthority.pluginRegistry)
+    : undefined;
   requireBoardViewTicketAuthority(claims, options.gatewayContext);
   const session = { sessionKey: claims.sessionKey, agentId: claims.agentId };
   return await store.useWidgetDocument(session, claims.name, (document) => {
@@ -79,11 +87,20 @@ export async function withAuthorizedBoardWidgetView<T>(
         ...(document.declared ? { declared: document.declared } : {}),
         resourceOrigins,
       };
+      if (scripts) {
+        composed.html = embedSandboxPublicScripts(composed.html, scripts, resourceOrigins);
+      }
       return consume({ ...session, name: claims.name, document: composed });
     }
     if (!("html" in document)) {
       throw new BoardValidationError("invalid_operation", "board widget view ticket is stale");
     }
-    return consume({ ...session, name: claims.name, document });
+    return consume({
+      ...session,
+      name: claims.name,
+      document: scripts
+        ? { ...document, html: embedSandboxPublicScripts(document.html, scripts) }
+        : document,
+    });
   });
 }

@@ -52,21 +52,39 @@ export function buildWidgetThemeMessage(): WidgetThemeMessage {
   };
 }
 
-export function postWidgetTheme(frame: HTMLIFrameElement, targetOrigin = "*"): void {
-  frame.contentWindow?.postMessage(buildWidgetThemeMessage(), targetOrigin);
+type ThemeSender = (message: WidgetThemeMessage) => void;
+
+export function postWidgetTheme(
+  frame: HTMLIFrameElement,
+  targetOrigin = "*",
+  send?: ThemeSender,
+): void {
+  const message = buildWidgetThemeMessage();
+  if (send) {
+    send(message);
+  } else {
+    frame.contentWindow?.postMessage(message, targetOrigin);
+  }
 }
 
 const widgetThemeObserverWindows = new WeakSet<Window>();
-const widgetThemeFrames = new WeakMap<Window, Map<HTMLIFrameElement, string>>();
+const widgetThemeFrames = new WeakMap<
+  Window,
+  Map<HTMLIFrameElement, { origin: string; send?: ThemeSender }>
+>();
 
 /** Explicit registration also reaches widgets inside a chat component's shadow root. */
-export function registerWidgetThemeFrame(frame: HTMLIFrameElement, origin: string): () => void {
+export function registerWidgetThemeFrame(
+  frame: HTMLIFrameElement,
+  origin: string,
+  send?: ThemeSender,
+): () => void {
   let frames = widgetThemeFrames.get(window);
   if (!frames) {
     frames = new Map();
     widgetThemeFrames.set(window, frames);
   }
-  frames.set(frame, origin);
+  frames.set(frame, { origin, send });
   installWidgetThemeObserver();
   return () => frames.delete(frame);
 }
@@ -93,9 +111,9 @@ export function installWidgetThemeObserver(): void {
         postWidgetTheme(frame);
       }
     }
-    for (const [frame, origin] of registered ?? []) {
+    for (const [frame, { origin, send }] of registered ?? []) {
       if (frame.isConnected) {
-        postWidgetTheme(frame, origin);
+        postWidgetTheme(frame, origin, send);
       } else {
         registered?.delete(frame);
       }

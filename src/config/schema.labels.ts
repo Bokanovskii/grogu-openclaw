@@ -5,6 +5,7 @@ import { APPROVAL_FIELD_LABELS } from "./schema.labels.approvals.js";
 import { BROWSER_FIELD_LABELS } from "./schema.labels.browser.js";
 import { CRON_FIELD_LABELS } from "./schema.labels.cron.js";
 import { GITHUB_TOOL_FIELD_LABELS } from "./schema.labels.github.js";
+import { MCP_FIELD_LABELS } from "./schema.labels.mcp.js";
 import { SESSION_FIELD_LABELS } from "./schema.labels.session.js";
 import { WORKSPACE_FIELD_LABELS } from "./schema.labels.workspace.js";
 import { META_FIELD_LABELS } from "./schema.meta.js";
@@ -255,10 +256,6 @@ export const FIELD_LABELS: Record<string, string> = {
   "tools.web.fetch.ssrfPolicy.allowRfc2544BenchmarkRange":
     "Web Fetch Allow RFC 2544 Benchmark Range",
   "tools.web.fetch.ssrfPolicy.allowIpv6UniqueLocalRange": "Web Fetch Allow IPv6 Unique Local Range",
-  "mcp.apps": "MCP Apps",
-  "mcp.apps.enabled": "MCP Apps Enabled",
-  "mcp.apps.sandboxOrigin": "MCP Apps Sandbox Origin",
-  "mcp.apps.sandboxPort": "MCP Apps Sandbox Port",
   "gateway.push": "Gateway Push Delivery",
   "gateway.push.apns": "Gateway APNs Delivery",
   "gateway.push.apns.relay": "Gateway APNs Relay",
@@ -524,34 +521,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "commands.restart": "Allow Restart",
   "commands.ownerAllowFrom": "Command Owners",
   "commands.allowFrom": "Command Elevated Access Rules",
-  mcp: "MCP",
-  "mcp.sessionIdleTtlMs": "MCP Session Idle TTL (ms)",
-  "mcp.servers": "MCP Servers",
-  "mcp.servers.*.enabled": "MCP Server Enabled",
-  "mcp.servers.*.auth": "MCP Server Auth",
-  "mcp.servers.*.oauth": "MCP OAuth",
-  "mcp.servers.*.oauth.identity": "MCP OAuth Identity",
-  "mcp.servers.*.oauth.authProfileId": "MCP OAuth Auth Profile",
-  "mcp.servers.*.oauth.scope": "MCP OAuth Scope",
-  "mcp.servers.*.oauth.redirectUrl": "MCP OAuth Redirect URL",
-  "mcp.servers.*.oauth.clientMetadataUrl": "MCP OAuth Client Metadata URL",
-  "mcp.servers.*.requestTimeoutMs": "MCP Request Timeout (ms)",
-  "mcp.servers.*.connectionTimeoutMs": "MCP Connect Timeout (ms)",
-  "mcp.servers.*.supportsParallelToolCalls": "MCP Parallel Tool Calls",
-  "mcp.servers.*.supports_parallel_tool_calls": "MCP Parallel Tool Calls",
-  "mcp.servers.*.sslVerify": "MCP TLS Verification",
-  "mcp.servers.*.ssl_verify": "MCP TLS Verification",
-  "mcp.servers.*.clientCert": "MCP Client Certificate",
-  "mcp.servers.*.client_cert": "MCP Client Certificate",
-  "mcp.servers.*.clientKey": "MCP Client Key",
-  "mcp.servers.*.client_key": "MCP Client Key",
-  "mcp.servers.*.codex": "Codex MCP Projection",
-  "mcp.servers.*.toolFilter": "MCP Tool Selection",
-  "mcp.servers.*.toolFilter.include": "Included MCP Tools",
-  "mcp.servers.*.toolFilter.exclude": "Excluded MCP Tools",
-  "mcp.servers.*.codex.agents": "Codex MCP Agents",
-  "mcp.servers.*.codex.defaultToolsApprovalMode": "Codex MCP Tool Approval",
-  "mcp.servers.*.codex.default_tools_approval_mode": "Codex MCP Tool Approval",
+  ...MCP_FIELD_LABELS,
   ui: "UI",
   "ui.seamColor": "Accent Color",
   "ui.prefs.accent": "User Accent Color",

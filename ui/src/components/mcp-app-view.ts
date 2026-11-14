@@ -1,21 +1,19 @@
 import { consume } from "@lit/context";
 import { Task, TaskStatus } from "@lit/task";
-import {
-  type AppBridge,
-  McpUiHostContextSchema,
-  PostMessageTransport,
-} from "@modelcontextprotocol/ext-apps/app-bridge";
+import { type AppBridge, McpUiHostContextSchema } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { isMcpAppViewExpiredError } from "@openclaw/gateway-protocol";
 import { raceWithTimeout } from "@openclaw/retry";
 import { LitElement, html, nothing, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
+import { sandboxHostFramePermissions } from "../../../src/shared/sandbox-host-transport.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
 import { navigateMcpAppLink } from "../app/mcp-app-routing.ts";
 import { I18nController, t } from "../i18n/index.ts";
 import { registerMcpAppEnglish } from "../i18n/locales/en-mcp-app.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import { parseMcpAppLink } from "../lib/mcp-app-route.ts";
+import { prepareMcpSandboxTransport } from "../lib/mcp-sandbox-transport.ts";
 import { openExternalUrlSafe } from "../lib/open-external-url.ts";
 import { OpenClawAppBridge, bindMcpAppResourceHandlers } from "./mcp-app-bridge.ts";
 import { McpAppConfirm } from "./mcp-app-confirm.ts";
@@ -41,6 +39,7 @@ type McpAppViewPayload = {
   sandboxUrl: string;
   sandboxPort: number;
   sandboxOrigin?: string;
+  sameOriginSandbox?: boolean;
   html: string;
   csp?: McpAppHostSandboxCsp;
   toolInput: unknown;
@@ -377,9 +376,7 @@ export class McpAppView extends LitElement {
       // Control UI origin is disclosed; path/query data remains suppressed.
       iframe.referrerPolicy = "origin";
       iframe.style.height = this.fillContainer ? "100%" : `${this.height}px`;
-      // The proxy listener is a dedicated origin that never serves host data,
-      // so Apps retain their required origin capabilities without reaching Control UI.
-      iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+      iframe.setAttribute("sandbox", sandboxHostFramePermissions(payload.sameOriginSandbox));
       mount.appendChild(iframe);
       const createdResources: McpAppResources = {
         bridge: null,
@@ -396,39 +393,26 @@ export class McpAppView extends LitElement {
         once: true,
       });
 
-      const proxyReady = new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          cleanupProxyReady();
-          reject(new Error(t("mcpApp.errors.sandboxTimedOut")));
-        }, 15_000);
-        const onMessage = (event: MessageEvent) => {
-          if (
-            event.source === iframe.contentWindow &&
-            event.data?.method === "ui/notifications/sandbox-proxy-ready"
-          ) {
-            cleanupProxyReady();
-            resolve();
-          }
-        };
-        const cleanupProxyReady = this.addResourceCleanup(createdResources, () => {
-          window.clearTimeout(timeout);
-          window.removeEventListener("message", onMessage);
-        });
-        window.addEventListener("message", onMessage);
-      });
-      iframe.src = resolveSandboxHostUrl(
+      const sandboxUrl = resolveSandboxHostUrl(
         payload.sandboxUrl,
         payload.sandboxPort,
         payload.sandboxOrigin,
         this.context?.gateway.connection.gatewayUrl ?? "",
         window.location.origin,
         t("mcpApp.errors.invalidSandboxUrl"),
+        payload.sameOriginSandbox,
       );
-      await proxyReady;
-      signal.throwIfAborted();
-      if (!iframe.contentWindow) {
-        throw new Error(t("mcpApp.errors.sandboxUnavailable"));
+      const transport = await prepareMcpSandboxTransport({
+        frame: iframe,
+        sandboxUrl,
+        sameOriginSandbox: payload.sameOriginSandbox,
+        signal,
+      });
+      if (!this.isCurrentBinding(binding, createdResources, signal)) {
+        await transport.close();
+        throw new DOMException(t("mcpApp.errors.sandboxUnavailable"), "AbortError");
       }
+      createdResources.transport = transport;
 
       let modes = negotiateMcpAppDisplayModes(payload.displayModes);
       this.displayMode =
@@ -603,8 +587,6 @@ export class McpAppView extends LitElement {
           resolve();
         };
       });
-      const transport = new PostMessageTransport(iframe.contentWindow, iframe.contentWindow);
-      createdResources.transport = transport;
       await bridge.connect(transport);
       signal.throwIfAborted();
       await bridge.sendSandboxResourceReady({

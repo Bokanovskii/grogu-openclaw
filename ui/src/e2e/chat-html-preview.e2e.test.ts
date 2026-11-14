@@ -1,4 +1,4 @@
-// Uses the real isolated sandbox listener with deterministic Gateway file data.
+// Uses the real sandbox HTTP handlers with deterministic Gateway file data.
 import type { Server } from "node:http";
 import path from "node:path";
 import { expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
   defaultControlUiFeatureMethods,
   installMockGateway,
 } from "../test-helpers/control-ui-e2e.ts";
+import { close, startProtectedSource } from "./chat-widget-sandbox.fixture.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({
@@ -148,21 +149,54 @@ suite.define(() => {
     });
   });
 
-  for (const mode of ["scripts", "strict"] as const) {
-    it(`renders HTML with ${mode} and retains Source in the same file tab`, async (test) => {
+  for (const [mode, sameOriginSandbox] of [
+    ["scripts", false],
+    ["strict", false],
+    ["scripts", true],
+    ["strict", true],
+  ] as const) {
+    it(`renders HTML with ${mode} and retains Source in the same file tab (${sameOriginSandbox ? "same-origin" : "dedicated"} hosting)`, async (test) => {
       let sandbox: Server | undefined;
+      let protectedSource: Awaited<ReturnType<typeof startProtectedSource>> | undefined;
       await suite.runScenario(test, {
         run: async () => {
-          sandbox = createSandboxHostHttpServer();
-          const sandboxPort = await listen(sandbox);
-          const sandboxUrl = buildSandboxHostPath({ blockDescendantFrames: true });
+          let sandboxPort: number;
+          if (sameOriginSandbox) {
+            protectedSource = await startProtectedSource({
+              html: source,
+              upstream: suite.server.baseUrl,
+              documentPath: "/__openclaw__/preview-fixture/document.html",
+              boardPath: "/__openclaw__/preview-fixture/board.html",
+              sameOriginSandbox,
+            });
+            sandboxPort = Number(new URL(protectedSource.baseUrl).port);
+          } else {
+            sandbox = createSandboxHostHttpServer();
+            sandboxPort = await listen(sandbox);
+          }
+          const baseUrl = protectedSource?.baseUrl ?? suite.server.baseUrl;
+          const sandboxUrl = buildSandboxHostPath(
+            { blockDescendantFrames: true },
+            sameOriginSandbox,
+          );
           await suite.withPage(
             {
               viewport: { width: 1440, height: 1000 },
               serviceWorkers: "block",
               permissions: ["local-network-access"],
             },
-            async ({ page }) => {
+            async ({ context, page }) => {
+              if (sameOriginSandbox) {
+                await context.addCookies([
+                  {
+                    name: "synthetic_widget_edge",
+                    value: "allowed",
+                    url: baseUrl,
+                    httpOnly: true,
+                    sameSite: "Strict",
+                  },
+                ]);
+              }
               const mediaUrl =
                 "/__openclaw__/assistant-media?source=attachment.htm&mediaTicket=html-preview";
               await page.route("**/__openclaw__/assistant-media?**", (route) =>
@@ -176,7 +210,9 @@ suite.define(() => {
                 html,
                 sandboxUrl,
                 sandboxPort,
-                sandboxOrigin: `http://127.0.0.1:${sandboxPort}`,
+                ...(sameOriginSandbox
+                  ? { sameOriginSandbox: true }
+                  : { sandboxOrigin: `http://127.0.0.1:${sandboxPort}` }),
               });
               const gateway = await installMockGateway(page, {
                 workspace: "/workspace",
@@ -232,7 +268,7 @@ suite.define(() => {
               });
               // Exercise the production app CSP, not a srcdoc demo that accidentally
               // permits scripts only because a dev server omitted the app policy.
-              await page.route(`${suite.server.baseUrl}chat`, async (route) => {
+              await page.route(`${baseUrl}chat`, async (route) => {
                 const response = await route.fetch();
                 const body = await response.text();
                 await route.fulfill({
@@ -253,7 +289,7 @@ suite.define(() => {
                   });
                 });
               }
-              await page.goto(`${suite.server.baseUrl}chat`);
+              await page.goto(`${baseUrl}chat`);
               await gateway.waitForRequest("chat.startup");
               await page
                 .locator('a.markdown-file-link[data-file-path="page.html"]')
@@ -264,6 +300,13 @@ suite.define(() => {
               await outer.waitFor();
               const document = outer.contentFrame().frameLocator("iframe");
               await document.getByRole("heading", { name: "Local HTML page" }).waitFor();
+              if (sameOriginSandbox) {
+                const frameUrl = await outer.getAttribute("src");
+                expect(frameUrl && new URL(frameUrl).origin).toBe(new URL(baseUrl).origin);
+                expect(await outer.getAttribute("sandbox")).not.toContain("allow-same-origin");
+                expect(protectedSource!.shellRequests.length).toBeGreaterThan(0);
+                expect(protectedSource!.shellRequests.every(Boolean)).toBe(true);
+              }
               await panel
                 .locator("openclaw-chat-html-preview [role=status]")
                 .waitFor({ state: "hidden" });
@@ -431,6 +474,9 @@ suite.define(() => {
           );
         },
         close: async () => {
+          if (protectedSource) {
+            await close(protectedSource.server);
+          }
           if (sandbox) {
             sandbox.closeAllConnections();
             await new Promise<void>((resolve, reject) => {

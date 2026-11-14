@@ -135,6 +135,8 @@ export function createBoardHandlers(
         await store.getSnapshotWithHtmlViewMetadata(boardSession);
       authority.assertActive();
       let sandboxPort = context.getMcpAppSandboxPort?.();
+      const apps = context.getRuntimeConfig().mcp?.apps;
+      const sameOriginSandbox = apps?.sameOriginSandbox === true;
       let sandboxOrigin: string | undefined | null = null;
       for (const widget of snapshot.widgets) {
         if (widget.grantState !== "none" && widget.grantState !== "granted") {
@@ -193,13 +195,19 @@ export function createBoardHandlers(
         widget.viewTicketTtlMs = BOARD_VIEW_TICKET_TTL_MS;
         widget.viewGeneration = viewMetadata.viewGeneration;
         if (sandboxPort !== undefined) {
-          widget.sandboxUrl = buildBoardWidgetSandboxPath({
-            ...viewMetadata,
-            ...(resourceOrigins ? { resourceOrigins } : {}),
-          });
+          widget.sandboxUrl = buildBoardWidgetSandboxPath(
+            {
+              ...viewMetadata,
+              ...(resourceOrigins ? { resourceOrigins } : {}),
+            },
+            sameOriginSandbox,
+          );
           widget.sandboxPort = sandboxPort;
+          if (sameOriginSandbox) {
+            widget.sameOriginSandbox = true;
+          }
           if (sandboxOrigin === null) {
-            const configuredOrigin = context.getRuntimeConfig?.().mcp?.apps?.sandboxOrigin;
+            const configuredOrigin = !sameOriginSandbox && apps?.sandboxOrigin;
             sandboxOrigin = configuredOrigin ? new URL(configuredOrigin).origin : undefined;
           }
           if (sandboxOrigin) {

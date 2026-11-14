@@ -193,6 +193,7 @@ describe("mcp-app-view localization", () => {
     expect(frame.getAttribute("src")).toContain("/mcp-app-sandbox?ticket=test");
     const readyEvent = {
       data: { method: "ui/notifications/sandbox-proxy-ready" },
+      origin: new URL(frame.getAttribute("src")!, window.location.href).origin,
       source: frame.contentWindow,
     } as MessageEvent;
     expect(messageListeners.length).toBeGreaterThan(0);
@@ -678,6 +679,7 @@ describe("mcp-app-view localization", () => {
         window.dispatchEvent(
           new MessageEvent("message", {
             source: window,
+            origin: new URL(value, window.location.href).origin,
             data: { method: "ui/notifications/sandbox-proxy-ready" },
           }),
         ),

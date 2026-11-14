@@ -214,7 +214,7 @@ export function normalizeSandboxHostCsp(value: unknown): SandboxHostCsp | undefi
   return csp;
 }
 
-export function buildSandboxHostPath(csp?: SandboxHostCsp): string {
+export function buildSandboxHostPath(csp?: SandboxHostCsp, sameOriginSandbox = false): string {
   const normalized = normalizeSandboxHostCsp(csp);
   const query = new URLSearchParams();
   if (normalized) {
@@ -223,16 +223,19 @@ export function buildSandboxHostPath(csp?: SandboxHostCsp): string {
       Buffer.from(JSON.stringify(normalized)).toString("base64url"),
     );
   }
-  query.set("v", buildSandboxHostDocument(normalized).version);
+  query.set("v", buildSandboxHostDocument(normalized, sameOriginSandbox).version);
   return `${SANDBOX_HOST_PATH}?${query}`;
 }
 
 /** Version the public shell and its security headers together, never widget content. */
-export function buildSandboxHostDocument(csp?: SandboxHostCsp) {
-  const html = buildSandboxHostProxyHtml(csp);
+export function buildSandboxHostDocument(csp?: SandboxHostCsp, sameOriginSandbox = false) {
+  const html = buildSandboxHostProxyHtml(csp, sameOriginSandbox);
   const headers = {
     "Content-Type": "text/html; charset=utf-8",
-    "Content-Security-Policy": buildSandboxHostContentSecurityPolicy(csp),
+    "Content-Security-Policy": [
+      buildSandboxHostContentSecurityPolicy(csp, sameOriginSandbox),
+      ...(sameOriginSandbox ? ["sandbox allow-scripts allow-forms"] : []),
+    ].join("; "),
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), clipboard-write=()",
     "Cross-Origin-Resource-Policy": "cross-origin",
     "Origin-Agent-Cluster": "?1",
@@ -283,7 +286,7 @@ export function decodeSandboxHostCsp(value: string | null): SandboxHostCsp | und
 }
 
 /** Trusted outer document. Untrusted content is written only into its inner iframe. */
-function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
+function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = false): string {
   const blockDescendantFrames = csp?.blockDescendantFrames === true;
   // Runtime insertion reaches existing saved widgets without changing their
   // approved bytes. Capture listeners consume private host state before stored
@@ -319,6 +322,17 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
   };
   let inner = createInner();
   document.body.appendChild(inner);
+  let hostPort;
+  const opaqueHost = ${sameOriginSandbox};
+  const postHost = (message, ports = []) => {
+    if (hostPort) hostPort.postMessage(message, ports);
+    else if (!opaqueHost) window.parent.postMessage(message, hostOrigin, ports);
+  };
+  const reportReady = () => ({
+    jsonrpc: "2.0",
+    method: "ui/notifications/sandbox-proxy-ready",
+    params: { sandboxUrl: window.location.href },
+  });
   const widgetPortsOffered = new Set();
   const blockDescendantFrames = ${blockDescendantFrames};
   const descendantSelector = "iframe,frame,object,embed,portal,fencedframe,webview,browser";
@@ -338,11 +352,9 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
     const doctypeEnd = resolveLeadingDoctypeEnd(html);
     return html.slice(0, doctypeEnd) + documentGuard + html.slice(doctypeEnd);
   };
-  window.addEventListener("message", (event) => {
-    if (event.source === window.parent) {
-      if (event.origin !== hostOrigin) return;
-      if (event.data?.method === "ui/notifications/sandbox-resource-ready") {
-        const params = event.data.params ?? {};
+  const receiveHost = (data) => {
+      if (data?.method === "ui/notifications/sandbox-resource-ready") {
+        const params = data.params ?? {};
         if (typeof params.html === "string") {
           const guardedHtml = guardDocument(params.html);
           // Replace the browsing context so a superseded document cannot race
@@ -350,11 +362,11 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
           const nextInner = createInner(params.allowScripts !== false);
           nextInner.addEventListener("load", () => {
             if (inner !== nextInner || typeof params.renderId !== "string") return;
-            window.parent.postMessage({
+            postHost({
               jsonrpc: "2.0",
               method: "ui/notifications/sandbox-resource-loaded",
               params: { renderId: params.renderId },
-            }, hostOrigin);
+            });
           }, { once: true });
           widgetPortsOffered.clear();
           nextInner.srcdoc = guardedHtml;
@@ -363,17 +375,33 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
         }
         return;
       }
-      if (typeof event.data?.method === "string" && event.data.method.startsWith("ui/notifications/sandbox-")) return;
+      if (typeof data?.method === "string" && data.method.startsWith("ui/notifications/sandbox-")) return;
       // A frame whose root color-scheme differs from its embedding element gets
       // an opaque UA canvas. Follow the host theme (widget theme messages, or
       // MCP host context from ui/initialize and later changes) so this shell
       // and the themed document both stay transparent.
-      const data = event.data;
       const theme = data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)} ? data.mode
         : data?.method === "ui/notifications/host-context-changed" ? data.params?.theme
         : data?.result?.hostContext?.theme;
       if (theme === "light" || theme === "dark") document.documentElement.style.colorScheme = theme;
-      inner.contentWindow?.postMessage(event.data, "*");
+      inner.contentWindow?.postMessage(data, "*");
+  };
+  window.addEventListener("message", (event) => {
+    if (event.source === window.parent) {
+      if (event.origin !== hostOrigin) return;
+      if (opaqueHost && event.data?.method === "ui/notifications/sandbox-connect") {
+        const port = event.ports[0];
+        if (!hostPort && port && event.data?.params?.sandboxUrl === window.location.href) {
+          hostPort = port;
+          port.addEventListener("message", (message) => receiveHost(message.data));
+          port.start();
+          postHost(reportReady());
+        } else {
+          port?.close();
+        }
+        return;
+      }
+      if (!opaqueHost) receiveHost(event.data);
       return;
     }
     if (event.source === inner.contentWindow) {
@@ -384,27 +412,26 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
         // Only the first offer of each kind belongs to this document instance.
         if (!widgetPortsOffered.has(event.data.type) && port) {
           widgetPortsOffered.add(event.data.type);
-          window.parent.postMessage(event.data, hostOrigin, [port]);
+          postHost(event.data, [port]);
         } else {
           port?.close();
         }
         return;
       }
-      window.parent.postMessage(event.data, hostOrigin);
+      postHost(event.data);
     }
   });
-  window.parent.postMessage({
-    jsonrpc: "2.0",
-    method: "ui/notifications/sandbox-proxy-ready",
-    params: { sandboxUrl: window.location.href },
-  }, hostOrigin);
+  window.parent.postMessage(reportReady(), hostOrigin);
 })();
 </script>
 </body>`;
 }
 
 /** HTTP response policy for the isolated proxy and its inner about:blank content. */
-function buildSandboxHostContentSecurityPolicy(csp?: SandboxHostCsp): string {
+function buildSandboxHostContentSecurityPolicy(
+  csp?: SandboxHostCsp,
+  sameOriginSandbox = false,
+): string {
   const resources = csp?.resourceDomains ?? [];
   const media = csp?.mediaDomains ?? resources;
   const connections = csp?.connectDomains ?? [];
@@ -413,7 +440,7 @@ function buildSandboxHostContentSecurityPolicy(csp?: SandboxHostCsp): string {
   const sources = (values: string[]) => (values.length > 0 ? values.join(" ") : "'none'");
   const directives = [
     "default-src 'none'",
-    `script-src 'self' 'unsafe-inline' ${resources.join(" ")}`.trim(),
+    `script-src 'self' 'unsafe-inline' ${sameOriginSandbox ? "data: " : ""}${resources.join(" ")}`.trim(),
     `style-src 'self' 'unsafe-inline' ${resources.join(" ")}`.trim(),
     `img-src 'self' data: ${resources.join(" ")}`.trim(),
     `media-src 'self' data: ${media.join(" ")}`.trim(),

@@ -1,4 +1,5 @@
 import { html, nothing, type TemplateResult } from "lit";
+import { sandboxHostFramePermissions } from "../../../../src/shared/sandbox-host-transport.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
 import type { BoardWidget } from "../../lib/board/types.ts";
@@ -10,7 +11,11 @@ import { isGatewayAvailable } from "../../lib/gateway-availability.ts";
 import { isLoopbackHostname } from "../../lib/gateway-locality.ts";
 import { generateUUID } from "../../lib/uuid.ts";
 import { WidgetRenderTimeoutError } from "../../lib/widget-sandbox-host.ts";
-import { installWidgetThemeObserver, postWidgetTheme } from "../../lib/widget-theme.ts";
+import {
+  installWidgetThemeObserver,
+  postWidgetTheme,
+  registerWidgetThemeFrame,
+} from "../../lib/widget-theme.ts";
 import { COMMAND_PALETTE_OPEN_EVENT } from "../command-palette-contract.ts";
 import { McpAppConfirm } from "../mcp-app-confirm.ts";
 import { renderPanelLoadingSkeleton } from "../panel-loading-skeleton.ts";
@@ -40,11 +45,12 @@ function documentHidden(): boolean {
 // message keeps the authorization fact but adds the deployment hint operators
 // otherwise never find.
 function resolveBoardFrameFailureMessage(
-  widget: Pick<BoardWidget, "sandboxOrigin">,
+  widget: Pick<BoardWidget, "sandboxOrigin" | "sameOriginSandbox">,
   resolvedSandboxOrigin: string,
 ): string {
   if (
     !widget.sandboxOrigin &&
+    !widget.sameOriginSandbox &&
     resolvedSandboxOrigin &&
     !isLoopbackHostname(new URL(resolvedSandboxOrigin).hostname)
   ) {
@@ -154,6 +160,7 @@ export class BoardWidgetFrameLifecycle {
   private lastFrameUrl = "";
   private sandboxOrigin = "";
   private sandboxHost: BoardWidgetSandboxHost | null = null;
+  private releaseTheme?: () => void;
   private contentVisible = false;
   private revealFrame = 0;
   private readonly confirmation = new McpAppConfirm(() => this.host.requestUpdate());
@@ -187,6 +194,8 @@ export class BoardWidgetFrameLifecycle {
     window.removeEventListener("message", this.handleWindowMessage);
     this.sandboxHost?.dispose();
     this.sandboxHost = null;
+    this.releaseTheme?.();
+    this.releaseTheme = undefined;
   }
 
   private suspend(): void {
@@ -277,7 +286,7 @@ export class BoardWidgetFrameLifecycle {
             class="board-widget__frame"
             style=${this.contentVisible ? "" : "opacity: 0"}
             ?inert=${!this.contentVisible}
-            sandbox="allow-scripts allow-same-origin allow-forms"
+            sandbox=${sandboxHostFramePermissions(widget.sameOriginSandbox)}
             referrerpolicy="origin"
             loading="eager"
             title=${widget.title || widget.name}
@@ -290,10 +299,10 @@ export class BoardWidgetFrameLifecycle {
                 document.activeElement === frame &&
                 this.keyboardHostNonce
               ) {
-                frame.contentWindow?.postMessage(
-                  { type: "openclaw:widget-shortcut-focus", nonce: this.keyboardHostNonce },
-                  this.sandboxOrigin,
-                );
+                this.sandboxHost?.send({
+                  type: "openclaw:widget-shortcut-focus",
+                  nonce: this.keyboardHostNonce,
+                });
               }
             }}
             @error=${() => {
@@ -447,16 +456,17 @@ export class BoardWidgetFrameLifecycle {
   private postBoardHostState(frame: HTMLIFrameElement): void {
     this.boardHostNonce = generateUUID();
     this.keyboardHostNonce = this.sandboxOrigin ? generateUUID() : "";
-    postWidgetTheme(frame, this.sandboxOrigin || "*");
-    frame.contentWindow?.postMessage(
-      { type: WIDGET_BOARD_HOST_MESSAGE_TYPE, nonce: this.boardHostNonce },
-      this.sandboxOrigin || "*",
-    );
+    const send = (message: unknown) => {
+      if (this.sandboxHost?.frame === frame) {
+        this.sandboxHost.send(message);
+      } else if (!this.host.widget()?.sameOriginSandbox) {
+        frame.contentWindow?.postMessage(message, this.sandboxOrigin || "*");
+      }
+    };
+    postWidgetTheme(frame, this.sandboxOrigin || "*", send);
+    send({ type: WIDGET_BOARD_HOST_MESSAGE_TYPE, nonce: this.boardHostNonce });
     if (this.keyboardHostNonce) {
-      frame.contentWindow?.postMessage(
-        { type: WIDGET_SHORTCUT_HOST_MESSAGE_TYPE, nonce: this.keyboardHostNonce },
-        this.sandboxOrigin,
-      );
+      send({ type: WIDGET_SHORTCUT_HOST_MESSAGE_TYPE, nonce: this.keyboardHostNonce });
     }
   }
 
@@ -476,6 +486,8 @@ export class BoardWidgetFrameLifecycle {
       widget.sandboxOrigin,
       gatewayUrl,
       window.location.origin,
+      undefined,
+      widget.sameOriginSandbox,
     );
     this.sandboxOrigin = new URL(url).origin;
     return url;
@@ -501,6 +513,7 @@ export class BoardWidgetFrameLifecycle {
       connected: !context || context.gateway.snapshot.phase === "connected",
       sandboxOrigin: this.sandboxOrigin,
       sandboxUrl: frame.src,
+      onMessage: this.handleWindowMessage,
       sourceOrigin: resolveGatewayHttpOrigin(
         context?.gateway.connection.gatewayUrl ?? "",
         window.location.origin,
@@ -591,6 +604,8 @@ export class BoardWidgetFrameLifecycle {
     ) {
       this.sandboxHost?.dispose();
       this.sandboxHost = null;
+      this.releaseTheme?.();
+      this.releaseTheme = undefined;
       return;
     }
     this.syncSandboxHost(frame, widget);
@@ -609,14 +624,22 @@ export class BoardWidgetFrameLifecycle {
       return;
     }
     const frame = this.host.root().querySelector<HTMLIFrameElement>(".board-widget__frame");
-    if (!frame || event.source !== frame.contentWindow) {
+    // Same-origin sandboxes answer on the current host's private port, which has
+    // no window source. Messages from other frames must not rebind this cell.
+    if (
+      !frame ||
+      (event.source !== frame.contentWindow && !this.sandboxHost?.acceptsMessage(event))
+    ) {
+      return;
+    }
+    if (!this.host.active()) {
+      // Hidden cells keep their existing handshake until they become active.
+      this.sandboxHost?.handleMessage(event);
       return;
     }
     const widget = this.host.widget();
-    if (!this.host.active()) {
-      if (event.origin === this.sandboxOrigin) {
-        this.sandboxHost?.handleMessage(event);
-      }
+    const sandboxHost = widget?.viewTicket ? this.syncSandboxHost(frame, widget) : undefined;
+    if (sandboxHost ? !sandboxHost.acceptsMessage(event) : event.source !== frame.contentWindow) {
       return;
     }
     const data = event.data as {
@@ -649,17 +672,14 @@ export class BoardWidgetFrameLifecycle {
       data?.type === WIDGET_COMMAND_PALETTE_MESSAGE_TYPE &&
       this.keyboardHostNonce &&
       data.nonce === this.keyboardHostNonce &&
-      event.origin === this.sandboxOrigin &&
+      sandboxHost &&
       frame.isConnected &&
       document.activeElement === frame &&
       !document.openClawModalLayers?.size
     ) {
       window.dispatchEvent(new CustomEvent(COMMAND_PALETTE_OPEN_EVENT));
     }
-    if (!widget?.viewTicket || event.origin !== this.sandboxOrigin) {
-      return;
-    }
-    this.syncSandboxHost(frame, widget)?.handleMessage(event);
+    sandboxHost?.handleMessage(event);
   };
 
   private syncSandboxHost(
@@ -680,6 +700,10 @@ export class BoardWidgetFrameLifecycle {
     if (!this.sandboxHost || this.sandboxHost.frame !== frame) {
       this.sandboxHost?.dispose();
       this.sandboxHost = new BoardWidgetSandboxHost(options);
+      this.releaseTheme?.();
+      this.releaseTheme = registerWidgetThemeFrame(frame, this.sandboxOrigin, (message) => {
+        this.sandboxHost?.send(message);
+      });
     } else {
       this.sandboxHost.update(options);
     }

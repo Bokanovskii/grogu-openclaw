@@ -1,20 +1,25 @@
-// Serialized into the standalone shell; keep runtime dependencies inside this function.
-export function runStandaloneMcpAppHost(config: {
-  protocolVersion: string;
-  viewPath: string;
-  initialLoadTimeoutMs: number;
-}): void {
+import { createSandboxHostTransport } from "../shared/sandbox-host-transport.js";
+
+// The shell serializes this function and injects its shared transport factory.
+export function runStandaloneMcpAppHost(
+  config: {
+    protocolVersion: string;
+    viewPath: string;
+    initialLoadTimeoutMs: number;
+    sameOriginSandbox?: boolean;
+  },
+  createTransport = createSandboxHostTransport,
+): void {
   type StandaloneElement = { className: string; textContent: string };
-  type StandaloneFrame = StandaloneElement & {
-    contentWindow?: { postMessage(message: unknown, targetOrigin: string): void };
-    referrerPolicy: string;
-    remove(): void;
-    setAttribute(name: string, value: string): void;
-    src: string;
-    style: { height: string };
+  type StandaloneFrame = Parameters<typeof createTransport>[0]["frame"] & {
     title: string;
+    src: string;
+    referrerPolicy: string;
+    style: { height: string };
+    setAttribute(name: string, value: string): void;
+    remove(): void;
   };
-  type StandaloneMessageEvent = { data: unknown; origin: string; source: unknown };
+  type StandaloneMessageEvent = MessageEvent;
   // SAFETY: This serialized function runs in the browser shell, whose Window supplies these APIs.
   const browser = globalThis as unknown as {
     addEventListener(type: "message", listener: (event: StandaloneMessageEvent) => void): void;
@@ -46,6 +51,7 @@ export function runStandaloneMcpAppHost(config: {
     sandboxUrl: string;
     sandboxPort: number;
     sandboxOrigin?: string;
+    sameOriginSandbox?: boolean;
     html: string;
     csp?: Record<string, unknown>;
     toolInput: unknown;
@@ -68,7 +74,7 @@ export function runStandaloneMcpAppHost(config: {
   let displayMode: "inline" | "fullscreen" = "inline";
   let availableDisplayModes: Array<"inline" | "fullscreen"> = ["inline", "fullscreen"];
   let requestId = 0;
-  let sandboxOrigin: string | undefined;
+  let sandboxTransport: ReturnType<typeof createTransport> | undefined;
   let teardownId: JsonRpcId | undefined;
   let phase: "active" | "tearing-down" | "suspended" | "closed" = "active";
   const pending = new Map<JsonRpcId, AbortController>();
@@ -96,9 +102,7 @@ export function runStandaloneMcpAppHost(config: {
     );
   };
   const post = (message: JsonRpcMessage) => {
-    if (sandboxOrigin) {
-      frame?.contentWindow?.postMessage(message, sandboxOrigin);
-    }
+    sandboxTransport?.send(message);
   };
   const notify = (method: string, params: unknown = {}) => post({ jsonrpc: "2.0", method, params });
   const respond = (id: JsonRpcId, result: unknown) => post({ jsonrpc: "2.0", id, result });
@@ -113,16 +117,18 @@ export function runStandaloneMcpAppHost(config: {
   const removeFrame = () => {
     phase = "closed";
     retireOperations();
+    sandboxTransport?.dispose();
+    sandboxTransport = undefined;
     frame?.remove();
     frame = undefined;
-    sandboxOrigin = undefined;
     teardownId = undefined;
   };
   const resolveSandboxUrl = (view: ViewPayload) => {
-    const base = view.sandboxOrigin
-      ? new URL(view.sandboxOrigin)
-      : new URL(browser.location.origin);
-    if (!view.sandboxOrigin) {
+    const base =
+      view.sandboxOrigin && !view.sameOriginSandbox
+        ? new URL(view.sandboxOrigin)
+        : new URL(browser.location.origin);
+    if (!view.sandboxOrigin && !view.sameOriginSandbox) {
       base.port = String(view.sandboxPort);
     }
     base.pathname = "/";
@@ -132,7 +138,7 @@ export function runStandaloneMcpAppHost(config: {
     if (
       !["http:", "https:"].includes(resolved.protocol) ||
       resolved.origin !== base.origin ||
-      resolved.origin === browser.location.origin ||
+      (!view.sameOriginSandbox && resolved.origin === browser.location.origin) ||
       resolved.pathname !== "/mcp-app-sandbox"
     ) {
       throw new Error("MCP App sandbox URL is invalid");
@@ -152,7 +158,7 @@ export function runStandaloneMcpAppHost(config: {
       },
       body: JSON.stringify({ method, params }),
       cache: "no-store",
-      credentials: "omit",
+      credentials: config.sameOriginSandbox ? "same-origin" : "omit",
       signal,
     });
     // SAFETY: The paired Gateway owns this response envelope; its result remains unknown.
@@ -203,12 +209,11 @@ export function runStandaloneMcpAppHost(config: {
     );
   };
 
-  browser.addEventListener("message", (event) => {
+  const receiveMessage = (event: StandaloneMessageEvent) => {
     // SAFETY: Only inspect envelope fields before the source, origin, JSON-RPC and ID guards below.
     const message = asStandaloneRecord(event.data) as JsonRpcMessage | undefined;
     if (
-      event.source !== frame?.contentWindow ||
-      event.origin !== sandboxOrigin ||
+      !sandboxTransport?.acceptsMessage(event) ||
       message?.jsonrpc !== "2.0" ||
       (message.id !== undefined &&
         typeof message.id !== "string" &&
@@ -391,7 +396,8 @@ export function runStandaloneMcpAppHost(config: {
           pending.delete(id);
         }
       });
-  });
+  };
+  browser.addEventListener("message", receiveMessage);
   browser.addEventListener("pagehide", (event) => {
     if (phase === "tearing-down") {
       phase = "closed";
@@ -418,7 +424,7 @@ export function runStandaloneMcpAppHost(config: {
   void fetch(config.viewPath, {
     headers: { Authorization: `MCP-App ${ticket}` },
     cache: "no-store",
-    credentials: "omit",
+    credentials: config.sameOriginSandbox ? "same-origin" : "omit",
     signal: AbortSignal.timeout(config.initialLoadTimeoutMs),
   })
     .then(async (response) => {
@@ -433,11 +439,21 @@ export function runStandaloneMcpAppHost(config: {
       payload = view;
       installOperations(payload);
       const sandboxUrl = resolveSandboxUrl(payload);
-      sandboxOrigin = sandboxUrl.origin;
       frame = browser.document.createElement("iframe");
       frame.title = "MCP App";
       frame.referrerPolicy = "origin";
-      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+      frame.setAttribute(
+        "sandbox",
+        payload.sameOriginSandbox
+          ? "allow-scripts allow-forms"
+          : "allow-scripts allow-same-origin allow-forms",
+      );
+      sandboxTransport = createTransport({
+        frame,
+        sandboxUrl: sandboxUrl.href,
+        sameOriginSandbox: payload.sameOriginSandbox,
+        onMessage: receiveMessage,
+      });
       frame.src = sandboxUrl.href;
       host?.replaceChildren(frame);
     })

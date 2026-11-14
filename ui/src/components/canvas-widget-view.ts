@@ -10,6 +10,7 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { html, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import { keyed } from "lit/directives/keyed.js";
+import { sandboxHostFramePermissions } from "../../../src/shared/sandbox-host-transport.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
 import { hasOperatorReadAccess } from "../app/operator-access.ts";
 import { t } from "../i18n/index.ts";
@@ -299,6 +300,7 @@ export class OpenClawCanvasWidgetView extends OpenClawLightDomContentsElement {
           (previous.html !== view.html ||
             previous.sandboxUrl !== view.sandboxUrl ||
             previous.sandboxPort !== view.sandboxPort ||
+            previous.sameOriginSandbox !== view.sameOriginSandbox ||
             previous.sandboxOrigin !== view.sandboxOrigin)
         ) {
           this.clearSandbox();
@@ -346,12 +348,16 @@ export class OpenClawCanvasWidgetView extends OpenClawLightDomContentsElement {
     if (!this.allowScripts || !frame || !view || !this.isCurrent(binding) || this.sandboxHost) {
       return;
     }
-    this.releaseTheme = registerWidgetThemeFrame(frame, this.sandboxOrigin);
+    this.releaseTheme = registerWidgetThemeFrame(frame, this.sandboxOrigin, (message) => {
+      this.sandboxHost?.send(message);
+    });
     this.scrollNonce = generateUUID();
     this.sandboxHost = new WidgetSandboxHost({
       frame,
       sandboxOrigin: this.sandboxOrigin,
       sandboxUrl: frame.src,
+      sameOriginSandbox: view.sameOriginSandbox,
+      onMessage: this.handleMessage,
       documentKey: `${binding.docId}\0${binding.generation}`,
       loadDocument: async () => view.html,
       onLoaded: () => {
@@ -377,24 +383,16 @@ export class OpenClawCanvasWidgetView extends OpenClawLightDomContentsElement {
     if (!frame) {
       return;
     }
-    postWidgetTheme(frame, this.sandboxOrigin);
-    frame.contentWindow?.postMessage({ type: "openclaw:widget-chat-host" }, this.sandboxOrigin);
+    postWidgetTheme(frame, this.sandboxOrigin, (message) => this.sandboxHost?.send(message));
+    this.sandboxHost?.send({ type: "openclaw:widget-chat-host" });
     // Saved widget documents already use this bridge for unconsumed wheel/touch input.
-    frame.contentWindow?.postMessage(
-      { type: "openclaw:widget-board-host", nonce: this.scrollNonce },
-      this.sandboxOrigin,
-    );
+    this.sandboxHost?.send({ type: "openclaw:widget-board-host", nonce: this.scrollNonce });
   }
 
   private readonly handleMessage = (event: MessageEvent): void => {
     const host = this.sandboxHost;
     const binding = this.viewOwner;
-    if (
-      !host ||
-      !this.sameOwner(binding) ||
-      event.source !== host.frame.contentWindow ||
-      event.origin !== this.sandboxOrigin
-    ) {
+    if (!host || !this.sameOwner(binding) || !host.acceptsMessage(event)) {
       return;
     }
     host.handleMessage(event);
@@ -545,6 +543,8 @@ export class OpenClawCanvasWidgetView extends OpenClawLightDomContentsElement {
           this.view.sandboxOrigin,
           this.context.gateway.connection.gatewayUrl,
           window.location.origin,
+          undefined,
+          this.view.sameOriginSandbox,
         );
         this.sandboxOrigin = new URL(src).origin;
       }
@@ -574,7 +574,7 @@ export class OpenClawCanvasWidgetView extends OpenClawLightDomContentsElement {
           title=${this.title}
           src=${src ?? nothing}
           srcdoc=${this.allowScripts ? nothing : this.view.html}
-          sandbox=${this.allowScripts ? "allow-scripts allow-same-origin allow-forms" : ""}
+          sandbox=${this.allowScripts ? sandboxHostFramePermissions(this.view.sameOriginSandbox) : ""}
           referrerpolicy="origin"
           style=${height ? `height:${height}px;min-height:${height}px` : nothing}
           @error=${() => this.sandboxHost?.handleFrameError()}

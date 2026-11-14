@@ -3,8 +3,20 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsdown --no-config index.ts store.worker.ts --unbundle --format esm --platform node --target node24 --no-dts",
+    "prepack": "npm run build"
+  },
   "dependencies": {
     "typebox": "1.3.34"
+  },
+  "devDependencies": {
+    "tsdown": "0.23.0"
   },
   "peerDependencies": {
     "openclaw": ">=2026.10.7"
@@ -15,7 +27,7 @@
     }
   },
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": ["./dist/index.mjs"],
     "compat": {
       "pluginApi": ">=2026.10.7"
     }

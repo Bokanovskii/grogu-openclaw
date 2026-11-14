@@ -12,18 +12,31 @@ Long findings stay in separate private artifacts. `findingsRef` points to those 
 
 ## Enable the plugin
 
-Install this directory with OpenClaw's native plugin installer, or add its absolute path to `plugins.load.paths`.
-For an installed copy, keep the entire directory, including `store.worker.ts`.
-The plugin declares its `typebox` dependency.
+Build and pack the plugin from a checkout with the repository's dependencies installed:
+
+```sh
+cd grogu/plugins/research-topics
+npm pack --pack-destination /path/to/artifacts
+```
+
+The `prepack` step compiles the entry, schema, and SQLite worker into `dist/`.
+The tarball contains JavaScript, the manifest, and this README, not TypeScript source or build tools.
+Install the tarball through OpenClaw's managed npm project:
+
+```sh
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-1.0.0.tgz
+openclaw plugins inspect research-topics --runtime --json
+```
+
+The native installer installs the declared `typebox` runtime dependency.
+Neither the Gateway nor its SQLite worker needs `tsx` or the compiler.
 It requires the Plugin SDK shipped with OpenClaw 2026.10.7 or later.
 
 Merge the following entries into the existing configuration. Preserve other plugin and tool permissions.
-Replace the example path with the plugin directory on the Gateway host.
 
 ```json5
 {
   plugins: {
-    load: { paths: ["/path/to/research-topics"] },
     allow: ["research-topics"],
     entries: { "research-topics": { enabled: true } },
   },
@@ -32,6 +45,11 @@ Replace the example path with the plugin directory on the Gateway host.
   },
 }
 ```
+
+For a local development load path, run `npm run build` in this directory first.
+Then add the directory's absolute path to `plugins.load.paths`.
+Keep its `dist/` directory intact, including `store.worker.mjs` and `schema.mjs`.
+Remove a superseded development load path when switching to the managed package.
 
 The tool is optional. Include `research_topics` in the effective permissions of each selected agent.
 If a scheduled payload defines `toolsAllow`, include `research_topics` there too.

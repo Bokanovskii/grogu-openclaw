@@ -168,7 +168,8 @@ Gateway; applying while it is running can reload its plugins.
 The list includes the `duckduckgo` web-search plugin and the community
 `openclaw-icloud-calendar` plugin. Review the calendar plugin's capabilities
 before you add `--accept-capabilities`. The command does not install local
-dictation or copy browser, Keychain, or npm cache data.
+dictation or copy browser, Keychain, or npm cache data. Set up dictation on
+each new host with the [local voice plugin guide](plugins/grogu-local-voice/README.md).
 
 The command leaves a matching installation with its required direct dependencies
 in place. It uses the native installer to repair a missing package or direct
@@ -330,6 +331,7 @@ The [local voice plugin](plugins/grogu-local-voice/README.md) uses an installed
 whisper.cpp executable and model through the existing transcription relay.
 Tap the microphone, speak, stop, edit the transcript, and send it to the same chat.
 Sparky remains the reasoning model. The plugin does not upload audio or download a model.
+No speech model stays loaded. Each Stop starts one short `whisper-cli` process.
 The operator must approve its live installation and configuration after source review.
 
 The [Apple News skill](templates/workspace-grogu/skills/apple-news/SKILL.md) guides

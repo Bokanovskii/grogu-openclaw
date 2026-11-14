@@ -73,6 +73,28 @@ export function registerChatSourceMediaTests(fixture: SourceMediaFixture) {
     writeSavedPng,
   } = fixture;
   it.each([
+    { name: "one mirrored reply", texts: ["Widget is ready."], keyed: true },
+    { name: "two mirrored replies", texts: ["First note.", "Second note."], keyed: false },
+  ])("keys the live final to its delivery mirror only for $name", async ({ texts, keyed }) => {
+    await withTranscriptFixtureState("openclaw-chat-send-source-reply-receipt-", async () => {
+      const keys = texts.map((_, index) => `idem-source-receipt:tool-source-reply:call-${index}`);
+      setAgentRunReplies(
+        texts.map((text, index) => createMainSourceReply({ idempotencyKey: keys[index]!, text })),
+      );
+      const broadcast = await fixture.send({
+        idempotencyKey: "idem-source-receipt",
+        message: "make a widget",
+      });
+
+      expect(broadcast).toMatchObject({ runId: "idem-source-receipt", state: "final" });
+      // The client swaps a keyed live final for the saved mirror row; unkeyed finals stay separate.
+      expect(getMessage(broadcast)?.["__openclaw"]).toStrictEqual(
+        keyed ? { runId: "idem-source-receipt", idempotencyKey: keys[0] } : undefined,
+      );
+    });
+  });
+
+  it.each([
     { count: 1, delivery: "direct" },
     { count: 2, delivery: "direct" },
     { count: 1, delivery: "late canvas" },

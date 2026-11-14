@@ -422,6 +422,18 @@ async function finalizeChatSendAgentReplyPayloads(
   const sourceReplyTextFromContent = extractAssistantDisplayText(sourceReplyContent);
   const sourceReplyText =
     sourceReplyTextFromContent ?? (sourceReplyContent.length === 0 ? displayReply : undefined);
+  const broadcastReplyPayloads = agentRunReplyPayloads.filter(
+    (_, index) => sourceReplyContentStates[index]?.broadcastContent.length,
+  );
+  const [broadcastReplyPayload] = broadcastReplyPayloads;
+  // A lone mirrored reply is saved as its own delivery-mirror row. Carry that row's
+  // receipt so clients replace this live final with it instead of showing both.
+  const broadcastMirrorIdempotencyKey =
+    broadcastReplyPayloads.length === 1 && broadcastReplyPayload
+      ? getReplyPayloadMetadata(
+          broadcastReplyPayload,
+        )?.sourceReplyTranscriptMirror?.idempotencyKey?.trim()
+      : undefined;
   const message =
     sourceReplyContent.length || sourceReplyText
       ? {
@@ -433,6 +445,11 @@ async function finalizeChatSendAgentReplyPayloads(
           timestamp: Date.now(),
           stopReason: "stop",
           usage: { input: 0, output: 0, totalTokens: 0 },
+          ...(broadcastMirrorIdempotencyKey
+            ? {
+                __openclaw: { runId: clientRunId, idempotencyKey: broadcastMirrorIdempotencyKey },
+              }
+            : {}),
         }
       : undefined;
   // Failed turns retain source media/transcript finalization; chat.error carries no message.

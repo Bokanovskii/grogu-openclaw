@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import { extractText } from "../../lib/chat/message-extract.ts";
 import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
-import { activeHistory, createState } from "./chat-history.inflight.test-support.ts";
+import { activeHistory, createState, emit, message } from "./chat-history.inflight.test-support.ts";
 import { loadChatHistory } from "./chat-history.ts";
 
 function completedHistory(runId: string, receipt: "id" | "sequence" = "id"): ChatHistoryResult {
@@ -66,5 +67,26 @@ describe("chat history terminal recovery", () => {
     await loadChatHistory(state);
 
     expect(state.chatRunId).toBe(runId);
+  });
+
+  it("replaces a keyed source-reply final with its delivery mirror row", async () => {
+    const runId = "widget-run";
+    const idempotencyKey = "chatcmpl-1:tool-source-reply:call-1";
+    const user = message("user", "Make a widget", { id: "user", seq: 1, runId });
+    const mirror = {
+      ...message("assistant", "Widget is ready.", { id: "mirror", seq: 2, idempotencyKey }),
+      model: "delivery-mirror",
+    };
+    const state = createState({ messages: [user, mirror] });
+    state.chatMessages = [user];
+    state.chatRunId = runId;
+
+    emit(state, runId, {
+      state: "final",
+      message: message("assistant", "Widget is ready.", { runId, idempotencyKey }),
+    });
+    await loadChatHistory(state);
+
+    expect(state.chatMessages.map(extractText)).toEqual(["Make a widget", "Widget is ready."]);
   });
 });

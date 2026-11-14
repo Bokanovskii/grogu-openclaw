@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { reconcileManagedJobs, reconcileWorkerTriggers } from "./bootstrap.js";
+import {
+  bootstrapGroguWidgetSandbox,
+  reconcileManagedJobs,
+  reconcileWorkerTriggers,
+} from "./bootstrap.js";
 import { stageGroguCompactionConfig } from "./compaction-config.js";
 import {
   createPrivateArtifactDirectory,
@@ -65,13 +69,15 @@ program
 
 program
   .command("bootstrap")
-  .description("Reconcile native job metadata and install the small-disk storage policy")
-  .option("--apply", "Apply job metadata, disable local full backups, and install cleanup", false)
+  .description("Reconcile native jobs, storage policy, and the single-origin widget default")
+  .option("--apply", "Apply native policy and widget configuration; the Gateway may restart", false)
   .action(async (options: { apply: boolean }) => {
     const selected = profile();
     const jobs = await reconcileManagedJobs(selected, options.apply);
     const storage = await bootstrapGroguStorage(selected, options.apply);
-    console.log(JSON.stringify({ jobs, storage }));
+    // Apply restart-requiring configuration after the remaining bootstrap calls.
+    const widgets = await bootstrapGroguWidgetSandbox(selected, options.apply);
+    console.log(JSON.stringify({ jobs, storage, widgets }));
     if (storage.backups.deferred.length > 0) {
       process.exitCode = 1;
     }

@@ -1,17 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertWorkerJobDefinitionPreserved,
+  bootstrapGroguWidgetSandbox,
   parseManagedWorkerTriggers,
   planManagedJobPatch,
   readWorkerSchemaPin,
   readUpdatedManagedJob,
   workerJobDefinitionSha256,
 } from "../../grogu/bootstrap.js";
+import type { OperatorProfile } from "../../grogu/operator.js";
 import {
   inspectRenderedWorkerTriggerScript,
   workerTriggerScriptSha256,
 } from "../../grogu/worker-trigger-templates.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
+
+const native = vi.hoisted(() => ({ call: vi.fn() }));
+vi.mock("../../grogu/operator.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../grogu/operator.js")>()),
+  callNative: native.call,
+  createPrivateArtifactDirectory: async () => "/synthetic/recovery/attempt",
+  writePrivateReceipt: async () => "/synthetic/recovery/attempt/plan.json",
+}));
 
 const schemaSha256 = "16f483176747c72d4e27fe9c8cd4c645c48d4f6aa6aadaded3bdbe2ca89495b1";
 const approvedTools = [
@@ -220,5 +230,71 @@ describe("revision-checked metadata bootstrap", () => {
         },
       }),
     ).toThrow(/non-trigger job configuration/);
+  });
+});
+
+describe("Grogu widget sandbox bootstrap", () => {
+  const profile: OperatorProfile = {
+    runtime: { node: "/synthetic/node", cli: "/synthetic/openclaw" },
+    stateDir: "/synthetic/state",
+    configFile: "/synthetic/config.json",
+    oauthDir: "/synthetic/oauth",
+    recoveryDir: "/synthetic/recovery",
+    releasesDir: "/synthetic/releases",
+    gatewayPort: 18789,
+    gatewayUrl: "ws://127.0.0.1:18789",
+    profileFile: "/synthetic/profile.json",
+  };
+  beforeEach(() => {
+    native.call.mockReset();
+  });
+
+  it.each([
+    { current: undefined, apply: false, writes: false },
+    { current: undefined, apply: true, writes: true },
+    { current: false, apply: true, writes: false },
+    { current: true, apply: true, writes: false },
+  ])(
+    "defaults only an unset value through the native configuration owner: %j",
+    async ({ current, apply, writes }) => {
+      native.call
+        .mockResolvedValueOnce({
+          valid: true,
+          hash: "observed-config-revision",
+          config: { mcp: { apps: { sameOriginSandbox: current } } },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          config: { mcp: { apps: { sameOriginSandbox: true } } },
+        });
+      const result = await bootstrapGroguWidgetSandbox(profile, apply);
+      expect(result).toMatchObject({
+        mode: apply ? "applied" : "preview",
+        sameOriginSandbox: current ?? true,
+        changed: current === undefined,
+      });
+      expect(native.call).toHaveBeenCalledTimes(writes ? 2 : 1);
+      if (writes) {
+        expect(native.call.mock.calls[1]?.slice(1, 3)).toEqual([
+          "config.patch",
+          expect.objectContaining({
+            baseHash: "observed-config-revision",
+            raw: JSON.stringify({ mcp: { apps: { sameOriginSandbox: true } } }),
+          }),
+        ]);
+      }
+    },
+  );
+
+  it("does not replay the default over a concurrent operator choice", async () => {
+    native.call
+      .mockResolvedValueOnce({
+        valid: true,
+        hash: "old-revision",
+        config: {},
+      })
+      .mockRejectedValueOnce(new Error("config changed; re-run config.get"));
+    await expect(bootstrapGroguWidgetSandbox(profile, true)).rejects.toThrow("config changed");
+    expect(native.call).toHaveBeenCalledTimes(2);
   });
 });

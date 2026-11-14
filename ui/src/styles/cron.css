@@ -14,9 +14,9 @@
 
 .cron-group__heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-2);
-  padding: var(--space-4);
+  padding: var(--space-2) var(--space-4);
   list-style: none;
   background: var(--bg-elevated);
 }
@@ -30,7 +30,7 @@
 }
 
 .cron-group__chevron {
-  margin-top: 2px;
+  flex-shrink: 0;
   color: var(--muted);
 }
 
@@ -43,27 +43,24 @@
   transform: rotate(90deg);
 }
 
-.cron-group__copy,
 .cron-group__title {
   display: flex;
   gap: var(--space-2);
   min-width: 0;
-}
-
-.cron-group__copy {
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.cron-group__title {
   align-items: baseline;
   color: var(--text-strong);
   font-size: var(--control-ui-text-md);
   font-weight: 600;
 }
 
-.cron-group__count,
-.cron-group__description {
+.cron-group__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cron-group__count {
+  flex-shrink: 0;
   color: var(--muted);
   font-size: var(--control-ui-text-sm);
   font-weight: 400;

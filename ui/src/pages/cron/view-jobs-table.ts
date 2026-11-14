@@ -85,17 +85,13 @@ export function renderJobsTable(
               (group) => group.id,
               (group) => html`
                 <details class="cron-group" data-cron-group=${group.id || "other"} open>
-                  <summary class="cron-group__heading">
+                  <summary class="cron-group__heading" title=${group.description || nothing}>
                     <span class="cron-group__chevron" aria-hidden="true"
                       >${icon("chevronRight")}</span
                     >
-                    <span class="cron-group__copy">
-                      <span class="cron-group__title"
-                        >${group.label}<span class="cron-group__count"
-                          >${group.jobs.length}</span
-                        ></span
-                      >
-                      ${group.description ? html`<span class="cron-group__description">${group.description}</span>` : nothing}
+                    <span class="cron-group__title">
+                      <span class="cron-group__label">${group.label}</span>
+                      <span class="cron-group__count">${group.jobs.length}</span>
                     </span>
                   </summary>
                   ${repeat(group.jobs, (job) => job.id, renderJob)}

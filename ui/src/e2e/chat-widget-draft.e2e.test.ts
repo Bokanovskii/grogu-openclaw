@@ -77,6 +77,11 @@ suite.define(() => {
         const surface = page.locator(".chat-thread-inner");
         const card = page.locator("openclaw-widget-draft");
         await card.getByText("Building widget", { exact: true }).waitFor();
+        expect(
+          await card
+            .locator(".status svg")
+            .evaluate((icon) => getComputedStyle(icon).animationName),
+        ).toBe("widget-draft-spin");
         const preview = card.locator("iframe:not([hidden])").contentFrame();
         await preview.getByRole("heading", { name: "Build results" }).waitFor();
         expect(await card.count()).toBe(1);

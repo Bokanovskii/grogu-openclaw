@@ -131,7 +131,8 @@ function prepareEmbeddedAssistantTextForPhase(
     (hasExplicitPhasedTextBlocks || messagePhase !== "final_answer")
       ? undefined
       : requestedPhase;
-  const parts: { text: string; phase?: AssistantPhase; contentIndex: number }[] = [];
+  const parts: { text: string; phase?: AssistantPhase; contentIndex: number; separator: string }[] =
+    [];
   for (const [contentIndex, block] of msg.content.entries()) {
     if (!block || typeof block !== "object") {
       continue;
@@ -149,21 +150,50 @@ function prepareEmbeddedAssistantTextForPhase(
     const sanitizerPhase =
       resolvedPhase ??
       (requestedPhase === "final_answer" && signature?.id ? "final_answer" : undefined);
-    parts.push({ text: record.text, phase: sanitizerPhase, contentIndex });
+    const previous = parts.at(-1);
+    const gap = previous ? msg.content.slice(previous.contentIndex + 1, contentIndex) : [];
+    const continuation =
+      previous?.phase === sanitizerPhase &&
+      gap.length > 0 &&
+      gap.every(
+        (part) =>
+          part?.type === "thinking" && typeof part.thinking === "string" && !part.thinking.trim(),
+      );
+    parts.push({
+      text: record.text,
+      phase: sanitizerPhase,
+      contentIndex,
+      separator: previous && !continuation ? "\n" : "",
+    });
   }
   if (prepareText) {
     for (const [index, part] of parts.entries()) {
-      part.text = prepareText(part.text, index === parts.length - 1, part.phase, part.contentIndex);
+      part.text = prepareText(
+        part.text,
+        index === parts.length - 1,
+        part.phase,
+        part.contentIndex,
+        part.separator,
+      );
     }
   }
-  return prepareRender(selectedPhase, () =>
-    // A native block boundary can divide markup; finalize only the selected snapshot.
-    parts
+  return prepareRender(selectedPhase, () => {
+    // Join continuations before sanitization can trim spaces or split a control token.
+    const groups: { text: string; phase?: AssistantPhase }[] = [];
+    for (const part of parts) {
+      const previous = groups.at(-1);
+      if (previous && !part.separator) {
+        previous.text += part.text;
+      } else {
+        groups.push({ text: part.text, phase: part.phase });
+      }
+    }
+    return groups
       .map(({ text, phase }) => sanitizeAssistantText(text, phase))
       .filter((text) => text.trim())
       .join("\n")
-      .trimEnd(),
-  );
+      .trimEnd();
+  });
 }
 
 /** Prepare selected source parts now; render their visible text only when requested. */
@@ -174,6 +204,7 @@ export function prepareAssistantVisibleText(
     final: boolean,
     phase?: AssistantPhase,
     contentIndex?: number,
+    separator?: string,
   ) => string,
 ): () => string {
   return prepareEmbeddedAssistantTextForPhase(msg, "final_answer", prepareText);

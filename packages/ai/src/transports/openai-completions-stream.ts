@@ -126,6 +126,7 @@ export async function processCompletionsStream(
   const structuredReasoningStreaming =
     model.params?.structuredReasoningStreaming === true && !options?.strictReasoningTags;
   let sawStructuredReasoning = false;
+  let answerContentStarted = false;
   type ToolCallBlock = ToolCall & { partialArgs: string };
   let currentBlock: TextBlock | ThinkingBlock | ToolCallBlock | null = null;
   const directContent: { block: TextBlock | ThinkingBlock | null } = { block: null };
@@ -492,8 +493,12 @@ export async function processCompletionsStream(
         deltaFields,
         visibleReasoningDetailTypes,
       );
-      const reasoningDeltas = reasoningBatch.deltas;
-      const hasReasoningThinking = reasoningBatch.hasThinking;
+      // Some providers emit reasoning padding between answer tokens. It is not
+      // a resumed reasoning phase and must not demote or divide the answer.
+      const reasoningDeltas = answerContentStarted
+        ? reasoningBatch.deltas.filter((delta) => delta.kind !== "thinking" || delta.text.trim())
+        : reasoningBatch.deltas;
+      const hasReasoningThinking = reasoningDeltas.some((delta) => delta.kind === "thinking");
       // Share the content/refusal owner to avoid duplicate mirrored refusals.
       const contentDeltas = readOpenAICompletionsContentDeltas(
         choiceDelta.content,
@@ -503,11 +508,13 @@ export async function processCompletionsStream(
       const lastVisibleTextIndex = contentDeltas.findLastIndex((delta) => delta.kind === "text");
       const hasSameChunkVisibleText = reasoningBatch.hasVisibleText || lastVisibleTextIndex !== -1;
       if (hasReasoningThinking) {
+        answerContentStarted = false;
         beginReasoning(hasSameChunkVisibleText, true);
         appendReasoningDeltas(reasoningDeltas);
       }
       for (const [contentDeltaIndex, contentDelta] of contentDeltas.entries()) {
         if (contentDelta.kind === "text") {
+          answerContentStarted ||= Boolean(contentDelta.text.trim());
           const parts = gemmaToolCallRecoverer?.push(contentDelta.text) ?? [contentDelta];
           for (const part of parts) {
             const routedDeltas =
@@ -519,6 +526,10 @@ export async function processCompletionsStream(
             }
           }
         } else {
+          if (answerContentStarted && !contentDelta.text.trim()) {
+            continue;
+          }
+          answerContentStarted = false;
           const hasLaterVisibleText = contentDeltaIndex < lastVisibleTextIndex;
           beginReasoning(hasLaterVisibleText);
           if (emitReasoning) {

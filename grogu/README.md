@@ -125,8 +125,8 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                                           |
 | `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                                               |
 | `bootstrap [--apply]`           | Reconciles job metadata, storage policy, and default widget isolation; preview by default. Applying can restart the Gateway.                                                                |
-| `storage-bootstrap [--apply]`   | Disables local full-backup schedules and installs one hourly native cleanup job without a model call; preview by default.                                                                   |
-| `storage-cleanup [--apply]`     | Disables local full-backup schedules and retires eligible temporary artifacts; preview by default.                                                                                          |
+| `storage-bootstrap [--apply]`   | Disables scheduled backups and installs one native cleanup job every five minutes without a model call; preview by default.                                                                 |
+| `storage-cleanup [--apply]`     | Disables scheduled backups and retires completed backup artifacts without a retention window; preview by default.                                                                           |
 | `plugins-bootstrap [--apply]`   | Previews or installs Grogu's pinned plugin packages with OpenClaw's native installer.                                                                                                       |
 | `workers-bootstrap [--apply]`   | Preview or revision-check installation of private deterministic source triggers; writes private rollback facts and never invokes a model itself.                                            |
 | `release-build <source>`        | Builds a source-pinned native package; never activates it.                                                                                                                                  |
@@ -196,7 +196,8 @@ Gateway; applying while it is running can reload its plugins.
 The list includes the `duckduckgo` web-search plugin and the community
 `openclaw-icloud-calendar` plugin. Review the calendar plugin's capabilities
 before you add `--accept-capabilities`. The command does not install local
-dictation or copy browser, Keychain, or npm cache data.
+dictation or copy browser, Keychain, or npm cache data. Set up dictation on
+each new host with the [local voice plugin guide](plugins/grogu-local-voice/README.md).
 
 The command leaves a matching installation with its required direct dependencies
 in place. It uses the native installer to repair a missing package or direct
@@ -230,8 +231,12 @@ then `openclaw doctor --state-sqlite compact --json`.
 Do not run online `VACUUM` or create a routine full backup for this cleanup.
 Compaction does not restore expired detail.
 
-Grogu does not create routine local full backups or retain historical release
-packages. Git preserves source, not conversations, credentials, or databases.
+Grogu must not retain backups. Updates and standalone Doctor runs with an
+admitted `GROGU_PROFILE_FILE` skip optional full-state copies for manual recovery.
+Temporary snapshots required for transactional rollback remain under their
+update or repair owner until that operation finishes. Already-admitted recovery
+lineage remains valid when an older installed updater starts the operation.
+Git preserves source, not conversations, credentials, or databases.
 Removing recovery copies permanently loses the ability to restore those earlier
 states.
 
@@ -243,29 +248,33 @@ node /path/to/installed/openclaw/dist/grogu-maint.js \
   --profile /path/to/private/profile.json bootstrap --apply
 ```
 
-Bootstrap disables native full-archive backup jobs that target filesystem
-storage and legacy Grogu backup workers. It preserves remote backup schedules,
-Git snapshot jobs, unrelated automations, and running work. A running backup
+Bootstrap disables native full-archive backup jobs, including remote targets,
+Git snapshot jobs, and legacy Grogu backup workers. It preserves unrelated
+automations and running work. A running backup
 is reported as deferred and must finish before the next cleanup disables it.
 The old backup contract marker is retained only to identify installed legacy
 workers during migration.
 
-The hourly cleanup runs as a native command job, not an agent turn. It uses
+Cleanup runs every five minutes as a native command job, not an agent turn. It uses
 the installed Node and maintenance CLI from the private profile, so it needs
 no source checkout or machine-specific paths. Its run history records failures
 and deferred work. No new operating-system scheduler or model-backed watcher
 is required. Repeating bootstrap converges the same declaration-key job.
 
-Completed Grogu backup archives, release packages, and failed package builds are temporary for at most
-24 hours plus the next hourly sweep. Cleanup requires their producer receipts
+Completed Grogu backup archives, failed package builds, and completed maintenance
+receipts are eligible for the next sweep without a retention window.
+Unactivated release packages are installation candidates, not state backups.
+They expire after 24 hours so cleanup cannot delete a newly built candidate
+before the operator installs it. Cleanup requires producer receipts
 and shares a lock with package builders and archive readers. It preserves the
 running installation, state, credentials, active work, and unrecognized files.
 The cleanup also retires native update captures and future standalone Doctor
-captures after verified success and the same 24-hour recovery window.
+captures after verified success without an extra recovery window.
 Native update ownership and unfinished recovery always block removal.
 Older Doctor captures without completion evidence remain protected.
-Completed storage-maintenance receipts expire with the same window, so the
-cleanup does not accumulate its own private logs.
+Older incomplete captures and retained updater code require their native
+recovery owner's settlement or a reviewed one-time cleanup. Missing metadata
+does not authorize deleting an active writer's files.
 Preview cleanup before the first removal:
 
 ```sh
@@ -357,6 +366,7 @@ The [local voice plugin](plugins/grogu-local-voice/README.md) uses an installed
 whisper.cpp executable and model through the existing transcription relay.
 Tap the microphone, speak, stop, edit the transcript, and send it to the same chat.
 Sparky remains the reasoning model. The plugin does not upload audio or download a model.
+No speech model stays loaded. Each Stop starts one short `whisper-cli` process.
 The operator must approve its live installation and configuration after source review.
 
 The [Apple News skill](templates/workspace-grogu/skills/apple-news/SKILL.md) guides

@@ -84,6 +84,33 @@ console.log(audio.readInt16LE(44) > 0 ? "First recording." : "Second recording."
     second.close();
   });
 
+  it.each([
+    [
+      "joins speech segments without whisper markers",
+      String.raw`" [BLANK_AUDIO]\n Please check\n (air whooshing)\n the calendar. [MUSIC]"`,
+      "Please check the calendar.",
+    ],
+    [
+      "returns no transcript for noise-only output",
+      String.raw`" [BLANK_AUDIO]\n (crickets chirping)\n ♪♪\n *sigh*"`,
+      undefined,
+    ],
+  ])("%s", async (_name, output, expected) => {
+    const { provider } = installedCli(`process.stdout.write(${output});`);
+    const onTranscript = vi.fn();
+    const session = provider.createSession({ providerConfig: {}, onTranscript });
+    await session.connect();
+    session.sendAudio(Buffer.from([0x80]));
+    await session.finish?.();
+
+    if (expected) {
+      expect(onTranscript).toHaveBeenCalledExactlyOnceWith(expected);
+    } else {
+      expect(onTranscript).not.toHaveBeenCalled();
+    }
+    session.close();
+  });
+
   it.each(["silence", "discard"] as const)("does not start a process for %s", async (action) => {
     const { provider, receipt } = installedCli(`throw new Error("must not run");`);
     const onTranscript = vi.fn();

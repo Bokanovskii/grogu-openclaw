@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readGroguPrivateProfileDocument } from "../agents/grogu-private-profile.js";
 import { resolveStateDir } from "../config/paths.js";
 import { resolvePathViaExistingAncestorSync } from "../infra/boundary-path.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -63,6 +64,16 @@ export async function preserveDoctorOriginalState(params: {
     params.writeAuthority?.assertCurrent();
   };
   assertCallerCurrent();
+  if (
+    !updateInProgress &&
+    params.env.GROGU_PROFILE_FILE !== undefined &&
+    readGroguPrivateProfileDocument(params.env.GROGU_PROFILE_FILE)
+  ) {
+    params.runtime.log(
+      "Grogu no-backup policy: skipped the optional pre-repair original-state copy. Transactional rollback is unchanged.",
+    );
+    return undefined;
+  }
   if (updateInProgress && !runId) {
     params.runtime.log(
       "Original update capture is unavailable. Doctor will repair current state without replacing the retained originals.",

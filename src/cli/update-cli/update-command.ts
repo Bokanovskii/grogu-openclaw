@@ -1,4 +1,5 @@
 import { theme } from "../../../packages/terminal-core/src/theme.js";
+import { readGroguPrivateProfileDocument } from "../../agents/grogu-private-profile.js";
 import type { PackageActivationRuntime } from "../../infra/package-update-activation-runtime.types.js";
 import { tryProcessCwd } from "../../infra/safe-cwd.js";
 import { normalizeUpdateChannel } from "../../infra/update-channels.js";
@@ -111,7 +112,11 @@ async function updateCommandWithRuntime(
     const { updateStateNeedsInitialization } = await import("./update-command-initialization.js");
     assertUpdatePackageActivationAdmission(root, { serviceRoot, dryRun: inputOpts.dryRun });
     const needsInitialization = await updateStateNeedsInitialization(env);
+    const groguProfile =
+      env.GROGU_PROFILE_FILE !== undefined &&
+      readGroguPrivateProfileDocument(env.GROGU_PROFILE_FILE);
     const captureOriginal =
+      !groguProfile &&
       !inputOpts.dryRun &&
       !inputOpts.run &&
       !inputOpts.recovery &&

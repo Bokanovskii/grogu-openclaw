@@ -85,7 +85,7 @@ program
 
 program
   .command("storage-bootstrap")
-  .description("Disable local full-backup schedules and install hourly model-free cleanup")
+  .description("Disable scheduled backups and install model-free cleanup every five minutes")
   .option("--apply", "Apply the small-disk storage policy", false)
   .action(async (options: { apply: boolean }) => {
     const result = await bootstrapGroguStorage(profile(), options.apply);

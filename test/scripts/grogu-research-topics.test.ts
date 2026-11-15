@@ -331,6 +331,90 @@ describe("research_topics v2", () => {
     }
   });
 
+  it("tells a rejected caller which fields to repair instead of one generic refusal", () => {
+    expect(() => parseRequest({ action: "add", title: "Socks", category: "shopping" })).toThrow(
+      /^Invalid research_topics add arguments\. Missing: id\. Unknown: category \(.*label a topic with tags\)\. Allowed: id, title, .*\btags\b/,
+    );
+    expect(() => parseRequest({ action: "forget", id: "socks", reason: "bought" })).toThrow(
+      new Error(
+        "Invalid research_topics forget arguments. Missing: expectedRevision. Unknown: reason. Allowed: id, expectedRevision.",
+      ),
+    );
+    expect(() =>
+      parseRequest({
+        action: "update",
+        id: "socks",
+        expectedRevision: 1,
+        changes: { category: "shopping", priority: "urgent" },
+      }),
+    ).toThrow(
+      /Unknown: changes\.category .*Allowed in changes: title, .*\btags\b.*Invalid: changes\.priority must be one of "high", "normal", "low"\./,
+    );
+    expect(() => parseRequest({ action: "lookup", query: "socks", limit: 21 })).toThrow(
+      new Error("Invalid research_topics lookup arguments. Invalid: limit must be <= 20."),
+    );
+    expect(() =>
+      parseRequest({ action: "source_attempt", id: "socks", sourceId: "web-search.duckduckgo" }),
+    ).toThrow(
+      new Error(
+        "Invalid research_topics source_attempt arguments. Unknown: sourceId. Allowed: id.",
+      ),
+    );
+    expect(() => parseRequest({ id: "socks" })).toThrow(
+      /^Invalid research_topics arguments: action must be one of list, get, lookup, add,/,
+    );
+  });
+
+  it("reports every wrong field when a flattened call has more mistakes than the validator reports", () => {
+    const flattened = {
+      title: "Socks",
+      brief: "Merino, size 10",
+      why: "Hiking",
+      notes: "Wool only",
+      priority: "high",
+      purpose: "answer",
+      origin: "owner",
+      tags: ["shopping"],
+    };
+    const unknownFields = "title, brief, why, notes, priority, purpose, origin, tags";
+    const cases: [unknown, string][] = [
+      [
+        { action: "update", id: "socks", ...flattened },
+        `Invalid research_topics update arguments. Missing: expectedRevision, changes. Unknown: ${unknownFields}. Allowed: id, expectedRevision, changes.`,
+      ],
+      [
+        {
+          action: "update",
+          id: "socks",
+          expectedRevision: 1,
+          changes: { title: "Socks" },
+          ...flattened,
+        },
+        `Invalid research_topics update arguments. Unknown: ${unknownFields}. Allowed: id, expectedRevision, changes.`,
+      ],
+      [
+        { action: "forget", id: "socks", expectedRevision: 1, ...flattened, reason: "bought" },
+        `Invalid research_topics forget arguments. Unknown: ${unknownFields}, and 1 more. Allowed: id, expectedRevision.`,
+      ],
+    ];
+    for (const [request, message] of cases) {
+      expect(() => parseRequest(request)).toThrow(new Error(message));
+    }
+    expect(() =>
+      parseRequest({
+        action: "add",
+        id: "socks",
+        title: "Socks",
+        priority: "urgent",
+        origin: "me",
+        category: "shopping",
+        ...Object.fromEntries(["a", "b", "c", "d", "e", "f"].map((key) => [`extra${key}`, 1])),
+      }),
+    ).toThrow(
+      /Unknown: category \(.*\), extraa, extrab, extrac, extrad, extrae, extraf\. Allowed: id, title, .*\btags\b.*\. Invalid: priority must be one of "high", "normal", "low"; origin must be one of "owner", "noticed", "automation"\.$/,
+    );
+  });
+
   it("persists full briefs and indexed bounded lookup without exposing briefs or accepting FTS syntax", async () => {
     const ledger = await open();
     await ledger.run({

@@ -1,6 +1,6 @@
 import type { Generated } from "openclaw/plugin-sdk/sqlite-worker-runtime";
-import { Type, type Static } from "typebox";
-import { Check } from "typebox/value";
+import { Type, type Static, type TObject, type TSchema } from "typebox";
+import { Check, Errors } from "typebox/value";
 
 const object = <T extends Record<string, import("typebox").TSchema>>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -290,9 +290,115 @@ export type LedgerOperations = {
   };
 };
 
+const actionSchemas = requestSchema.anyOf;
+const categoryHint = "it only filters lookup and due; label a topic with tags";
+const unknownNameLimit = 8;
+const unknownNameLength = 64;
+
+// The provider schema is flat and cannot show per-action requirements, so a rejection names the repair.
+// The validator stops after a few errors per call and a flat call with many wrong fields uses them all
+// before it reports the summary, so missing and unknown fields come from the action's own property list
+// and every field is validated alone.
+function describeInvalidRequest(value: unknown): string {
+  const input = typeof value === "object" && value !== null ? value : undefined;
+  const action = input && "action" in input ? input.action : undefined;
+  const schema = actionSchemas.find((candidate) => candidate.properties.action.const === action);
+  if (!input || !schema) {
+    const names = actionSchemas.map((candidate) => candidate.properties.action.const);
+    return `Invalid research_topics arguments: action must be one of ${names.join(", ")}.`;
+  }
+  const missing: string[] = [];
+  const unknown: string[] = [];
+  const allowed = new Map<string, string[]>();
+  const choices = new Map<string, string[]>();
+  const invalid = new Map<string, string[]>();
+  const join = (...parts: string[]) => parts.filter(Boolean).join(".");
+  const addUnknown = (where: string, names: string[]) => {
+    for (const name of names.slice(0, unknownNameLimit)) {
+      const shown =
+        name.length > unknownNameLength ? `${name.slice(0, unknownNameLength)}...` : name;
+      unknown.push(
+        name === "category" ? `${join(where, shown)} (${categoryHint})` : join(where, shown),
+      );
+    }
+    if (names.length > unknownNameLimit) {
+      unknown.push(`and ${names.length - unknownNameLimit} more${where ? ` in ${where}` : ""}`);
+    }
+  };
+  const check = (field: TSchema, fieldValue: unknown, where: string) => {
+    for (const error of Errors(field, fieldValue)) {
+      const at = join(where, error.instancePath.slice(1).replaceAll("/", "."));
+      if (error.keyword === "required") {
+        missing.push(...error.params.requiredProperties.map((name) => join(at, name)));
+      } else if (error.keyword === "additionalProperties") {
+        addUnknown(at, error.params.additionalProperties);
+      } else if (error.keyword === "const") {
+        choices.set(at, [...(choices.get(at) ?? []), JSON.stringify(error.params.allowedValue)]);
+      } else if (error.keyword !== "boolean" && error.keyword !== "anyOf") {
+        invalid.set(at, [...(invalid.get(at) ?? []), error.message]);
+      }
+    }
+  };
+  const inspect = (shape: TObject, fields: object, where: string) => {
+    for (const [name, field] of Object.entries(shape.properties)) {
+      if (!Type.IsOptional(field) && !Object.hasOwn(fields, name)) {
+        missing.push(join(where, name));
+      }
+    }
+    const entries: [string, unknown][] = Object.entries(fields);
+    const extra = entries
+      .map(([name]) => name)
+      .filter((name) => !Object.hasOwn(shape.properties, name));
+    if (extra.length > 0) {
+      addUnknown(where, extra);
+      allowed.set(
+        where,
+        Object.keys(shape.properties).filter((name) => name !== "action"),
+      );
+    }
+    for (const [name, fieldValue] of entries) {
+      const field = Object.hasOwn(shape.properties, name) ? shape.properties[name] : undefined;
+      if (!field) {
+        continue;
+      }
+      if (
+        Type.IsObject(field) &&
+        typeof fieldValue === "object" &&
+        fieldValue !== null &&
+        !Array.isArray(fieldValue)
+      ) {
+        inspect(field, fieldValue, join(where, name));
+      } else {
+        check(field, fieldValue, join(where, name));
+      }
+    }
+  };
+  inspect(schema, input, "");
+  for (const [where, values] of choices) {
+    invalid.set(where, [`must be one of ${values.join(", ")}`, ...(invalid.get(where) ?? [])]);
+  }
+  const parts = [`Invalid research_topics ${schema.properties.action.const} arguments.`];
+  if (missing.length > 0) {
+    parts.push(`Missing: ${missing.join(", ")}.`);
+  }
+  if (unknown.length > 0) {
+    parts.push(`Unknown: ${unknown.join(", ")}.`);
+  }
+  for (const [where, fields] of allowed) {
+    parts.push(`Allowed${where ? ` in ${where}` : ""}: ${fields.join(", ")}.`);
+  }
+  if (invalid.size > 0) {
+    const problems = [...invalid].slice(0, 5).map(([where, reasons]) => {
+      return `${where || "arguments"} ${reasons.join(" or ")}`;
+    });
+    parts.push(`Invalid: ${problems.join("; ")}.`);
+  }
+  return parts.join(" ");
+}
+
 export function parseRequest(value: unknown): Request {
   if (!Check(requestSchema, value)) {
-    throw new Error("Invalid research_topics arguments. Use the action schema and bounded fields.");
+    throw new Error(describeInvalidRequest(value));
   }
   const fields =
     value.action === "add"
@@ -308,9 +414,9 @@ export function parseRequest(value: unknown): Request {
 
 export const toolDescription =
   "Internal shared Research Topics owner; no routine ledger narration to the user. " +
-  "lookup (default 8, max 20) finds bounded candidates by title/aliases/summary; category filters tags. " +
+  "lookup (default 8, max 20) finds bounded candidates by title/aliases/summary; category only filters lookup/due by tag, so label topics with tags. " +
   "Review semantic equivalence in this turn, get the full brief, then add/update/merge. " +
-  "Stable ids; updates patch only supplied fields and require expectedRevision. On conflict reread " +
+  "add needs a new stable slug id and title. update patches supplied fields inside changes and requires expectedRevision. On conflict reread " +
   "and reconcile, never blindly replay. merge also requires sourceRevision and reconciled title/brief; " +
   "it unions links and returns affectedSessionRefs for you to update those sessions. New sessionRefs " +
   "must be your current conversation; existing refs survive updates/merges. sourceIds are " +
@@ -319,7 +425,7 @@ export const toolDescription =
   "due orders least-served first, then priority and oldest waiting. record_check uses expectedRevision " +
   "and a unique operationId per completed unit; it preserves content and keeps unfinished work ready. " +
   "Monitoring requires an actual monitoringReason and nextDueAtMs; there is no default timer. " +
-  "Before each fetch use source_attempt; if denied do not fetch. Record its attemptId via source_result " +
+  "Before each fetch use source_attempt; its id is the provider from source_list, never a topic id. If denied do not fetch. Record its attemptId via source_result " +
   "(ok/throttled/error/skipped, retryAfterMinutes for Retry-After). Saved-info synthesis needs no fetch. " +
   "complete freezes the topic with a reason and resolves configured Main itself. " +
   "For an explicit owner correction, reopen with expectedRevision, then update the returned revision; " +
@@ -330,6 +436,6 @@ export const toolDescription =
   "For completion, Main uses prepare_text with its final ownerText, then the normal message tool to " +
   "the configured owner route. Native successful message receipts settle that obligation. " +
   "Main can recover with confirm_completion and the actual toolCallId; no model-supplied delivery " +
-  "claim is accepted. finalize never deletes unconfirmed destinations. forget is immediate permanent " +
+  "claim is accepted. finalize never deletes unconfirmed destinations. forget takes only id and expectedRevision; it is immediate permanent " +
   "deletion only for an explicit owner request, never a completion-verification workaround. " +
   "No archives, source fetches, or per-topic jobs are created.";

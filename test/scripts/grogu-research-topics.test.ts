@@ -738,6 +738,27 @@ describe("research_topics v2", () => {
     );
   });
 
+  it("tells the caller to set workState monitoring when a due time arrives without it", async () => {
+    const ledger = await open();
+    await ledger.run({ action: "add", id: "topic", title: "Topic" });
+    const recheck = {
+      action: "record_check",
+      id: "topic",
+      expectedRevision: 1,
+      monitoringReason: "Recheck the listing",
+      nextDueAtMs: START + MINUTE,
+    } as const;
+    await expect(ledger.run({ ...recheck, operationId: "without-state" })).rejects.toThrow(
+      /workState "monitoring"/,
+    );
+    await ledger.run({ ...recheck, operationId: "with-state", workState: "monitoring" });
+    expect(await ledger.run({ action: "get", id: "topic" })).toMatchObject({
+      workState: "monitoring",
+      nextDueAtMs: START + MINUTE,
+      serviceCount: 1,
+    });
+  });
+
   it("retains pending completion obligations and freezes edits rather than trusting arbitrary delivery claims", async () => {
     const ledger = await open();
     await ledger.run({

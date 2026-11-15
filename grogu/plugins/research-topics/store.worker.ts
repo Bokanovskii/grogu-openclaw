@@ -28,7 +28,10 @@ function schedule(topic: Schedule, changes: Partial<Schedule>): Schedule {
   const state = changes.workState ?? topic.workState;
   if (state !== "monitoring") {
     if (changes.nextDueAtMs != null || (changes.monitoringReason ?? "").trim()) {
-      throw new Error("Only monitoring/retry work has a due time and monitoring reason.");
+      throw new Error(
+        'A due time or monitoringReason needs workState "monitoring" in the same call. ' +
+          "Add workState monitoring to schedule a recheck, or remove nextDueAtMs and monitoringReason.",
+      );
     }
     return { workState: state, monitoringReason: "", nextDueAtMs: null };
   }

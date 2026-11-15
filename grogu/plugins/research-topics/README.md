@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.1.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.2.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -173,7 +173,8 @@ accounting and routine research service facts do not invalidate content edits.
 
 New general research is ready immediately. There is no implicit six-hour timer,
 recurring cadence, exclusive claim, or queue file. `waiting` work is not selected.
-Monitoring requires a real reason and a timestamp. Its purpose need not be
+Monitoring requires `workState: "monitoring"` with a real reason and a timestamp
+in the same call. Its purpose need not be
 `watch`: an answer or decision can explicitly wait for evidence or retry.
 Changing back to ready/waiting clears the monitoring reason and due time.
 

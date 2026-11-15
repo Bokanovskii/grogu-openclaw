@@ -76,7 +76,9 @@ export class Records {
       this.query.selectFrom("sources").selectAll().where("id", "=", id),
     ).rows[0];
     if (!row) {
-      throw new Error(`Unknown research source: ${id}. Define it with source_set first.`);
+      throw new Error(
+        `Unknown research source: ${id}. Provider IDs come from source_list, never topic IDs; define a new provider with source_set first.`,
+      );
     }
     return row;
   }

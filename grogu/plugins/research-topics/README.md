@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.0.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.1.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -101,9 +101,11 @@ agent, under the current tool invocation and native session writer.
 
 ## Tool actions
 
-All actions reject unknown fields. IDs are 1–96 lowercase letters, digits, dots,
-underscores, or hyphens, beginning with a letter or digit. Times are Unix
-milliseconds. The host supplies operation time; callers do not set service time.
+All actions reject unknown fields. A rejection names the missing, unknown, and
+invalid fields for that action so the caller can repair the call. IDs are 1–96
+lowercase letters, digits, dots, underscores, or hyphens, beginning with a
+letter or digit. Times are Unix milliseconds. The host supplies operation time;
+callers do not set service time.
 
 | Action               | Arguments besides `action`                                                                                       | Result                                                                                                            |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -203,7 +205,8 @@ resetting their service history. Attach only providers that the next research
 unit needs. Saved-info synthesis can proceed without fetching while a provider
 cools down.
 
-Before a fetch, call `source_attempt` for its shared provider ID. The transaction
+Before a fetch, call `source_attempt` with the shared provider ID from
+`source_list` as `id`, never a topic ID. The transaction
 checks interval/backoff and records the attempt before network work. A denial
 means do not fetch. There is no long-lived reservation. After the interval,
 another attempt can begin even if the first researcher has not reported a result.

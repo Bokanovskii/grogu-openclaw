@@ -6,7 +6,8 @@
   "include": [
     "*.ts",
     "../../../src/**/*.d.ts",
-    "../../../test/scripts/grogu-research-topics.test.ts"
+    "../../../test/scripts/grogu-research-topics.test.ts",
+    "../../../test/scripts/grogu-research-delivery.test.ts"
   ],
   "exclude": []
 }

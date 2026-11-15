@@ -1,210 +1,323 @@
 # Research Topics
 
-This plugin owns one private research ledger for trusted chat agents and automations.
-It registers the `research_topics` agent tool through the public Plugin SDK.
-It makes no network requests and sends no messages.
-It does not start a research loop or install an automation.
+Research Topics is Grogu's deterministic SQLite owner for shared research briefs,
+semantic reconciliation, fair work selection, and provider budgets. Models decide
+whether topics are equivalent and whether evidence satisfies a completion rule.
+Code owns revisions, links, scheduling facts, and deletion constraints.
 
-The ledger uses `<stateDir>/research-topics/ledger.sqlite`.
-It does not read the workspace's Markdown files or financial records.
-Topic lists and due lists contain bounded summaries, not full notes.
-Long findings stay in separate private artifacts. `findingsRef` points to those artifacts.
+The optional `research_topics` tool is internal. Do not narrate ordinary ledger
+work to the user. Report actionable errors, respond when asked, and send completion
+text through Main. The plugin uses existing native owners for thread updates
+and Main handoffs. It does not fetch sources, create per-topic automations,
+or send phone messages itself. See [Completion boundary](#completion-boundary).
 
-## Enable the plugin
+## Install the private package
 
-Build and pack the plugin from a checkout with the repository's dependencies installed:
+From a checkout with the repository's dependencies available:
 
 ```sh
 cd grogu/plugins/research-topics
 npm pack --pack-destination /path/to/artifacts
 ```
 
-The `prepack` step compiles the entry, schema, and SQLite worker into `dist/`.
-The tarball contains JavaScript, the manifest, and this README, not TypeScript source or build tools.
-Install the tarball through OpenClaw's managed npm project:
+`prepack` compiles the entry and its worker modules into `dist/`. The package
+contains JavaScript, the manifest, and this README. It needs no runtime TypeScript
+compiler. This is a versioned, private local package, not a registry publication.
+Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-1.0.0.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.0.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
-The native installer installs the declared `typebox` runtime dependency.
-Neither the Gateway nor its SQLite worker needs `tsx` or the compiler.
-It requires the Plugin SDK shipped with OpenClaw 2026.10.7 or later.
-
-Merge the following entries into the existing configuration. Preserve other plugin and tool permissions.
+The installer owns the declared `typebox` runtime dependency. The minimum declared
+Plugin SDK is OpenClaw 2026.10.7. Preserve existing permissions when merging:
 
 ```json5
 {
   plugins: {
     allow: ["research-topics"],
-    entries: { "research-topics": { enabled: true } },
+    entries: {
+      "research-topics": {
+        enabled: true,
+        hooks: { allowConversationAccess: true },
+        config: {
+          delivery: {
+            agentId: "assistant",
+            channel: "telegram",
+            target: "telegram:OWNER_CHAT_ID",
+          },
+        },
+      },
+    },
   },
-  tools: {
-    alsoAllow: ["research_topics"],
-  },
+  tools: { alsoAllow: ["research_topics"] },
 }
 ```
 
-For a local development load path, run `npm run build` in this directory first.
-Then add the directory's absolute path to `plugins.load.paths`.
-Keep its `dist/` directory intact, including `store.worker.mjs` and `schema.mjs`.
-Remove a superseded development load path when switching to the managed package.
+Include `research_topics` in each selected agent's effective permissions and in
+scheduled payload `toolsAllow` when present. Retain the native research and
+messaging permissions those roles need. Only trusted owner-facing agents should
+access this shared private ledger.
 
-The tool is optional. Include `research_topics` in the effective permissions of each selected agent.
-If a scheduled payload defines `toolsAllow`, include `research_topics` there too.
-Keep existing fetch and messaging permissions. This tool does not replace them.
-Expose this shared ledger only to trusted agents that act for the owner.
-The plugin adds no channel-specific behavior, model selector, or new Gateway API.
+Keep `delivery` private. Its agent owns the canonical Main selected by
+`session.mainKey`, or `global` under global session scope. Its channel and target
+identify the permitted owner route. Add `accountId` when the installation selects
+a particular account. This must agree with the coordination plugin's Main agent.
+Without delivery configuration, ledger operations remain available, but handoffs
+and completion fail explicitly. Incognito conversations do not receive the tool.
 
-## Tool contract
+For a development load path, first run `npm run build` in this directory. Keep
+the entire `dist/` directory. Remove the superseded development path when switching
+to the managed package. Do not run schema-1 and schema-2 workers together.
 
-Every call has an `action`. All timestamps are Unix milliseconds from the Gateway host.
-Ids use lowercase letters, digits, dots, underscores, and hyphens, with a maximum length of 96.
-Use stable ids so repeated intake finds the same topic.
-Unknown fields and invalid arguments fail without a write.
+## Reconcile topics in the current turn
 
-| Action                | Arguments besides `action`                                                | Result                                                             |
-| --------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `list`                | Optional `status`, `limit` (1–50, default 20), `after`                    | `{topics, nextCursor}` with summaries ordered by id                |
-| `get`                 | `id`                                                                      | Full topic with its `sources`                                      |
-| `add`                 | `id`, `title`, optional topic fields                                      | Full topic. Existing ids fail without overwriting                  |
-| `update`              | `id`, `expectedRevision`, `changes` containing topic fields               | Full topic. Stale revisions fail                                   |
-| `remove`              | `id`, `expectedRevision`, optional `hardDelete` (default false)           | Archived topic, or `{id, deleted:true}`                            |
-| `due`                 | Optional `limit` (1–50, default 10)                                       | `{topics}` with eligible summaries                                 |
-| `acquire`             | `id`, optional `leaseMinutes` (1–60, default 15)                          | `{acquired:true, ...topic, sources}` or `{acquired:false, reason}` |
-| `record_check`        | `id`, `leaseId`, `sources`, optional `nextDueAtMs`                        | Full topic after the check                                         |
-| `record_notification` | `id`, `confirmedAtMs`                                                     | Full topic after confirmed successful notification delivery        |
-| `signal`              | `id`                                                                      | Makes an active topic due now                                      |
-| `source_list`         | Optional `limit` (1–50, default 20), `after`                              | `{sources, nextCursor}`                                            |
-| `source_set`          | `id`, `minimumIntervalMinutes`, `expectedRevision` for an existing source | Full source                                                        |
+1. Call `lookup` using the subject's ordinary words, optionally narrowing by
+   `sessionKey` or `category` (an exact tag). No raw FTS syntax is accepted.
+2. Review the bounded candidates semantically. Call `get` for the relevant brief.
+3. Add a new stable ID only when no existing topic fits. Otherwise patch with
+   `update`, or supply a reconciled title and brief to `merge`.
+4. If either revision changed, reread both records and reconcile again. Never
+   blindly replay a stale patch or replace an entire topic from an old read.
+5. After a merge, update its `affectedSessionRefs` with `post_update`.
+   The native writer checks each recorded conversation's exact incarnation.
 
-Topic fields for `add` and `update.changes`:
+Intake automations use this same flow for bounded passes over new evidence.
+Only the ongoing research worker advances old topics. No topic is claimed:
+researchers may overlap and synthesize saved information independently.
 
-| Field            | Values and defaults                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `title`          | Nonblank text, at most 240 characters. Required for `add`               |
-| `why`            | At most 1,000 characters, default empty                                 |
-| `priority`       | `high`, `normal` (default), or `low`                                    |
-| `status`         | `active` (default), `paused`, `done`, or `archived`                     |
-| `cadenceMinutes` | Integer 1–525600, default 360. `null` means on-signal                   |
-| `origin`         | `owner` (default), `noticed`, or `automation`                           |
-| `notifyBar`      | What merits a notification, at most 1,000 characters, default empty     |
-| `notes`          | At most 2,000 characters, default empty                                 |
-| `findingsRef`    | Private artifact reference, at most 1,000 characters, default empty     |
-| `sourceIds`      | Up to 20 distinct, previously defined source ids, default empty         |
-| `nextDueAtMs`    | Timestamp or `null`. Default now for timed topics, `null` for on-signal |
+New conversation references must match the current tool invocation's
+`sessionKey` and `sessionId`, not a model-supplied identity. `add` automatically
+links that conversation when `sessionRefs` is omitted. Scheduled runs and topics
+with `origin: automation` do not automatically become originating conversations.
+Explicit new references
+may name messages only within that same conversation. Existing references survive
+updates and merges; an empty patch array does not unlink them. Legacy topics
+without links remain unlinked until a conversation adds its own reference.
+No broad send, read, list, or sibling-session grant is installed.
+`post_update` writes only to recorded source conversations of the configured
+agent, under the current tool invocation and native session writer.
 
-Changing the cadence resets the next due time to now, or to `null` for on-signal.
-An explicit `nextDueAtMs` in the same update overrides that reset.
-`signal` does not resume a paused, done, or archived topic.
-An active signal received during a check stays pending after that check settles.
-The source limits still apply to signals.
-Archive retains the topic. Hard deletion removes the topic and its source links, not shared source history.
+## Tool actions
 
-Each `record_check.sources` item has `id`, `outcome`, and optional `retryAfterMinutes`.
-The outcome is `ok`, `throttled`, `error`, or `skipped`.
-Supply exactly one outcome for every source returned by `acquire`.
-Use an empty array when the topic has no sources.
-Keep `notes` and `findingsRef` edits separate through `get` and `update`.
-This prevents a completed check from overwriting a concurrent owner edit.
+All actions reject unknown fields. IDs are 1–96 lowercase letters, digits, dots,
+underscores, or hyphens, beginning with a letter or digit. Times are Unix
+milliseconds. The host supplies operation time; callers do not set service time.
 
-## Planner and source limits
+| Action               | Arguments besides `action`                                                                                       | Result                                                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `lookup`             | `query`; optional `sessionKey`, `category`, `limit` (default 8, max 20)                                          | `{topics, match}`; bounded summaries, never briefs                                                                |
+| `get`                | `id`                                                                                                             | Full topic, links, sources, and completion destinations                                                           |
+| `list`               | Optional `status`, `after`, `limit` (default 20, max 50)                                                         | `{topics, nextCursor}`, ordered by ID                                                                             |
+| `add`                | `id`, `title`, optional topic fields                                                                             | Full topic; duplicate IDs fail                                                                                    |
+| `update`             | `id`, `expectedRevision`, `changes`                                                                              | Patched full topic; content revision increments                                                                   |
+| `merge`              | Target `id`, `expectedRevision`, `sourceId`, `sourceRevision`, `changes` with required `title` and `brief`       | Target, `mergedId`, `affectedSessionRefs`; source row deleted atomically                                          |
+| `due`                | Optional `category`, `limit` (default 10, max 50)                                                                | `{topics}` with explainable `score`                                                                               |
+| `record_check`       | `id`, `expectedRevision`, `operationId`; optional scheduling fields                                              | Full topic; one service unit recorded                                                                             |
+| `source_list`        | Optional `after`, `limit` (default 20, max 50)                                                                   | `{sources, nextCursor}`                                                                                           |
+| `source_set`         | `id`, `minimumIntervalMinutes`; `expectedRevision` required when source exists                                   | Full source                                                                                                       |
+| `source_attempt`     | `id`                                                                                                             | `{allowed:true, ...source}` including `attemptId`, or `{allowed:false, id, reason, nextAllowedAtMs}`              |
+| `source_result`      | `id`, `attemptId`, `outcome`; optional `retryAfterMinutes`                                                       | Full source; stale attempts fail                                                                                  |
+| `post_update`        | `id`, `expectedRevision`, `sessionKey`, `sessionId`, `message`, `operationId`; `completionId` for pending topics | Visible native thread message and its stored receipt                                                              |
+| `notify_main`        | `id`, `expectedRevision`, `message`, `operationId`                                                               | Accepted native Main run ID, not proof of a text                                                                  |
+| `complete`           | `id`, `expectedRevision`, `reason`                                                                               | Frozen topic and required destinations; requires a recorded completion rule                                       |
+| `reopen`             | `id`, `expectedRevision`                                                                                         | Explicitly reopens a pending topic for an owner correction; clears completion obligations and returns it to ready |
+| `prepare_text`       | `id`, `expectedRevision`, `completionId`, `ownerText`                                                            | Main-only final wording and configured route; changing wording increments revision                                |
+| `confirm_completion` | `id`, `expectedRevision`, `completionId`, `toolCallId`                                                           | Main-only recovery from its bounded recent native message history                                                 |
+| `finalize`           | `id`, `expectedRevision`, `completionId`                                                                         | Deletes only after all required outcomes have native receipts                                                     |
+| `forget`             | `id`, `expectedRevision`                                                                                         | `{id, deleted:true}`; immediate permanent deletion for an explicit owner request                                  |
 
-Run one planner on the chosen schedule, for example every 30 minutes.
-The planner first calls `due`, then acquires each selected topic before any fetch.
-`due` sorts high priority first, then normal, then low.
-Within each priority, the oldest due time comes first. The id breaks ties.
-It excludes inactive topics, future topics, live reservations, and topics with any unavailable required source.
+`lookup` uses SQLite FTS5 over title, aliases, and the short `why`/`notes`
+summary. It tokenizes at most 16 Unicode word terms and quotes each term before
+joining them with OR. Words are literal, not operators. A query matching an exact
+ID uses the ID index first, still applying supplied filters. Session and tag
+links are indexed. There are no embeddings, model calls, result caches, or
+global generation tokens.
 
-A lease is a short reservation for one check and all its required sources.
-Acquisition reserves all sources in one transaction.
-Two planners cannot acquire overlapping sources at the same time.
-Do not fetch after the lease expires. A late result fails instead of replacing a newer check.
-Choose enough lease time for the bounded work and settle it promptly.
-If a worker crashes, the reservation expires. The source's minimum interval still applies.
+### Topic fields
 
-Source state separates these facts:
+| Field              | Meaning and limits                                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `title`            | Nonblank, up to 240 characters; required for `add`                                                                         |
+| `brief`            | Full working brief, at most 65,536 UTF-8 bytes; default empty                                                              |
+| `why`, `notes`     | Lookup summaries, at most 1,000 and 2,000 characters; default empty                                                        |
+| `aliases`, `tags`  | Up to 32 each; nonblank aliases up to 160 characters, tags up to 80                                                        |
+| `sessionRefs`      | Up to 64 `{sessionKey, sessionId, messageId?}` references; key/ID/message limits 512/128/256 characters                    |
+| `sourceIds`        | Up to 20 previously defined provider-budget IDs, never conversation IDs                                                    |
+| `priority`         | `high`, `normal` (default), `low`                                                                                          |
+| `purpose`          | `answer`, `decision` (default), `watch`                                                                                    |
+| `completionRule`   | Nonblank text up to 2,000 characters or `null` (default); unset means reconciliation needed, not permission to auto-delete |
+| `workState`        | `ready` (default), `monitoring`, `waiting`                                                                                 |
+| `monitoringReason` | At most 1,000 characters; must be nonblank for monitoring                                                                  |
+| `nextDueAtMs`      | Required timestamp for monitoring/retry; otherwise `null`                                                                  |
+| `origin`           | `owner` (default), `noticed`, `automation`                                                                                 |
+| `notifyBar`        | What merits a notification, up to 1,000 characters; default empty                                                          |
+| `findingsRef`      | Optional private artifact reference up to 1,000 characters; default empty                                                  |
 
-- `lastAttemptedAtMs` records acquisition, before network work. It conservatively counts a reservation even if the worker crashes or skips a source.
-- `lastFetchedAtMs` records the successful result time only. Failures never advance it.
-- `lastStatus` records the last settled outcome.
-- `backoffUntilMs` blocks new acquisition after a refusal or error.
+Ordinary updates replace only explicitly supplied scalar fields, aliases, tags,
+and provider links. Session links are append-only unions of retained and
+caller-authorized references. Adds and merges deduplicate links. Merge unions
+both topics' aliases, tags, session references, and provider IDs with the supplied
+changes. Oversized unions fail without partial writes. The target ID remains
+stable; no archived row or redirect preserves the source ID. Merge rejects
+either topic while completion is pending.
 
-The next source attempt must wait until both its minimum interval and backoff expire.
-The interval applies after acquisition and after a successful result.
-Error and throttling backoffs also cover the minimum interval after settlement.
-This keeps a slow check from releasing a source too early.
-A throttled result defaults to a backoff of 30 minutes or the source interval, whichever is longer.
-An error defaults to five minutes or the source interval, whichever is longer.
-Use `retryAfterMinutes` for a provider's `Retry-After`, rounded up.
-The minimum source interval still applies if that value is shorter.
-Only attach sources required by a check. Use the same id for a shared provider limit across topics.
-The plugin cannot enforce a limit against a caller that bypasses acquisition or an unrelated external client.
+`status` is owner-controlled: `active` or `completion_pending`, not a patchable
+field. `revision` changes on content edits, merges, completion, and reopening. Provider
+accounting and routine research service facts do not invalidate content edits.
 
-`record_check` advances `lastCheckedAtMs` for any completed check, including failures.
-It schedules the next check from the current cadence, unless a new signal or explicit override applies.
-It preserves concurrent priority, status, cadence, due-time, and note edits.
-Pausing or archiving takes effect immediately for future selection.
-A current fetch can finish and record its outcome, but cannot reactivate the topic.
-Changing sources or hard deleting waits for a live lease to settle.
-Call `record_notification` only after a message succeeds.
-Supply its canonical confirmation time as `confirmedAtMs`, not the time of a later ledger update.
-The time must be after topic creation and cannot be in the future.
-Repeated or older confirmations leave the topic and its revision unchanged.
-The ledger does not send messages or deduplicate external delivery.
+## Research rounds and provider budgets
 
-### Confirm scheduled notifications
+New general research is ready immediately. There is no implicit six-hour timer,
+recurring cadence, exclusive claim, or queue file. `waiting` work is not selected.
+Monitoring requires a real reason and a timestamp. Its purpose need not be
+`watch`: an answer or decision can explicitly wait for evidence or retry.
+Changing back to ready/waiting clears the monitoring reason and due time.
 
-Guarded scheduled delivery happens after the model returns.
-Do not call `record_notification` in that model turn.
-Before returning a notice, link the saved finding to its topic and exact job/run identity.
-That link records intent, not delivery.
+`due` sorts eligible topics by:
 
-On a later existing planner or Main turn, read the canonical completed run with `automations` action `runs`.
-Match its job/run identity, finding, topic, and intended recipient.
-Require `status: "ok"` and primary `deliveryStatus: "delivered"`.
-Do not count `failureNotificationDelivery`, an error notice, a quiet run, or an uncertain result.
-Leave ambiguous matches unrecorded and do not resend to resolve uncertainty.
+1. Lowest persistent `serviceCount`.
+2. Priority: high, normal, low.
+3. Oldest `waitingSinceMs`, then ID.
 
-Use the completed record's `ts` as `confirmedAtMs` when no more precise canonical confirmation time exists.
-That value is the finish/confirmation time, not an exact provider send time.
-The trusted caller owns this reconciliation.
-The plugin does not read delivery records or install an automatic delivery callback.
-Hook observations, queued work, and model output alone are not delivery records.
+`score` reports that round, priority, waiting time, and tie-break ID. A fixed set
+of eligible topics each gets a completed unit before another round repeats.
+New topics join the next round: their initial service count is the minimum count
+of currently eligible work plus one, or zero when none is eligible. They remain
+ready without a timer, but cannot jump ahead of topics still waiting in the
+current round, even when a new high-priority topic arrives before every unit.
+Existing topics keep their service history. Merge preserves the higher service
+count, so deduplication does not reset that history.
 
-## Import existing topics
+`record_check` checks the content revision, increments service count once, records
+`lastCheckedAtMs`, and puts unfinished work back in `ready` unless the caller
+explicitly supplies monitoring or waiting fields. It never replaces the brief.
+Use one `operationId` per completed unit. Replaying the **last** operation with
+the same facts returns `replayed:true` without another count; changed facts fail.
+There is no operation history, so reread after uncertainty once later work has
+been recorded. Overlapping independently completed units are not exclusive.
 
-The separate deployment task owns migration and retirement of the old research loop.
-Do not run the old loop and the new planner together against the same providers.
-This plugin does not parse or change Markdown automatically.
+Topics with unavailable attached providers are omitted by `due`, without
+resetting their service history. Attach only providers that the next research
+unit needs. Saved-info synthesis can proceed without fetching while a provider
+cools down.
 
-On the Gateway host, read the old private research file once and prepare bounded topic records.
-Keep that input outside all repositories.
-For each shared provider, call `source_set` with its known minimum interval.
-For each topic, call `add` with a stable id, title, cadence, status, origin, and source ids.
-Put a short summary in `notes` and keep long findings in the existing private artifact.
+Before a fetch, call `source_attempt` for its shared provider ID. The transaction
+checks interval/backoff and records the attempt before network work. A denial
+means do not fetch. There is no long-lived reservation. After the interval,
+another attempt can begin even if the first researcher has not reported a result.
+The first attempt's late result cannot overwrite the second.
 
-On a repeated import, use `get` for each stable id before calling `add`.
-If the topic exists, compare it and use `update` with its current revision only for intended changes.
-Do not overwrite chat edits or treat a failed add as success.
-Use `list` pagination to reconcile topic counts and inspect representative records after import.
-Historical timestamps are not guessed or imported. Newly added timed topics start due now.
-For known provider cooldowns, set the imported topics' `nextDueAtMs` conservatively before starting the planner.
+`source_result.outcome` is `ok`, `throttled`, `error`, or `skipped`:
 
-## Storage and updates
+- `lastAttemptedAtMs` records attempts, including crashes and skipped fetches.
+- `lastFetchedAtMs` changes only on a successful result.
+- `lastStatus` records the last settled outcome; failures remain visible.
+- Both attempt time and successful-fetch time enforce the minimum interval.
+- Throttling defaults to 30 minutes; errors default to five minutes. Both
+  backoffs are at least the configured source interval, measured from settlement.
+- Supply provider `Retry-After`, rounded up, as `retryAfterMinutes`. It is
+  respected even when longer than the normal interval.
+- Repeating an identical result for the current attempt is idempotent.
+  A different result for that attempt, or a superseded attempt, fails.
 
-The private directory uses mode `0700`. The database uses mode `0600`.
-SQLite WAL mode permits concurrent readers. Full synchronous commits protect acknowledged writes.
-The existing SDK worker broker owns database execution and drains writes during cleanup.
-No database access runs on the Gateway main thread.
-Synchronous transactions and revision comparisons prevent partial writes and lost edits.
-There is no application-level result cache to become stale across processes.
-Indexed due selection and cursor pagination avoid reading every note on each planner run.
+The tool cannot enforce budgets against unrelated clients or callers that bypass
+`source_attempt`. Provider rules and current facts remain independent of topic
+deletion and completion.
 
-The plugin admits schema version 1 once per connection and refuses newer versions without changing their schema.
-It does not change OpenClaw's state or agent schemas.
-Disabling or removing the plugin leaves its database intact.
-Updates preserve it, and older code must not open a newer plugin schema.
-Back up this private database through an SQLite-aware backup or after the Gateway stops.
-The plugin does not install a backup schedule or delete data automatically.
+## Completion boundary
+
+`complete` stores the model's completion reason (up to 2,000 characters),
+completion identity/time, and immutable destinations. It resolves configured
+Main through the public native session owner, not caller-supplied routing.
+Main's owner-text obligation is always present, plus one obligation
+per distinct linked session key/incarnation. Linked message references remain
+available on the topic. Pending completion stops due selection and rejects
+updates, merges, and checks, so notices cannot become detached from a later edit.
+
+An explicit owner correction uses `reopen` with the current revision, followed by
+`update` with the returned revision. Reopening atomically clears completion
+identity, reason, owner text, time, and destinations, then returns the topic to
+`active/ready` without a monitoring timer. It preserves the current brief, links,
+and service history. Old confirmation/finalization requests fail; later completion
+needs a new identity and new obligations. Ordinary producer updates never reopen
+a pending topic automatically. Reopening cannot retract notices already sent.
+
+`post_update` calls the public strict transcript writer with the stored session
+identity. The write publishes a visible update and returns a native message ID.
+The SDK's file lock serializes ledger mutations through this short publication.
+A correction or deletion cannot commit between selection and the native write.
+Reads remain independent, and SQLite transactions remain synchronous. The
+temporary `ledger.sqlite.lock` holds lock-owner metadata, not topic data or
+research reservations. Recovery only reclaims a definitely dead owner.
+Reuse the same `operationId` only
+when reconciling the same update. Native payload comparison rejects changed
+content under the same identity. This operation does not send a phone message.
+
+Main uses `prepare_text` to record its final wording, up to 8,000 characters.
+Only its exact recorded incarnation can prepare that acknowledgment. Main then
+uses the normal `message` tool with that wording and the returned route.
+Before the send, the plugin binds that native call to the prepared revision and
+completion identity. The `after_tool_call` hook consumes that binding. It records success
+only for a settled, nonpartial send with a platform message ID, matching
+Main, destination, account when configured, and prepared wording.
+Unrelated messages and ambiguous matches do not settle a topic. A send that
+started before reopening cannot settle a new completion with the same wording.
+
+The native hook is the normal confirmation path, including nested tool calls.
+After an interruption, Main can use `confirm_completion` with the original
+`toolCallId`. Recovery reads at most 200 recent native messages in Main. It
+requires a successful `prepare_text` result for the current completion before
+the matching send call and successful host-owned delivery facts.
+Missing, compacted, or otherwise unavailable evidence leaves completion pending.
+Do not resend blindly. No model-provided receipt or success boolean is accepted.
+
+Only native prepared facts cross into the worker. Its transaction rechecks the
+topic revision, completion identity, and exact destination. Queued runs,
+generated wording, partial sends, and intended messages are not confirmations.
+No privileged Gateway request, direct SQL transcript write, or broad visibility
+change is used.
+
+`finalize` checks the revision, completion identity, mandatory Main destination,
+and all destination confirmations before hard deletion. No archive, tombstone,
+or historical topic record remains. `forget` is the separate explicit owner
+operation for deletion before notices, not a successful completion.
+
+## Schema-1 migration and recovery
+
+The ledger remains `<stateDir>/research-topics/ledger.sqlite`. Private directory
+and database modes remain `0700` and `0600`. All runtime access stays in the SDK
+SQLite worker; no Gateway main-thread database reads are added. Kysely queries
+run inside synchronous transactions, with current caller admission at transaction
+and commit. WAL and FULL synchronous commits preserve the existing durability.
+
+Schema 2 migrates schema 1 in one transaction at connection admission:
+
+- Refuse while any live topic lease remains. Let schema-1 work settle and stop
+  its workers before retrying; never invalidate active work to force migration.
+- Preserve active topics' IDs, title, priority, origin, summaries, artifact
+  references, notification bar, and checked/notified/created/updated facts.
+- Preserve source intervals, attempt/success/status facts, and the later of
+  source backoff and reservation expiry as a conservative cooldown.
+- Active legacy topics become `decision/ready` with an unset completion rule,
+  not watches inferred from cadence. Paused topics become `decision/waiting`.
+  Briefs retain the old cadence and due time as reconciliation context, not
+  live scheduling instructions. Content revisions increment.
+- Remove old `done` and `archived` topics rather than creating a historical
+  archive. Shared provider records remain.
+- Build the lookup/link indexes and remove obsolete cadence, claim, and pending
+  signal fields. Verify integrity and foreign keys before committing version 2.
+
+No backup is generated. Failure before commit rolls back schema and data
+mutations. Once committed, schema-1 code cannot reopen the ledger: this is a
+forward-only migration, not a promise of restoring earlier state. A failed
+integrity check requires stopping writes and arranging a compatible forward
+repair. Newer schemas are refused. Disabling the plugin leaves its database
+intact.
+
+Version-1 `acquire`, `signal`, cadence, lease, archive/remove, and
+`record_notification` actions are retired. Its `lastNotifiedAtMs` is retained only
+as a current legacy fact, not a native completion receipt. This is an installed
+private-plugin migration, not an external public API compatibility promise.
+Role prompts must move to the v2 actions together with the package.

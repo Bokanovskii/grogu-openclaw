@@ -12,6 +12,7 @@ export const toolingIsolatedTestFiles = [
   "test/scripts/control-ui-i18n.test.ts",
   // The research tool opens its SQLite broker on the process main thread.
   "test/scripts/grogu-research-topics.test.ts",
+  "test/scripts/grogu-research-delivery.test.ts",
   "test/scripts/managed-child-process.drain.test.ts",
   "test/scripts/managed-child-process.termination.test.ts",
   "test/scripts/openclaw-e2e-instance.test.ts",

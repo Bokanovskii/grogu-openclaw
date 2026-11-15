@@ -1,8 +1,8 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import {
   createTestPluginApi,
@@ -18,7 +18,7 @@ import plugin from "../../grogu/plugins/research-topics/index.js";
 import { parseRequest, type LedgerOperations } from "../../grogu/plugins/research-topics/schema.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const directories = useAutoCleanupTempDirTracker(afterEach);
 const stores: SqliteWorkerStore<LedgerOperations>[] = [];
 afterEach(async () => {
   for (const store of stores.splice(0)) {
@@ -27,11 +27,19 @@ afterEach(async () => {
 });
 const START = Date.UTC(2026, 0, 1);
 const MINUTE = 60_000;
+const firstSession = { sessionKey: "agent:grogu:chat:first", sessionId: "first-incarnation" };
+const secondSession = { sessionKey: "agent:grogu:chat:second", sessionId: "second-incarnation" };
+const mainSession = { sessionKey: "agent:grogu:main", sessionId: "main-incarnation" };
+const workerModule = new URL(
+  "../../grogu/plugins/research-topics/store.worker.ts",
+  import.meta.url,
+);
+const directory = () => directories.make("research-ledger-", process.cwd());
 
-async function open(databasePath = path.join(tempDirs.make("research-ledger-"), "ledger.sqlite")) {
+async function open(databasePath = path.join(directory(), "ledger.sqlite"), caller = firstSession) {
   const store = await openSqliteWorkerStore<LedgerOperations>({
     databasePath,
-    moduleUrl: new URL("../../grogu/plugins/research-topics/store.worker.ts", import.meta.url),
+    moduleUrl: workerModule,
     input: {},
   });
   stores.push(store);
@@ -45,7 +53,7 @@ async function open(databasePath = path.join(tempDirs.make("research-ledger-"), 
       const request = parseRequest(value);
       return runSqliteWorkerStoreWrite(
         store,
-        (scope) => scope.execute({ type: "request", input: { request, now } }),
+        (scope) => scope.execute({ type: "request", input: { request, now, caller, mainSession } }),
         () => {},
         [databasePath],
       );
@@ -53,21 +61,94 @@ async function open(databasePath = path.join(tempDirs.make("research-ledger-"), 
   };
 }
 
-function leaseId(value: unknown): string {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    !("leaseId" in value) ||
-    typeof value.leaseId !== "string"
-  ) {
-    throw new Error("Expected an acquired research lease");
+function stringField(value: unknown, key: string): string {
+  if (!value || typeof value !== "object" || !(key in value)) {
+    throw new Error(`Expected result field: ${key}`);
   }
-  return value.leaseId;
+  const field: unknown = Reflect.get(value, key);
+  if (typeof field !== "string") {
+    throw new Error(`Expected string result field: ${key}`);
+  }
+  return field;
 }
 
-describe("research_topics ledger operations", () => {
-  it("runs the registered chat/automation tool through the real worker and rejects revoked callers", async () => {
-    const root = tempDirs.make("research-tool-");
+function createV1(databasePath: string, now: number, activeLease = false) {
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.exec(`
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE topics (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, why TEXT NOT NULL,
+        priority TEXT NOT NULL, status TEXT NOT NULL, cadenceMinutes INTEGER,
+        origin TEXT NOT NULL, notifyBar TEXT NOT NULL, notes TEXT NOT NULL,
+        findingsRef TEXT NOT NULL, revision INTEGER NOT NULL,
+        createdAtMs INTEGER NOT NULL, updatedAtMs INTEGER NOT NULL,
+        lastCheckedAtMs INTEGER, nextDueAtMs INTEGER, lastNotifiedAtMs INTEGER,
+        leaseId TEXT, leaseUntilMs INTEGER, pendingDue INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX topics_due ON topics(status, nextDueAtMs);
+      CREATE TABLE sources (
+        id TEXT PRIMARY KEY, minimumIntervalMinutes INTEGER NOT NULL,
+        lastAttemptedAtMs INTEGER, lastFetchedAtMs INTEGER, lastStatus TEXT,
+        backoffUntilMs INTEGER, leaseId TEXT, leaseUntilMs INTEGER, revision INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE topic_sources (
+        topicId TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+        sourceId TEXT NOT NULL REFERENCES sources(id), PRIMARY KEY(topicId, sourceId)
+      ) STRICT;
+      CREATE INDEX topic_sources_source ON topic_sources(sourceId);
+      PRAGMA user_version=1;
+    `);
+    db.prepare("INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      "provider",
+      30,
+      now,
+      now - MINUTE,
+      "throttled",
+      now + 10 * MINUTE,
+      "source-reservation",
+      now + 60 * MINUTE,
+      4,
+    );
+    for (const [id, status, cadence] of [
+      ["active", "active", 360],
+      ["paused", "paused", null],
+      ["done", "done", 360],
+      ["archive", "archived", 360],
+    ] as const) {
+      db.prepare(
+        "INSERT INTO topics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        id,
+        `${id} topic`,
+        "Existing why",
+        "low",
+        status,
+        cadence,
+        "noticed",
+        "Only useful news",
+        "Known current fact",
+        "private:artifact",
+        7,
+        now - 10 * MINUTE,
+        now - MINUTE,
+        now - MINUTE,
+        now + 360 * MINUTE,
+        now - 2 * MINUTE,
+        activeLease ? "active-reservation" : null,
+        activeLease ? now + 30 * MINUTE : null,
+        0,
+      );
+      db.prepare("INSERT INTO topic_sources VALUES (?, ?)").run(id, "provider");
+    }
+  } finally {
+    db.close();
+  }
+}
+
+describe("research_topics v2", () => {
+  it("uses the registered tool, binds links to its caller, shares provider budgets, and rejects revoked callers", async () => {
+    const root = directory();
     const registered = vi.fn<OpenClawPluginApi["registerTool"]>();
     const service = vi.fn<OpenClawPluginApi["registerService"]>();
     const api = createTestPluginApi({
@@ -107,7 +188,15 @@ describe("research_topics ledger operations", () => {
       throw new Error("Expected an authority-bound tool factory");
     }
     let active = true;
+    expect(
+      factory.create({
+        ...firstSession,
+        sessionKey: "agent:grogu:dashboard:incognito-private",
+        assertInvocationCurrent: () => {},
+      }),
+    ).toBeNull();
     const tool = factory.create({
+      ...firstSession,
       assertInvocationCurrent: () => {
         if (!active) {
           throw new Error("Caller revoked");
@@ -119,58 +208,62 @@ describe("research_topics ledger operations", () => {
       throw new Error("Expected a research tool and shutdown owner");
     }
     try {
-      const result = await tool.execute("add", {
-        action: "add",
-        id: "synthetic",
-        title: "Synthetic topic",
-      });
-      expect(result.details).toMatchObject({ id: "synthetic", revision: 1 });
-      const listing = await tool.execute("list", { action: "list" });
-      expect(listing.details).toMatchObject({ topics: [{ id: "synthetic" }] });
       await tool.execute("source", {
         action: "source_set",
         id: "shared",
         minimumIntervalMinutes: 30,
       });
-      await tool.execute("attach", {
-        action: "update",
-        id: "synthetic",
-        expectedRevision: 1,
-        changes: { sourceIds: ["shared"] },
-      });
-      await tool.execute("peer", {
-        action: "add",
-        id: "peer",
-        title: "Peer topic",
-        sourceIds: ["shared"],
-      });
-      const competing = await Promise.all([
-        tool.execute("claim-first", { action: "acquire", id: "synthetic" }),
-        tool.execute("claim-second", { action: "acquire", id: "peer" }),
+      expect(
+        (
+          await tool.execute("add", {
+            action: "add",
+            id: "topic",
+            title: "Synthetic topic",
+            sourceIds: ["shared"],
+          })
+        ).details,
+      ).toMatchObject({ id: "topic", revision: 1, sessionRefs: [firstSession] });
+      await expect(
+        tool.execute("forge", {
+          action: "update",
+          id: "topic",
+          expectedRevision: 1,
+          changes: { sessionRefs: [secondSession] },
+        }),
+      ).rejects.toThrow("current caller");
+      const attempts = await Promise.all([
+        tool.execute("first", { action: "source_attempt", id: "shared" }),
+        tool.execute("second", { action: "source_attempt", id: "shared" }),
       ]);
-      expect(competing.map((attempt) => attempt.details)).toEqual([
-        expect.objectContaining({ acquired: true }),
-        { acquired: false, reason: "not-due-or-source-unavailable" },
+      expect(attempts.map((result) => result.details)).toEqual([
+        expect.objectContaining({ allowed: true }),
+        expect.objectContaining({ allowed: false, reason: "source-cooldown" }),
       ]);
       await tool.execute("settle", {
+        action: "source_result",
+        id: "shared",
+        attemptId: stringField(attempts[0]?.details, "attemptId"),
+        outcome: "skipped",
+      });
+      await tool.execute("check", {
         action: "record_check",
-        id: "synthetic",
-        leaseId: leaseId(competing[0]?.details),
-        sources: [{ id: "shared", outcome: "skipped" }],
+        id: "topic",
+        expectedRevision: 1,
+        operationId: "unit-1",
       });
       active = false;
       await expect(
-        tool.execute("remove", {
-          action: "remove",
-          id: "synthetic",
+        tool.execute("forget", {
+          action: "forget",
+          id: "topic",
           expectedRevision: 1,
-          hardDelete: true,
         }),
       ).rejects.toThrow("Caller revoked");
       active = true;
-      expect((await tool.execute("get", { action: "get", id: "synthetic" })).details).toMatchObject(
-        { id: "synthetic" },
-      );
+      expect((await tool.execute("get", { action: "get", id: "topic" })).details).toMatchObject({
+        revision: 1,
+        serviceCount: 1,
+      });
     } finally {
       await cleanup({
         config: {},
@@ -182,15 +275,11 @@ describe("research_topics ledger operations", () => {
     await expect(tool.execute("late", { action: "list" })).rejects.toThrow("plugin stopped");
   });
 
-  it("rejects a ledger write revoked while it waits on SQLite's writer lock", async () => {
-    const root = tempDirs.make("research-writer-lock-");
-    const databasePath = path.join(root, "ledger.sqlite");
-    const runtimeSource = fileURLToPath(
-      new URL("../../grogu/plugins/research-topics/index.ts", import.meta.url),
-    );
+  it("rolls back a caller revoked while waiting on SQLite's writer lock", async () => {
+    const databasePath = path.join(directory(), "ledger.sqlite");
     const store = await openSqliteWorkerStore<LedgerOperations>({
       databasePath,
-      moduleUrl: new URL("./store.worker.ts", pathToFileURL(runtimeSource)),
+      moduleUrl: workerModule,
       input: {},
     });
     const lock = new DatabaseSync(databasePath);
@@ -208,11 +297,7 @@ describe("research_topics ledger operations", () => {
           const dispatchedWrite = scope.execute({
             type: "request",
             input: {
-              request: parseRequest({
-                action: "add",
-                id: "revoked-while-waiting",
-                title: "Revoked while waiting",
-              }),
+              request: parseRequest({ action: "add", id: "revoked", title: "Revoked" }),
               now: START,
             },
           });
@@ -234,10 +319,7 @@ describe("research_topics ledger operations", () => {
       await expect(
         store.execute({
           type: "request",
-          input: {
-            request: parseRequest({ action: "get", id: "revoked-while-waiting" }),
-            now: START,
-          },
+          input: { request: parseRequest({ action: "get", id: "revoked" }), now: START },
         }),
       ).rejects.toThrow("Unknown research topic");
     } finally {
@@ -249,252 +331,620 @@ describe("research_topics ledger operations", () => {
     }
   });
 
-  it("persists additive topics, bounded reads, optimistic edits, stopping and permanent removal", async () => {
+  it("persists full briefs and indexed bounded lookup without exposing briefs or accepting FTS syntax", async () => {
     const ledger = await open();
-    await ledger.run({ action: "add", id: "weather", title: "Weather", origin: "noticed" });
-    await ledger.run({ action: "add", id: "events", title: "Events", cadenceMinutes: null });
-    await expect(ledger.run({ action: "add", id: "weather", title: "Overwrite" })).rejects.toThrow(
-      "already exists",
-    );
-    const other = await open(ledger.databasePath);
-    expect(await other.run({ action: "get", id: "weather" })).toMatchObject({
-      title: "Weather",
-      origin: "noticed",
-      revision: 1,
-      createdAtMs: START,
-    });
-    expect(await other.run({ action: "list", limit: 1 })).toEqual({
-      topics: [expect.objectContaining({ id: "events" })],
-      nextCursor: "events",
-    });
-    expect(await other.run({ action: "list", after: "events" })).toMatchObject({
-      topics: [{ id: "weather" }],
-      nextCursor: null,
-    });
-    await other.run({
-      action: "update",
-      id: "weather",
-      expectedRevision: 1,
-      changes: { priority: "high", notes: "Keep it short" },
-    });
-    await expect(
-      ledger.run({
-        action: "update",
-        id: "weather",
-        expectedRevision: 1,
-        changes: { title: "Lost edit" },
-      }),
-    ).rejects.toThrow("revision changed");
-    expect(await ledger.run({ action: "due" })).toMatchObject({
-      topics: [{ id: "weather", priority: "high" }],
-    });
     await ledger.run({
-      action: "update",
-      id: "weather",
-      expectedRevision: 2,
-      changes: { status: "paused" },
+      action: "add",
+      id: "rail",
+      title: "Intercity travel",
+      brief: "Private working brief ".repeat(1_000),
+      aliases: ["train journey", "rail fares"],
+      tags: ["travel"],
+      why: "Compare tickets",
+      notes: "Known constraints",
+      origin: "noticed",
     });
-    expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
-    await expect(ledger.run({ action: "signal", id: "weather" })).rejects.toThrow("not active");
-    await ledger.run({ action: "remove", id: "weather", expectedRevision: 3 });
-    expect(await other.run({ action: "get", id: "weather" })).toMatchObject({
-      status: "archived",
-      notes: "Keep it short",
+    const other = await open(ledger.databasePath);
+    expect(await other.run({ action: "get", id: "rail" })).toMatchObject({
+      brief: "Private working brief ".repeat(1_000),
+      workState: "ready",
+      nextDueAtMs: null,
+      purpose: "decision",
+      completionRule: null,
+      sessionRefs: [firstSession],
     });
-    await ledger.run({ action: "remove", id: "weather", expectedRevision: 4, hardDelete: true });
-    await expect(other.run({ action: "get", id: "weather" })).rejects.toThrow(
-      "Unknown research topic",
+    expect(
+      await other.run({
+        action: "lookup",
+        query: "train journey",
+        category: "travel",
+        sessionKey: firstSession.sessionKey,
+      }),
+    ).toMatchObject({ topics: [{ id: "rail", why: "Compare tickets" }] });
+    const candidates = await other.run({ action: "lookup", query: "rail" });
+    expect(candidates).toMatchObject({ topics: [{ id: "rail" }], match: "id" });
+    expect(JSON.stringify(candidates)).not.toContain("Private working brief");
+    expect(
+      await other.run({ action: "lookup", query: "train", sessionKey: secondSession.sessionKey }),
+    ).toMatchObject({ topics: [] });
+    expect(await other.run({ action: "lookup", query: '" OR NOT * : ()' })).toMatchObject({
+      topics: [],
+    });
+    await expect(other.run({ action: "lookup", query: "train", limit: 21 })).rejects.toThrow(
+      "Invalid research_topics",
+    );
+    await expect(other.run({ action: "add", id: "rail", title: "Overwrite" })).rejects.toThrow(
+      "already exists",
     );
     expect(statSync(ledger.databasePath).mode & 0o777).toBe(0o600);
     expect(statSync(path.dirname(ledger.databasePath)).mode & 0o777).toBe(0o700);
   });
 
-  it("orders due topics by priority, then due time, and only researches on-signal topics after a signal", async () => {
+  it("keeps content revisions independent of service facts while refusing stale edits and replaying one unit once", async () => {
     const ledger = await open();
-    for (const [id, priority, nextDueAtMs] of [
-      ["low", "low", START - 10],
-      ["normal", "normal", START - 10],
-      ["high-new", "high", START],
-      ["high-old", "high", START - 1],
-    ]) {
-      await ledger.run({ action: "add", id, title: id, priority, nextDueAtMs });
-    }
-    await ledger.run({ action: "add", id: "signal", title: "On signal", cadenceMinutes: null });
-    await ledger.run({ action: "add", id: "done", title: "Done", status: "done" });
-    await ledger.run({ action: "add", id: "future", title: "Future", nextDueAtMs: START + 1 });
-    expect(await ledger.run({ action: "due" })).toMatchObject({
-      topics: ["high-old", "high-new", "normal", "low"].map((id) => ({ id })),
-    });
-    await ledger.run({ action: "signal", id: "signal" });
-    const lease = leaseId(await ledger.run({ action: "acquire", id: "signal" }));
-    await ledger.run({ action: "record_check", id: "signal", leaseId: lease, sources: [] });
-    expect(await ledger.run({ action: "get", id: "signal" })).toMatchObject({
-      nextDueAtMs: null,
+    await ledger.run({ action: "add", id: "topic", title: "Topic" });
+    const check = {
+      action: "record_check",
+      id: "topic",
+      expectedRevision: 1,
+      operationId: "one-unit",
+    };
+    await ledger.run(check);
+    ledger.at(START + MINUTE);
+    expect(await ledger.run(check)).toMatchObject({
+      revision: 1,
+      serviceCount: 1,
       lastCheckedAtMs: START,
+      replayed: true,
+    });
+    await ledger.run({
+      action: "update",
+      id: "topic",
+      expectedRevision: 1,
+      changes: { brief: "Owner correction", priority: "high" },
+    });
+    await expect(
+      ledger.run({
+        action: "record_check",
+        id: "topic",
+        expectedRevision: 1,
+        operationId: "stale-unit",
+      }),
+    ).rejects.toThrow("revision changed");
+    await expect(
+      ledger.run({
+        action: "update",
+        id: "topic",
+        expectedRevision: 1,
+        changes: { brief: "Lost edit" },
+      }),
+    ).rejects.toThrow("revision changed");
+    await expect(
+      ledger.run({
+        action: "record_check",
+        id: "topic",
+        expectedRevision: 2,
+        operationId: "one-unit",
+      }),
+    ).rejects.toThrow("different check facts");
+    expect(await ledger.run({ action: "get", id: "topic" })).toMatchObject({
+      brief: "Owner correction",
+      serviceCount: 1,
+      revision: 2,
+    });
+    await ledger.run({ action: "forget", id: "topic", expectedRevision: 2 });
+    await expect(ledger.run({ action: "get", id: "topic" })).rejects.toThrow(
+      "Unknown research topic",
+    );
+    expect(await ledger.run({ action: "lookup", query: "Topic" })).toMatchObject({ topics: [] });
+  });
+
+  it("atomically merges reconciled content and all links, detects both revisions, and retains no source alias record", async () => {
+    const ledger = await open();
+    await ledger.run({ action: "source_set", id: "rail-provider", minimumIntervalMinutes: 30 });
+    await ledger.run({ action: "source_set", id: "weather-provider", minimumIntervalMinutes: 60 });
+    await ledger.run({
+      action: "add",
+      id: "trip",
+      title: "Trip",
+      aliases: ["vacation"],
+      tags: ["travel"],
+      sourceIds: ["rail-provider"],
+      sessionRefs: [{ ...firstSession, messageId: "question" }],
+    });
+    const peer = await open(ledger.databasePath, secondSession);
+    await peer.run({
+      action: "add",
+      id: "transport",
+      title: "Train",
+      aliases: ["rail fares"],
+      tags: ["travel", "budget"],
+      sourceIds: ["weather-provider"],
+    });
+    await peer.run({
+      action: "update",
+      id: "transport",
+      expectedRevision: 1,
+      changes: { notes: "New evidence" },
+    });
+    const merge = {
+      action: "merge",
+      id: "trip",
+      expectedRevision: 1,
+      sourceId: "transport",
+      sourceRevision: 1,
+      changes: { title: "Trip plan", brief: "Reconciled evidence", tags: ["planning"] },
+    };
+    await expect(ledger.run(merge)).rejects.toThrow("revision changed");
+    expect(await ledger.run({ action: "get", id: "trip" })).toMatchObject({
+      title: "Trip",
+      revision: 1,
+    });
+    const merged = await ledger.run({ ...merge, sourceRevision: 2 });
+    expect(merged).toMatchObject({
+      title: "Trip plan",
+      brief: "Reconciled evidence",
+      revision: 2,
+      aliases: ["rail fares", "vacation"],
+      tags: ["budget", "planning", "travel"],
+      sourceIds: ["rail-provider", "weather-provider"],
+      mergedId: "transport",
+      affectedSessionRefs: [{ ...firstSession, messageId: "question" }, secondSession],
+    });
+    await expect(peer.run({ action: "get", id: "transport" })).rejects.toThrow(
+      "Unknown research topic",
+    );
+    await expect(
+      peer.run({
+        action: "update",
+        id: "transport",
+        expectedRevision: 2,
+        changes: { notes: "Late write" },
+      }),
+    ).rejects.toThrow("Unknown research topic");
+    expect(await ledger.run({ action: "lookup", query: "rail fares" })).toMatchObject({
+      topics: [{ id: "trip" }],
+    });
+    expect(await ledger.run({ action: "lookup", query: "transport" })).toMatchObject({
+      topics: [],
+    });
+    await ledger.run({
+      action: "update",
+      id: "trip",
+      expectedRevision: 2,
+      changes: { sessionRefs: [] },
+    });
+    expect(await ledger.run({ action: "get", id: "trip" })).toMatchObject({
+      sessionRefs: [{ ...firstSession, messageId: "question" }, secondSession],
     });
   });
 
-  it("shares source limits across topics and separates attempted fetches, successes and 429 backoff", async () => {
+  it("serves recurring high, high, normal, and low topics in two complete rounds before repeats", async () => {
     const ledger = await open();
-    await ledger.run({ action: "source_set", id: "example.org", minimumIntervalMinutes: 30 });
-    for (const id of ["first", "second"]) {
+    for (const [id, priority] of [
+      ["high-a", "high"],
+      ["high-b", "high"],
+      ["normal", "normal"],
+      ["low", "low"],
+    ]) {
       await ledger.run({
         action: "add",
         id,
         title: id,
-        sourceIds: ["example.org"],
-        cadenceMinutes: 1,
+        priority,
+        tags: ["science"],
+        workState: "waiting",
       });
     }
-    const other = await open(ledger.databasePath);
-    const lease = leaseId(await ledger.run({ action: "acquire", id: "first" }));
-    expect(await other.run({ action: "acquire", id: "second" })).toEqual({
-      acquired: false,
-      reason: "not-due-or-source-unavailable",
+    for (const id of ["high-a", "high-b", "normal", "low"]) {
+      await ledger.run({
+        action: "update",
+        id,
+        expectedRevision: 1,
+        changes: { workState: "ready" },
+      });
+    }
+    let unit = 0;
+    for (let round = 0; round < 2; round++) {
+      for (const id of ["high-a", "high-b", "normal", "low"]) {
+        ledger.at(START + unit++);
+        expect(await ledger.run({ action: "due", limit: 1, category: "science" })).toMatchObject({
+          topics: [{ id, score: { round }, serviceCount: round }],
+        });
+        await ledger.run({
+          action: "record_check",
+          id,
+          expectedRevision: 2,
+          operationId: `round-${round}-${id}`,
+        });
+      }
+    }
+    ledger.at(START + unit);
+    expect(await ledger.run({ action: "add", id: "new", title: "New" })).toMatchObject({
+      serviceCount: 3,
+      nextDueAtMs: null,
+      workState: "ready",
     });
-    expect(await other.run({ action: "due" })).toEqual({ topics: [] });
+    expect(await ledger.run({ action: "due", category: "unrelated" })).toEqual({ topics: [] });
+  });
+
+  it("serves a waiting low topic despite a new high-priority arrival before every completed unit", async () => {
+    const ledger = await open();
+    await ledger.run({
+      action: "add",
+      id: "high-existing",
+      title: "Existing research",
+      priority: "high",
+    });
+    await ledger.run({ action: "add", id: "low", title: "Waiting research", priority: "low" });
+    const served: string[] = [];
+    for (let unit = 0; unit < 4; unit++) {
+      ledger.at(START + unit + 1);
+      await ledger.run({
+        action: "add",
+        id: `arrival-${unit}`,
+        title: `New research ${unit}`,
+        priority: "high",
+      });
+      const due = await ledger.run({ action: "due", limit: 1 });
+      if (!due || typeof due !== "object" || !("topics" in due) || !Array.isArray(due.topics)) {
+        throw new Error("Expected a due-topic selection");
+      }
+      const id = stringField(due.topics[0], "id");
+      served.push(id);
+      await ledger.run({
+        action: "record_check",
+        id,
+        expectedRevision: 1,
+        operationId: `churn-${unit}`,
+      });
+    }
+    expect(served).toContain("low");
+    expect(await ledger.run({ action: "get", id: "low" })).toMatchObject({
+      serviceCount: 2,
+      lastCheckedAtMs: START + 4,
+    });
+  });
+
+  it("requires explicit monitoring reasons and times, with no general research timer or partial invalid writes", async () => {
+    const ledger = await open();
+    for (const request of [
+      { action: "add", id: "bad", title: "Bad", workState: "monitoring" },
+      { action: "add", id: "bad", title: "Bad", nextDueAtMs: START + MINUTE },
+      { action: "add", id: "bad", title: "Bad", sourceIds: ["unknown"] },
+      { action: "add", id: "bad", title: "Bad", brief: "🦞".repeat(17_000) },
+      { action: "add", id: "bad", title: "Bad", sessionRefs: [secondSession] },
+    ]) {
+      await expect(ledger.run(request)).rejects.toThrow();
+    }
+    expect(await ledger.run({ action: "list" })).toMatchObject({ topics: [] });
+    await ledger.run({
+      action: "add",
+      id: "watch",
+      title: "Release watch",
+      purpose: "watch",
+      workState: "monitoring",
+      monitoringReason: "Wait for publication",
+      nextDueAtMs: START + MINUTE,
+    });
+    expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
     ledger.at(START + MINUTE);
+    expect(await ledger.run({ action: "due" })).toMatchObject({ topics: [{ id: "watch" }] });
     await ledger.run({
       action: "record_check",
-      id: "first",
-      leaseId: lease,
-      sources: [{ id: "example.org", outcome: "ok" }],
+      id: "watch",
+      expectedRevision: 1,
+      operationId: "publication",
     });
-    expect(await other.run({ action: "source_list" })).toMatchObject({
-      sources: [{ lastAttemptedAtMs: START, lastFetchedAtMs: START + MINUTE, lastStatus: "ok" }],
+    expect(await ledger.run({ action: "get", id: "watch" })).toMatchObject({
+      workState: "ready",
+      nextDueAtMs: null,
+      monitoringReason: "",
+      serviceCount: 1,
     });
-    other.at(START + 29 * MINUTE);
-    expect(await other.run({ action: "due" })).toEqual({ topics: [] });
-    other.at(START + 30 * MINUTE);
-    expect(await other.run({ action: "due" })).toEqual({ topics: [] });
-    other.at(START + 31 * MINUTE);
-    const throttledLease = leaseId(await other.run({ action: "acquire", id: "second" }));
-    await other.run({
+    await ledger.run({
+      action: "update",
+      id: "watch",
+      expectedRevision: 1,
+      changes: { workState: "waiting" },
+    });
+    expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
+    await expect(ledger.run({ action: "acquire", id: "watch" })).rejects.toThrow(
+      "Invalid research_topics",
+    );
+  });
+
+  it("retains pending completion obligations and freezes edits rather than trusting arbitrary delivery claims", async () => {
+    const ledger = await open();
+    await ledger.run({
+      action: "add",
+      id: "topic",
+      title: "Question",
+      purpose: "answer",
+      completionRule: "The question has a supported answer",
+    });
+    await ledger.run({ action: "add", id: "other", title: "Other" });
+    const pending = await ledger.run({
+      action: "complete",
+      id: "topic",
+      expectedRevision: 1,
+      reason: "The question is answered",
+    });
+    const completionId = stringField(pending, "completionId");
+    expect(pending).toMatchObject({
+      status: "completion_pending",
+      revision: 2,
+      ownerText: null,
+      destinations: [
+        { destinationId: "main", kind: "main", ...mainSession, receipt: null },
+        { kind: "session", ...firstSession, receipt: null },
+      ],
+    });
+    expect(await ledger.run({ action: "due" })).toMatchObject({ topics: [{ id: "other" }] });
+    for (const request of [
+      {
+        action: "update",
+        id: "topic",
+        expectedRevision: 2,
+        changes: { brief: "Changed after notice" },
+      },
+      { action: "record_check", id: "topic", expectedRevision: 2, operationId: "too-late" },
+      {
+        action: "merge",
+        id: "other",
+        expectedRevision: 1,
+        sourceId: "topic",
+        sourceRevision: 2,
+        changes: { title: "Merged", brief: "Changed after notice" },
+      },
+    ]) {
+      await expect(ledger.run(request)).rejects.toThrow("completion is pending");
+    }
+    await expect(
+      ledger.run({
+        action: "confirm_completion",
+        id: "topic",
+        expectedRevision: 2,
+        completionId,
+        toolCallId: "unverified",
+      }),
+    ).rejects.toThrow("native receipt");
+    await expect(
+      ledger.run({
+        action: "finalize",
+        id: "topic",
+        expectedRevision: 2,
+        completionId,
+      }),
+    ).rejects.toThrow("unconfirmed");
+    expect(await ledger.run({ action: "get", id: "topic" })).toEqual(pending);
+    await ledger.run({ action: "forget", id: "topic", expectedRevision: 2 });
+    await expect(ledger.run({ action: "get", id: "topic" })).rejects.toThrow(
+      "Unknown research topic",
+    );
+  });
+
+  it("reopens for an owner correction without losing research history or accepting stale completion", async () => {
+    const ledger = await open();
+    await ledger.run({
+      action: "add",
+      id: "topic",
+      title: "Question",
+      brief: "Current evidence",
+      aliases: ["Research question"],
+      tags: ["science"],
+      completionRule: "Independent evidence answers it",
+    });
+    await ledger.run({
       action: "record_check",
-      id: "second",
-      leaseId: throttledLease,
-      sources: [{ id: "example.org", outcome: "throttled", retryAfterMinutes: 120 }],
+      id: "topic",
+      expectedRevision: 1,
+      operationId: "completed-unit",
+      workState: "monitoring",
+      monitoringReason: "Await independent evidence",
+      nextDueAtMs: START + MINUTE,
     });
-    expect(await other.run({ action: "source_list" })).toMatchObject({
+    const pending = await ledger.run({
+      action: "complete",
+      id: "topic",
+      expectedRevision: 1,
+      reason: "The answer is established",
+    });
+    const completionId = stringField(pending, "completionId");
+    await expect(
+      ledger.run({ action: "reopen", id: "topic", expectedRevision: 1 }),
+    ).rejects.toThrow("revision changed");
+    expect(await ledger.run({ action: "get", id: "topic" })).toEqual(pending);
+    ledger.at(START + 1);
+    expect(await ledger.run({ action: "reopen", id: "topic", expectedRevision: 2 })).toMatchObject({
+      status: "active",
+      workState: "ready",
+      revision: 3,
+      brief: "Current evidence",
+      aliases: ["Research question"],
+      tags: ["science"],
+      sessionRefs: [firstSession],
+      serviceCount: 1,
+      lastCheckedAtMs: START,
+      monitoringReason: "",
+      nextDueAtMs: null,
+      completionId: null,
+      completionReason: null,
+      ownerText: null,
+      completedAtMs: null,
+      destinations: [],
+    });
+    expect(await ledger.run({ action: "due" })).toMatchObject({ topics: [{ id: "topic" }] });
+    await ledger.run({
+      action: "update",
+      id: "topic",
+      expectedRevision: 3,
+      changes: { brief: "Corrected evidence" },
+    });
+    await expect(
+      ledger.run({
+        action: "finalize",
+        id: "topic",
+        expectedRevision: 2,
+        completionId,
+      }),
+    ).rejects.toThrow("revision changed");
+    await expect(
+      ledger.run({
+        action: "finalize",
+        id: "topic",
+        expectedRevision: 4,
+        completionId,
+      }),
+    ).rejects.toThrow("completion identity changed");
+    expect(await ledger.run({ action: "get", id: "topic" })).toMatchObject({
+      brief: "Corrected evidence",
+      revision: 4,
+      serviceCount: 1,
+      destinations: [],
+    });
+  });
+
+  it("preserves shared source intervals, successful-fetch time, Retry-After and stale-result fencing independently of topics", async () => {
+    const ledger = await open();
+    await ledger.run({ action: "source_set", id: "provider", minimumIntervalMinutes: 30 });
+    for (const id of ["first", "second"]) {
+      await ledger.run({ action: "add", id, title: id, sourceIds: ["provider"] });
+    }
+    const attempt = await ledger.run({ action: "source_attempt", id: "provider" });
+    expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
+    ledger.at(START + MINUTE);
+    const ok = {
+      action: "source_result",
+      id: "provider",
+      attemptId: stringField(attempt, "attemptId"),
+      outcome: "ok",
+    };
+    await ledger.run(ok);
+    ledger.at(START + 30 * MINUTE);
+    expect(await ledger.run({ action: "source_attempt", id: "provider" })).toMatchObject({
+      allowed: false,
+      nextAllowedAtMs: START + 31 * MINUTE,
+    });
+    expect(await ledger.run(ok)).toMatchObject({ lastFetchedAtMs: START + MINUTE, replayed: true });
+    ledger.at(START + 31 * MINUTE);
+    const throttle = await ledger.run({ action: "source_attempt", id: "provider" });
+    await expect(ledger.run(ok)).rejects.toThrow("attempt changed");
+    await ledger.run({
+      action: "source_result",
+      id: "provider",
+      attemptId: stringField(throttle, "attemptId"),
+      outcome: "throttled",
+      retryAfterMinutes: 120,
+    });
+    expect(await ledger.run({ action: "source_list" })).toMatchObject({
       sources: [
         {
-          lastAttemptedAtMs: START + 31 * MINUTE,
           lastFetchedAtMs: START + MINUTE,
           lastStatus: "throttled",
           backoffUntilMs: START + 151 * MINUTE,
         },
       ],
     });
-    other.at(START + 150 * MINUTE);
-    expect(await other.run({ action: "due" })).toEqual({ topics: [] });
-    other.at(START + 151 * MINUTE);
-    expect(await other.run({ action: "due" })).toMatchObject({
-      topics: [{ id: "first" }, { id: "second" }],
-    });
-    await expect(
-      other.run({ action: "source_set", id: "example.org", minimumIntervalMinutes: 1 }),
-    ).rejects.toThrow("revision changed");
-  });
-
-  it("settles checks atomically without losing owner edits or signals during research", async () => {
-    const ledger = await open();
-    await ledger.run({ action: "source_set", id: "feed", minimumIntervalMinutes: 1 });
-    await ledger.run({ action: "add", id: "topic", title: "Topic", sourceIds: ["feed"] });
-    const lease = leaseId(await ledger.run({ action: "acquire", id: "topic" }));
-    await expect(
-      ledger.run({ action: "record_check", id: "topic", leaseId: lease, sources: [] }),
-    ).rejects.toThrow("every source");
-    await expect(
-      ledger.run({
-        action: "record_check",
-        id: "topic",
-        leaseId: lease,
-        sources: [
-          { id: "feed", outcome: "ok" },
-          { id: "feed", outcome: "ok" },
-        ],
-      }),
-    ).rejects.toThrow("every source");
-    await ledger.run({
-      action: "update",
-      id: "topic",
-      expectedRevision: 2,
-      changes: { notes: "Owner edit", cadenceMinutes: null },
-    });
-    await ledger.run({ action: "signal", id: "topic" });
     await ledger.run({
       action: "record_check",
-      id: "topic",
-      leaseId: lease,
-      sources: [{ id: "feed", outcome: "error" }],
+      id: "first",
+      expectedRevision: 1,
+      operationId: "saved-info",
     });
-    expect(await ledger.run({ action: "get", id: "topic" })).toMatchObject({
-      notes: "Owner edit",
-      cadenceMinutes: null,
-      nextDueAtMs: START,
-      lastCheckedAtMs: START,
-      sources: [{ lastFetchedAtMs: null, lastStatus: "error", backoffUntilMs: START + 5 * MINUTE }],
+    ledger.at(START + 151 * MINUTE);
+    expect(await ledger.run({ action: "due" })).toMatchObject({
+      topics: [{ id: "second" }, { id: "first" }],
     });
-    ledger.at(START + 10 * MINUTE);
-    const confirmed = await ledger.run({
-      action: "record_notification",
-      id: "topic",
-      confirmedAtMs: START + 2 * MINUTE,
+    const failure = await ledger.run({ action: "source_attempt", id: "provider" });
+    await ledger.run({
+      action: "source_result",
+      id: "provider",
+      attemptId: stringField(failure, "attemptId"),
+      outcome: "error",
     });
-    expect(confirmed).toMatchObject({
-      lastNotifiedAtMs: START + 2 * MINUTE,
-      updatedAtMs: START + 10 * MINUTE,
-      notes: "Owner edit",
-      cadenceMinutes: null,
+    expect(await ledger.run({ action: "source_list" })).toMatchObject({
+      sources: [
+        {
+          lastStatus: "error",
+          lastFetchedAtMs: START + MINUTE,
+          backoffUntilMs: START + 181 * MINUTE,
+        },
+      ],
     });
-    ledger.at(START + 20 * MINUTE);
-    for (const confirmedAtMs of [START + 2 * MINUTE, START + MINUTE]) {
-      expect(
-        await ledger.run({ action: "record_notification", id: "topic", confirmedAtMs }),
-      ).toEqual(confirmed);
-    }
-    for (const confirmedAtMs of [START - 1, START + 21 * MINUTE]) {
-      await expect(
-        ledger.run({ action: "record_notification", id: "topic", confirmedAtMs }),
-      ).rejects.toThrow("confirmation time");
-    }
-    expect(await ledger.run({ action: "get", id: "topic" })).toEqual(confirmed);
+    await expect(
+      ledger.run({ action: "source_set", id: "provider", minimumIntervalMinutes: 1 }),
+    ).rejects.toThrow("revision changed");
+    expect(await ledger.run({ action: "get", id: "first" })).toMatchObject({
+      revision: 1,
+      serviceCount: 1,
+    });
   });
 
-  it("recovers expired claims and rejects late results, invalid input and unknown sources without partial writes", async () => {
-    const ledger = await open();
-    await expect(
-      ledger.run({ action: "add", id: "bad", title: "Bad", sourceIds: ["missing"] }),
-    ).rejects.toThrow("Unknown research source");
-    expect(await ledger.run({ action: "list" })).toMatchObject({ topics: [] });
-    for (const request of [
-      { action: "add", id: "../escape", title: "Bad" },
-      { action: "add", id: "bad", title: " " },
-      { action: "add", id: "bad", title: "Bad", cadenceMinutes: 0 },
-      { action: "update", id: "bad", expectedRevision: 1, changes: { typo: true } },
-      { action: "due", limit: 51 },
-      { action: "record_notification", id: "bad" },
-    ]) {
-      await expect(ledger.run(request)).rejects.toThrow("Invalid research_topics");
+  it("migrates v1 current facts and conservative provider cooldowns without inferring watches or retaining archives", async () => {
+    const root = directory();
+    const databasePath = path.join(root, "ledger.sqlite");
+    const now = Date.now();
+    createV1(databasePath, now);
+    const ledger = await open(databasePath);
+    ledger.at(now);
+    expect(await ledger.run({ action: "get", id: "active" })).toMatchObject({
+      priority: "low",
+      purpose: "decision",
+      workState: "ready",
+      completionRule: null,
+      nextDueAtMs: null,
+      origin: "noticed",
+      notes: "Known current fact",
+      findingsRef: "private:artifact",
+      lastCheckedAtMs: now - MINUTE,
+      lastNotifiedAtMs: now - 2 * MINUTE,
+      revision: 8,
+      brief: expect.stringContaining("cadenceMinutes=360"),
+      sources: [
+        {
+          minimumIntervalMinutes: 30,
+          lastAttemptedAtMs: now,
+          lastFetchedAtMs: now - MINUTE,
+          backoffUntilMs: now + 60 * MINUTE,
+          lastStatus: "throttled",
+        },
+      ],
+    });
+    expect(await ledger.run({ action: "get", id: "paused" })).toMatchObject({
+      workState: "waiting",
+    });
+    for (const id of ["done", "archive"]) {
+      await expect(ledger.run({ action: "get", id })).rejects.toThrow("Unknown research topic");
     }
-    await ledger.run({ action: "add", id: "topic", title: "Topic" });
-    const old = leaseId(await ledger.run({ action: "acquire", id: "topic", leaseMinutes: 1 }));
-    ledger.at(START + MINUTE);
-    const current = leaseId(await ledger.run({ action: "acquire", id: "topic" }));
-    await expect(
-      ledger.run({ action: "record_check", id: "topic", leaseId: old, sources: [] }),
-    ).rejects.toThrow("lease expired or changed");
-    await ledger.run({
-      action: "update",
-      id: "topic",
-      expectedRevision: 3,
-      changes: { status: "paused", nextDueAtMs: START + 120 * MINUTE },
+    expect(await ledger.run({ action: "source_attempt", id: "provider" })).toMatchObject({
+      allowed: false,
+      nextAllowedAtMs: now + 60 * MINUTE,
     });
-    await ledger.run({ action: "record_check", id: "topic", leaseId: current, sources: [] });
-    expect(await ledger.run({ action: "get", id: "topic" })).toMatchObject({
-      status: "paused",
-      nextDueAtMs: START + 120 * MINUTE,
+    ledger.at(now + 60 * MINUTE);
+    expect(await ledger.run({ action: "due" })).toMatchObject({ topics: [{ id: "active" }] });
+    expect(await ledger.run({ action: "lookup", query: "Known current fact" })).toMatchObject({
+      topics: [{ id: "active" }, { id: "paused" }],
     });
-    expect(await ledger.run({ action: "due" })).toEqual({ topics: [] });
+    expect(
+      readdirSync(root).every((name) =>
+        ["ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm"].includes(name),
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses v1 live work and newer schemas without committing a migration", async () => {
+    const databasePath = path.join(directory(), "ledger.sqlite");
+    createV1(databasePath, Date.now(), true);
+    await expect(open(databasePath)).rejects.toThrow("live topic lease");
+    const db = new DatabaseSync(databasePath);
+    try {
+      expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(1);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM topics").get()?.count).toBe(4);
+      db.exec("PRAGMA user_version=3");
+    } finally {
+      db.close();
+    }
+    await expect(open(databasePath)).rejects.toThrow("newer than this plugin");
   });
 });

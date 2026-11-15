@@ -103,8 +103,10 @@ out of owner messages, including when a genuine alert is being sent. The
 through the existing stable system-context hook, including lightweight jobs
 that skip workspace bootstrap. Verify the installed cutover before removing
 temporary saved-payload copies. Already-admitted turns keep their prior inputs.
-Preserve source-backed findings, useful links and exact `NO_REPLY` on quiet
-unattended scans; explicit owner requests still receive useful answers.
+Preserve source-backed findings and useful links. Unattended source runs end
+quiet scans with a short status line, because native scheduling records a silent
+`NO_REPLY` after a failed tool call as a failed run. Explicit owner requests
+still receive useful answers.
 
 ## Commands
 

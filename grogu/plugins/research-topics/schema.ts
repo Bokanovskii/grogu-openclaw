@@ -424,7 +424,7 @@ export const toolDescription =
   "Intake runs bounded new-evidence passes; only the research worker advances old topics. " +
   "due orders least-served first, then priority and oldest waiting. record_check uses expectedRevision " +
   "and a unique operationId per completed unit; it preserves content and keeps unfinished work ready. " +
-  "Monitoring requires an actual monitoringReason and nextDueAtMs; there is no default timer. " +
+  "Monitoring is workState monitoring with an actual monitoringReason and nextDueAtMs in the same call; other states take neither, and there is no default timer. " +
   "Before each fetch use source_attempt; its id is the provider from source_list, never a topic id. If denied do not fetch. Record its attemptId via source_result " +
   "(ok/throttled/error/skipped, retryAfterMinutes for Retry-After). Saved-info synthesis needs no fetch. " +
   "complete freezes the topic with a reason and resolves configured Main itself. " +

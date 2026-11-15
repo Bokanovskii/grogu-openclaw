@@ -77,7 +77,7 @@ Grogu uses `agents.defaults.timeoutSeconds: 0` and
 child-session execution caps without reducing Sparky/Ultra. Model-backed
 automations also need an explicit `payload.timeoutSeconds: 0`; omitting it
 retains OpenClaw's separate 60-minute automation watchdog. The
-[shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#preserve-privacy-authority-and-progress)
+[shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#preserve-authority-and-evidence)
 requires this when Grogu creates or edits a model-backed automation, unless the
 owner requests a finite budget. Other OpenClaw installations and clients keep
 their existing defaults.
@@ -96,7 +96,7 @@ the deferred tool name does not establish that the capability is unavailable.
 
 ## Owner notification content
 
-The [shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#send-useful-updates-not-operational-commentary)
+The [Main text policy](plugins/grogu-coordination/policy/main.md)
 keeps deduplication decisions, suppressed topics and routine check commentary
 out of owner messages, including when a genuine alert is being sent. The
 [coordination plugin](plugins/grogu-coordination/README.md) supplies that policy
@@ -158,6 +158,34 @@ a private SQLite ledger for chat intake and a scheduled research planner.
 Its `research_topics` tool tracks priorities, due times, shared source limits,
 and fetch outcomes without reading large workspace files on every run.
 Installation alone does not migrate private topics or change running jobs.
+
+### Ongoing research and instruction ownership
+
+Behavior instructions contain no changing interest or shopping list.
+The [automation architecture](automation-architecture.md) describes Grogu's
+reusable design, ownership, and extension points. The repository owns code,
+generic policies, and worker templates. Private configuration owns installation
+choices, source accounts, job identities, notification routes, and quiet hours.
+
+`research_topics` owns research details, categories, priorities, conversation
+links, fair selection facts, and completion. Chats push context into that owner.
+The [researcher](templates/workers/research-planner.md) advances a fair batch of
+questions. [Source producers](templates/workers/producer.md) make bounded passes
+over new evidence. Main reviews explicit candidates and owns automatic texts.
+
+Inbox uses independent Gmail and Messages metadata polls, so each source keeps
+its existing cursor and failure handling. Daily prep reads calendar and weather.
+News runs every thirty minutes around the clock. Native event wakes remain,
+but an empty periodic heartbeat is not a research worker.
+
+Reconcile useful old facts before deleting enumerated obsolete research lists
+and duplicate policy copies. Preserve current owner edits and original chats.
+Do not create archives or backups of the retired copies.
+
+The deployment owner applies the reviewed contracts with current configuration
+revisions. Reconcile source templates, rendered triggers, exact tool caps, and
+schema/hash pins together. A merge changes no live job. Prove the actual
+job/tool flow after cutover before claiming working intake or delivery.
 
 Run `plugins-bootstrap` with the protected profile on the new host. The command
 previews the approved plugins and their exact versions. Add `--apply` to install
@@ -262,22 +290,21 @@ the profile's recovery directory need a separate, reviewed one-time cleanup.
 Worker prompt contracts live under `grogu/templates/workers/`. Private job
 definitions may consume them after review. They keep unchanged polls
 deterministic and model-free, distinguish authorization failures from empty
-sources, and require privacy-preserving bounded research plus one useful
-owner-only update for each material private signal. Add each private job id and
+sources, and require privacy-preserving bounded research plus useful
+candidates for Main to review. Add each private job id and
 its required template marker to `bindings.modelPolicy.workerContracts`;
 `policy-check` then reports missing jobs or markers without printing prompts.
 Each `native.workerTriggers` entry selects a tracked template from
 `worker-trigger-templates.ts`, an approved MCP server/tool plus its live
 catalog schema hash, private bounded arguments, fixed metadata-only decoding,
-and continuation limits. Bind exactly the two existing jobs: one Gmail
-primary and one Messages primary. Both multi-source payloads retain their
-complete, ordered, already-approved `toolsAllow` lists, including both
-collector permissions and existing Calendar/research tools; the renderer calls
-only its selected primary. Bootstrap patches only `trigger`, rejects wildcard
+and continuation limits. Each binding has one Gmail or Messages collector.
+Several bindings can feed the same Inbox role. Keep each payload's complete,
+ordered, reviewed `toolsAllow` list. The renderer calls only its selected
+collector. Bootstrap patches only `trigger`, rejects wildcard
 or `exec`/`message` broadening, and receipts a hash proving the remaining job
-definition stayed unchanged. Calendar remains the existing payload tool and is
-requested only by bounded `native_source_sweep` trigger intent. No Calendar MCP
-trigger template or new job is installed.
+definition stayed unchanged. Daily prep uses a separate bounded calendar and
+weather schedule. The collector bootstrap does not create that job or change
+any schedule, source permission, or role payload.
 
 Capture the supported effective input-schema pins without invoking a source
 tool:

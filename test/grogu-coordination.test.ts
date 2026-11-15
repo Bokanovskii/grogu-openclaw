@@ -35,7 +35,7 @@ afterAll(cleanupPluginLoaderFixturesForTest);
 const pluginRoot = fileURLToPath(new URL("../grogu/plugins/grogu-coordination", import.meta.url));
 const canonicalPolicy = fs.readFileSync(path.join(pluginRoot, "policy/AGENTS.md"), "utf8").trim();
 
-it("routes private side-chat and completed research hints through the native Main queue and wake owner", async () => {
+it("keeps side chats and quiet successful research out of Main unless a worker sends a finding", async () => {
   useNoBundledPlugins();
   vi.useFakeTimers();
   const wake = vi.fn(async (_request: HeartbeatWakeRequest) => ({
@@ -84,15 +84,12 @@ it("routes private side-chat and completed research hints through the native Mai
         sideChat,
       );
       const mainKey = "agent:assistant:curator";
-      expect(peekSystemEventEntries(mainKey)).toHaveLength(1);
-      expect(peekSystemEventEntries(mainKey)[0]?.text).toContain(sideChat.sessionKey);
-      expect(peekSystemEventEntries(mainKey)[0]?.text).not.toContain("PRIVATE_CHAT_BYTES");
+      expect(peekSystemEventEntries(mainKey)).toHaveLength(0);
       await runner.runMessageReceived(
         { from: "owner", content: "OTHER_PRIVATE_BYTES", messageId: "second" },
         sideChat,
       );
-      expect(peekSystemEventEntries(mainKey)).toHaveLength(1);
-      expect(peekSystemEventEntries(mainKey)[0]?.text).toContain("second");
+      expect(peekSystemEventEntries(mainKey)).toHaveLength(0);
       const beforeExcluded = peekSystemEventEntries(mainKey);
       for (const sessionKey of [
         undefined,
@@ -136,9 +133,7 @@ it("routes private side-chat and completed research hints through the native Mai
       expect(peekSystemEventEntries(mainKey)).toEqual(beforeExcluded);
       await runner.runCronChanged(finished, cronContext);
       const researchHint = peekSystemEventEntries(mainKey);
-      expect(researchHint).toHaveLength(1);
-      expect(researchHint[0]?.text).toContain("research");
-      expect(researchHint[0]?.text).not.toContain("PRIVATE_RESEARCH_BYTES");
+      expect(researchHint).toHaveLength(0);
       await runner.runCronChanged(finished, cronContext);
       expect(peekSystemEventEntries(mainKey)).toEqual(researchHint);
       controller.abort();
@@ -149,13 +144,7 @@ it("routes private side-chat and completed research hints through the native Mai
       );
       expect(peekSystemEventEntries(mainKey)).toEqual(researchHint);
       await vi.advanceTimersByTimeAsync(250);
-      expect(wake).toHaveBeenCalledOnce();
-      expect(wake.mock.calls[0]?.[0]).toMatchObject({
-        source: "hook",
-        intent: "event",
-        agentId: "assistant",
-        sessionKey: mainKey,
-      });
+      expect(wake).not.toHaveBeenCalled();
       expect(config).toEqual(originalConfig);
       expect(streamMocks.streamSimple).not.toHaveBeenCalled();
     },
@@ -195,6 +184,7 @@ it.each([
             hooks: { allowConversationAccess: true },
             config: {
               agentIds: ["assistant"],
+              mainAgentId: "assistant",
               jobs: [
                 {
                   id: "shopping",
@@ -298,6 +288,9 @@ it.each([
         });
         expect(finalSystemPrompt).toContain(canonicalPolicy);
         expect(finalSystemPrompt.split(canonicalPolicy)).toHaveLength(2);
+        expect(finalSystemPrompt.includes("# Main text coordination")).toBe(
+          scenario.sessionKey === "agent:assistant:main",
+        );
         expect(finalSystemPrompt.includes(workspaceInstruction)).toBe(!scenario.lightweight);
         expect(prompt.effectivePrompt.includes("Originating subject:")).toBe(
           scenario.trigger === "cron",

@@ -130,10 +130,8 @@ export function parseManagedWorkerTriggers(value: unknown): ManagedWorkerTrigger
       triggerSha256: workerTriggerScriptSha256(script),
     };
   });
-  if (managed.length !== 2 || new Set(managed.map((entry) => entry.templateId)).size !== 2) {
-    throw new Error(
-      "Managed worker triggers must bind exactly the two existing jobs to one Gmail and one Messages collector",
-    );
+  if (managed.length === 0) {
+    throw new Error("Managed worker triggers must include at least one source collector");
   }
   return managed;
 }

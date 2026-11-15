@@ -114,7 +114,14 @@ describe("revision-checked metadata bootstrap", () => {
         },
       ]),
     ).toThrow(/Invalid or duplicate/);
-    expect(() => parseManagedWorkerTriggers([])).toThrow(/exactly the two existing jobs/);
+    expect(parseManagedWorkerTriggers([workerBindings[0]])).toHaveLength(1);
+    expect(
+      parseManagedWorkerTriggers([
+        ...workerBindings,
+        { ...workerBindings[0], logicalName: "another-inbox", id: "another-source-job" },
+      ]),
+    ).toHaveLength(3);
+    expect(() => parseManagedWorkerTriggers([])).toThrow(/at least one source collector/);
     expect(() => parseManagedWorkerTriggers([parsed[0]])).toThrow();
   });
 

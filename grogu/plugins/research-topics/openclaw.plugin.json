@@ -1,7 +1,7 @@
 {
   "id": "research-topics",
   "name": "Research Topics",
-  "description": "A private research ledger with shared source limits and due-topic planning.",
+  "description": "Private research briefs with optimistic reconciliation, fair rounds, and shared source limits.",
   "contracts": {
     "tools": ["research_topics"]
   },
@@ -11,6 +11,18 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "delivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agentId", "channel", "target"],
+        "properties": {
+          "agentId": { "type": "string", "minLength": 1 },
+          "channel": { "type": "string", "minLength": 1 },
+          "target": { "type": "string", "minLength": 1 },
+          "accountId": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
   }
 }

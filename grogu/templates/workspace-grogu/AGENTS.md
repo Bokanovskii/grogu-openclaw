@@ -1,45 +1,48 @@
 # Grogu workspace guidance
 
-Shared assistant, notification, privacy, coordination and response-budget policy
-is supplied by the enabled `grogu-coordination` plugin, including lightweight
-automation runs. Maintain it in the plugin's `policy/AGENTS.md`, not in job
-payloads or copies of this workspace file.
+The enabled `grogu-coordination` plugin supplies shared assistant instructions,
+including lightweight automation turns. Maintain those rules in its
+`policy/AGENTS.md`. Main receives its separate text-coordination instructions.
+Job payloads contain focused source or research briefs.
 
 ## Older conversation context
 
-- Treat the deterministic compaction digest as a bounded index, not the complete
-  transcript.
-- When the owner asks about older history not present verbatim, call
-  `sessions_search` first, then `sessions_history` for the neighboring exact
-  turns. Keep the existing narrow session-visibility scope.
-- Do not claim older text is gone or ask the owner to resend it until those
-  lookups have been attempted.
+Treat the deterministic compaction digest as a bounded index, not the complete
+transcript. When the owner asks about older history that is not present verbatim,
+use `sessions_search`, then `sessions_history` for the neighboring exact turns.
+Keep the existing narrow session-visibility scope.
 
-## Private signals and follow-up research
+Attempt those lookups before claiming that older text is gone or asking the
+owner to resend it.
 
-- Email, Messages, and calendar collection is read-only. Never send, draft,
-  accept, decline, or modify an external item during automatic validation.
-- Poll the private source before invoking a model. An unchanged cursor or
-  watermark is an intentional non-outcome: record it without a model request or
-  owner message.
-- A new material private signal should trigger one privacy-preserving, bounded
-  follow-up research pass only when outside context would improve an actionable
-  recommendation. Search with the minimum facts needed; never include private
-  message bodies, addresses, account identifiers, or unrelated names in a web
-  query.
-- Deliver one useful owner-only update per material change: what changed, why it
-  matters, the bounded research result, uncertainty, and the next useful action.
-  Do not reduce the result to an inbox summary.
-- Deduplicate retries by the source's durable item identity and the existing
-  delivery/idempotency owner.
-- Distinguish an empty result from collector or authorization failure. Gmail
-  401/invalid-grant and 403/missing-scope are authorization blockers; do not
-  start consent or broaden scopes automatically.
+## Research ownership
+
+General instructions describe behavior, not current interests or shopping
+lists. Read `research_topics` for active questions, details, priorities, and
+next steps. Read relevant `memory/owner/plans.md`, `purchases.md`, and
+`profile.md` for their current facts.
+
+Every relevant chat pushes its topic details and own session identity through
+the topic tool. Source producers use the same lookup and merge flow.
+Routine bookkeeping stays in tool steps.
+
+Current research findings stay in the topic. Files hold named documents or
+attachments, not a second active research list.
+
+Inbox watches Gmail and Messages. Daily prep watches calendar and weather.
+News contributes fresh reporting. Each makes a bounded pass over new evidence.
+The continuous researcher develops the recorded questions.
+
+Main reviews explicit findings and owns automatic phone texts. Native
+automations own schedules and progress. Topic and native delivery owners
+retain pending outcomes. Keep native heartbeat event wakes. An empty periodic
+monitor does not perform research.
 
 ## Source-linked News research
 
-- For a question that benefits from Apple News, read
-  [the Apple News skill](skills/apple-news/SKILL.md).
-- Use supported reading and share-link controls with the existing subscription.
-- Return original, source-linked notes. Keep app-access limits separate from
-  public-source evidence.
+For a question that benefits from Apple News, read the existing
+[Apple News skill](skills/apple-news/SKILL.md). Use supported reading and
+share-link controls with the existing subscription.
+
+Return original, source-linked notes. Keep app-access limits separate from
+public-source evidence.

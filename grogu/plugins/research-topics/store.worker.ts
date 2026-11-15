@@ -1,55 +1,75 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import {
   enableNodeSqliteKyselyStatementCache,
   executeSqliteQuerySync,
-  getNodeSqliteKysely,
   openNodeSqliteDatabase,
   requestSqliteWorkerOperationAdmission,
   runSqliteDeferredTransactionSync,
   runSqliteImmediateTransactionSync,
   type SqliteWorkerBackend,
 } from "openclaw/plugin-sdk/sqlite-worker-runtime";
+import { handleCompletion } from "./completion.js";
+import { Records, summaryColumns, unionLinks } from "./records.js";
 import {
   parseRequest,
-  type LedgerDatabase,
   type LedgerOperations,
   type Request,
+  type SessionRef,
   type Source,
   type Topic,
 } from "./schema.js";
+import { initializeLedgerDatabase } from "./storage.js";
 
-const SCHEMA = `
-CREATE TABLE topics (
-  id TEXT PRIMARY KEY, title TEXT NOT NULL, why TEXT NOT NULL,
-  priority TEXT NOT NULL, status TEXT NOT NULL, cadenceMinutes INTEGER,
-  origin TEXT NOT NULL, notifyBar TEXT NOT NULL, notes TEXT NOT NULL,
-  findingsRef TEXT NOT NULL, revision INTEGER NOT NULL,
-  createdAtMs INTEGER NOT NULL, updatedAtMs INTEGER NOT NULL,
-  lastCheckedAtMs INTEGER, nextDueAtMs INTEGER, lastNotifiedAtMs INTEGER,
-  leaseId TEXT, leaseUntilMs INTEGER, pendingDue INTEGER NOT NULL
-) STRICT;
-CREATE INDEX topics_due ON topics(status, nextDueAtMs);
-CREATE TABLE sources (
-  id TEXT PRIMARY KEY, minimumIntervalMinutes INTEGER NOT NULL,
-  lastAttemptedAtMs INTEGER, lastFetchedAtMs INTEGER, lastStatus TEXT,
-  backoffUntilMs INTEGER, leaseId TEXT, leaseUntilMs INTEGER,
-  revision INTEGER NOT NULL
-) STRICT;
-CREATE TABLE topic_sources (
-  topicId TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  sourceId TEXT NOT NULL REFERENCES sources(id),
-  PRIMARY KEY(topicId, sourceId)
-) STRICT;
-CREATE INDEX topic_sources_source ON topic_sources(sourceId);
-PRAGMA user_version=1;
-`;
-const BUSY_MS = 5_000;
+type Schedule = Pick<Topic, "workState" | "monitoringReason" | "nextDueAtMs">;
+
+function schedule(topic: Schedule, changes: Partial<Schedule>): Schedule {
+  const state = changes.workState ?? topic.workState;
+  if (state !== "monitoring") {
+    if (changes.nextDueAtMs != null || (changes.monitoringReason ?? "").trim()) {
+      throw new Error("Only monitoring/retry work has a due time and monitoring reason.");
+    }
+    return { workState: state, monitoringReason: "", nextDueAtMs: null };
+  }
+  const reason = changes.monitoringReason ?? topic.monitoringReason;
+  const due = changes.nextDueAtMs === undefined ? topic.nextDueAtMs : changes.nextDueAtMs;
+  if (!reason.trim() || due === null) {
+    throw new Error("Monitoring/retry requires an actual monitoringReason and nextDueAtMs.");
+  }
+  return { workState: state, monitoringReason: reason, nextDueAtMs: due };
+}
+
+function fingerprint(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function authorizedSessions(
+  existing: SessionRef[],
+  requested: SessionRef[] | undefined,
+  caller: LedgerOperations["request"]["input"]["caller"],
+) {
+  for (const ref of requested ?? []) {
+    const retained = existing.some(
+      (old) =>
+        old.sessionKey === ref.sessionKey &&
+        old.sessionId === ref.sessionId &&
+        old.messageId === ref.messageId,
+    );
+    if (
+      !retained &&
+      (!caller || ref.sessionKey !== caller.sessionKey || ref.sessionId !== caller.sessionId)
+    ) {
+      throw new Error(
+        "New session references must match the current caller's sessionKey and sessionId.",
+      );
+    }
+  }
+  return unionLinks({ sessionRefs: existing }, { sessionRefs: requested }).sessionRefs;
+}
 
 class Ledger {
-  private readonly db;
-  private readonly query;
+  private readonly records;
 
   constructor(databasePath: string) {
     const directory = path.dirname(databasePath);
@@ -58,27 +78,11 @@ class Ledger {
     const db = openNodeSqliteDatabase(databasePath);
     try {
       chmodSync(databasePath, 0o600);
-      db.exec(`PRAGMA busy_timeout=${BUSY_MS}; PRAGMA foreign_keys=ON;`);
-      // FULL protects acknowledged owner edits; the private directory protects WAL sidecars.
+      db.exec("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
       db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
-      runSqliteImmediateTransactionSync(db, () => {
-        const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-        if (version === 0) {
-          db.exec(SCHEMA);
-        } else if (version !== 1) {
-          throw new Error(
-            "Research ledger schema is newer than this plugin. Use the matching plugin.",
-          );
-        }
-        if (db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok") {
-          throw new Error(
-            "Research ledger integrity failed. Restore a verified backup before retrying.",
-          );
-        }
-      });
+      runSqliteImmediateTransactionSync(db, () => initializeLedgerDatabase(db, Date.now()));
       enableNodeSqliteKyselyStatementCache(db);
-      this.db = db;
-      this.query = getNodeSqliteKysely<LedgerDatabase>(db);
+      this.records = new Records(db);
     } catch (error) {
       db.close();
       throw error;
@@ -86,114 +90,15 @@ class Ledger {
   }
 
   close() {
-    this.db.close();
+    this.records.db.close();
   }
 
-  private topic(id: string) {
-    const row = executeSqliteQuerySync(
-      this.db,
-      this.query.selectFrom("topics").selectAll().where("id", "=", id),
-    ).rows[0];
-    if (!row) {
-      throw new Error(`Unknown research topic: ${id}. Use list to find its id.`);
-    }
-    return row;
-  }
-
-  private sources(id: string) {
-    return executeSqliteQuerySync(
-      this.db,
-      this.query
-        .selectFrom("sources")
-        .innerJoin("topic_sources", "topic_sources.sourceId", "sources.id")
-        .selectAll("sources")
-        .where("topic_sources.topicId", "=", id)
-        .orderBy("sources.id"),
-    ).rows;
-  }
-
-  private get(id: string) {
-    return { ...this.topic(id), sources: this.sources(id) };
-  }
-
-  private expectRevision(actual: number, expected: number | undefined) {
-    if (actual !== expected) {
-      throw new Error("Research ledger revision changed. Read the current record before editing.");
-    }
-  }
-
-  private attachSources(id: string, ids: string[]) {
-    for (const sourceId of ids) {
-      const source = executeSqliteQuerySync(
-        this.db,
-        this.query.selectFrom("sources").select("id").where("id", "=", sourceId),
-      ).rows[0];
-      if (!source) {
-        throw new Error(`Unknown research source: ${sourceId}. Define it with source_set first.`);
-      }
-    }
-    executeSqliteQuerySync(
-      this.db,
-      this.query.deleteFrom("topic_sources").where("topicId", "=", id),
-    );
-    if (ids.length > 0) {
-      executeSqliteQuerySync(
-        this.db,
-        this.query
-          .insertInto("topic_sources")
-          .values(ids.map((sourceId) => ({ topicId: id, sourceId }))),
-      );
-    }
-  }
-
-  private eligible(now: number) {
-    return this.query
-      .selectFrom("topics")
-      .where("status", "=", "active")
-      .where("nextDueAtMs", "<=", now)
-      .where((eb) => eb.or([eb("leaseUntilMs", "is", null), eb("leaseUntilMs", "<=", now)]))
-      .where((eb) =>
-        eb.not(
-          eb.exists(
-            eb
-              .selectFrom("topic_sources as ts")
-              .innerJoin("sources as s", "s.id", "ts.sourceId")
-              .select("s.id")
-              .whereRef("ts.topicId", "=", "topics.id")
-              .where((inner) =>
-                inner.or([
-                  inner("s.backoffUntilMs", ">", now),
-                  inner("s.leaseUntilMs", ">", now),
-                  inner(
-                    inner(
-                      "s.lastAttemptedAtMs",
-                      "+",
-                      inner("s.minimumIntervalMinutes", "*", 60_000),
-                    ),
-                    ">",
-                    now,
-                  ),
-                  inner(
-                    inner("s.lastFetchedAtMs", "+", inner("s.minimumIntervalMinutes", "*", 60_000)),
-                    ">",
-                    now,
-                  ),
-                ]),
-              ),
-          ),
-        ),
-      );
-  }
-
-  private bump(topic: Topic, now: number, changes: Partial<Topic>) {
-    executeSqliteQuerySync(
-      this.db,
-      this.query
-        .updateTable("topics")
-        .set({ ...changes, revision: topic.revision + 1, updatedAtMs: now })
-        .where("id", "=", topic.id),
-    );
-    return this.get(topic.id);
+  publication(input: LedgerOperations["publication"]["input"]) {
+    return runSqliteDeferredTransactionSync(this.records.db, () => {
+      const topic = this.records.get(input.id);
+      this.records.expectRevision(topic, input.expectedRevision);
+      return topic;
+    });
   }
 
   execute(input: LedgerOperations["request"]["input"]) {
@@ -202,13 +107,12 @@ class Ledger {
     if (!Number.isSafeInteger(now) || now < 0) {
       throw new Error("Research ledger requires a valid server time.");
     }
-    const readOnly = ["list", "get", "due", "source_list"].includes(request.action);
-    const dispatch = () => this.dispatch(request, now);
-    if (readOnly) {
-      return runSqliteDeferredTransactionSync(this.db, dispatch);
+    const dispatch = () => this.dispatch(request, now, input);
+    if (["list", "get", "lookup", "due", "source_list"].includes(request.action)) {
+      return runSqliteDeferredTransactionSync(this.records.db, dispatch);
     }
     return runSqliteImmediateTransactionSync(
-      this.db,
+      this.records.db,
       () => {
         requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
         return dispatch();
@@ -222,59 +126,323 @@ class Ledger {
     );
   }
 
-  private dispatch(request: Request, now: number): unknown {
+  matchMessage(input: LedgerOperations["matchMessage"]["input"]) {
+    const r = this.records;
+    return runSqliteDeferredTransactionSync(r.db, () => {
+      const topics = executeSqliteQuerySync(
+        r.db,
+        r.query
+          .selectFrom("topics")
+          .innerJoin("completion_destinations as d", "d.topicId", "topics.id")
+          .select(["topics.id", "topics.revision", "topics.completionId"])
+          .where("topics.status", "=", "completion_pending")
+          .where("topics.ownerText", "=", input.ownerText)
+          .where("d.kind", "=", "main")
+          .where("d.sessionKey", "=", input.caller.sessionKey)
+          .where("d.sessionId", "=", input.caller.sessionId)
+          .limit(2),
+      ).rows;
+      const topic = topics[0];
+      if (!topic?.completionId || topics.length !== 1) {
+        return undefined;
+      }
+      return { id: topic.id, expectedRevision: topic.revision, completionId: topic.completionId };
+    });
+  }
+
+  private dispatch(
+    request: Request,
+    now: number,
+    evidence: LedgerOperations["request"]["input"],
+  ): unknown {
+    const { caller } = evidence;
+    const r = this.records;
+    const { db, query } = r;
     switch (request.action) {
       case "get":
-        return this.get(request.id);
+        return r.get(request.id);
+      case "lookup": {
+        const terms = [...new Set(request.query.normalize("NFKC").match(/[\p{L}\p{N}]+/gu) ?? [])]
+          .slice(0, 16)
+          .map((word) => `"${word}"`)
+          .join(" OR ");
+        let candidates = query.selectFrom("topics").select(summaryColumns);
+        if (request.sessionKey) {
+          candidates = candidates.where((eb) =>
+            eb.exists(
+              eb
+                .selectFrom("topic_sessions")
+                .select("topicId")
+                .whereRef("topicId", "=", "topics.id")
+                .where("sessionKey", "=", request.sessionKey!),
+            ),
+          );
+        }
+        if (request.category) {
+          candidates = candidates.where((eb) =>
+            eb.exists(
+              eb
+                .selectFrom("topic_tags")
+                .select("topicId")
+                .whereRef("topicId", "=", "topics.id")
+                .where("tag", "=", request.category!),
+            ),
+          );
+        }
+        const exact = executeSqliteQuerySync(
+          db,
+          candidates.where("topics.id", "=", request.query),
+        ).rows;
+        if (exact.length) {
+          return { topics: exact, match: "id" };
+        }
+        if (!terms) {
+          return { topics: [], match: "terms" };
+        }
+        const rows = executeSqliteQuerySync(
+          db,
+          candidates
+            .innerJoin("topic_search", "topic_search.topicId", "topics.id")
+            .where("topic_search.topic_search", "match", terms)
+            .orderBy("topic_search.rank")
+            .orderBy("topics.id")
+            .limit(request.limit ?? 8),
+        ).rows;
+        return { topics: rows, match: "terms" };
+      }
       case "list": {
-        let query = this.query
-          .selectFrom("topics")
-          .select([
-            "id",
-            "title",
-            "priority",
-            "status",
-            "cadenceMinutes",
-            "origin",
-            "nextDueAtMs",
-            "lastCheckedAtMs",
-            "revision",
-          ]);
+        let listing = query.selectFrom("topics").select(summaryColumns);
         if (request.status) {
-          query = query.where("status", "=", request.status);
+          listing = listing.where("status", "=", request.status);
         }
         if (request.after) {
-          query = query.where("id", ">", request.after);
+          listing = listing.where("id", ">", request.after);
         }
         const limit = request.limit ?? 20;
-        const rows = executeSqliteQuerySync(this.db, query.orderBy("id").limit(limit + 1)).rows;
+        const rows = executeSqliteQuerySync(db, listing.orderBy("id").limit(limit + 1)).rows;
         return {
           topics: rows.slice(0, limit),
-          nextCursor: rows.length > limit ? (rows[limit - 1]?.id ?? null) : null,
+          nextCursor: rows.length > limit ? rows[limit - 1]?.id : null,
         };
       }
+      case "due": {
+        let due = r.eligible(now);
+        if (request.category) {
+          due = due.where((eb) =>
+            eb.exists(
+              eb
+                .selectFrom("topic_tags")
+                .select("topicId")
+                .whereRef("topicId", "=", "topics.id")
+                .where("tag", "=", request.category!),
+            ),
+          );
+        }
+        const topics = executeSqliteQuerySync(
+          db,
+          due
+            .select(summaryColumns)
+            .orderBy("serviceCount")
+            .orderBy((eb) =>
+              eb
+                .case()
+                .when("priority", "=", "high")
+                .then(0)
+                .when("priority", "=", "normal")
+                .then(1)
+                .else(2)
+                .end(),
+            )
+            .orderBy("waitingSinceMs")
+            .orderBy("id")
+            .limit(request.limit ?? 10),
+        ).rows;
+        return {
+          topics: topics.map((topic) =>
+            Object.assign(topic, {
+              score: {
+                round: topic.serviceCount,
+                priority: topic.priority,
+                waitingSinceMs: topic.waitingSinceMs,
+                tieBreak: topic.id,
+              },
+            }),
+          ),
+        };
+      }
+      case "add": {
+        if (r.findTopic(request.id)) {
+          throw new Error("Research topic already exists. Use get/update; add never overwrites.");
+        }
+        const row: Topic = {
+          id: request.id,
+          title: request.title,
+          brief: request.brief ?? "",
+          why: request.why ?? "",
+          notes: request.notes ?? "",
+          findingsRef: request.findingsRef ?? "",
+          priority: request.priority ?? "normal",
+          purpose: request.purpose ?? "decision",
+          ...schedule({ workState: "ready", monitoringReason: "", nextDueAtMs: null }, request),
+          status: "active",
+          completionRule: request.completionRule ?? null,
+          origin: request.origin ?? "owner",
+          notifyBar: request.notifyBar ?? "",
+          revision: 1,
+          createdAtMs: now,
+          updatedAtMs: now,
+          lastCheckedAtMs: null,
+          lastNotifiedAtMs: null,
+          serviceCount: r.newTopicRound(now),
+          waitingSinceMs: now,
+          lastCheckOperationId: null,
+          lastCheckFingerprint: null,
+          completionId: null,
+          completionReason: null,
+          ownerText: null,
+          completedAtMs: null,
+        };
+        executeSqliteQuerySync(db, query.insertInto("topics").values(row));
+        r.setLinks(row.id, {
+          ...request,
+          sessionRefs: authorizedSessions(
+            [],
+            request.sessionRefs ?? (request.origin !== "automation" && caller ? [caller] : []),
+            caller,
+          ),
+        });
+        r.index(row.id);
+        return r.get(row.id);
+      }
+      case "update":
+      case "merge": {
+        const topic = r.topic(request.id);
+        r.expectRevision(topic, request.expectedRevision);
+        r.active(topic);
+        const { aliases, tags, sourceIds, sessionRefs, ...changes } = request.changes;
+        const existing = r.links(topic.id);
+        let links = { aliases, tags, sourceIds, sessionRefs };
+        let merged: Topic | undefined;
+        if (request.action === "merge") {
+          if (request.id === request.sourceId) {
+            throw new Error("Merge requires two different topic ids.");
+          }
+          merged = r.topic(request.sourceId);
+          r.expectRevision(merged, request.sourceRevision);
+          r.active(merged);
+          const retained = unionLinks(existing, r.links(merged.id));
+          links = unionLinks(retained, {
+            ...links,
+            sessionRefs: authorizedSessions(retained.sessionRefs, sessionRefs, caller),
+          });
+        } else {
+          links.sessionRefs = authorizedSessions(existing.sessionRefs, sessionRefs, caller);
+        }
+        parseRequest({
+          action: "update",
+          id: topic.id,
+          expectedRevision: topic.revision,
+          changes: { ...changes, ...unionLinks(links) },
+        });
+        const scheduling = schedule(topic, changes);
+        r.setLinks(topic.id, links);
+        const result = r.bump(topic, now, {
+          ...changes,
+          ...scheduling,
+          waitingSinceMs: scheduling.workState !== topic.workState ? now : topic.waitingSinceMs,
+          ...(merged ? { serviceCount: Math.max(topic.serviceCount, merged.serviceCount) } : {}),
+        });
+        if (merged) {
+          r.delete(merged.id);
+          return { ...result, mergedId: merged.id, affectedSessionRefs: result.sessionRefs };
+        }
+        return result;
+      }
+      case "reopen": {
+        const topic = r.topic(request.id);
+        r.expectRevision(topic, request.expectedRevision);
+        if (topic.status !== "completion_pending") {
+          throw new Error("Research topic is not pending completion. Use update for active work.");
+        }
+        executeSqliteQuerySync(
+          db,
+          query.deleteFrom("completion_destinations").where("topicId", "=", topic.id),
+        );
+        return r.bump(topic, now, {
+          status: "active",
+          workState: "ready",
+          monitoringReason: "",
+          nextDueAtMs: null,
+          waitingSinceMs: now,
+          completionId: null,
+          completionReason: null,
+          ownerText: null,
+          completedAtMs: null,
+        });
+      }
+      case "forget": {
+        const topic = r.topic(request.id);
+        r.expectRevision(topic, request.expectedRevision);
+        return r.delete(topic.id);
+      }
+      case "record_check": {
+        const topic = r.topic(request.id);
+        r.active(topic);
+        const signature = fingerprint([
+          request.expectedRevision,
+          request.workState ?? null,
+          request.monitoringReason ?? null,
+          request.nextDueAtMs === undefined ? "unset" : request.nextDueAtMs,
+        ]);
+        if (topic.lastCheckOperationId === request.operationId) {
+          if (topic.lastCheckFingerprint !== signature) {
+            throw new Error("Research operationId was already used with different check facts.");
+          }
+          return { ...r.get(topic.id), replayed: true };
+        }
+        r.expectRevision(topic, request.expectedRevision);
+        const next = schedule(
+          { workState: "ready", monitoringReason: "", nextDueAtMs: null },
+          request,
+        );
+        executeSqliteQuerySync(
+          db,
+          query
+            .updateTable("topics")
+            .set({
+              ...next,
+              lastCheckedAtMs: now,
+              serviceCount: topic.serviceCount + 1,
+              waitingSinceMs: now,
+              lastCheckOperationId: request.operationId,
+              lastCheckFingerprint: signature,
+            })
+            .where("id", "=", topic.id),
+        );
+        return r.get(topic.id);
+      }
       case "source_list": {
-        let query = this.query.selectFrom("sources").selectAll();
+        let sources = query.selectFrom("sources").selectAll();
         if (request.after) {
-          query = query.where("id", ">", request.after);
+          sources = sources.where("id", ">", request.after);
         }
         const limit = request.limit ?? 20;
-        const rows = executeSqliteQuerySync(this.db, query.orderBy("id").limit(limit + 1)).rows;
+        const rows = executeSqliteQuerySync(db, sources.orderBy("id").limit(limit + 1)).rows;
         return {
           sources: rows.slice(0, limit),
-          nextCursor: rows.length > limit ? (rows[limit - 1]?.id ?? null) : null,
+          nextCursor: rows.length > limit ? rows[limit - 1]?.id : null,
         };
       }
       case "source_set": {
         const source = executeSqliteQuerySync(
-          this.db,
-          this.query.selectFrom("sources").selectAll().where("id", "=", request.id),
+          db,
+          query.selectFrom("sources").selectAll().where("id", "=", request.id),
         ).rows[0];
         if (source) {
-          this.expectRevision(source.revision, request.expectedRevision);
+          r.expectRevision(source, request.expectedRevision);
           executeSqliteQuerySync(
-            this.db,
-            this.query
+            db,
+            query
               .updateTable("sources")
               .set({
                 minimumIntervalMinutes: request.minimumIntervalMinutes,
@@ -293,233 +461,88 @@ class Ledger {
             lastFetchedAtMs: null,
             lastStatus: null,
             backoffUntilMs: null,
-            leaseId: null,
-            leaseUntilMs: null,
+            attemptId: null,
+            lastResultFingerprint: null,
             revision: 1,
           };
-          executeSqliteQuerySync(this.db, this.query.insertInto("sources").values(row));
+          executeSqliteQuerySync(db, query.insertInto("sources").values(row));
         }
-        return executeSqliteQuerySync(
-          this.db,
-          this.query.selectFrom("sources").selectAll().where("id", "=", request.id),
-        ).rows[0];
+        return r.source(request.id);
       }
-      case "add": {
-        const existing = executeSqliteQuerySync(
-          this.db,
-          this.query.selectFrom("topics").select("id").where("id", "=", request.id),
-        ).rows[0];
-        if (existing) {
-          throw new Error("Research topic already exists. Use get/update; add never overwrites.");
+      case "source_attempt": {
+        const source = r.source(request.id);
+        const nextAllowedAtMs = Math.max(
+          source.backoffUntilMs ?? 0,
+          source.lastAttemptedAtMs === null
+            ? 0
+            : source.lastAttemptedAtMs + source.minimumIntervalMinutes * 60_000,
+          source.lastFetchedAtMs === null
+            ? 0
+            : source.lastFetchedAtMs + source.minimumIntervalMinutes * 60_000,
+        );
+        if (nextAllowedAtMs > now) {
+          return { allowed: false, id: source.id, nextAllowedAtMs, reason: "source-cooldown" };
         }
-        const cadenceMinutes = request.cadenceMinutes === undefined ? 360 : request.cadenceMinutes;
-        const row: Topic = {
-          id: request.id,
-          title: request.title,
-          why: request.why ?? "",
-          priority: request.priority ?? "normal",
-          status: request.status ?? "active",
-          cadenceMinutes,
-          origin: request.origin ?? "owner",
-          notifyBar: request.notifyBar ?? "",
-          notes: request.notes ?? "",
-          findingsRef: request.findingsRef ?? "",
-          revision: 1,
-          createdAtMs: now,
-          updatedAtMs: now,
-          lastCheckedAtMs: null,
-          nextDueAtMs:
-            request.nextDueAtMs !== undefined
-              ? request.nextDueAtMs
-              : cadenceMinutes === null
-                ? null
-                : now,
-          lastNotifiedAtMs: null,
-          leaseId: null,
-          leaseUntilMs: null,
-          pendingDue: 0,
-        };
-        executeSqliteQuerySync(this.db, this.query.insertInto("topics").values(row));
-        this.attachSources(row.id, request.sourceIds ?? []);
-        return this.get(row.id);
+        executeSqliteQuerySync(
+          db,
+          query
+            .updateTable("sources")
+            .set({
+              attemptId: randomUUID(),
+              lastAttemptedAtMs: now,
+              lastResultFingerprint: null,
+              revision: source.revision + 1,
+            })
+            .where("id", "=", source.id),
+        );
+        return { allowed: true, ...r.source(source.id) };
       }
-      case "update": {
-        const topic = this.topic(request.id);
-        this.expectRevision(topic.revision, request.expectedRevision);
-        const { sourceIds, ...changes } = request.changes;
-        if (sourceIds !== undefined) {
-          if ((topic.leaseUntilMs ?? 0) > now) {
-            throw new Error(
-              "Research is in flight. Pause now; change sources after its lease settles.",
-            );
+      case "source_result": {
+        const source = r.source(request.id);
+        if (source.attemptId !== request.attemptId) {
+          throw new Error("Research source attempt changed. Do not overwrite its newer result.");
+        }
+        const signature = fingerprint([request.outcome, request.retryAfterMinutes ?? null]);
+        if (source.lastResultFingerprint !== null) {
+          if (source.lastResultFingerprint !== signature) {
+            throw new Error("Research source attempt already has a different result.");
           }
-          this.attachSources(topic.id, sourceIds);
+          return { ...source, replayed: true };
         }
-        if (changes.cadenceMinutes !== undefined && changes.nextDueAtMs === undefined) {
-          changes.nextDueAtMs = changes.cadenceMinutes === null ? null : now;
-        }
-        return this.bump(topic, now, {
-          ...changes,
-          pendingDue:
-            (topic.leaseUntilMs ?? 0) > now && changes.nextDueAtMs !== undefined
-              ? 1
-              : topic.pendingDue,
-        });
+        const failure = request.outcome === "throttled" || request.outcome === "error";
+        const backoffMinutes = Math.max(
+          request.retryAfterMinutes ??
+            (request.outcome === "throttled" ? 30 : request.outcome === "error" ? 5 : 0),
+          failure ? source.minimumIntervalMinutes : 0,
+        );
+        executeSqliteQuerySync(
+          db,
+          query
+            .updateTable("sources")
+            .set({
+              lastStatus: request.outcome,
+              lastFetchedAtMs: request.outcome === "ok" ? now : source.lastFetchedAtMs,
+              backoffUntilMs:
+                backoffMinutes > 0
+                  ? Math.max(source.backoffUntilMs ?? 0, now + backoffMinutes * 60_000)
+                  : source.backoffUntilMs,
+              lastResultFingerprint: signature,
+              revision: source.revision + 1,
+            })
+            .where("id", "=", source.id),
+        );
+        return r.source(source.id);
       }
-      case "remove": {
-        const topic = this.topic(request.id);
-        this.expectRevision(topic.revision, request.expectedRevision);
-        if (!request.hardDelete) {
-          return this.bump(topic, now, { status: "archived" });
-        }
-        if ((topic.leaseUntilMs ?? 0) > now) {
-          throw new Error("Research is in flight. Archive now; delete after its lease settles.");
-        }
-        executeSqliteQuerySync(this.db, this.query.deleteFrom("topics").where("id", "=", topic.id));
-        return { id: topic.id, deleted: true };
-      }
-      case "signal": {
-        const topic = this.topic(request.id);
-        if (topic.status !== "active") {
-          throw new Error("Research topic is not active. Resume it explicitly before signaling.");
-        }
-        return this.bump(topic, now, {
-          nextDueAtMs: now,
-          pendingDue: (topic.leaseUntilMs ?? 0) > now ? 1 : 0,
-        });
-      }
-      case "record_notification": {
-        const topic = this.topic(request.id);
-        if (request.confirmedAtMs < topic.createdAtMs || request.confirmedAtMs > now) {
-          throw new Error(
-            "Notification confirmation time must follow topic creation and not be in the future.",
-          );
-        }
-        if (topic.lastNotifiedAtMs !== null && request.confirmedAtMs <= topic.lastNotifiedAtMs) {
-          return this.get(topic.id);
-        }
-        return this.bump(topic, now, { lastNotifiedAtMs: request.confirmedAtMs });
-      }
-      case "due":
-        return {
-          topics: executeSqliteQuerySync(
-            this.db,
-            this.eligible(now)
-              .select([
-                "id",
-                "title",
-                "why",
-                "priority",
-                "notifyBar",
-                "cadenceMinutes",
-                "nextDueAtMs",
-                "lastCheckedAtMs",
-                "revision",
-              ])
-              .orderBy((eb) =>
-                eb
-                  .case()
-                  .when("priority", "=", "high")
-                  .then(0)
-                  .when("priority", "=", "normal")
-                  .then(1)
-                  .else(2)
-                  .end(),
-              )
-              .orderBy("nextDueAtMs")
-              .orderBy("id")
-              .limit(request.limit ?? 10),
-          ).rows,
-        };
-      case "acquire": {
-        const topic = executeSqliteQuerySync(
-          this.db,
-          this.eligible(now).selectAll("topics").where("id", "=", request.id),
-        ).rows[0];
-        if (!topic) {
-          return { acquired: false, reason: "not-due-or-source-unavailable" };
-        }
-        const leaseId = randomUUID();
-        const leaseUntilMs = now + (request.leaseMinutes ?? 15) * 60_000;
-        for (const source of this.sources(topic.id)) {
-          executeSqliteQuerySync(
-            this.db,
-            this.query
-              .updateTable("sources")
-              .set({
-                leaseId,
-                leaseUntilMs,
-                lastAttemptedAtMs: now,
-                revision: source.revision + 1,
-              })
-              .where("id", "=", source.id),
-          );
-        }
-        return {
-          acquired: true,
-          ...this.bump(topic, now, { leaseId, leaseUntilMs, pendingDue: 0 }),
-        };
-      }
-      case "record_check": {
-        const topic = this.topic(request.id);
-        if (topic.leaseId !== request.leaseId || (topic.leaseUntilMs ?? 0) <= now) {
-          throw new Error(
-            "Research lease expired or changed. Do not fetch again without acquiring.",
-          );
-        }
-        const sources = this.sources(topic.id);
-        const outcomes = new Map(request.sources.map((source) => [source.id, source]));
-        if (
-          outcomes.size !== request.sources.length ||
-          sources.length !== outcomes.size ||
-          sources.some((source) => !outcomes.has(source.id))
-        ) {
-          throw new Error("Record exactly one outcome for every source from acquire.");
-        }
-        for (const source of sources) {
-          if (source.leaseId !== request.leaseId) {
-            throw new Error("Research source lease changed. Read the ledger before continuing.");
-          }
-          const outcome = outcomes.get(source.id)!;
-          let backoffMinutes =
-            outcome.retryAfterMinutes ??
-            (outcome.outcome === "throttled"
-              ? Math.max(30, source.minimumIntervalMinutes)
-              : outcome.outcome === "error"
-                ? Math.max(5, source.minimumIntervalMinutes)
-                : 0);
-          if (outcome.outcome === "throttled" || outcome.outcome === "error") {
-            backoffMinutes = Math.max(backoffMinutes, source.minimumIntervalMinutes);
-          }
-          executeSqliteQuerySync(
-            this.db,
-            this.query
-              .updateTable("sources")
-              .set({
-                lastStatus: outcome.outcome,
-                lastFetchedAtMs: outcome.outcome === "ok" ? now : source.lastFetchedAtMs,
-                backoffUntilMs: backoffMinutes > 0 ? now + backoffMinutes * 60_000 : null,
-                leaseId: null,
-                leaseUntilMs: null,
-                revision: source.revision + 1,
-              })
-              .where("id", "=", source.id),
-          );
-        }
-        return this.bump(topic, now, {
-          lastCheckedAtMs: now,
-          nextDueAtMs: topic.pendingDue
-            ? topic.nextDueAtMs
-            : request.nextDueAtMs !== undefined
-              ? request.nextDueAtMs
-              : topic.cadenceMinutes === null
-                ? null
-                : now + topic.cadenceMinutes * 60_000,
-          leaseId: null,
-          leaseUntilMs: null,
-          pendingDue: 0,
-        });
-      }
+      case "complete":
+      case "prepare_text":
+      case "post_update":
+      case "confirm_completion":
+      case "finalize":
+        return handleCompletion(r, request, now, evidence);
+      case "notify_main":
+        throw new Error("Main handoffs require the registered Research Topics tool.");
+      default:
+        throw new Error("Unsupported research request.");
     }
   }
 }
@@ -530,7 +553,14 @@ export function createSqliteWorkerBackend(
 ): SqliteWorkerBackend<LedgerOperations> {
   const ledger = new Ledger(context.databasePath);
   return {
-    execute: (command) => ledger.execute(command.input),
+    execute: (command) => {
+      if (command.type === "publication") {
+        return ledger.publication(command.input);
+      }
+      return command.type === "matchMessage"
+        ? ledger.matchMessage(command.input)
+        : ledger.execute(command.input);
+    },
     close: () => ledger.close(),
   };
 }

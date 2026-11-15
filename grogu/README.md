@@ -360,6 +360,117 @@ Production app audience avoids testing-mode seven-day expiry, but refresh
 tokens can still be revoked; a low-frequency health check must distinguish
 missing scope, revocation, and transient network/provider failure.
 
+### Keep Seaglass search current
+
+Seaglass answers topical searches from its own index, not from the Messages
+database. Recent-message and conversation lookups read the Messages database
+directly, so they stay current. The `sync_index` tool refreshes the index only
+while the Seaglass app runs. A Gateway host usually does not run the app.
+Without a refresh, `index_status` reports `stale: true` and topical search
+misses every message that arrived after the last refresh.
+
+A native cron command job can refresh the index every day without a model call.
+Each run copies the live Messages database to `~/.seaglass/chat_snapshot.db`.
+Then it adds only new chunks (groups of messages) to `~/.seaglass/index.db`. The
+copy is overwritten in place, so it does not grow with each run. Do not
+schedule the job more than once a day. Each run rewrites a file as large as the
+Messages database.
+
+Before you create the job, make sure that these conditions are true on the
+Gateway host:
+
+- Seaglass is installed and registered as the MCP server `seaglass`.
+- The process that runs the Gateway has Full Disk Access.
+- `jq` is installed.
+
+Grogu setup does not create this job. Run these steps once on each Gateway host:
+
+1. Store the path of the Python program that Seaglass uses. It is next to the
+   `seaglass-mcp` command.
+
+   ```sh
+   PYTHON_BIN="$(dirname "$(openclaw config get mcp.servers.seaglass.command)")/python"
+   ```
+
+2. Build the JSON array of arguments for the job. The code calls `run_build`, the
+   function that the Seaglass app uses to build its index.
+
+   ```sh
+   ARGV="$(jq -Rsc --arg py "$PYTHON_BIN" '[$py, "-c", .]' <<'PY'
+   import json
+   import sys
+   from pathlib import Path
+
+   from seaglass.app.config import load_config
+   from seaglass.app.indexstate import IndexBuildState, run_build
+
+   config = load_config()
+   state = IndexBuildState()
+   run_build(
+       state,
+       chat_db_source=config.chat_db_source,
+       chat_db_snapshot=config.chat_db,
+       index_db=config.index_db,
+   )
+   result = state.snapshot()
+   wal = Path(config.chat_db + "-wal")
+   print(
+       json.dumps(
+           {
+               "stage": result["stage"],
+               "error": (result["error"] or "")[:200] or None,
+               "elapsed_s": round(result["elapsed_s"]),
+               "chunks_before": result["chunks_before"],
+               "chunks_now": result["chunks_now"],
+               "snapshot_wal_bytes": wal.stat().st_size if wal.exists() else 0,
+           }
+       )
+   )
+   sys.exit(0 if result["stage"] == "done" else 1)
+   PY
+   )"
+   ```
+
+3. Create the job. The flag `--timeout-seconds 3600` ends a run after one hour.
+   The command prints JSON. The job `id` is in the `job` object.
+
+   ```sh
+   openclaw cron add \
+     --name "Seaglass index refresh" \
+     --description "Refresh the Seaglass message index. No model calls." \
+     --notification-description "Does not text you." \
+     --cron "30 4 * * *" \
+     --session isolated \
+     --no-deliver \
+     --timeout-seconds 3600 \
+     --declaration-key grogu-seaglass-refresh-v1 \
+     --command-argv "$ARGV"
+   ```
+
+4. Run the job once and wait for it to finish. The flag `--wait-timeout 1h`
+   matches the job timeout. The command exits with code 0 when the run succeeds.
+
+   ```sh
+   openclaw cron run <job-id> --wait --wait-timeout 1h
+   ```
+
+A successful run prints one JSON line with `"stage": "done"` and the chunk
+counts. The run summary shows that line under `stdout:`. A progress line from
+the model library can also appear under `stderr:`. A failed run records
+`error`, and topical search stays stale until a later run succeeds. If the
+Gateway process lacks Full Disk Access, the error text says so. To read the run
+history, run `openclaw cron runs <job-id> --limit 5`.
+
+The job uses the default Seaglass file locations. If `mcp.servers.seaglass.env`
+sets `SEAGLASS_CHAT_DB_SOURCE`, `SEAGLASS_CHAT_DB`, or `SEAGLASS_INDEX_DB`, add
+each value to the command in step 3 with `--command-env KEY=VALUE`.
+
+The code depends on the internal function `run_build`. A Seaglass update can
+change it, and then every run records `error`. If that happens, copy the call
+from the `/api/index/build` handler in `seaglass/app/server.py` into the code in
+step 2. Then run steps 1 to 3 again. Because the declaration key is the same,
+`openclaw cron add` updates the existing job and does not create a second job.
+
 ## Local microphone input
 
 The [local voice plugin](plugins/grogu-local-voice/README.md) uses an installed

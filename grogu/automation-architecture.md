@@ -122,6 +122,20 @@ The [Main policy](plugins/grogu-coordination/policy/main.md) owns text style and
 decision rules. The installation supplies quiet hours and the approved route.
 Direct owner replies retain normal conversation behavior.
 
+Route the owner's phone replies into the same Main conversation. For an
+otherwise isolated installation, use a route binding with the exact channel,
+account, and direct peer, plus `session.dmScope: "main"`. Preserve global DM
+isolation, other bindings, and existing conversation history. Main then receives
+new phone replies directly instead of polling another chat.
+
+Main needs the native `message` tool for its approved owner route. A global
+deny still blocks an agent allow. Keep other agents restricted when reconciling
+that policy. Every producer and researcher needs an explicit tool cap without
+`message`, `delivery.mode: "none"`, and no independent failure-alert text route.
+Clear old delivery destinations when changing an existing job to `none`.
+Main's morning review can include `message` to revisit held findings and
+`completion_pending` topics after quiet hours.
+
 A queued handoff is not a delivered update. Native operation IDs identify
 uncertain work for reconciliation. Do not resend merely because a wait expired.
 Session access, current identities, and channel permissions remain authoritative.
@@ -164,6 +178,12 @@ Reconcile private source templates, rendered scripts, tool caps, and schema/hash
 pins together. Use current native configuration revisions. Keep admitted work
 intact while its old plugin generation settles.
 
+A saved installation is not proof of activation. Inspect the running Gateway
+through `plugins.list`, including the selected version and `runtime.state`.
+If an old explicit `plugins.load.paths` entry shadows the managed replacement,
+remove only that verified obsolete override through native configuration.
+Use the native reload owner to settle a saved replacement, not another install.
+
 Before a schema change, establish the current version and supported migration.
 Use the migration owner's transaction rather than direct live SQL edits.
 Reject incompatible state before mutation. The reviewed no-backup cutover
@@ -172,6 +192,18 @@ does not create duplicate personal archives.
 Move current facts out of obsolete lists before removing their readers.
 Delete only named obsolete files and task-owned copies. Preserve original
 conversations, current facts, and requested documents.
+
+Inspect custom health scripts before deleting old state. A legacy watchdog can
+still recreate retired research or notification files after model jobs stop.
+Use `openclaw health --json` for a native health-check command job when that is
+the required responsibility. Native scheduling retains retry and run outcomes.
+Do not replace an active recovery or power-management owner without accounting
+for its work.
+
+Set the agent's `heartbeat.every` to `"0m"` to stop an empty periodic cadence
+while preserving targeted event wakes. Read `agents.files.list` for the serving
+build's actual instruction files. An obsolete `HEARTBEAT.md` is not a substitute
+for a native job or an active instruction owner.
 
 Verify the actual source intake, topic update, fair selection, conversation
 return, and completion flow. A passing helper test or a reloaded CLI process

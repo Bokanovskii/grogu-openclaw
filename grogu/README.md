@@ -212,6 +212,13 @@ Git preserves source, not conversations, credentials, or databases.
 Removing recovery copies permanently loses the ability to restore those earlier
 states.
 
+Successful npm, pnpm, or Bun updates run `npm cache verify` and `pnpm store prune`
+only when the updater admits the protected `GROGU_PROFILE_FILE`. Cache pruning
+waits until package rollback cleanup settles. It removes unused package-manager
+data without clearing all caches or removing installed packages. The five-minute
+cleanup does not prune these caches. A cache command failure leaves the update
+successful and records a warning. A later successful package update retries cleanup.
+
 After installing a Grogu release, run the normal bootstrap with the protected
 profile. The installed release must include `dist/grogu-maint.js`.
 

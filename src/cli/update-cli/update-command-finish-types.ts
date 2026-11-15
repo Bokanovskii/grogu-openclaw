@@ -39,3 +39,13 @@ export type FinishUpdateParams = UpdateRestartParams & {
   activationConfig?: import("./update-command-config-snapshot.js").UpdateConfigSnapshot;
   rollbackBlockedReason?: "state-migrated-no-rollback" | "rollback-state-unverified";
 };
+
+export type UpdatePackageCompletionParams = Pick<
+  FinishUpdateParams,
+  | "databaseBackup"
+  | "mutationStarted"
+  | "packageTransaction"
+  | "root"
+  | "opts"
+  | "updateStepTimeoutMs"
+>;

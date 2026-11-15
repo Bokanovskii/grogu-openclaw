@@ -15,6 +15,7 @@ import {
 } from "./update-command-failure-recovery.js";
 import type { FinishUpdateParams } from "./update-command-finish-types.js";
 import { parkForegroundUpdateForActivation } from "./update-command-handoff.js";
+import { recordUpdatePackageCompletion } from "./update-command-package-completion.js";
 import { appendPluginUpdateWarnings } from "./update-command-plugins-internals.js";
 import {
   completePostUpdateMaintenance,
@@ -59,10 +60,7 @@ import {
   captureUpdateCommandTerminalRecord,
   type UpdateCommandTerminalRecord,
 } from "./update-command-terminal-record.js";
-import {
-  deferUpdateCommandTerminalResult,
-  recordUpdatePackageCompletion,
-} from "./update-command-terminal.js";
+import { deferUpdateCommandTerminalResult } from "./update-command-terminal.js";
 
 type FinishUpdateOptions = { candidateRuntime?: boolean; onGatewayStartAttempted?: () => void };
 

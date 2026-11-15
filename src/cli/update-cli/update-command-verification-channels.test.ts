@@ -17,7 +17,7 @@ import {
   resetRestartHealthMocks,
   restoreRestartHealthMocks,
 } from "../daemon-cli/restart-health.test-helpers.js";
-import { recordUpdatePackageCompletion } from "./update-command-terminal.js";
+import { recordUpdatePackageCompletion } from "./update-command-package-completion.js";
 import { verifyUpdatedGateway } from "./update-command-verification.js";
 
 let server: Server;
@@ -122,6 +122,8 @@ describe("update repair channel warnings", () => {
         recordUpdatePackageCompletion(
           {
             root: "/synthetic-package",
+            mutationStarted: true,
+            updateStepTimeoutMs: 60_000,
             opts: { json: true },
             packageTransaction: {
               backupRoot: "/synthetic-backup",

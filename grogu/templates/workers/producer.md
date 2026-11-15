@@ -29,5 +29,6 @@ with its completion identity for the originating Grogu threads, then
 notification time.
 
 Keep routine topic work in tool steps. Save useful context even when it does
-not merit a text. After saving a quiet result, finish `NO_REPLY`.
+not merit a text. After saving a quiet result, end with one short plain status
+line, never `NO_REPLY`.
 If a native handoff is queued, retain its operation identity for reconciliation.

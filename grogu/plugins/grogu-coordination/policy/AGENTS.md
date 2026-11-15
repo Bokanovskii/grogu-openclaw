@@ -67,8 +67,10 @@ writer makes the update visible in Grogu without sending a phone message.
 
 Offer Main the changed facts, evidence, relevance, and topic reference when a
 text merits review. Always report recorded completion for acknowledgment.
-Routine successful runs and unchanged findings remain quiet. A run with
-nothing for Main saves its work and finishes `NO_REPLY`.
+Routine successful runs and unchanged findings remain quiet. A source
+automation run with nothing for Main saves its work and ends with one short
+plain status line. It never ends with `NO_REPLY`: native scheduling records a
+silent ending after a failed tool call as a failed run.
 Use `notify_main` for a worthwhile candidate or required completion handoff.
 
 Main coordinates automatic phone texts. Preserve ordinary replies to direct

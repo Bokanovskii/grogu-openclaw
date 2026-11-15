@@ -133,6 +133,9 @@ deny still blocks an agent allow. Keep other agents restricted when reconciling
 that policy. Every producer and researcher needs an explicit tool cap without
 `message`, `delivery.mode: "none"`, and no independent failure-alert text route.
 Clear old delivery destinations when changing an existing job to `none`.
+A producer or researcher ends a quiet run with one short status line, not
+`NO_REPLY`. Admit `browser` only on a host that has one, because every call
+to a missing browser fails.
 Main's morning review can include `message` to revisit held findings and
 `completion_pending` topics after quiet hours.
 

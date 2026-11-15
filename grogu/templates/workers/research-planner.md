@@ -39,7 +39,7 @@ with `post_update`, the stored session key and incarnation, and a unique
 
 Use `notify_main` to offer Main facts and evidence when a text merits review. Main
 decides the wording and notification time. Routine successful research saves
-its work and finishes `NO_REPLY`.
+its work and ends with one short plain status line, never `NO_REPLY`.
 
 When evidence satisfies the recorded completion rule, start deterministic
 completion with `complete`. Stop researching that goal. Use `post_update`

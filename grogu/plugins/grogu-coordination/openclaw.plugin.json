@@ -1,7 +1,7 @@
 {
   "id": "grogu-coordination",
   "name": "Grogu shared policy",
-  "description": "Shared assistant policy, bounded job observations and native Main coordination.",
+  "description": "Stable shared instructions and one Main text coordinator.",
   "activation": {
     "onStartup": true
   },
@@ -10,6 +10,22 @@
     "additionalProperties": false,
     "required": ["agentIds", "jobs"],
     "properties": {
+      "quietHours": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start", "end", "timeZone"],
+        "properties": {
+          "start": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+          "end": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+          "timeZone": {"type": "string", "minLength": 1, "maxLength": 100}
+        }
+      },
+      "mainAgentId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      },
       "agentIds": {
         "type": "array",
         "minItems": 1,
@@ -24,7 +40,7 @@
       },
       "jobs": {
         "type": "array",
-        "minItems": 1,
+        "minItems": 0,
         "maxItems": 16,
         "items": {
           "type": "object",
@@ -35,7 +51,10 @@
             "agentId": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[a-zA-Z0-9_-]+$"},
             "label": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[^\\r\\n]+$"},
             "role": {
-              "enum": ["intake", "personal", "financial", "purchase-watch", "research", "review", "reminder"]
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]*$"
             },
             "sourceSessionKey": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[a-zA-Z0-9:_-]+$"}
           }

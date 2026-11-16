@@ -72,8 +72,9 @@ It needs neither a new coordinating agent nor a separate ledger.
 ## A fair continuous queue
 
 The [researcher](templates/workers/research-planner.md) advances several useful
-questions per pass in a persistent conversation. Stable policy prefixes remain
-small. Changing details arrive through bounded tool results.
+questions per pass. Every pass is a fresh isolated run, so the topic owner holds
+the memory between passes and the stable policy prefix stays small and shared.
+Changing details arrive through bounded tool results.
 
 Fair rounds prevent recurring high-priority questions from taking every turn.
 The topic owner stores service counts. Eligible topics sort by least service,
@@ -113,6 +114,9 @@ Only worthwhile text candidates and required completion acknowledgments go to
 Main through `notify_main`. The native session owner queues a real Main turn
 and returns its run ID. A routine research pass saves its result and stays quiet.
 Successful jobs do not automatically wake Main.
+Automations that call `notify_main` use an isolated session target. A job that
+reuses a stable `cron:` root session fences its web requests to that run. The
+Main turn it starts inherits the fence and fails once the caller ends.
 
 Main uses recent worker inputs, its text decisions, confirmed sends, and owner
 replies to decide what to send. Repetition avoidance is contextual and best

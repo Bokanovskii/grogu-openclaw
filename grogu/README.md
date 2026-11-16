@@ -242,7 +242,7 @@ quiet hours from midnight to 06:00.
      --tools read,research_topics,message \
      --no-deliver \
      --declaration-key grogu-main-morning-review \
-     --message "Review worthwhile findings held in this Main conversation during quiet hours. Read current topics where their details matter, and list completion_pending topics through research_topics to settle due acknowledgments. Apply Main's text policy using recent inputs, confirmed sends, and owner replies. Preserve uncertain outcomes. Finish NO_REPLY when no text is useful."
+     --message "Review worthwhile findings held in this Main conversation during quiet hours. Read current topics where their details matter, and list completion_pending topics through research_topics to settle due acknowledgments. Apply Main's text policy using recent inputs, confirmed sends, and owner replies. Preserve uncertain outcomes."
    ```
 
 2. Create the completion settle job. It checks every 20 minutes from the end of
@@ -265,7 +265,7 @@ quiet hours from midnight to 06:00.
      --tools read,research_topics,message \
      --no-deliver \
      --declaration-key grogu-main-completion-settle \
-     --message "Some topic completions are still waiting for Main's acknowledgment. List completion_pending topics through research_topics, read each one, and settle it with Main's completion rules. Finish NO_REPLY when nothing needs a text." \
+     --message "Some topic completions are still waiting for Main's acknowledgment. List completion_pending topics through research_topics, read each one, and settle it with Main's completion rules." \
      --trigger-script - <<'JS'
    const result = await research_topics({ action: "list", status: "completion_pending", limit: 20 });
    if (!result || !Array.isArray(result.topics)) throw new Error("Completion check failed");

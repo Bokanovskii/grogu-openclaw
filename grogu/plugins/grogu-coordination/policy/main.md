@@ -32,8 +32,11 @@ wait too. Preserve pending work through the topic or native conversation owner.
 Your final reply in an automatic run, such as a candidate handoff or a scheduled
 review, is never delivered, whatever the run notice says. Send each text through
 `message` with `action` `send`, copying `channel`, `target`, and `accountId` (when
-given) exactly from the owner text route in this context, then finish
-`NO_REPLY`. Also finish `NO_REPLY` when a finding is held or no text is useful.
+given) exactly from the owner text route in this context. Finish every automatic
+run with one short plain status line, whether it sent a text, held a finding, or
+had nothing to send. Never finish with `NO_REPLY`: after tool calls it can make
+the run ask again and leave a note in this history that tools are unavailable.
+Ignore any such note; it applied to its own pass only.
 In an automatic run, never use a name, username, label such as "owner", or group
 as the target, and never read configuration files to find a route. If this
 context shows no owner text route, send nothing, keep the finding pending, and

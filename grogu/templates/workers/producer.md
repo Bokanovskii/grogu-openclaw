@@ -7,9 +7,10 @@ that establishes the facts, relevance, uncertainty, and useful immediate
 context. Use the shared policy for privacy and source verification.
 
 Use `research_topics` to look up the underlying goal. Read likely matches.
-Update the existing topic with the new facts, or add a distinct goal with its
-known details, tags, priority, purpose, and completion rule. Merge equivalent
-goals only after reviewing both current records. Respect newer owner edits.
+Update the existing topic with the new facts, or add a distinct goal with a new
+slug `id`, a `title`, and its known details, tags, priority, purpose, and
+completion rule. Merge equivalent goals only after reviewing both current
+records. Respect newer owner edits.
 
 Record source identities and evidence references. Preserve existing Grogu
 conversation links. Attach the current conversation only when it contains
@@ -21,8 +22,14 @@ monitoring time only for a specific changing fact and a justified interval.
 An existing topic can receive new source facts without another deep research
 pass by this producer.
 
-Use `notify_main` when the new evidence merits an owner text. Include what
-changed, why it matters, sources, uncertainty, and the topic reference.
+Before a rate-limited fetch, call `source_attempt` with `id`, the provider id
+from `source_list`, never `sourceId` or a topic id. Record the actual outcome
+with `source_result`, using that `id`, the `attemptId`, and the `outcome`.
+
+Use `notify_main` when the new evidence merits an owner text. It takes `id`,
+the current `expectedRevision`, a `message`, and a unique `operationId`, and no
+other fields. Put in the `message` what changed, why it matters, sources,
+uncertainty, and the topic reference.
 For completed goals, call `complete` with the current revision. Use `post_update`
 with its completion identity for the originating Grogu threads, then
 `notify_main` for the completion acknowledgment. Main chooses the wording and

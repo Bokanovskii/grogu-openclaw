@@ -71,6 +71,24 @@ For a development load path, first run `npm run build` in this directory. Keep
 the entire `dist/` directory. Remove the superseded development path when switching
 to the managed package. Do not run schema-1 and schema-2 workers together.
 
+### Replace an installed package
+
+Install a newer package over the running one with
+`openclaw plugins install --force /path/to/grogu-research-topics-<version>.tgz`.
+The Gateway applies it only while no agent run is active. Otherwise it waits about
+a minute and reports the install as saved but not applied.
+`openclaw plugins reload research-topics --wait` applies it once the runs finish,
+but a busy schedule may never go quiet. Disable the scheduled jobs that start
+runs, wait for running work to finish, install, and enable the same jobs again.
+
+After an in-place replacement, scheduled trigger scripts that call
+`research_topics` fail with `ReferenceError: research_topics is not defined`
+until the Gateway restarts. Once the install has applied, run one plain
+`openclaw gateway restart --json` while no agent run is active, then search
+`gateway.log` for `trigger evaluation failed`. Do not use `--safe` for this
+restart: it defers behind running cron work and can leave Gateway admission
+closed for a long time.
+
 ## Reconcile topics in the current turn
 
 1. Call `lookup` using the subject's ordinary words, optionally narrowing by

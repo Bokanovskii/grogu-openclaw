@@ -18,7 +18,7 @@ real conversations never belong in those files.
 | Grogu coordination plugin              | Shared behavior and Main-only text instructions                                   | Tracked policy files                       |
 | Worker brief                           | A focused source or research task                                                 | Tracked template, private rendered payload |
 | Installation configuration             | Source access, agent and job IDs, routes, models, quiet hours                     | Protected private configuration            |
-| Owner fact files                       | Preferences, plans, and other facts outside the research ledger                   | Private workspace                          |
+| Owner profile file                     | Stable preferences and owned gear, capped at about 2,000 characters               | Private workspace                          |
 
 Markdown holds instructions or named user documents. It is not a second live
 research database. JSON configuration selects runtime capabilities and bindings.

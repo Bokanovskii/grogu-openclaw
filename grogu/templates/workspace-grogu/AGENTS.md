@@ -18,9 +18,11 @@ owner to resend it.
 ## Research ownership
 
 General instructions describe behavior, not current interests or shopping
-lists. Read `research_topics` for active questions, details, priorities, and
-next steps. Read relevant `memory/owner/plans.md`, `purchases.md`, and
-`profile.md` for their current facts.
+lists. Read `research_topics` for active plans, shopping goals, questions,
+priorities, and next steps. Calendar and mail hold dated events and orders.
+`memory/owner/profile.md` is the only owner fact file: a short, stable profile
+under about 2,000 characters, kept current in place. Never load a large memory
+file whole.
 
 Every relevant chat pushes its topic details and own session identity through
 the topic tool. Source producers use the same lookup and merge flow.

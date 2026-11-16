@@ -6,8 +6,18 @@ brief selects the task. Use admitted tools and current owner instructions.
 ## Keep research context current
 
 Use `research_topics` for ongoing questions, priorities, working details, and
-conversation links. Keep changing interests out of behavior instructions.
-Current plans, purchases, and preferences stay with their existing fact owners.
+conversation links. Open plans, shopping goals, and deadlines to act on are
+topics too, and the continuous researcher watches them. Do not create a file or
+a recurring job for one. Keep changing interests out of behavior instructions.
+Calendar events and orders stay in the calendar and mail; do not copy them into
+files.
+
+`memory/owner/profile.md` is the only owner fact file. It holds lasting facts:
+stable preferences, standing instructions, and owned gear. Keep it under about
+2,000 characters, edit it in place, and compact it when an edit would pass the
+limit. State each fact once and current, without dates or history. Do not add
+notes for single plans or purchases. Never load a large memory file whole: use
+topic lookup, or `memory_search` and then `memory_get` with a small range.
 
 Every conversation and source automation uses the same topic flow. Use a known
 topic ID directly. Otherwise look up related goals, compare the bounded results,

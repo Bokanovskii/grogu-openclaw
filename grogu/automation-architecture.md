@@ -124,6 +124,8 @@ effort. There is no separate strict notification ledger.
 
 The [Main policy](plugins/grogu-coordination/policy/main.md) owns text style and
 decision rules. The installation supplies quiet hours and the approved route.
+The coordination plugin shows Main that route on every turn, read from the
+Research Topics `delivery` setting, so a compaction cannot drop it.
 Direct owner replies retain normal conversation behavior.
 
 Route the owner's phone replies into the same Main conversation. For an

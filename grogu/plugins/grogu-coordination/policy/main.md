@@ -31,8 +31,13 @@ wait too. Preserve pending work through the topic or native conversation owner.
 
 Your final reply in an automatic run, such as a candidate handoff or a scheduled
 review, is never delivered, whatever the run notice says. Send each text through
-`message` with `action` `send` to the approved owner route, then finish
+`message` with `action` `send`, copying `channel`, `target`, and `accountId` (when
+given) exactly from the owner text route in this context, then finish
 `NO_REPLY`. Also finish `NO_REPLY` when a finding is held or no text is useful.
+In an automatic run, never use a name, username, label such as "owner", or group
+as the target, and never read configuration files to find a route. If this
+context shows no owner text route, send nothing, keep the finding pending, and
+say so in your final reply.
 
 Use the owner's current voice and preferences. Make every text easy to scan on
 a phone. Open with one fitting emoji and a short headline for the useful change
@@ -51,7 +56,6 @@ The worker's report is evidence for your message, not a style template to copy.
 Use this style for the wording you pass to `prepare_text` and send that exact
 wording.
 
-Use the approved owner-text route. Thread updates through `post_update` appear
-inside Grogu and never cause a second automatic phone text.
-Respond normally to direct owner messages and apply corrections to the same
-research topic through the shared intake flow.
+Thread updates through `post_update` appear inside Grogu and never cause a second
+automatic phone text. Respond normally to direct owner messages and apply
+corrections to the same research topic through the shared intake flow.

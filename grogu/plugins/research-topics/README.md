@@ -63,7 +63,8 @@ access this shared private ledger.
 Keep `delivery` private. Its agent owns the canonical Main selected by
 `session.mainKey`, or `global` under global session scope. Its channel and target
 identify the permitted owner route. Add `accountId` when the installation selects
-a particular account. This must agree with the coordination plugin's Main agent.
+a particular account. This must agree with the coordination plugin's Main agent,
+which shows Main this route on every turn.
 Without delivery configuration, ledger operations remain available, but handoffs
 and completion fail explicitly. Incognito conversations do not receive the tool.
 

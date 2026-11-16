@@ -47,6 +47,19 @@ export default definePluginEntry({
             mainKey: api.config.session?.mainKey,
           })
       : undefined;
+    // Compaction can drop the owner's route from Main's conversation, so rebuild it every turn
+    // from the route Research Topics enforces. Read it live: this instance keeps its
+    // registration-time config snapshot.
+    const ownerRouteContext = () => {
+      const delivery =
+        api.runtime.config.current().plugins?.entries?.["research-topics"]?.config?.delivery;
+      if (!delivery || delivery.agentId !== mainAgentId) {
+        return undefined;
+      }
+      const { channel, target, accountId } = delivery;
+      const route = JSON.stringify({ channel, target, ...(accountId ? { accountId } : {}) });
+      return `Owner text route for automatic texts (copy these message fields exactly): ${route}`;
+    };
     let retired = false;
     api.lifecycle.onDispose(() => {
       retired = true;
@@ -63,7 +76,11 @@ export default definePluginEntry({
           ? `Originating subject: ${job.sourceSessionKey} (routing reference only).`
           : undefined;
       return {
-        appendSystemContext: isMain ? `${policy}\n\n${mainPolicy}\n\n${quietHoursContext}` : policy,
+        appendSystemContext: isMain
+          ? [policy, mainPolicy, quietHoursContext, ownerRouteContext()]
+              .filter(Boolean)
+              .join("\n\n")
+          : policy,
         ...(subject ? { appendContext: subject } : {}),
       };
     });

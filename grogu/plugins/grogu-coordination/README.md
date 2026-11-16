@@ -36,7 +36,8 @@ Enable conversation access for prompt injection through
 `plugins.entries.grogu-coordination.hooks.allowConversationAccess: true`.
 The plugin uses `before_prompt_build`, preserves tools and conversation bytes,
 and reads policies once per registration. It rejects missing or oversized
-policies. It adds no changing activity table to ordinary prompts.
+policies. It adds no changing activity table to ordinary prompts. The one live
+read is Main's owner text route (see Research and delivery).
 
 ## Research and delivery
 
@@ -54,6 +55,15 @@ confirmed delivery.
 Keep normal native thread delivery, source permissions, and session visibility.
 The plugin does not create a new transport, hidden transcript operation, or
 notification database. A session reference never grants access.
+
+Automatic Main runs, such as scheduled reviews, have no owner conversation to
+infer a destination from, and a conversation compaction can drop the route from
+Main's history. So each Main turn carries one line with the owner text route,
+read from `plugins.entries["research-topics"].config.delivery` when the prompt
+is built. A changed route applies to the next turn, and the line appears only
+when `delivery.agentId` is the Main agent. Without it, Main sends nothing and
+keeps the finding pending. The route is installation configuration and never
+part of this repository.
 
 ## Update
 

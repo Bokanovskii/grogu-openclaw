@@ -65,6 +65,13 @@ when `delivery.agentId` is the Main agent. Without it, Main sends nothing and
 keeps the finding pending. The route is installation configuration and never
 part of this repository.
 
+An automatic Main run ends `NO_REPLY` after it sends a text. A held or no-text
+run ends with one plain status line, which is never delivered. In a candidate
+handoff run, a silent ending after tool calls without a send makes core run an
+extra text-only pass and keep its "tools are unavailable" note in Main's
+history. The policy tells Main to ignore such a note, and job prompts leave the
+ending to the policy.
+
 ## Update
 
 Install the reviewed package with the native installer, then reload through

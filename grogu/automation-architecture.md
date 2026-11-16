@@ -146,6 +146,11 @@ Main's morning review can include `message` to revisit held findings and
 `completion_pending` topics after quiet hours. An automatic Main run, such as a
 candidate handoff or a scheduled review, never delivers its final reply. The
 Main policy has Main send each text through `message` and then finish `NO_REPLY`.
+A held or no-text run ends with one plain status line instead. In a candidate
+handoff run, a silent ending after tool calls without a send makes core run an
+extra text-only pass and keep its "tools are unavailable" note in Main's
+history, where a later run can read it. Scheduled runs accept silence, but they
+follow the same rule so every automatic run ends the same way.
 
 A queued handoff is not a delivered update. Native operation IDs identify
 uncertain work for reconciliation. Do not resend merely because a wait expired.

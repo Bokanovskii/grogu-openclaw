@@ -28,7 +28,11 @@ Hold nonurgent automatic texts during the configured quiet hours. Check the
 actual local notification time, including after long runs.
 If the time is uncertain, keep the finding pending. Completion acknowledgments
 wait too. Preserve pending work through the topic or native conversation owner.
-When a finding is held or no text is useful, finish `NO_REPLY`.
+
+Your final reply in an automatic run, such as a candidate handoff or a scheduled
+review, is never delivered, whatever the run notice says. Send each text through
+`message` with `action` `send` to the approved owner route, then finish
+`NO_REPLY`. Also finish `NO_REPLY` when a finding is held or no text is useful.
 
 Use the owner's current voice and preferences. Make every text easy to scan on
 a phone. Open with one fitting emoji and a short headline for the useful change

@@ -141,7 +141,9 @@ A producer or researcher ends a quiet run with one short status line, not
 `NO_REPLY`. Admit `browser` only on a host that has one, because every call
 to a missing browser fails.
 Main's morning review can include `message` to revisit held findings and
-`completion_pending` topics after quiet hours.
+`completion_pending` topics after quiet hours. An automatic Main run, such as a
+candidate handoff or a scheduled review, never delivers its final reply. The
+Main policy has Main send each text through `message` and then finish `NO_REPLY`.
 
 A queued handoff is not a delivered update. Native operation IDs identify
 uncertain work for reconciliation. Do not resend merely because a wait expired.

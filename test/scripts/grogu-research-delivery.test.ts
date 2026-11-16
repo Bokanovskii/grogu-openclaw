@@ -9,19 +9,24 @@ import { readVisibleSessionTranscriptMessageEntries } from "openclaw/plugin-sdk/
 import * as transcriptRuntime from "openclaw/plugin-sdk/session-transcript-runtime";
 import { expect, it, vi } from "vitest";
 import plugin from "../../grogu/plugins/research-topics/index.js";
+import { jsonResult } from "../../src/agents/tools/tool-results.js";
 import { createSessionEntryWithTranscript } from "../../src/config/sessions/session-accessor.js";
 import type { PluginHookHandlerMap } from "../../src/plugins/hook-types.js";
 import { createPluginRuntime } from "../../src/plugins/runtime/index.js";
 import { createOpenClawTestState } from "../../src/test-utils/openclaw-test-state.js";
 
-it("stores real thread updates and deletes completed topics only after a matching Main delivery receipt", async () => {
+const first = { sessionKey: "agent:grogu:chat:first", sessionId: "first-incarnation" };
+const main = { sessionKey: "global", sessionId: "main-incarnation" };
+const route = { channel: "telegram", target: "telegram:synthetic-owner" };
+
+async function openHarness(options: { accountId?: string } = {}) {
   const state = await createOpenClawTestState({ prefix: "research-delivery-" });
-  const first = { sessionKey: "agent:grogu:chat:first", sessionId: "first-incarnation" };
-  const main = { sessionKey: "global", sessionId: "main-incarnation" };
-  const route = { channel: "telegram", target: "telegram:synthetic-owner" };
   const registered = vi.fn<OpenClawPluginApi["registerTool"]>();
   const hooks = vi.fn<OpenClawPluginApi["on"]>();
   const services = vi.fn<OpenClawPluginApi["registerService"]>();
+  // Stands in for the Gateway, which serves Main's native history only for Main's own session key.
+  const history: unknown[] = [];
+  const base = createPluginRuntime();
   const api = createTestPluginApi({
     id: "research-topics",
     config: {
@@ -30,14 +35,20 @@ it("stores real thread updates and deletes completed topics only after a matchin
     runtimeSource: fileURLToPath(
       new URL("../../grogu/plugins/research-topics/index.ts", import.meta.url),
     ),
-    pluginConfig: { delivery: { agentId: "grogu", ...route } },
-    runtime: createPluginRuntime(),
+    pluginConfig: { delivery: { agentId: "grogu", ...route, ...options } },
+    runtime: createPluginRuntime({
+      subagent: {
+        ...base.subagent,
+        getSessionMessages: async ({ sessionKey }) => ({
+          messages: sessionKey === main.sessionKey ? [...history] : [],
+        }),
+      },
+    }),
     registerTool: registered,
     registerService: services,
     on: hooks,
   });
   api.runtime.state.resolveStateDir = () => state.stateDir;
-  let stop: (() => Promise<void>) | undefined;
   try {
     for (const session of [first, main]) {
       await createSessionEntryWithTranscript({ agentId: "grogu", ...session }, () => ({
@@ -66,31 +77,104 @@ it("stores real thread updates and deletes completed topics only after a matchin
       }
       return tool;
     };
-    const source = makeTool(first);
-    const coordinator = makeTool(main);
-    const cleanup = services.mock.calls[0]?.[0].stop;
-    if (!cleanup) {
+    const stopService = services.mock.calls[0]?.[0].stop;
+    if (!stopService) {
       throw new Error("Expected plugin cleanup");
     }
-    stop = async () => {
-      await cleanup({
-        config: {},
-        stateDir: state.stateDir,
-        logger: api.logger,
-        scheduler: createTestPluginServiceScheduler(),
-      });
-    };
-    const hook = hooks.mock.calls.find(([name]) => name === "after_tool_call");
-    if (!hook) {
+    const afterHook = hooks.mock.calls.find(([name]) => name === "after_tool_call");
+    if (!afterHook) {
       throw new Error("Expected native message receipt observer");
     }
-    // The registration name selects this handler from the generic hook map.
-    const observe = hook[1] as PluginHookHandlerMap["after_tool_call"];
     const beforeHook = hooks.mock.calls.find(([name]) => name === "before_tool_call");
     if (!beforeHook) {
       throw new Error("Expected completion binding before native sends");
     }
-    const begin = beforeHook[1] as PluginHookHandlerMap["before_tool_call"];
+    return {
+      source: makeTool(first),
+      coordinator: makeTool(main),
+      history,
+      // The registration name selects each handler from the generic hook map.
+      observe: afterHook[1] as PluginHookHandlerMap["after_tool_call"],
+      begin: beforeHook[1] as PluginHookHandlerMap["before_tool_call"],
+      async close() {
+        try {
+          await stopService({
+            config: {},
+            stateDir: state.stateDir,
+            logger: api.logger,
+            scheduler: createTestPluginServiceScheduler(),
+          });
+        } finally {
+          await state.cleanup();
+        }
+      },
+    };
+  } catch (error) {
+    await state.cleanup();
+    throw error;
+  }
+}
+
+type Harness = Awaited<ReturnType<typeof openHarness>>;
+
+function completionIdOf(details: unknown) {
+  if (
+    !details ||
+    typeof details !== "object" ||
+    !("completionId" in details) ||
+    typeof details.completionId !== "string"
+  ) {
+    throw new Error("Expected a pending completion");
+  }
+  return details.completionId;
+}
+
+// Adds a topic and completes it, which leaves Main's text receipt pending.
+async function completeTopic({ source }: Harness, id: string) {
+  await source.execute("add", {
+    action: "add",
+    id,
+    title: `A synthetic ${id} question`,
+    purpose: "answer",
+    completionRule: "A supported answer resolves the question",
+  });
+  return completionIdOf(
+    (
+      await source.execute("complete", {
+        action: "complete",
+        id,
+        expectedRevision: 1,
+        reason: "The answer is supported",
+      })
+    ).details,
+  );
+}
+
+// Takes a topic to the point where only Main's text receipt is missing.
+async function prepareClosing(harness: Harness, id: string, ownerText: string) {
+  const { source, coordinator } = harness;
+  const completionId = await completeTopic(harness, id);
+  const prepare = { action: "prepare_text", id, expectedRevision: 2, completionId, ownerText };
+  const prepared = (await coordinator.execute("prepare", prepare)).details;
+  await source.execute("closing-update", {
+    action: "post_update",
+    id,
+    expectedRevision: 3,
+    ...first,
+    completionId,
+    operationId: "closing",
+    message: "Research is complete. The answer is supported.",
+  });
+  return {
+    prepared,
+    prepare,
+    finalize: { action: "finalize", id, expectedRevision: 3, completionId },
+  };
+}
+
+it("stores real thread updates and deletes completed topics only after a matching Main delivery receipt", async () => {
+  const { source, coordinator, begin, observe, close } = await openHarness();
+  try {
     await coordinator.execute("main-topic", {
       action: "add",
       id: "main-topic",
@@ -140,23 +224,16 @@ it("stores real thread updates and deletes completed topics only after a matchin
         operationId: "unlinked",
       }),
     ).rejects.toThrow("recorded source conversation");
-    const completed = (
-      await source.execute("complete", {
-        action: "complete",
-        id: "question",
-        expectedRevision: 1,
-        reason: "The answer is supported",
-      })
-    ).details;
-    if (
-      !completed ||
-      typeof completed !== "object" ||
-      !("completionId" in completed) ||
-      typeof completed.completionId !== "string"
-    ) {
-      throw new Error("Expected a pending completion");
-    }
-    const completionId = completed.completionId;
+    const completionId = completionIdOf(
+      (
+        await source.execute("complete", {
+          action: "complete",
+          id: "question",
+          expectedRevision: 1,
+          reason: "The answer is supported",
+        })
+      ).details,
+    );
     const ownerText = "The question is answered. I have closed its research.";
     const prepare = {
       action: "prepare_text",
@@ -233,23 +310,16 @@ it("stores real thread updates and deletes completed topics only after a matchin
       { toolName: "message", ...main, agentId: "grogu" },
     );
     await source.execute("reopen", { action: "reopen", id: "question", expectedRevision: 3 });
-    const newer = (
-      await source.execute("new-completion", {
-        action: "complete",
-        id: "question",
-        expectedRevision: 4,
-        reason: "Additional evidence confirms the answer",
-      })
-    ).details;
-    if (
-      !newer ||
-      typeof newer !== "object" ||
-      !("completionId" in newer) ||
-      typeof newer.completionId !== "string"
-    ) {
-      throw new Error("Expected a new completion identity");
-    }
-    const newCompletionId = newer.completionId;
+    const newCompletionId = completionIdOf(
+      (
+        await source.execute("new-completion", {
+          action: "complete",
+          id: "question",
+          expectedRevision: 4,
+          reason: "Additional evidence confirms the answer",
+        })
+      ).details,
+    );
     await coordinator.execute("new-prepare", {
       ...prepare,
       expectedRevision: 5,
@@ -344,7 +414,175 @@ it("stores real thread updates and deletes completed topics only after a matchin
       ).details,
     ).toMatchObject({ revision: 2, title: "Corrected constraints" });
   } finally {
-    await stop?.();
-    await state.cleanup();
+    await close();
+  }
+});
+
+it("records Main's receipt from a plugin-handled send that omits the channel and account", async () => {
+  const harness = await openHarness({ accountId: "default" });
+  const { coordinator, begin, observe, close } = harness;
+  try {
+    const context = { toolName: "message", ...main, agentId: "grogu" };
+    const send = async (args: Record<string, unknown>, result: unknown) => {
+      await begin({ toolName: "message", toolCallId: "message-call", params: args }, context);
+      await observe(
+        { toolName: "message", toolCallId: "message-call", params: args, result },
+        context,
+      );
+    };
+    // Telegram returns only its own success envelope here; core adds no `messageDelivery` fact.
+    const delivered = jsonResult({
+      ok: true,
+      messageId: "261",
+      chatId: "synthetic-owner",
+      receipt: {},
+    });
+
+    const ownerText = "The question is answered. I have closed its research.";
+    const { finalize } = await prepareClosing(harness, "question", ownerText);
+    const sendParams = { action: "send", target: route.target, message: ownerText };
+    for (const attempt of [
+      { args: { ...sendParams, channel: "signal" }, result: delivered },
+      { args: { ...sendParams, accountId: "other" }, result: delivered },
+      { args: sendParams, result: jsonResult({ ok: true }) },
+    ]) {
+      await send(attempt.args, attempt.result);
+      await expect(coordinator.execute("not-confirmed", finalize)).rejects.toThrow("unconfirmed");
+    }
+    await send(sendParams, delivered);
+    expect((await coordinator.execute("finalize", finalize)).details).toEqual({
+      id: "question",
+      deleted: true,
+    });
+
+    const secondText = "A second answer is ready. I closed that research too.";
+    const second = await prepareClosing(harness, "second", secondText);
+    expect(second.prepared).toMatchObject({ route: { ...route, accountId: "default" } });
+    await send({ action: "send", ...route, accountId: "default", message: secondText }, delivered);
+    expect((await coordinator.execute("finalize-second", second.finalize)).details).toEqual({
+      id: "second",
+      deleted: true,
+    });
+  } finally {
+    await close();
+  }
+});
+
+it("recovers a missed Main receipt from recent history without a tool-call id", async () => {
+  const harness = await openHarness({ accountId: "default" });
+  const { coordinator, history, close } = harness;
+  try {
+    const ownerText = "The question is answered. I have closed its research.";
+    const { prepare, finalize } = await prepareClosing(harness, "question", ownerText);
+    const confirm = { ...finalize, action: "confirm_completion" };
+    const at = Date.now();
+    const sendParams = { action: "send", target: route.target, message: ownerText };
+    const delivered = { ok: true, messageId: "261", chatId: "synthetic-owner", receipt: {} };
+    // One native exchange: the model's call, then its persisted result.
+    const exchange = (
+      id: string,
+      name: string,
+      args: Record<string, unknown>,
+      result: { details: Record<string, unknown>; isError?: boolean; at?: number },
+    ) => [
+      { role: "assistant", content: [{ type: "toolCall", id, name, arguments: args }] },
+      {
+        role: "toolResult",
+        toolCallId: id,
+        toolName: name,
+        isError: result.isError ?? false,
+        details: result.details,
+        timestamp: result.at ?? at,
+      },
+    ];
+    // Core persists no topic for a result over 8 KiB, which a large topic's preparation exceeds.
+    const preparation = (
+      id: string,
+      change: { args?: Record<string, unknown>; isError?: boolean } = {},
+    ) =>
+      exchange(id, "research_topics", change.args ?? prepare, {
+        details: {
+          persistedDetailsTruncated: true,
+          originalDetailsBytes: 20_000,
+          originalDetailKeys: ["topic", "route"],
+        },
+        isError: change.isError,
+      });
+    // Each send is the good one except for the single property it changes.
+    const sent = (
+      id: string,
+      change: {
+        args?: Record<string, unknown>;
+        details?: Record<string, unknown>;
+        isError?: boolean;
+        at?: number;
+      } = {},
+    ) =>
+      exchange(id, "message", change.args ?? sendParams, {
+        details: change.details ?? delivered,
+        isError: change.isError,
+        at: change.at,
+      });
+    history.push(
+      ...sent("before-preparation"),
+      ...preparation("failed-preparation", { isError: true }),
+      ...preparation("other-topic", { args: { ...prepare, id: "elsewhere" } }),
+      ...preparation("other-completion", { args: { ...prepare, completionId: "an-older-one" } }),
+      ...preparation("other-text", { args: { ...prepare, ownerText: "An unrelated message" } }),
+      ...sent("after-other-preparations"),
+    );
+    await expect(coordinator.execute("unprepared", confirm)).rejects.toThrow(
+      "No successful native text",
+    );
+    const unpreparedCompletion = await completeTopic(harness, "unprepared");
+    await expect(
+      coordinator.execute("no-wording", {
+        action: "confirm_completion",
+        id: "unprepared",
+        expectedRevision: 2,
+        completionId: unpreparedCompletion,
+      }),
+    ).rejects.toThrow("No completion text is prepared");
+
+    history.push(
+      ...preparation("prepare"),
+      ...sent("other-wording", { args: { ...sendParams, message: "An unrelated message" } }),
+      ...sent("other-target", { args: { ...sendParams, target: "telegram:someone-else" } }),
+      ...sent("failed", {
+        details: { ok: false, error: "Telegram rejected the message" },
+        isError: true,
+      }),
+      ...sent("before-completion", { at: 1 }),
+    );
+    await expect(coordinator.execute("nothing-sent", confirm)).rejects.toThrow(
+      "No successful native text",
+    );
+
+    history.push(...sent("good"));
+    await expect(
+      coordinator.execute("other-call", { ...confirm, toolCallId: "other-call" }),
+    ).rejects.toThrow("No successful native text");
+    await coordinator.execute("recover", confirm);
+    expect(
+      (await coordinator.execute("get", { action: "get", id: "question" })).details,
+    ).toMatchObject({
+      destinations: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "main",
+          receipt: expect.objectContaining({
+            ...main,
+            kind: "owner_text",
+            messageId: "261",
+            toolCallId: "good",
+          }),
+        }),
+      ]),
+    });
+    expect((await coordinator.execute("finalize", finalize)).details).toEqual({
+      id: "question",
+      deleted: true,
+    });
+  } finally {
+    await close();
   }
 });

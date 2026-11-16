@@ -383,6 +383,29 @@ class Ledger {
           completedAtMs: null,
         });
       }
+      case "link_session": {
+        const topic = r.topic(request.id);
+        r.active(topic);
+        if (!caller) {
+          throw new Error("link_session needs a conversation session.");
+        }
+        const { sessionRefs } = r.links(topic.id);
+        if (
+          !sessionRefs.some(
+            (ref) => ref.sessionKey === caller.sessionKey && ref.sessionId === caller.sessionId,
+          )
+        ) {
+          const linked = unionLinks({ sessionRefs }, { sessionRefs: [caller] }).sessionRefs;
+          parseRequest({
+            action: "update",
+            id: topic.id,
+            expectedRevision: topic.revision,
+            changes: { sessionRefs: linked },
+          });
+          r.setLinks(topic.id, { sessionRefs: linked });
+        }
+        return r.get(topic.id);
+      }
       case "forget": {
         const topic = r.topic(request.id);
         r.expectRevision(topic, request.expectedRevision);

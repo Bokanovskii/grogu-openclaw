@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.3.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.1.0.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -89,8 +89,13 @@ researchers may overlap and synthesize saved information independently.
 
 New conversation references must match the current tool invocation's
 `sessionKey` and `sessionId`, not a model-supplied identity. `add` automatically
-links that conversation when `sessionRefs` is omitted. Scheduled runs and topics
-with `origin: automation` do not automatically become originating conversations.
+links that conversation when `sessionRefs` is omitted. A conversation cannot see
+its own `sessionId`, so it links itself to an existing topic with `link_session`,
+which takes only the topic `id` and records the host-supplied caller. The link is
+idempotent and leaves the revision unchanged, because a link is not a content
+edit and must not invalidate a researcher's pending write. A topic pending
+completion rejects it. Scheduled runs cannot link, and they and topics with
+`origin: automation` do not automatically become originating conversations.
 Explicit new references
 may name messages only within that same conversation. Existing references survive
 updates and merges; an empty patch array does not unlink them. Legacy topics
@@ -115,6 +120,7 @@ callers do not set service time.
 | `add`                | `id`, `title`, optional topic fields                                                                             | Full topic; duplicate IDs fail                                                                                    |
 | `update`             | `id`, `expectedRevision`, `changes`                                                                              | Patched full topic; content revision increments                                                                   |
 | `merge`              | Target `id`, `expectedRevision`, `sourceId`, `sourceRevision`, `changes` with required `title` and `brief`       | Target, `mergedId`, `affectedSessionRefs`; source row deleted atomically                                          |
+| `link_session`       | `id`                                                                                                             | Full topic with the current conversation linked; revision unchanged; rejected for scheduled runs                  |
 | `due`                | Optional `category`, `limit` (default 10, max 50)                                                                | `{topics}` with explainable `score`                                                                               |
 | `record_check`       | `id`, `expectedRevision`, `operationId`; optional scheduling fields                                              | Full topic; one service unit recorded                                                                             |
 | `source_list`        | Optional `after`, `limit` (default 20, max 50)                                                                   | `{sources, nextCursor}`                                                                                           |

@@ -65,12 +65,13 @@ when `delivery.agentId` is the Main agent. Without it, Main sends nothing and
 keeps the finding pending. The route is installation configuration and never
 part of this repository.
 
-An automatic Main run ends `NO_REPLY` after it sends a text. A held or no-text
-run ends with one plain status line, which is never delivered. In a candidate
-handoff run, a silent ending after tool calls without a send makes core run an
-extra text-only pass and keep its "tools are unavailable" note in Main's
-history. The policy tells Main to ignore such a note, and job prompts leave the
-ending to the policy.
+An automatic Main run ends with one plain status line after a send, a hold, or no
+text, and that line is never delivered. A silent ending (`NO_REPLY`) after tool
+calls in a candidate handoff run makes core run an extra text-only pass and keep
+its "tools are unavailable" note in Main's history. That happens after a send too,
+because a send from a run with no source conversation does not count as a
+delivered reply. The policy tells Main to ignore such a note, and job prompts
+leave the ending to the policy.
 
 ## Update
 

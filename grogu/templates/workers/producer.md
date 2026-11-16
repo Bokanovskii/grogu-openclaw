@@ -31,9 +31,10 @@ the current `expectedRevision`, a `message`, and a unique `operationId`, and no
 other fields. Put in the `message` what changed, why it matters, sources,
 uncertainty, and the topic reference.
 For completed goals, call `complete` with the current revision. Use `post_update`
-with its completion identity for the originating Grogu threads, then
-`notify_main` for the completion acknowledgment. Main chooses the wording and
-notification time.
+for the originating Grogu threads. It takes `id`, the current `expectedRevision`,
+the stored `sessionKey` and `sessionId`, the `message`, a unique `operationId`,
+and the `completionId` from `complete`. Then use `notify_main` for the completion
+acknowledgment. Main chooses the wording and notification time.
 
 Keep routine topic work in tool steps. Save useful context even when it does
 not merit a text. After saving a quiet result, end with one short plain status

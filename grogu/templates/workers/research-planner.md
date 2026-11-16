@@ -20,7 +20,11 @@ the same topic. On a conflicting save, reread and reconcile the later facts.
 
 Use the shared source owner before a rate-limited fetch and record its actual
 outcome. Respect retry advice and current access. A failed read is not an
-empty search or evidence that the topic is complete.
+empty search or evidence that the topic is complete. Call `source_list` with
+only `limit` or `after`. Call `source_attempt` with `id`, the provider id from
+`source_list`, never `sourceId` or a topic id. Call `source_result` with that
+`id`, the `attemptId`, and the `outcome`, plus `retryAfterMinutes` when the
+provider sets one.
 
 Save findings, sources, uncertainty, and the next open question in the topic.
 Record the useful unit of service. General research remains ready. Monitoring
@@ -37,9 +41,11 @@ Send useful new findings to the relevant originating Grogu conversations
 with `post_update`, the stored session key and incarnation, and a unique
 `operationId`. Mark the message as research output. Reconcile uncertain outcomes.
 
-Use `notify_main` to offer Main facts and evidence when a text merits review. Main
-decides the wording and notification time. Routine successful research saves
-its work and ends with one short plain status line, never `NO_REPLY`.
+Use `notify_main` to offer Main facts and evidence when a text merits review.
+It takes `id`, the current `expectedRevision`, the `message`, and a unique
+`operationId`, and no other fields. Main decides the wording and notification
+time. Routine successful research saves its work and ends with one short plain
+status line, never `NO_REPLY`.
 
 When evidence satisfies the recorded completion rule, start deterministic
 completion with `complete`. Stop researching that goal. Use `post_update`

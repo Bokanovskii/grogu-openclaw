@@ -210,6 +210,104 @@ source, package, or version, or OpenClaw reports an unresolved error. If an
 installation fails, read the private native receipt. Fix the reported problem
 and run the command again.
 
+### Main review and completion settle jobs
+
+Main sends every automatic text, and it sends each one through the `message`
+tool. Main holds a finding during quiet hours. Two small jobs wake the Main
+conversation, so held findings and stalled completions do not wait for a new
+event. The [Main policy](plugins/grogu-coordination/policy/main.md) owns the
+text rules, so each job only says when to look.
+
+Grogu setup does not create these jobs. Before you start, install the Research
+Topics and coordination plugins, and let the Main agent use the `message` tool
+for the owner's route. Run these steps once on each Gateway host. Replace each
+value in angle brackets with the installation's own choice. The examples assume
+quiet hours from midnight to 06:00.
+
+1. Create the morning review. It runs once a day when quiet hours end. Add
+   `browser` to `--tools` only on a host that has a browser.
+
+   ```sh
+   openclaw cron add \
+     --name "Main: morning text review" \
+     --description "Reviews held findings and pending topic completions using Main's recent phone context and text policy." \
+     --notification-description "Main reviews worthwhile findings before sending an automatic text." \
+     --cron "0 6 * * *" \
+     --tz "<IANA time zone>" \
+     --agent <main-agent-id> \
+     --session session:agent:<main-agent-id>:main \
+     --model "<provider/model>" \
+     --thinking <thinking level> \
+     --timeout-seconds 0 \
+     --tools read,research_topics,message \
+     --no-deliver \
+     --declaration-key grogu-main-morning-review \
+     --message "Review worthwhile findings held in this Main conversation during quiet hours. Read current topics where their details matter, and list completion_pending topics through research_topics to settle due acknowledgments. Apply Main's text policy using recent inputs, confirmed sends, and owner replies. Preserve uncertain outcomes. Finish NO_REPLY when no text is useful."
+   ```
+
+2. Create the completion settle job. It checks every 20 minutes from the end of
+   quiet hours to the end of the day, so it never wakes Main during quiet hours.
+   The trigger script starts a run only when a topic stays in
+   `completion_pending`.
+
+   ```sh
+   openclaw cron add \
+     --name "Main: completion settle" \
+     --description "Settles completion acknowledgments that stayed pending after Main's first handoff." \
+     --notification-description "Main settles a stalled completion acknowledgment before it sends a text." \
+     --cron "*/20 6-23 * * *" \
+     --tz "<IANA time zone>" \
+     --agent <main-agent-id> \
+     --session session:agent:<main-agent-id>:main \
+     --model "<provider/model>" \
+     --thinking <thinking level> \
+     --timeout-seconds 0 \
+     --tools read,research_topics,message \
+     --no-deliver \
+     --declaration-key grogu-main-completion-settle \
+     --message "Some topic completions are still waiting for Main's acknowledgment. List completion_pending topics through research_topics, read each one, and settle it with Main's completion rules. Finish NO_REPLY when nothing needs a text." \
+     --trigger-script - <<'JS'
+   const result = await research_topics({ action: "list", status: "completion_pending", limit: 20 });
+   if (!result || !Array.isArray(result.topics)) throw new Error("Completion check failed");
+   const prior = trigger.state && trigger.state.tries ? trigger.state.tries : {};
+   const tries = {};
+   let fire = false;
+   for (const topic of result.topics) {
+     const seen = prior[topic.id];
+     if (seen === undefined) {
+       tries[topic.id] = 0;
+       continue;
+     }
+     if (seen < 3) {
+       tries[topic.id] = seen + 1;
+       fire = true;
+     } else {
+       tries[topic.id] = seen;
+     }
+   }
+   return { fire, state: { tries } };
+   JS
+   ```
+
+3. Turn off the native failure alert for both jobs, so a failed run cannot send
+   its own text outside Main's rules. Each `cron add` command printed the job
+   `id`. Use those two values here.
+
+   ```sh
+   openclaw cron edit <review-job-id> --no-failure-alert
+   openclaw cron edit <settle-job-id> --no-failure-alert
+   ```
+
+The declaration key makes a second run of the same `cron add` command update
+that job and not create another one.
+
+The settle trigger records each pending topic on its first sighting and does not
+start Main. If the same topic is still pending on the next check, the trigger
+starts Main, up to three times for each topic. A trigger that finds nothing
+leaves no run history, so `openclaw cron runs <job-id>` stays empty until a
+completion stays pending. Both jobs deliver nothing themselves. Main sends any
+text through `message`.
+
 ### Small-disk storage policy
 
 Automation detail expires after seven days by default through

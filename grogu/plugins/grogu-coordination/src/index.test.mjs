@@ -19,11 +19,13 @@ const configuration = {
   ],
 };
 
-function register(config = configuration, session = {}) {
+function register(config = configuration, session = {}, live = {}) {
   const hooks = new Map();
   let dispose;
   plugin.register({
     config: { session },
+    // A fresh copy per call, so only a read made at prompt time sees later edits.
+    runtime: { config: { current: () => structuredClone(live) } },
     pluginConfig: config,
     on: (name, handler) => hooks.set(name, handler),
     lifecycle: {
@@ -63,6 +65,43 @@ test("injects complete stable instructions only into the selected Main and keeps
   assert.equal(host.prompt({}), undefined);
   host.dispose();
   assert.equal(host.prompt({ agentId: "assistant" }), undefined);
+});
+
+test("gives only Main the owner text route from the live delivery configuration", () => {
+  const delivery = {
+    agentId: "assistant",
+    channel: "telegram",
+    target: "telegram:100",
+    accountId: "owner-bot",
+  };
+  const live = { plugins: { entries: { "research-topics": { config: { delivery } } } } };
+  const host = register(configuration, {}, live);
+  const main = { agentId: "assistant", sessionKey: "agent:assistant:main" };
+  const routeOf = (ctx) => {
+    const line = host.prompt(ctx).appendSystemContext.match(/^Owner text route.*?(\{.*\})$/m);
+    return line ? JSON.parse(line[1]) : undefined;
+  };
+  assert.deepEqual(routeOf(main), {
+    channel: "telegram",
+    target: "telegram:100",
+    accountId: "owner-bot",
+  });
+  // A later edit reaches the next turn without registering again.
+  delivery.target = "telegram:200";
+  delete delivery.accountId;
+  assert.deepEqual(routeOf(main), { channel: "telegram", target: "telegram:200" });
+  for (const ctx of [
+    { agentId: "assistant", sessionKey: "agent:assistant:cron:inbox" },
+    { agentId: "assistant", jobId: "snow" },
+    { agentId: "reviewer", sessionKey: "agent:reviewer:main" },
+  ]) {
+    assert(!host.prompt(ctx).appendSystemContext.includes("telegram:200"));
+  }
+  delivery.agentId = "reviewer";
+  assert.equal(routeOf(main), undefined);
+  delivery.agentId = "assistant";
+  delete live.plugins.entries["research-topics"];
+  assert.equal(routeOf(main), undefined);
 });
 
 test("accepts reusable producer roles without giving every agent Main authority", () => {

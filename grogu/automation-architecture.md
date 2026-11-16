@@ -169,6 +169,15 @@ its prepared wording in Main's recent history. Main sends the wording again only
 when that finds nothing.
 Partial, simulated, and uncertain sends leave the acknowledgment pending.
 
+A completion handoff is one queued Main turn. If that turn fails, the topic
+stays `completion_pending` and Main's morning review settles it after quiet
+hours. A sooner daytime retry is installation configuration, not repository
+state. A job wakes the Main session when its trigger finds the same
+`completion_pending` topic on two checks in a row, at most three times per
+topic, and only outside quiet hours. The trigger lists topics through
+`research_topics`. Main still prepares, sends, and finalizes through the
+completion rules above.
+
 Final removal follows the deterministic owner's conditions. Model-generated
 wording or an accepted request alone does not prove delivery. Unsupported or
 uncertain outcomes remain pending rather than deleting evidence.

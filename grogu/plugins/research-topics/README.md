@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.2.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.0.3.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -126,7 +126,7 @@ callers do not set service time.
 | `complete`           | `id`, `expectedRevision`, `reason`                                                                               | Frozen topic and required destinations; requires a recorded completion rule                                       |
 | `reopen`             | `id`, `expectedRevision`                                                                                         | Explicitly reopens a pending topic for an owner correction; clears completion obligations and returns it to ready |
 | `prepare_text`       | `id`, `expectedRevision`, `completionId`, `ownerText`                                                            | Main-only final wording and configured route; changing wording increments revision                                |
-| `confirm_completion` | `id`, `expectedRevision`, `completionId`, `toolCallId`                                                           | Main-only recovery from its bounded recent native message history                                                 |
+| `confirm_completion` | `id`, `expectedRevision`, `completionId`; optional `toolCallId`                                                  | Main-only recovery from its bounded recent native message history                                                 |
 | `finalize`           | `id`, `expectedRevision`, `completionId`                                                                         | Deletes only after all required outcomes have native receipts                                                     |
 | `forget`             | `id`, `expectedRevision`                                                                                         | `{id, deleted:true}`; immediate permanent deletion for an explicit owner request                                  |
 
@@ -263,19 +263,38 @@ Main uses `prepare_text` to record its final wording, up to 8,000 characters.
 Only its exact recorded incarnation can prepare that acknowledgment. Main then
 uses the normal `message` tool with that wording and the returned route.
 Before the send, the plugin binds that native call to the prepared revision and
-completion identity. The `after_tool_call` hook consumes that binding. It records success
-only for a settled, nonpartial send with a platform message ID, matching
-Main, destination, account when configured, and prepared wording.
+completion identity. The `after_tool_call` hook consumes that binding. It records
+success only for a send from Main with the prepared wording to the configured
+target, with a settled, nonpartial result that carries a platform message ID.
+The `channel` and `accountId` may be left out of the call because the message
+tool resolves them itself. When the call names them, they must match the
+configured route. A call that omits the channel counts only when the target is
+qualified by the configured channel. A deployment with several accounts on one
+channel must have Main name the account.
+
+The result evidence is the host's delivery fact when the host attached one. The
+host attaches that fact only to replies to the run's own source conversation. A
+plugin-handled send from another run, such as Main's scheduled review, carries
+only the channel's success envelope (`ok` and `messageId`), so the same
+projection the host uses for plugin sends is accepted. Failed, simulated,
+partial, and skipped sends never count.
 Unrelated messages and ambiguous matches do not settle a topic. A send that
 started before reopening cannot settle a new completion with the same wording.
 
 The native hook is the normal confirmation path, including nested tool calls.
-After an interruption, Main can use `confirm_completion` with the original
-`toolCallId`. Recovery reads at most 200 recent native messages in Main. It
-requires a successful `prepare_text` result for the current completion before
-the matching send call and successful host-owned delivery facts.
+After an interruption, Main can use `confirm_completion`. The `toolCallId` is
+optional, because the model does not see the IDs that the serving layer
+generates. Without it, recovery finds the send by the prepared wording. Recovery
+reads at most 200 recent native messages in Main. It matches the `prepare_text`
+call by its recorded arguments (topic, completion identity, and wording) and
+requires that call to have a successful result. It does not read the topic from
+the stored result, because the host keeps no topic in a stored result over 8 KiB.
+The matching send call must come after that preparation and finish after the
+completion was recorded. The result must pass the same rules as the hook. A
+supplied `toolCallId` limits the match to that call.
 Missing, compacted, or otherwise unavailable evidence leaves completion pending.
-Do not resend blindly. No model-provided receipt or success boolean is accepted.
+Main sends the wording again only when recovery finds no matching send. No
+model-provided receipt or success boolean is accepted.
 
 Only native prepared facts cross into the worker. Its transaction rechecks the
 topic revision, completion identity, and exact destination. Queued runs,

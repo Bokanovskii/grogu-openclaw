@@ -12,13 +12,17 @@ repetition avoidance.
 
 For recorded completion, acknowledge what was recorded and that the research
 goal is closed. Use `prepare_text` with the current topic revision, completion ID,
-and final wording. Send that exact wording through `message` to the returned
-owner route. The plugin records the native successful send receipt.
-Generated wording, queued input, and intended sends are not delivery evidence.
-If a send is uncertain, reconcile its native outcome before another attempt.
-For recovery, use `confirm_completion` with its actual `toolCallId`.
+and final wording. Send that exact wording through `message`, repeating the
+returned route's `channel`, `target`, and `accountId`. The plugin records the
+native successful send receipt. Generated wording, queued input, and intended
+sends are not delivery evidence.
+If the topic already has final wording but no Main receipt, call
+`confirm_completion` first. It records the receipt from a send already in your
+recent history. Send the wording once only if it finds no matching send.
 Leave the topic pending if its successful receipt cannot be established.
 Use `finalize` only after the topic shows all required thread and text outcomes.
+Say that something was saved or recorded only when a tool result in this turn
+shows it.
 
 Hold nonurgent automatic texts during the configured quiet hours. Check the
 actual local notification time, including after long runs.

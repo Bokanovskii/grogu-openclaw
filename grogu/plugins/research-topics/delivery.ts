@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  projectPluginMessageDeliveryFact,
+  readEmbeddedMessageDeliveryFact,
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import {
   buildAgentMainSessionKey,
@@ -65,6 +69,14 @@ export function createDelivery(api: OpenClawPluginApi) {
     return { sessionKey: mainKey, sessionId: entry.sessionId };
   };
 
+  // The message tool resolves an omitted channel or account itself, so Main may leave them out.
+  // An omitted channel is trusted only when the target names it; explicit values must match.
+  const routeMatches = (params: Record<string, unknown>) =>
+    params.target === target &&
+    (params.channel === channel ||
+      (params.channel === undefined && target.startsWith(`${channel}:`))) &&
+    (accountId === undefined || params.accountId === undefined || params.accountId === accountId);
+
   function receipt(
     params: Record<string, unknown>,
     result: unknown,
@@ -72,30 +84,28 @@ export function createDelivery(api: OpenClawPluginApi) {
     toolCallId: string,
     completedAtMs: number,
   ): CompletionReceipt | undefined {
-    const details = record(record(result)?.details);
-    const delivery = record(details?.messageDelivery);
+    const outcome = record(result);
+    // Core attaches `messageDelivery` only to replies to the current source. Plugin-handled sends
+    // from other runs, such as Main's cron review, return only the channel's own success envelope.
+    const recorded = record(outcome?.details)?.messageDelivery;
+    const delivery =
+      recorded === undefined
+        ? projectPluginMessageDeliveryFact(result)
+        : readEmbeddedMessageDeliveryFact(recorded);
+    const messageId = delivery?.primaryPlatformMessageId;
     if (
       !isMain(caller) ||
       params.action !== "send" ||
-      params.channel !== channel ||
-      params.target !== target ||
-      (accountId !== undefined && params.accountId !== accountId) ||
+      !routeMatches(params) ||
       params.dryRun === true ||
-      record(result)?.isError === true ||
+      outcome?.isError === true ||
       delivery?.status !== "settled" ||
-      delivery.partialDelivery !== false ||
-      typeof delivery.primaryPlatformMessageId !== "string" ||
-      !delivery.primaryPlatformMessageId.trim()
+      delivery.partialDelivery ||
+      !messageId?.trim()
     ) {
       return undefined;
     }
-    return {
-      ...caller,
-      kind: "owner_text",
-      messageId: delivery.primaryPlatformMessageId,
-      toolCallId,
-      completedAtMs,
-    };
+    return { ...caller, kind: "owner_text", messageId, toolCallId, completedAtMs };
   }
 
   return {
@@ -107,11 +117,17 @@ export function createDelivery(api: OpenClawPluginApi) {
     async recoverReceipt(
       caller: Session | undefined,
       topic: TopicRecord,
-      toolCallId: string,
+      toolCallId: string | undefined,
       assertCurrent: () => void,
     ) {
       if (!caller || !isMain(caller)) {
         throw new Error("Only Main can reconcile its completion text.");
+      }
+      const ownerText = topic.ownerText;
+      if (!ownerText) {
+        throw new Error(
+          "No completion text is prepared for this topic. Reread it and use prepare_text for a pending completion.",
+        );
       }
       const current = await mainSession(assertCurrent);
       if (current.sessionId !== caller.sessionId) {
@@ -122,46 +138,63 @@ export function createDelivery(api: OpenClawPluginApi) {
         limit: 200,
       });
       assertCurrent();
-      let params: Record<string, unknown> | undefined;
+      // Serving layers generate tool-call IDs, so the model cannot be expected to quote one:
+      // find the send by the prepared wording unless an exact call was named. Core keeps no topic
+      // in a persisted result over 8 KiB, so the preparation is read from its call arguments.
+      const preparations = new Set<string>();
+      const sends = new Map<string, Record<string, unknown>>();
       let prepared = false;
       for (const value of messages) {
         const message = record(value);
-        const preparation = record(record(message?.details)?.topic);
+        const calls =
+          message?.role === "assistant" && Array.isArray(message.content) ? message.content : [];
+        for (const content of calls) {
+          const call = record(content);
+          const params = record(call?.arguments);
+          if (call?.type !== "toolCall" || typeof call.id !== "string") {
+            continue;
+          }
+          if (
+            call.name === "research_topics" &&
+            params?.action === "prepare_text" &&
+            params.id === topic.id &&
+            params.completionId === topic.completionId &&
+            params.ownerText === ownerText
+          ) {
+            preparations.add(call.id);
+          } else if (
+            prepared &&
+            call.name === "message" &&
+            (toolCallId === undefined || call.id === toolCallId) &&
+            params?.message === ownerText
+          ) {
+            sends.set(call.id, params);
+          }
+        }
+        if (message?.role !== "toolResult" || typeof message.toolCallId !== "string") {
+          continue;
+        }
         if (
-          message?.role === "toolResult" &&
           message.toolName === "research_topics" &&
           message.isError !== true &&
-          preparation?.id === topic.id &&
-          preparation.completionId === topic.completionId &&
-          preparation.revision === topic.revision &&
-          preparation.ownerText === topic.ownerText
+          preparations.has(message.toolCallId)
         ) {
           prepared = true;
         }
-        if (message?.role === "assistant" && Array.isArray(message.content)) {
-          for (const content of message.content) {
-            const call = record(content);
-            if (call?.type === "toolCall" && call.name === "message" && call.id === toolCallId) {
-              params = prepared ? record(call.arguments) : undefined;
-            }
-          }
-        }
+        const params = message.toolName === "message" ? sends.get(message.toolCallId) : undefined;
         if (
-          params?.message === topic.ownerText &&
-          message?.role === "toolResult" &&
-          message.toolName === "message" &&
-          message.toolCallId === toolCallId &&
+          params &&
           typeof message.timestamp === "number" &&
           message.timestamp >= (topic.completedAtMs ?? Infinity)
         ) {
-          const verified = receipt(params, message, caller, toolCallId, message.timestamp);
+          const verified = receipt(params, message, caller, message.toolCallId, message.timestamp);
           if (verified) {
             return verified;
           }
         }
       }
       throw new Error(
-        "No matching successful native text receipt is available in Main's recent history. Keep completion pending; do not resend blindly.",
+        "No successful native text for the prepared wording is in Main's recent history. If this wording may already have been sent, keep completion pending. If it was never sent, send it once through message to the returned route; the plugin records the receipt.",
       );
     },
     async post(

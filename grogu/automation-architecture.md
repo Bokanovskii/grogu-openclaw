@@ -157,7 +157,12 @@ Completion stops further research. A pending record retains the required
 originating-thread updates and Main acknowledgment until they settle.
 Main prepares the final completion text through `prepare_text`, then sends it
 with the normal `message` tool. The plugin records the native successful send
-receipt only for that text, Main incarnation, and configured owner route.
+receipt only for that text, Main incarnation, and configured owner route. The
+receipt rules accept the host's delivery fact or, for a plugin-handled send
+without one, the channel's success envelope with a message ID. If a receipt is
+missing after a send, Main calls `confirm_completion`, which finds the send by
+its prepared wording in Main's recent history. Main sends the wording again only
+when that finds nothing.
 Partial, simulated, and uncertain sends leave the acknowledgment pending.
 
 Final removal follows the deterministic owner's conditions. Model-generated

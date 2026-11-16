@@ -139,7 +139,7 @@ export const requestSchema = Type.Union([
     id,
     expectedRevision: revision,
     completionId: nonblank(128),
-    toolCallId: nonblank(256),
+    toolCallId: Type.Optional(nonblank(256)),
   }),
   object({
     action: Type.Literal("finalize"),
@@ -435,7 +435,7 @@ export const toolDescription =
   "notify_main sends a text candidate to configured Main; keep its returned runId, never blindly resend. " +
   "For completion, Main uses prepare_text with its final ownerText, then the normal message tool to " +
   "the configured owner route. Native successful message receipts settle that obligation. " +
-  "Main can recover with confirm_completion and the actual toolCallId; no model-supplied delivery " +
-  "claim is accepted. finalize never deletes unconfirmed destinations. forget takes only id and expectedRevision; it is immediate permanent " +
+  "Main can recover with confirm_completion, which finds the prepared wording in its recent " +
+  "native history; no model-supplied delivery claim is accepted. finalize never deletes unconfirmed destinations. forget takes only id and expectedRevision; it is immediate permanent " +
   "deletion only for an explicit owner request, never a completion-verification workaround. " +
   "No archives, source fetches, or per-topic jobs are created.";

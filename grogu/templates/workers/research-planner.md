@@ -38,8 +38,10 @@ session links, then update the affected conversations.
 ## Return the result
 
 Send useful new findings to the relevant originating Grogu conversations
-with `post_update`, the stored session key and incarnation, and a unique
-`operationId`. Mark the message as research output. Reconcile uncertain outcomes.
+with `post_update`. It takes `id`, the current `expectedRevision`, the stored
+`sessionKey` and `sessionId`, the `message`, and a unique `operationId`. Add
+`completionId` only for a closing update, never empty. Mark the message as
+research output. Reconcile uncertain outcomes.
 
 Use `notify_main` to offer Main facts and evidence when a text merits review.
 It takes `id`, the current `expectedRevision`, the `message`, and a unique

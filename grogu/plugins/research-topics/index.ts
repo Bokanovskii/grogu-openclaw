@@ -212,6 +212,15 @@ export default definePluginEntry({
                   ) {
                     request = { ...request, origin: "automation", sessionRefs: [] };
                   }
+                  if (
+                    request.action === "link_session" &&
+                    context.sessionKey &&
+                    isCronSessionKey(context.sessionKey)
+                  ) {
+                    throw new Error(
+                      "Scheduled runs are not conversations and cannot link. Use post_update for recorded conversations.",
+                    );
+                  }
                   const needsDelivery = [
                     "complete",
                     "post_update",

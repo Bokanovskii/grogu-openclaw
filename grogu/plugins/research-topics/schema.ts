@@ -111,6 +111,7 @@ export const requestSchema = Type.Union([
     reason: nonblank(2_000),
   }),
   object({ action: Type.Literal("reopen"), id, expectedRevision: revision }),
+  object({ action: Type.Literal("link_session"), id }),
   object({
     action: Type.Literal("post_update"),
     id,
@@ -419,7 +420,9 @@ export const toolDescription =
   "add needs a new stable slug id and title. update patches supplied fields inside changes and requires expectedRevision. On conflict reread " +
   "and reconcile, never blindly replay. merge also requires sourceRevision and reconciled title/brief; " +
   "it unions links and returns affectedSessionRefs for you to update those sessions. New sessionRefs " +
-  "must be your current conversation; existing refs survive updates/merges. sourceIds are " +
+  "must be your current conversation; existing refs survive updates/merges. To receive updates on an existing " +
+  "topic your conversation did not add, call link_session with only id after you contribute to it (add already " +
+  "links you; scheduled runs cannot link). sourceIds are " +
   "provider budgets, not conversations. No claims: overlapping research is allowed. " +
   "Intake runs bounded new-evidence passes; only the research worker advances old topics. " +
   "due orders least-served first, then priority and oldest waiting. record_check uses expectedRevision " +

@@ -231,6 +231,24 @@ describe("research_topics v2", () => {
           changes: { sessionRefs: [secondSession] },
         }),
       ).rejects.toThrow("current caller");
+      const link = { action: "link_session", id: "topic" };
+      const second = factory.create({ ...secondSession, assertInvocationCurrent: () => {} });
+      const scheduled = factory.create({
+        sessionKey: "agent:grogu:cron:job-1:run:run-1",
+        sessionId: "scheduled-incarnation",
+        assertInvocationCurrent: () => {},
+      });
+      if (!second || Array.isArray(second) || !scheduled || Array.isArray(scheduled)) {
+        throw new Error("Expected conversation and scheduled research tools");
+      }
+      // A conversation cannot name its own incarnation, so the host-supplied caller is the only link it can make.
+      for (const callId of ["link", "relink"]) {
+        expect((await second.execute(callId, link)).details).toMatchObject({
+          revision: 1,
+          sessionRefs: [firstSession, secondSession],
+        });
+      }
+      await expect(scheduled.execute("scheduled", link)).rejects.toThrow("cannot link");
       const attempts = await Promise.all([
         tool.execute("first", { action: "source_attempt", id: "shared" }),
         tool.execute("second", { action: "source_attempt", id: "shared" }),

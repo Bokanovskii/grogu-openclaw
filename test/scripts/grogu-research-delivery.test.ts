@@ -11,6 +11,7 @@ import { expect, it, vi } from "vitest";
 import plugin from "../../grogu/plugins/research-topics/index.js";
 import { jsonResult } from "../../src/agents/tools/tool-results.js";
 import { createSessionEntryWithTranscript } from "../../src/config/sessions/session-accessor.js";
+import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import type { PluginHookHandlerMap } from "../../src/plugins/hook-types.js";
 import { createPluginRuntime } from "../../src/plugins/runtime/index.js";
 import { createOpenClawTestState } from "../../src/test-utils/openclaw-test-state.js";
@@ -27,6 +28,16 @@ async function openHarness(options: { accountId?: string } = {}) {
   // Stands in for the Gateway, which serves Main's native history only for Main's own session key.
   const history: unknown[] = [];
   const base = createPluginRuntime();
+  const liveConfig: OpenClawConfig = {
+    agents: {
+      defaults: { model: "shared/default-model" },
+      entries: { grogu: { model: { primary: "automatic/worker-model" } } },
+    },
+  };
+  const run = vi.fn<OpenClawPluginApi["runtime"]["subagent"]["run"]>(async (request) => ({
+    runId: "handoff-run",
+    sessionKey: request.sessionKey,
+  }));
   const api = createTestPluginApi({
     id: "research-topics",
     config: {
@@ -39,6 +50,7 @@ async function openHarness(options: { accountId?: string } = {}) {
     runtime: createPluginRuntime({
       subagent: {
         ...base.subagent,
+        run,
         getSessionMessages: async ({ sessionKey }) => ({
           messages: sessionKey === main.sessionKey ? [...history] : [],
         }),
@@ -48,6 +60,7 @@ async function openHarness(options: { accountId?: string } = {}) {
     registerService: services,
     on: hooks,
   });
+  api.runtime.config.current = () => liveConfig;
   api.runtime.state.resolveStateDir = () => state.stateDir;
   try {
     for (const session of [first, main]) {
@@ -93,10 +106,12 @@ async function openHarness(options: { accountId?: string } = {}) {
       source: makeTool(first),
       coordinator: makeTool(main),
       history,
+      run,
+      liveConfig,
       // The registration name selects each handler from the generic hook map.
       observe: afterHook[1] as PluginHookHandlerMap["after_tool_call"],
       begin: beforeHook[1] as PluginHookHandlerMap["before_tool_call"],
-      async close() {
+      close: async () => {
         try {
           await stopService({
             config: {},
@@ -116,6 +131,37 @@ async function openHarness(options: { accountId?: string } = {}) {
 }
 
 type Harness = Awaited<ReturnType<typeof openHarness>>;
+
+it("hands findings to Main with its configured model instead of the saved chat model", async () => {
+  const harness = await openHarness();
+  const { source, run, liveConfig } = harness;
+  try {
+    await source.execute("add", { action: "add", id: "question", title: "A synthetic question" });
+    const request = {
+      action: "notify_main",
+      id: "question",
+      expectedRevision: 1,
+      message: "A supported finding.",
+      operationId: "first-finding",
+    };
+    await source.execute("notify", request);
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      sessionKey: main.sessionKey,
+      model: "automatic/worker-model",
+      deliver: false,
+    });
+    liveConfig.agents = { defaults: { model: "shared/new-model" } };
+    await source.execute("notify-again", { ...request, operationId: "second-finding" });
+    expect(run.mock.calls[1]?.[0].model).toBe("shared/new-model");
+    delete liveConfig.agents;
+    await expect(
+      source.execute("missing-model", { ...request, operationId: "third-finding" }),
+    ).rejects.toThrow("configured primary model");
+    expect(run).toHaveBeenCalledTimes(2);
+  } finally {
+    await harness.close();
+  }
+});
 
 function completionIdOf(details: unknown) {
   if (

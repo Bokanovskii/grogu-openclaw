@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.1.0.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.1.1.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 
@@ -41,6 +41,10 @@ Plugin SDK is OpenClaw 2026.10.7. Preserve existing permissions when merging:
       "research-topics": {
         enabled: true,
         hooks: { allowConversationAccess: true },
+        subagent: {
+          allowModelOverride: true,
+          allowedModels: ["provider/automatic-model"],
+        },
         config: {
           delivery: {
             agentId: "assistant",
@@ -65,6 +69,11 @@ Keep `delivery` private. Its agent owns the canonical Main selected by
 identify the permitted owner route. Add `accountId` when the installation selects
 a particular account. This must agree with the coordination plugin's Main agent,
 which shows Main this route on every turn.
+Handoffs use this agent's configured primary model, or the shared default,
+not Main's saved chat override. Set `subagent.allowedModels` to that exact
+model reference. The model applies only to the handoff run. Main keeps the
+owner's saved model choice for later messages. Missing configuration or a
+denied model fails the handoff visibly.
 Without delivery configuration, ledger operations remain available, but handoffs
 and completion fail explicitly. Incognito conversations do not receive the tool.
 

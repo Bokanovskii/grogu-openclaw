@@ -34,10 +34,11 @@ in the installation configuration.
 
 Enable conversation access for prompt injection through
 `plugins.entries.grogu-coordination.hooks.allowConversationAccess: true`.
-The plugin uses `before_prompt_build`, preserves tools and conversation bytes,
-and reads policies once per registration. It rejects missing or oversized
-policies. It adds no changing activity table to ordinary prompts. The one live
-read is Main's owner text route (see Research and delivery).
+The plugin uses `before_prompt_build` and `before_model_resolve`, preserves
+tools and conversation bytes, and reads policies once per registration. It
+rejects missing or oversized policies. It adds no changing activity table to
+ordinary prompts. The live reads are Main's owner text route (see Research and
+delivery) and the agent's configured model (see Models).
 
 ## Research and delivery
 
@@ -72,6 +73,33 @@ its "tools are unavailable" note in Main's history. That happens after a send to
 because a send from a run with no source conversation does not count as a
 delivered reply. The policy tells Main to ignore such a note, and job prompts
 leave the ending to the policy.
+
+## Models
+
+The owner can choose a different model for one chat. That choice is for the
+owner's own messages. Runs that the system starts in that chat use the agent's
+configured model instead, for that run only. The chat keeps its saved choice.
+
+A run counts as system-started when its input came from another session (for
+example `sessions_send` or a subagent result) or from an internal system source
+(for example a heartbeat, a restart notice, or a background event). These
+internal sources continue the owner's own turn or request, so they keep the
+chat's model: `openclaw_agent_consult`, `session-companion`, `sessions.recover`,
+`session_goal_resume`, `exec_approval_followup`, and `stalled-turn-recovery`.
+
+Core owns some models, and this plugin does not change them: scheduled jobs
+(set on the job and checked by the native policy check), memory flushes, and
+heartbeats when a heartbeat model is configured. Plugin subagent runs carry no
+input source, so the plugin that starts them must pass the model itself.
+
+The configured model is `agents.entries.<id>.model`, or `agents.defaults.model`
+when the agent sets no primary. It is read live and must be a
+`provider/model` reference. A missing or unqualified model reports a hook error
+instead of guessing the provider.
+Requires core with input provenance in model hooks (2026.10.7 builds after
+Grogu PR 92).
+This hook covers native provider execution. External CLI backends bypass these
+hooks and are not covered by this model policy.
 
 ## Update
 

@@ -2,6 +2,30 @@ import { readFileSync } from "node:fs";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { buildAgentMainSessionKey } from "openclaw/plugin-sdk/routing";
 
+// Inputs that continue the owner's own turn or request keep the chat's chosen model.
+const OWNER_SOURCE_TOOLS = new Set([
+  "openclaw_agent_consult",
+  "session-companion",
+  "sessions.recover",
+  "session_goal_resume",
+  "exec_approval_followup",
+  "stalled-turn-recovery",
+]);
+
+const primaryOf = (model) => (typeof model === "string" ? model : model?.primary)?.trim();
+
+// Scheduled jobs, memory flushes, and heartbeats with a heartbeat model have model settings
+// that core owns.
+const isSystemRun = ({ trigger, jobId, inputProvenance: provenance }, heartbeatModel) =>
+  provenance !== undefined &&
+  provenance.kind !== "external_user" &&
+  !OWNER_SOURCE_TOOLS.has(provenance.sourceTool) &&
+  trigger !== "cron" &&
+  trigger !== "memory" &&
+  !jobId &&
+  !provenance.jobId &&
+  !(trigger === "heartbeat" && heartbeatModel);
+
 export default definePluginEntry({
   id: "grogu-coordination",
   name: "Grogu shared policy",
@@ -83,6 +107,33 @@ export default definePluginEntry({
           : policy,
         ...(subject ? { appendContext: subject } : {}),
       };
+    });
+    // A chat's model choice is for the owner's own messages. Runs the system starts in that
+    // chat use the agent's configured model, for this run only.
+    api.on("before_model_resolve", (_event, ctx) => {
+      if (retired || !agents.has(ctx.agentId)) {
+        return undefined;
+      }
+      ctx.hookInvocation?.assertActive();
+      const config = api.runtime.config.current();
+      const agent = config.agents?.entries?.[ctx.agentId];
+      const heartbeatModel =
+        primaryOf(agent?.heartbeat?.model) || primaryOf(config.agents?.defaults?.heartbeat?.model);
+      if (!isSystemRun(ctx, heartbeatModel)) {
+        return undefined;
+      }
+      const primary = primaryOf(agent?.model) || primaryOf(config.agents?.defaults?.model);
+      const slash = primary?.indexOf("/") ?? -1;
+      if (slash < 1 || slash === primary.length - 1) {
+        throw new Error(
+          "Grogu automatic runs require an agent or default model in provider/model form.",
+        );
+      }
+      const providerOverride = primary.slice(0, slash);
+      const modelOverride = primary.slice(slash + 1);
+      return providerOverride === ctx.modelProviderId && modelOverride === ctx.modelId
+        ? undefined
+        : { providerOverride, modelOverride };
     });
   },
 });

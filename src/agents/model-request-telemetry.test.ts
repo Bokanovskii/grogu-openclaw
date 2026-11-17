@@ -111,6 +111,29 @@ describe("metadata-only request telemetry", () => {
     expect(records.at(-1)).toBe(record);
   });
 
+  it("classifies people waiting on internal turns as interactive and automation as scheduled", () => {
+    const workClass = (fields: Parameters<typeof createRequestTracker>[0]) =>
+      createRequestTracker(fields, { write: () => {} }).record.workClass;
+    expect(
+      workClass({
+        trigger: "user",
+        inputProvenance: { kind: "internal_system", sourceTool: "openclaw_agent_consult" },
+      }),
+    ).toBe("interactive");
+    expect(
+      workClass({
+        trigger: "manual",
+        inputProvenance: { kind: "internal_system", sourceTool: "session-companion" },
+      }),
+    ).toBe("interactive");
+    expect(
+      workClass({
+        trigger: "user",
+        inputProvenance: { kind: "internal_system", sourceTool: "plugin_subagent" },
+      }),
+    ).toBe("scheduled");
+  });
+
   it("keeps unknown errors hashed and distinguishes incomplete wire streams from provider errors", () => {
     const error = Object.assign(new Error("private full error body"), {
       name: "private-error-name",

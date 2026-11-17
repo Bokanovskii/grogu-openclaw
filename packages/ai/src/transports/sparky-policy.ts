@@ -1,5 +1,6 @@
 import type { Context, Model } from "@openclaw/llm-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
+import { getAiTransportHost } from "../host.js";
 import { parseRetryAfterErrorSeconds } from "../internal/retry-after.js";
 
 function admissionAbortReason(signal?: AbortSignal): Error {
@@ -79,6 +80,7 @@ export async function retrySparkyAdmission<T>(
     throw new RangeError("Invalid admission retry budget");
   }
   const deadline = now() + timeoutMs;
+  const admissionWait = getAiTransportHost().withProviderAdmissionWait;
   for (let attempt = 0; ; attempt++) {
     throwIfAdmissionAborted(signal);
     try {
@@ -92,7 +94,7 @@ export async function retrySparkyAdmission<T>(
       if (!Number.isFinite(delayMs) || delayMs >= deadline - now()) {
         throw error;
       }
-      await sleep(delayMs, signal);
+      await (admissionWait ? admissionWait(() => sleep(delayMs, signal)) : sleep(delayMs, signal));
       throwIfAdmissionAborted(signal);
       if (now() >= deadline) {
         throw error;

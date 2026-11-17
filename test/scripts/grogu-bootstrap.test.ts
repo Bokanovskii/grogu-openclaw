@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertWorkerJobDefinitionPreserved,
-  bootstrapGroguWidgetSandbox,
+  bootstrapGroguRuntimeConfig,
   parseManagedWorkerTriggers,
   planManagedJobPatch,
   readWorkerSchemaPin,
@@ -240,7 +240,7 @@ describe("revision-checked metadata bootstrap", () => {
   });
 });
 
-describe("Grogu widget sandbox bootstrap", () => {
+describe("Grogu runtime configuration bootstrap", () => {
   const profile: OperatorProfile = {
     runtime: { node: "/synthetic/node", cli: "/synthetic/openclaw" },
     stateDir: "/synthetic/state",
@@ -274,7 +274,7 @@ describe("Grogu widget sandbox bootstrap", () => {
           ok: true,
           config: { mcp: { apps: { sameOriginSandbox: true } } },
         });
-      const result = await bootstrapGroguWidgetSandbox(profile, apply);
+      const result = await bootstrapGroguRuntimeConfig(profile, apply);
       expect(result).toMatchObject({
         mode: apply ? "applied" : "preview",
         sameOriginSandbox: current ?? true,
@@ -301,7 +301,63 @@ describe("Grogu widget sandbox bootstrap", () => {
         config: {},
       })
       .mockRejectedValueOnce(new Error("config changed; re-run config.get"));
-    await expect(bootstrapGroguWidgetSandbox(profile, true)).rejects.toThrow("config changed");
+    await expect(bootstrapGroguRuntimeConfig(profile, true)).rejects.toThrow("config changed");
+    expect(native.call).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { maxConcurrent: 2, apply: false, writes: false },
+    { maxConcurrent: 2, apply: true, writes: true },
+    { maxConcurrent: undefined, apply: true, writes: false },
+    { maxConcurrent: 8, apply: true, writes: false },
+  ])("removes only the legacy provider-wide cap through native config: %j", async (input) => {
+    native.call
+      .mockResolvedValueOnce({
+        valid: true,
+        hash: "observed-config-revision",
+        config: {
+          mcp: { apps: { sameOriginSandbox: false } },
+          agents: {
+            defaults: { maxConcurrent: input.maxConcurrent, subagents: { maxConcurrent: 1 } },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        config: {
+          mcp: { apps: { sameOriginSandbox: false } },
+          agents: { defaults: { subagents: { maxConcurrent: 1 } } },
+        },
+      });
+    const result = await bootstrapGroguRuntimeConfig(profile, input.apply);
+    expect(result).toMatchObject({
+      changed: input.maxConcurrent === 2,
+      removeLegacyConcurrency: input.maxConcurrent === 2,
+      sameOriginSandbox: false,
+    });
+    expect(native.call).toHaveBeenCalledTimes(input.writes ? 2 : 1);
+    if (input.writes) {
+      expect(native.call.mock.calls[1]?.slice(1, 3)).toEqual([
+        "config.patch",
+        expect.objectContaining({
+          baseHash: "observed-config-revision",
+          raw: JSON.stringify({ agents: { defaults: { maxConcurrent: null } } }),
+        }),
+      ]);
+    }
+  });
+
+  it("does not claim the legacy cap was removed when native config kept it", async () => {
+    const config = {
+      mcp: { apps: { sameOriginSandbox: true } },
+      agents: { defaults: { maxConcurrent: 2 } },
+    };
+    native.call
+      .mockResolvedValueOnce({ valid: true, hash: "observed-config-revision", config })
+      .mockResolvedValueOnce({ ok: true, config });
+    await expect(bootstrapGroguRuntimeConfig(profile, true)).rejects.toThrow(
+      "did not remove the legacy provider-wide concurrency cap",
+    );
     expect(native.call).toHaveBeenCalledTimes(2);
   });
 });

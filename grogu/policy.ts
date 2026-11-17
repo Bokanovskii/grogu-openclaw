@@ -19,6 +19,9 @@ export const REQUIRED_CHANNEL_QUEUE_MODES: Readonly<Record<string, string>> = Ob
   telegram: "followup",
 });
 
+// This former Sparky limit also blocked unrelated providers in the shared main lane.
+export const LEGACY_GROGU_AGENT_MAX_CONCURRENT = 2;
+
 const modelRef = z.string().regex(/^[^/\s]+\/\S+$/, "Expected provider/model");
 const workerContractMarker = z.enum([
   "GROGU_PRIVATE_SIGNAL_V1",
@@ -187,6 +190,15 @@ export function evaluatePolicy(
         expected: mode,
       });
     }
+  }
+  const maxConcurrent = (config as { agents?: { defaults?: { maxConcurrent?: unknown } } })?.agents
+    ?.defaults?.maxConcurrent;
+  if (maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT) {
+    violations.push({
+      where: "config.agents.defaults.maxConcurrent",
+      found: maxConcurrent,
+      expected: "unset (native bounded concurrency; Sparky admission is provider-specific)",
+    });
   }
   for (const job of jobs) {
     if (job.payload.kind !== "agentTurn" || policy.ownerOverrides.jobIds.includes(job.id)) {

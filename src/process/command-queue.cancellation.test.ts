@@ -1,11 +1,16 @@
 import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { withCommandLaneCapacitySuspended } from "./command-queue.capacity-suspension.js";
 import {
   clearCommandLane,
   CommandLaneClearedError,
   enqueueCommandInLane,
   getCommandLaneSnapshot,
+  getQueueSize,
+  isCommandLaneTaskMarkerCurrent,
+  markGatewayDraining,
+  resetCommandLane,
   setCommandLaneConcurrency,
 } from "./command-queue.js";
 import {
@@ -14,6 +19,7 @@ import {
   enqueueLaneQueue,
   peekLaneQueue,
   type QueueEntry,
+  type CommandLaneTaskMarker,
   removeLaneQueueEntry,
 } from "./command-queue.state.js";
 import { resetCommandQueueStateForTest } from "./command-queue.test-support.js";
@@ -92,6 +98,143 @@ describe("queued command scheduling and cancellation", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     resetCommandQueueStateForTest();
+  });
+
+  it("reacquires through existing priority/FIFO order without settling owned work during drain", async () => {
+    vi.useFakeTimers();
+    const waiting = createDeferred<CommandLaneTaskMarker>();
+    const ready = createDeferred();
+    const order: string[] = [];
+    const suspended = enqueueCommandInLane(
+      "main",
+      async (marker) => {
+        await withCommandLaneCapacitySuspended(() => {
+          waiting.resolve(marker);
+          return ready.promise;
+        });
+        order.push("resumed");
+      },
+      { allowCapacitySuspension: true },
+    );
+    const marker = await waiting.promise;
+    expect(isCommandLaneTaskMarkerCurrent(marker)).toBe(true);
+    expect(getQueueSize("main")).toBe(1);
+    const running = createDeferred();
+    const release = createDeferred();
+    const blocker = enqueueCommandInLane("main", async () => {
+      running.resolve();
+      await release.promise;
+    });
+    await running.promise;
+    const earlier = enqueueCommandInLane("main", async () => {
+      order.push("earlier");
+    });
+    const foreground = enqueueCommandInLane(
+      "main",
+      async () => {
+        order.push("foreground");
+      },
+      { priority: "foreground" },
+    );
+    markGatewayDraining();
+    ready.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getCommandLaneSnapshot("main")).toMatchObject({
+      activeCount: 2,
+      suspendedCount: 1,
+      queuedCount: 2,
+      capacityWaitingCount: 1,
+    });
+    expect(getQueueSize("main")).toBe(4);
+    release.resolve();
+    await Promise.all([blocker, suspended, earlier, foreground]);
+    expect(order).toEqual(["foreground", "earlier", "resumed"]);
+    expect(getQueueSize("main")).toBe(0);
+  });
+
+  it("cancels reacquisition but retains task ownership through cancellation cleanup", async () => {
+    vi.useFakeTimers();
+    const signal = new AbortController();
+    const waiting = createDeferred<CommandLaneTaskMarker>();
+    const ready = createDeferred();
+    const cleaning = createDeferred();
+    const cleanup = createDeferred();
+    const continued = vi.fn();
+    const suspended = enqueueCommandInLane(
+      "main",
+      async (marker) => {
+        try {
+          await withCommandLaneCapacitySuspended(() => {
+            waiting.resolve(marker);
+            return ready.promise;
+          });
+          continued();
+        } finally {
+          cleaning.resolve();
+          await cleanup.promise;
+        }
+      },
+      { allowCapacitySuspension: true, abortSignal: signal.signal },
+    );
+    const outcome = suspended.catch((error: unknown) => error);
+    const marker = await waiting.promise;
+    const running = createDeferred();
+    const release = createDeferred();
+    const blocker = enqueueCommandInLane("main", async () => {
+      running.resolve();
+      await release.promise;
+    });
+    await running.promise;
+    ready.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getCommandLaneSnapshot("main").capacityWaitingCount).toBe(1);
+    expect(clearCommandLane("main")).toBe(0);
+    const reason = new Error("owner cancelled");
+    signal.abort(reason);
+    await cleaning.promise;
+    expect(isCommandLaneTaskMarkerCurrent(marker)).toBe(true);
+    expect(getQueueSize("main")).toBe(2);
+    expect(continued).not.toHaveBeenCalled();
+    cleanup.resolve();
+    expect(await outcome).toBe(reason);
+    expect(getQueueSize("main")).toBe(1);
+    release.resolve();
+    await blocker;
+    expect(getQueueSize("main")).toBe(0);
+  });
+
+  it("cannot revive a suspended task or release a successor after a lane reset", async () => {
+    const waiting = createDeferred();
+    const ready = createDeferred();
+    const continued = vi.fn();
+    const suspended = enqueueCommandInLane(
+      "main",
+      async () => {
+        await withCommandLaneCapacitySuspended(() => {
+          waiting.resolve();
+          return ready.promise;
+        });
+        continued();
+      },
+      { allowCapacitySuspension: true },
+    );
+    const outcome = suspended.catch((error: unknown) => error);
+    await waiting.promise;
+    expect(resetCommandLane("main")).toBe(1);
+    const running = createDeferred<CommandLaneTaskMarker>();
+    const release = createDeferred();
+    const successor = enqueueCommandInLane("main", async (marker) => {
+      running.resolve(marker);
+      await release.promise;
+    });
+    const marker = await running.promise;
+    ready.resolve();
+    expect(await outcome).toMatchObject({ message: "Command task no longer owns its lane" });
+    expect(continued).not.toHaveBeenCalled();
+    expect(isCommandLaneTaskMarkerCurrent(marker)).toBe(true);
+    expect(getQueueSize("main")).toBe(1);
+    release.resolve();
+    await successor;
   });
 
   it("admits aging work in FIFO order while foreground arrivals continue", async () => {

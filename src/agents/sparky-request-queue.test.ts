@@ -1,4 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { retrySparkyAdmission } from "../../packages/ai/src/transports/sparky-policy.js";
+import { createDeferred } from "../../test/helpers/promise.js";
+import "../llm/ai-transport-host.js";
+import {
+  enqueueCommandInLane,
+  getCommandLaneSnapshot,
+  getQueueSize,
+  isCommandLaneTaskMarkerCurrent,
+  setCommandLaneConcurrency,
+  type CommandLaneTaskMarker,
+} from "../process/command-queue.js";
+import { resetCommandQueueStateForTest } from "../process/command-queue.test-support.js";
 import { createSparkyAdmission, queueSparkyFetch } from "./sparky-request-queue.js";
 import { makeProviderModelFixture } from "./test-helpers/provider-model-fixture.js";
 
@@ -14,6 +26,16 @@ const flush = async () => {
 };
 
 describe("provider-origin admission", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetCommandQueueStateForTest();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    resetCommandQueueStateForTest();
+  });
+
   it("preserves AbortError classification for an explicit null abort reason", async () => {
     const controller = new AbortController();
     controller.abort(null);
@@ -22,47 +44,43 @@ describe("provider-origin admission", () => {
     });
   });
 
-  it("keeps one of four lanes reserved for interactive work", async () => {
-    const pool = createSparkyAdmission({ maxWaiting: 2 });
-    const background = await Promise.all(
-      Array.from({ length: 3 }, () => pool.acquire(undefined, "scheduled")),
-    );
-    let fourthBackgroundAdmitted = false;
-    const fourthBackground = pool.acquire(undefined, "scheduled").then((release) => {
-      fourthBackgroundAdmitted = true;
+  it("keeps one of two slots reserved for humans without lending it to background work", async () => {
+    const pool = createSparkyAdmission({ maxWaiting: 1 });
+    const background = await pool.acquire(undefined, "scheduled");
+    let utilityAdmitted = false;
+    const utility = pool.acquire(undefined, "utility").then((release) => {
+      utilityAdmitted = true;
       return release;
     });
     await flush();
-    expect(fourthBackgroundAdmitted).toBe(false);
-    expect(pool.activeByWorkClass).toEqual({ interactive: 0, utility: 0, scheduled: 3 });
+    expect(utilityAdmitted).toBe(false);
+    expect(pool.activeByWorkClass).toEqual({ interactive: 0, utility: 0, scheduled: 1 });
     expect(pool.telemetry).toMatchObject({
       queueInteractiveReserveAvailable: true,
       queueInteractiveReserveOccupied: false,
     });
 
     const interactive = await pool.acquire(undefined, "interactive");
-    expect(pool.activeByWorkClass).toEqual({ interactive: 1, utility: 0, scheduled: 3 });
+    expect(pool.activeByWorkClass).toEqual({ interactive: 1, utility: 0, scheduled: 1 });
+    expect(pool.waiting).toBe(1);
     expect(pool.telemetry).toMatchObject({
       queueInteractiveReserveAvailable: false,
       queueInteractiveReserveOccupied: true,
     });
     interactive();
     await flush();
-    expect(fourthBackgroundAdmitted).toBe(false);
+    expect(utilityAdmitted).toBe(false);
 
-    background[0]!();
-    const fourthRelease = await fourthBackground;
-    fourthRelease();
-    background.slice(1).forEach((release) => release());
+    background();
+    const utilityRelease = await utility;
+    utilityRelease();
     expect(pool.activeCount).toBe(0);
   });
 
-  it("bounds waiting and ages scheduled work into a non-interactive lane", async () => {
+  it("keeps humans FIFO ahead of aged backgrounds, while aging still orders background work", async () => {
     let now = 0;
-    const pool = createSparkyAdmission({ now: () => now, maxWaiting: 2 });
+    const pool = createSparkyAdmission({ maxActive: 2, now: () => now, maxWaiting: 4 });
     const releases = await Promise.all([
-      pool.acquire(undefined, "scheduled"),
-      pool.acquire(undefined, "scheduled"),
       pool.acquire(undefined, "scheduled"),
       pool.acquire(undefined, "interactive"),
     ]);
@@ -71,23 +89,194 @@ describe("provider-origin admission", () => {
       order.push("scheduled");
       return release;
     });
-    const interactive = pool.acquire(undefined, "interactive").then((release) => {
-      order.push("interactive");
+    const utility = pool.acquire(undefined, "utility").then((release) => {
+      order.push("utility");
       return release;
     });
+    const interactive = ["first human", "second human"].map((name) =>
+      pool.acquire(undefined, "interactive").then((release) => {
+        order.push(name);
+        return release;
+      }),
+    );
     await expect(pool.acquire()).rejects.toThrow(/full/);
     now = 120_001;
     releases[0]!();
+    await flush();
+    expect(order).toEqual(["first human"]);
+    const firstHuman = await interactive[0]!;
+    firstHuman();
+    const secondHuman = await interactive[1]!;
+    expect(order).toEqual(["first human", "second human"]);
+    secondHuman();
     const backgroundRelease = await scheduled;
-    expect(order).toEqual(["scheduled"]);
+    expect(order).toEqual(["first human", "second human", "scheduled"]);
     backgroundRelease();
-    const foregroundRelease = await interactive;
-    expect(order).toEqual(["scheduled", "interactive"]);
-    foregroundRelease();
-    releases[3]!();
-    releases.slice(1, 3).forEach((release) => release());
+    const utilityRelease = await utility;
+    expect(order).toEqual(["first human", "second human", "scheduled", "utility"]);
+    utilityRelease();
+    releases[1]!();
     expect(pool.activeCount).toBe(0);
   });
+
+  it("dispatches a non-Sparky provider while Sparky is waiting for its own slot", async () => {
+    const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+    const release = await pool.acquire();
+    const sparkyFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+    const sparky = queueSparkyFetch(model, sparkyFetch, { pool })("https://queue.example.invalid");
+    const copilotFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+    await queueSparkyFetch({ ...model, provider: "github-copilot" }, copilotFetch, { pool })(
+      "https://queue.example.invalid",
+    );
+    expect(copilotFetch).toHaveBeenCalledOnce();
+    expect(sparkyFetch).not.toHaveBeenCalled();
+    expect(pool.activeCount).toBe(1);
+    release();
+    await sparky;
+    expect(sparkyFetch).toHaveBeenCalledOnce();
+    expect(pool.activeCount).toBe(0);
+  });
+
+  it("starts GHCP when every main slot is waiting for Sparky without releasing session ownership", async () => {
+    setCommandLaneConcurrency("main", 2);
+    const pool = createSparkyAdmission();
+    const releaseProvider = await pool.acquire(undefined, "scheduled");
+    const sparkyFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+    const sparky = queueSparkyFetch(model, sparkyFetch, { pool });
+    const waiting = [
+      createDeferred<CommandLaneTaskMarker>(),
+      createDeferred<CommandLaneTaskMarker>(),
+    ];
+    const requests = waiting.map((started, index) =>
+      enqueueCommandInLane(`session:sparky-${index}`, () =>
+        enqueueCommandInLane(
+          "main",
+          async (marker) => {
+            const response = sparky("https://queue.example.invalid");
+            started.resolve(marker);
+            return await response;
+          },
+          { allowCapacitySuspension: true },
+        ),
+      ),
+    );
+    const markers = await Promise.all(waiting.map((started) => started.promise));
+    expect(getCommandLaneSnapshot("main")).toMatchObject({
+      activeCount: 2,
+      suspendedCount: 2,
+      maxConcurrent: 2,
+      blockedBy: null,
+    });
+    expect(markers.every(isCommandLaneTaskMarkerCurrent)).toBe(true);
+    expect(getQueueSize("main")).toBe(2);
+    const nextInSession = vi.fn(async () => {});
+    const serialized = enqueueCommandInLane("session:sparky-0", nextInSession);
+    const copilotFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+    await enqueueCommandInLane("session:human", () =>
+      enqueueCommandInLane(
+        "main",
+        () =>
+          queueSparkyFetch({ ...model, provider: "github-copilot" }, copilotFetch, { pool })(
+            "https://queue.example.invalid",
+          ),
+        { allowCapacitySuspension: true },
+      ),
+    );
+    expect(copilotFetch).toHaveBeenCalledOnce();
+    expect(sparkyFetch).not.toHaveBeenCalled();
+    expect(nextInSession).not.toHaveBeenCalled();
+    expect(getQueueSize("main")).toBe(2);
+    releaseProvider();
+    await Promise.all([...requests, serialized]);
+    expect(sparkyFetch).toHaveBeenCalledTimes(2);
+    expect(nextInSession).toHaveBeenCalledOnce();
+    expect(pool.activeCount).toBe(0);
+    expect(getQueueSize("main")).toBe(0);
+  });
+
+  it("starts GHCP during rejected-admission cooldown through the installed transport host", async () => {
+    vi.stubEnv("GROGU_PROFILE_FILE", "/synthetic/profile.json");
+    setCommandLaneConcurrency("main", 1);
+    const waiting = createDeferred();
+    const ready = createDeferred();
+    const open = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Concurrency limit reached"), {
+          status: 429,
+          headers: new Headers({ "retry-after": "15" }),
+        }),
+      )
+      .mockResolvedValue("accepted");
+    const sparky = enqueueCommandInLane(
+      "main",
+      () =>
+        retrySparkyAdmission(model, open, {
+          sleep: () => {
+            waiting.resolve();
+            return ready.promise;
+          },
+        }),
+      { allowCapacitySuspension: true },
+    );
+    await waiting.promise;
+    expect(getCommandLaneSnapshot("main")).toMatchObject({ activeCount: 1, suspendedCount: 1 });
+    const copilotFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+    await enqueueCommandInLane("main", () =>
+      queueSparkyFetch(
+        { ...model, provider: "github-copilot" },
+        copilotFetch,
+      )("https://queue.example.invalid"),
+    );
+    expect(copilotFetch).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledOnce();
+    ready.resolve();
+    await expect(sparky).resolves.toBe("accepted");
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])(
+    "releases provider admission on cancellation during reacquisition (root cancellation=%s)",
+    async (cancelRoot) => {
+      const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+      const releaseProvider = await pool.acquire();
+      const signal = new AbortController();
+      const waiting = createDeferred();
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
+      const request = enqueueCommandInLane(
+        "main",
+        async () => {
+          const response = queueSparkyFetch(model, fetcher, { pool })(
+            "https://queue.example.invalid",
+            { signal: signal.signal },
+          );
+          waiting.resolve();
+          return await response;
+        },
+        { allowCapacitySuspension: true, abortSignal: cancelRoot ? signal.signal : undefined },
+      );
+      const outcome = request.catch((error: unknown) => error);
+      await waiting.promise;
+      const running = createDeferred();
+      const ready = createDeferred();
+      const blocker = enqueueCommandInLane("main", async () => {
+        running.resolve();
+        await ready.promise;
+      });
+      await running.promise;
+      releaseProvider();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getCommandLaneSnapshot("main").capacityWaitingCount).toBe(1);
+      expect(pool.activeCount).toBe(1);
+      signal.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(pool.activeCount).toBe(0);
+      ready.resolve();
+      expect(await outcome).toMatchObject({ name: "AbortError" });
+      await blocker;
+    },
+  );
 
   it("rechecks deadline just before dispatch after a host pause", async () => {
     let now = 0;

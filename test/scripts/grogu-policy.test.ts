@@ -112,6 +112,39 @@ describe("automatic routing and queue policy", () => {
     ]);
   });
 
+  it("detects the retired shared two-run cap without confusing child limits or bounded defaults", () => {
+    for (const maxConcurrent of [undefined, 2, 8]) {
+      const config = compliantConfig();
+      const violations = evaluatePolicy(
+        {
+          ...config,
+          agents: {
+            ...config.agents,
+            defaults: {
+              ...config.agents.defaults,
+              maxConcurrent,
+              subagents: { maxConcurrent: 1 },
+            },
+          },
+        },
+        [],
+        policy,
+      );
+      expect(violations).toEqual(
+        maxConcurrent === 2
+          ? [
+              {
+                where: "config.agents.defaults.maxConcurrent",
+                found: 2,
+                expected:
+                  "unset (native bounded concurrency; Sparky admission is provider-specific)",
+              },
+            ]
+          : [],
+      );
+    }
+  });
+
   it("requires declared private-signal and deterministic-poll worker contracts", () => {
     const template = workerTriggerTemplateSchema.parse({
       version: 1,

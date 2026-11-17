@@ -70,6 +70,37 @@ advertised effort, not a literal provider-native `ultra` value. For a model
 advertising only none, low, medium and high, Ultra uses high. Explicit request,
 session, model, agent and job choices remain in force.
 
+## Provider concurrency
+
+Only Sparky uses Grogu's provider-origin admission queue. Its conservative limit
+is two active requests, with one slot reserved for human requests. Scheduled and
+utility work share the other slot and cannot borrow the human reserve, even when
+it is idle. Waiting human requests run first in arrival order; aging can promote
+background work only when no human is eligible. Already-running requests are not
+preempted.
+
+The current run's trigger and typed input provenance determine priority. System
+and inter-session handoffs do not gain human priority merely because they run in
+a conversation with a session ID. Native plugin dispatch marks automatic
+handoffs, including Research Topics notifications to Main, as internal input.
+Grogu keeps the two-request baseline even when
+upstream capacity rises; it does not guess or automatically detect that change.
+
+GitHub Copilot and other providers bypass the Sparky queue. While awaiting
+Sparky admission or rejected-admission cooldown, a run yields only its global
+execution capacity and reacquires it through the existing command queue. It
+retains session serialization, run authority, and shutdown drain ownership.
+Waiting Sparky runs therefore cannot occupy every execution slot ahead of
+GitHub Copilot. Accepted streams retain their capacity and are not replayed.
+
+Native bounded Gateway concurrency, child-session limits and automation limits
+still apply. The old `agents.defaults.maxConcurrent: 2` applied Sparky's
+limit to every provider. `bootstrap --apply` removes that exact legacy override
+through native configuration, restoring the host-sized default; it preserves
+other explicit limits and subagent settings. `policy-check` reports the retired
+two-run override if it returns. Preview bootstrap first and apply only with
+approval for a possible Gateway restart.
+
 ## Active-response budgets
 
 Grogu uses `agents.defaults.timeoutSeconds: 0` and
@@ -121,12 +152,12 @@ Release builds install the same CLI as `dist/grogu-maint.js`.
 | Command                         | Effect                                                                                                                                                                                      |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `status`                        | Native service status plus a read-scope `health` call; no model calls.                                                                                                                      |
-| `policy-check`                  | Reads native config and all jobs; exits 1 if any automatic selector, fallback or job route leaves `automaticModel`, or a required channel queue mode drifted.                               |
+| `policy-check`                  | Reads native config and all jobs; exits 1 for automatic model, channel queue or legacy shared-concurrency policy drift.                                                                     |
 | `compaction-stage`              | Writes a validated candidate configuration and a small original-configuration recovery copy. Apply checks exact configuration hashes, needs no full backup, and never restarts the Gateway. |
 | `backup`                        | Retired. Exits with an error without creating a local full backup.                                                                                                                          |
 | `verify-archive <archive>`      | Native archive and SQLite inventory verification.                                                                                                                                           |
 | `restore-stage <archive> <dir>` | Restores into an empty staging directory; never activates or starts channels.                                                                                                               |
-| `bootstrap [--apply]`           | Reconciles job metadata, storage policy, and default widget isolation; preview by default. Applying can restart the Gateway.                                                                |
+| `bootstrap [--apply]`           | Reconciles job metadata, storage policy, default widget isolation and the legacy shared concurrency cap; preview by default. Applying can restart the Gateway.                              |
 | `storage-bootstrap [--apply]`   | Disables scheduled backups and installs one native cleanup job every five minutes without a model call; preview by default.                                                                 |
 | `storage-cleanup [--apply]`     | Disables scheduled backups and retires completed backup artifacts without a retention window; preview by default.                                                                           |
 | `plugins-bootstrap [--apply]`   | Previews or installs Grogu's pinned plugin packages with OpenClaw's native installer.                                                                                                       |

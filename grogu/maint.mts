@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import {
-  bootstrapGroguWidgetSandbox,
+  bootstrapGroguRuntimeConfig,
   reconcileManagedJobs,
   reconcileWorkerTriggers,
 } from "./bootstrap.js";
@@ -69,15 +69,19 @@ program
 
 program
   .command("bootstrap")
-  .description("Reconcile native jobs, storage policy, and the single-origin widget default")
-  .option("--apply", "Apply native policy and widget configuration; the Gateway may restart", false)
+  .description("Reconcile native jobs, storage policy, and Grogu runtime defaults")
+  .option(
+    "--apply",
+    "Apply native policy and runtime configuration; the Gateway may restart",
+    false,
+  )
   .action(async (options: { apply: boolean }) => {
     const selected = profile();
     const jobs = await reconcileManagedJobs(selected, options.apply);
     const storage = await bootstrapGroguStorage(selected, options.apply);
     // Apply restart-requiring configuration after the remaining bootstrap calls.
-    const widgets = await bootstrapGroguWidgetSandbox(selected, options.apply);
-    console.log(JSON.stringify({ jobs, storage, widgets }));
+    const runtimeConfig = await bootstrapGroguRuntimeConfig(selected, options.apply);
+    console.log(JSON.stringify({ jobs, storage, runtimeConfig }));
     if (storage.backups.deferred.length > 0) {
       process.exitCode = 1;
     }

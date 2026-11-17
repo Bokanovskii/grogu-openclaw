@@ -298,6 +298,8 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
           runId: diagnosticCompactionRunId,
           ...(params.sessionKey && { sessionKey: params.sessionKey }),
           sessionId: params.sessionId,
+          trigger,
+          inputProvenance: params.inputProvenance,
           provider,
           model: modelId,
           api: effectiveModel.api,

@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 describe("embedded run lane priority", () => {
-  it("runs a foreground user turn before queued restart recovery and inter-session work", async () => {
+  it("runs a foreground user turn before queued recovery, inter-session, and plugin work", async () => {
     const lane = "test:restart-recovery-priority";
     setCommandLaneConcurrency(lane, 1);
     let releaseBlocker: () => void = () => {};
@@ -44,6 +44,18 @@ describe("embedded run lane priority", () => {
         }).priority,
       },
     );
+    const plugin = enqueueCommandInLane(
+      lane,
+      async () => {
+        order.push("plugin");
+      },
+      {
+        priority: resolveEmbeddedRunSessionLanePolicy("user", {
+          kind: "internal_system",
+          sourceTool: "plugin_subagent",
+        }).priority,
+      },
+    );
     const foreground = enqueueCommandInLane(
       lane,
       async () => {
@@ -51,10 +63,28 @@ describe("embedded run lane priority", () => {
       },
       { priority: resolveEmbeddedRunSessionLanePolicy("user").priority },
     );
+    const voiceConsult = enqueueCommandInLane(
+      lane,
+      async () => {
+        order.push("voice-consult");
+      },
+      {
+        priority: resolveEmbeddedRunSessionLanePolicy("user", {
+          kind: "internal_system",
+          sourceTool: "openclaw_agent_consult",
+        }).priority,
+      },
+    );
 
     releaseBlocker();
-    await Promise.all([blocker, foreground, restartRecovery, interSession]);
+    await Promise.all([blocker, foreground, voiceConsult, restartRecovery, interSession, plugin]);
 
-    expect(order).toEqual(["foreground-user", "restart-recovery", "inter-session"]);
+    expect(order).toEqual([
+      "foreground-user",
+      "voice-consult",
+      "restart-recovery",
+      "inter-session",
+      "plugin",
+    ]);
   });
 });

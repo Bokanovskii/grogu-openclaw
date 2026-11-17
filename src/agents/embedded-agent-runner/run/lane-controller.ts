@@ -316,6 +316,7 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
     };
     const globalOpts: CommandQueueEnqueueOptions = {
       ...opts,
+      allowCapacitySuspension: true,
       maxConcurrent: options.getParams().swarmExecutionLane?.maxConcurrent,
       priority: isBackgroundWorkLane(options.globalLane)
         ? "background"

@@ -2,6 +2,7 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 // The queue supplies `drainLane` so capacity policy never imports the queue runtime.
 import {
   compareQueueEntries,
+  getLaneOccupiedCount,
   getQueueState,
   normalizeLane,
   peekLaneQueue,
@@ -87,13 +88,13 @@ export function getLaneGroup(lane: string): LaneGroupState | undefined {
  * here would resurrect lanes that `retireIdleScopedCommandLane` just removed.
  */
 function getMemberActiveCount(lane: string): number {
-  return getQueueState().lanes.get(lane)?.activeTaskIds.size ?? 0;
+  const state = getQueueState().lanes.get(lane);
+  return state ? getLaneOccupiedCount(state) : 0;
 }
 
 type GroupCapacity = { active: number; reserved: number };
 
-// Derive capacity from active task IDs so timeout, reset, and stale completion
-// handling share the queue's existing ownership accounting.
+// Derive occupied capacity from the same task ownership and suspension state.
 function readGroupCapacity(group: LaneGroupState): GroupCapacity {
   let active = 0;
   let reserved = 0;
@@ -126,7 +127,7 @@ export function applyCommandLaneCapacity(snapshot: CommandLaneSnapshot): void {
   const group = getLaneGroup(snapshot.lane);
   const capacity = group ? readGroupCapacity(group) : undefined;
   snapshot.blockedBy =
-    snapshot.activeCount >= snapshot.maxConcurrent
+    snapshot.activeCount - (snapshot.suspendedCount ?? 0) >= snapshot.maxConcurrent
       ? "lane"
       : group && capacity
         ? resolveGroupBlockReason(group, snapshot.lane, capacity)
@@ -218,7 +219,7 @@ function resolveNextGroupLane(group: LaneGroupState): string | undefined {
   for (const lane of group.members) {
     const state = getQueueState().lanes.get(lane);
     const head = state ? peekLaneQueue(state.queue) : undefined;
-    if (!state || !head || state.draining || state.activeTaskIds.size >= state.maxConcurrent) {
+    if (!state || !head || state.draining || getLaneOccupiedCount(state) >= state.maxConcurrent) {
       continue;
     }
     // No callbacks run during selection. Recompute on the next selection after

@@ -15,6 +15,7 @@ import {
 } from "../logging/redact.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeAnthropicInlineContentBlocks } from "../media/anthropic-inline-images.js";
+import { withCommandLaneCapacitySuspended } from "../process/command-queue.capacity-suspension.js";
 import { swapSecretSentinelsInText } from "../secrets/sentinel.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
@@ -38,6 +39,7 @@ configureAiTransportHost({
     void trackAsyncWork(() => pending).catch(() => {});
   },
   buildModelFetch: buildGuardedModelFetch,
+  withProviderAdmissionWait: withCommandLaneCapacitySuspended,
   unwrapModelTransportSentinels: unwrapModelHeaderSentinelsForProviderEgress,
   resolveSecretSentinel: (value) => {
     const swapped = swapSecretSentinelsInText(value);

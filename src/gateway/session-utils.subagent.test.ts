@@ -352,6 +352,36 @@ describe("session list subagent metadata", () => {
     }
   });
 
+  test("does not make a main session its own parent after a plugin turn in it", async () => {
+    const now = Date.now();
+    const mainKey = "agent:main:main";
+    const chatKey = "agent:main:dashboard:spawned-chat";
+    await addSubagentRunForTests({
+      runId: "plugin-turn-in-main",
+      childSessionKey: mainKey,
+      controllerSessionKey: mainKey,
+      requesterSessionKey: mainKey,
+      createdAt: now - 5_000,
+      startedAt: now - 4_000,
+      endedAt: now - 1_000,
+      outcome: { status: "ok" },
+    });
+    const result = await listSubagentSessions({
+      [mainKey]: { sessionId: "sess-main", updatedAt: now } as SessionEntry,
+      [chatKey]: {
+        sessionId: "sess-chat",
+        updatedAt: now - 1,
+        spawnedBy: mainKey,
+      } as SessionEntry,
+    });
+
+    const main = result.sessions.find((row) => row.key === mainKey);
+    expect(main?.spawnedBy).toBeUndefined();
+    expect(main?.controlOwnerSessionKey).toBeUndefined();
+    expect(main?.childSessions).toEqual([chatKey]);
+    expect(result.sessions.find((row) => row.key === chatKey)?.spawnedBy).toBe(mainKey);
+  });
+
   test("does not reattach stale terminal store-only child links", async () => {
     await resetSubagentRegistryForTests({ persist: false });
     const now = Date.now();

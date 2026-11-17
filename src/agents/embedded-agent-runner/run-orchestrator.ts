@@ -471,6 +471,7 @@ async function runEmbeddedAgentForSession(
                 modelProviderId: provider,
                 modelId,
                 trigger: params.trigger,
+                inputProvenance: params.inputProvenance,
                 ...buildAgentHookContextChannelFields(params),
                 ...buildAgentHookContextIdentityFields(params),
               };

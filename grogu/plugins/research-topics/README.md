@@ -26,7 +26,7 @@ compiler. This is a versioned, private local package, not a registry publication
 Install it through OpenClaw's managed npm project:
 
 ```sh
-openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.1.1.tgz
+openclaw plugins install npm-pack:/path/to/artifacts/grogu-research-topics-2.1.2.tgz
 openclaw plugins inspect research-topics --runtime --json
 ```
 

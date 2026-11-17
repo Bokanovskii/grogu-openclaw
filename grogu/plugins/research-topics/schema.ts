@@ -165,32 +165,8 @@ export const requestSchema = Type.Union([
   }),
 ]);
 
-// Provider tool schemas require an object root; the union validates action-specific fields.
-export const toolSchema = object({
-  action: Type.Index(requestSchema, ["action"]),
-  id: Type.Optional(id),
-  ...topicFields,
-  ...page,
-  status: Type.Optional(status),
-  query: Type.Optional(nonblank(500)),
-  sessionKey: Type.Optional(session.sessionKey),
-  sessionId: Type.Optional(session.sessionId),
-  message: Type.Optional(nonblank(8_000)),
-  category: Type.Optional(nonblank(80)),
-  expectedRevision: Type.Optional(revision),
-  changes: Type.Optional(object(topicFields)),
-  sourceId: Type.Optional(id),
-  sourceRevision: Type.Optional(revision),
-  operationId: Type.Optional(nonblank(128)),
-  reason: Type.Optional(nonblank(2_000)),
-  ownerText: Type.Optional(nonblank(8_000)),
-  completionId: Type.Optional(nonblank(128)),
-  toolCallId: Type.Optional(nonblank(256)),
-  minimumIntervalMinutes: Type.Optional(minutes),
-  attemptId: Type.Optional(nonblank(128)),
-  outcome: Type.Optional(outcome),
-  retryAfterMinutes: Type.Optional(minutes),
-});
+// Keep an object root without flattening away each action's allowed fields.
+export const toolSchema = Type.Intersect([Type.Object({}), requestSchema], { type: "object" });
 
 export type Request = Static<typeof requestSchema>;
 export type SessionRef = Static<typeof sessionRef>;

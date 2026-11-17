@@ -101,6 +101,11 @@ closed for a long time.
 
 ## Reconcile topics in the current turn
 
+The tool schema preserves each action's fields. For example, `lookup` takes
+`query` and optional `sessionKey`, `category`, and `limit`; it does not take a topic
+`id` or write/completion fields. Do not fill unrelated fields with placeholders.
+Provider schema projection and execution use the same action contract.
+
 1. Call `lookup` using the subject's ordinary words, optionally narrowing by
    `sessionKey` or `category` (an exact tag). No raw FTS syntax is accepted.
 2. Review the bounded candidates semantically. Call `get` for the relevant brief.

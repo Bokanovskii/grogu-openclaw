@@ -13,9 +13,15 @@ import {
   runSqliteWorkerStoreWrite,
   type SqliteWorkerStore,
 } from "openclaw/plugin-sdk/sqlite-runtime";
+import { Check } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "../../grogu/plugins/research-topics/index.js";
-import { parseRequest, type LedgerOperations } from "../../grogu/plugins/research-topics/schema.js";
+import {
+  parseRequest,
+  toolSchema,
+  type LedgerOperations,
+} from "../../grogu/plugins/research-topics/schema.js";
+import { convertResponsesToolPayload } from "../../packages/ai/src/providers/openai-responses-tools.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const directories = useAutoCleanupTempDirTracker(afterEach);
@@ -346,6 +352,38 @@ describe("research_topics v2", () => {
       }
       lock.close();
       await store.close();
+    }
+  });
+
+  it("keeps action-specific arguments in the provider schema instead of inviting padded calls", () => {
+    const [tool] = convertResponsesToolPayload(
+      [{ name: "research_topics", description: "Research topics", parameters: toolSchema }],
+      { strict: false },
+    );
+    if (!tool?.parameters) {
+      throw new Error("Missing emitted Research Topics schema");
+    }
+    for (const request of [
+      { action: "lookup", query: "train fares", limit: 8 },
+      { action: "add", id: "train-fares", title: "Train fares" },
+      { action: "update", id: "train-fares", expectedRevision: 1, changes: { priority: "high" } },
+    ]) {
+      expect(Check(tool.parameters, request)).toBe(true);
+      expect(parseRequest(request)).toEqual(request);
+    }
+    for (const request of [
+      {
+        action: "lookup",
+        query: "train fares",
+        id: "noop",
+        sessionId: "current",
+        reason: "unused",
+      },
+      { action: "lookup", id: "train-fares" },
+      { action: "update", id: "train-fares", expectedRevision: 1, priority: "high" },
+    ]) {
+      expect(Check(tool.parameters, request)).toBe(false);
+      expect(() => parseRequest(request)).toThrow();
     }
   });
 

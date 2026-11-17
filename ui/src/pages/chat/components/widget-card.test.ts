@@ -270,7 +270,7 @@ describe("widget-card", () => {
     expect(canvas.querySelector('button[aria-label="Widget actions"]')).not.toBeNull();
     expect(
       Array.from(canvas.querySelectorAll("wa-dropdown-item"), (item) => item.textContent?.trim()),
-    ).toEqual(["Copy as image", "Download as image"]);
+    ).toEqual(["Download HTML"]);
 
     const app = mountWidget(
       {

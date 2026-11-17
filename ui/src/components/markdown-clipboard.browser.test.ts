@@ -3,7 +3,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { renderMessageImages } from "../pages/chat/components/chat-message-images.ts";
 import { renderMessageMarkdown } from "../pages/chat/components/chat-message-text.ts";
-import { exportWidget } from "../pages/chat/components/widget-export.ts";
 import "../pages/chat/components/browser-tab-card.ts";
 import { renderCopyButton } from "./copy-button.ts";
 import { handleMarkdownCodeBlockClick } from "./markdown-code-blocks.ts";
@@ -140,19 +139,14 @@ async function flushCopy() {
 }
 
 describe("Markdown clipboard operation lifetime", () => {
-  it.each(
-    ["managed image", "widget"].flatMap((surface) =>
-      [true, false].map((available) => ({ surface, available })),
-    ),
-  )(
-    "retires text fallback after $surface copy intent (binary API: $available)",
-    async ({ surface, available }) => {
+  it.each([true, false])(
+    "retires text fallback after managed image copy intent (binary API: %s)",
+    async (available) => {
       const pendingText = delayFirstWrite();
       const pngData =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR7sAAAAASUVORK5CYII=";
       const nativeFetch = globalThis.fetch.bind(globalThis);
       const png = await (await nativeFetch(pngData)).blob();
-      const snapshot = createDeferred<string>();
       const fullImage = createDeferred<Response>();
       const write = vi.fn(async (items: ClipboardItem[]) => {
         expect((await items[0]!.getType("image/png")).type).toBe("image/png");
@@ -162,62 +156,36 @@ describe("Markdown clipboard operation lifetime", () => {
         configurable: true,
         value: { writeText, ...(available ? { write } : {}) },
       });
-      let copy: () => void;
-      let widgetResult: Promise<unknown> | undefined;
-      if (surface === "managed image") {
-        vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
-          const url = input instanceof Request ? input.url : String(input);
-          return url.includes("/thumbnail")
-            ? Promise.resolve(new Response(png))
-            : url.includes("/full")
-              ? fullImage.promise
-              : nativeFetch(input, init);
-        });
-        const owner = document.body.appendChild(document.createElement("section"));
-        owners.push(owner);
-        render(
-          renderMessageImages([
-            {
-              url: `/api/chat/media/outgoing/agent%3Amain%3Amain/${crypto.randomUUID()}/full`,
-              alt: "Synthetic image",
-            },
-          ]),
-          owner,
-        );
-        await vi.waitFor(() => expect(owner.querySelector("wa-dropdown")).not.toBeNull());
-        copy = () =>
-          owner
-            .querySelector("wa-dropdown")!
-            .dispatchEvent(new CustomEvent("wa-select", { detail: { item: { value: "copy" } } }));
-      } else {
-        const frame = document.body.appendChild(document.createElement("iframe"));
-        owners.push(frame);
-        vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation((request) => {
-          void snapshot.promise.then((dataUrl) => {
-            window.dispatchEvent(
-              new MessageEvent("message", {
-                source: frame.contentWindow,
-                data: { type: "openclaw:widget-snapshot", id: request.id, dataUrl },
-              }),
-            );
-          });
-        });
-        copy = () => {
-          widgetResult = exportWidget("copy", frame, "Synthetic widget").catch(
-            (error: unknown) => error,
-          );
-        };
-      }
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        return url.includes("/thumbnail")
+          ? Promise.resolve(new Response(png))
+          : url.includes("/full")
+            ? fullImage.promise
+            : nativeFetch(input, init);
+      });
+      const owner = document.body.appendChild(document.createElement("section"));
+      owners.push(owner);
+      render(
+        renderMessageImages([
+          {
+            url: `/api/chat/media/outgoing/agent%3Amain%3Amain/${crypto.randomUUID()}/full`,
+            alt: "Synthetic image",
+          },
+        ]),
+        owner,
+      );
+      await vi.waitFor(() => expect(owner.querySelector("wa-dropdown")).not.toBeNull());
       const code = await mountCopy("code");
       code.button.click();
-      copy();
+      owner
+        .querySelector("wa-dropdown")!
+        .dispatchEvent(new CustomEvent("wa-select", { detail: { item: { value: "copy" } } }));
       // Binary ClipboardItem promises must be submitted during the click, before bytes arrive.
       expect(write).toHaveBeenCalledTimes(available ? 1 : 0);
       pendingText.reject(new Error("Synthetic clipboard rejection"));
       await flushCopy();
-      snapshot.resolve(pngData);
       fullImage.resolve(new Response(png));
-      await widgetResult;
       if (available) {
         await vi.waitFor(() => expect(clipboard).toBe("new binary image"));
       }

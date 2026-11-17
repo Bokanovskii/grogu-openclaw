@@ -24,7 +24,7 @@ import {
 import { parseYouTubeVideoUrl } from "../../../lib/chat/youtube-video.ts";
 import { showToast } from "../../../lib/toast.ts";
 import { installWidgetThemeObserver, postWidgetTheme } from "../../../lib/widget-theme.ts";
-import { exportWidget } from "./widget-export.ts";
+import { downloadWidgetHtml } from "./widget-export.ts";
 import "./browser-tab-card.ts";
 
 registerMcpAppEnglish();
@@ -427,7 +427,7 @@ function handleWidgetExportAction(
     );
     return;
   }
-  if (value !== "copy" && value !== "download") {
+  if (value !== "download") {
     return;
   }
   const frame = dropdown
@@ -438,19 +438,9 @@ function handleWidgetExportAction(
     return;
   }
   const documentHtml = frame.closest("openclaw-canvas-widget-view")?.documentHtml;
-  void exportWidget(value, frame, title, { documentHtml })
-    .then((result) => {
-      if (result === "rerender-required") {
-        showToast({ message: t("chat.toolCards.widgetExportRerender") });
-      } else if (result === "html") {
-        showToast({ message: t("chat.toolCards.widgetExportHtmlFallback") });
-      } else if (value === "copy") {
-        showToast({ message: t("common.copied") });
-      }
-    })
-    .catch(() => {
-      showToast({ message: t("chat.toolCards.widgetExportFailed") });
-    });
+  void downloadWidgetHtml(frame, title, { documentHtml }).catch(() => {
+    showToast({ message: t("chat.toolCards.widgetExportFailed") });
+  });
 }
 
 function widgetActionsPlacementRef() {
@@ -486,10 +476,9 @@ function widgetActionsPlacementRef() {
   };
 }
 
-function renderWidgetAction(value: "copy" | "download" | "raw-details") {
+function renderWidgetAction(value: "download" | "raw-details") {
   const { icon, labelKey } = {
-    copy: { icon: icons.copyImage, labelKey: "chat.toolCards.copyAsImage" },
-    download: { icon: icons.download, labelKey: "chat.toolCards.downloadAsImage" },
+    download: { icon: icons.download, labelKey: "chat.toolCards.downloadHtml" },
     "raw-details": { icon: icons.fileText, labelKey: "chat.toolCards.showRawDetails" },
   }[value];
   const label = t(labelKey);
@@ -500,8 +489,8 @@ function renderWidgetAction(value: "copy" | "download" | "raw-details") {
 }
 
 function renderWidgetActions(preview: CanvasToolPreview, hasRawDetails: boolean) {
-  const canExportImage = !preview.mcpApp && isInternalCanvasEntryUrl(preview.url);
-  if (!canExportImage && !hasRawDetails) {
+  const canDownloadHtml = !preview.mcpApp && isInternalCanvasEntryUrl(preview.url);
+  if (!canDownloadHtml && !hasRawDetails) {
     return nothing;
   }
   return html`
@@ -521,7 +510,7 @@ function renderWidgetActions(preview: CanvasToolPreview, hasRawDetails: boolean)
       >
         ${icons.moreHorizontal}
       </button>
-      ${canExportImage ? (["copy", "download"] as const).map(renderWidgetAction) : nothing}
+      ${canDownloadHtml ? renderWidgetAction("download") : nothing}
       ${hasRawDetails ? renderWidgetAction("raw-details") : nothing}
     </wa-dropdown>
   `;

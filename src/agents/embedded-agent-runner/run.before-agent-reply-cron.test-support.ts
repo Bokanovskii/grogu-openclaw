@@ -129,6 +129,32 @@ describe("runEmbeddedAgent before_agent_reply seam", () => {
     expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
   });
 
+  it("gives agent hooks the run input provenance", async () => {
+    const inputProvenance = {
+      kind: "inter_session" as const,
+      sourceSessionKey: "agent:main:main",
+      sourceTool: "sessions_send",
+    };
+    mockedGlobalHookRunner.hasHooks.mockImplementation(
+      (hookName: string) => hookName === "before_agent_reply",
+    );
+    mockedGlobalHookRunner.runBeforeAgentReply.mockResolvedValue({
+      handled: true,
+      reply: { text: "claimed" },
+    });
+
+    await runEmbeddedAgent({
+      ...createOverflowRunParams(state),
+      trigger: "user",
+      inputProvenance,
+    });
+
+    const [, hookContext] = firstBeforeAgentReplyCall();
+    expect(hookContext?.inputProvenance).toEqual(inputProvenance);
+    expect(hookContext?.trigger).toBe("user");
+    expect(mockedRunEmbeddedAttempt).not.toHaveBeenCalled();
+  });
+
   it.each([
     { name: "stable cron root", sessionKey: "agent:main:cron:hook-authority", fenced: true },
     { name: "ordinary session", sessionKey: "agent:main:hook-authority", fenced: false },

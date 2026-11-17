@@ -22,6 +22,7 @@ import {
   type LedgerOperations,
 } from "../../grogu/plugins/research-topics/schema.js";
 import { convertResponsesToolPayload } from "../../packages/ai/src/providers/openai-responses-tools.js";
+import { validateToolArguments } from "../../packages/llm-core/src/validation.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const directories = useAutoCleanupTempDirTracker(afterEach);
@@ -419,6 +420,40 @@ describe("research_topics v2", () => {
     expect(() => parseRequest({ id: "socks" })).toThrow(
       /^Invalid research_topics arguments: action must be one of list, get, lookup, add,/,
     );
+  });
+
+  it("lets oversized notes pass core validation so the plugin names the repair", () => {
+    const tool = {
+      name: "research_topics",
+      description: "Research topics",
+      parameters: toolSchema,
+    };
+    const notes = "Quiet inbox pass. ".repeat(126).slice(0, 2_263);
+    const changesCases = [
+      { notes, workState: "ready" },
+      JSON.stringify({ notes, workState: "ready" }),
+    ];
+    for (const changes of changesCases) {
+      const args = validateToolArguments(tool, {
+        type: "toolCall",
+        id: "call",
+        name: "research_topics",
+        arguments: { action: "update", id: "inbox", expectedRevision: 3, changes },
+      });
+      expect(() => parseRequest(args)).toThrow(
+        new Error(
+          "Invalid research_topics update arguments. changes.notes is 2,263 characters; limit 2,000. " +
+            "notes is a short summary that replaces the old one; move details and history to brief.",
+        ),
+      );
+    }
+    const atLimit = "🎿".repeat(2_000);
+    expect(parseRequest({ action: "add", id: "ski", title: "Ski", notes: atLimit })).toMatchObject({
+      notes: atLimit,
+    });
+    expect(() =>
+      parseRequest({ action: "add", id: "ski", title: "Ski", notes: `${atLimit}!` }),
+    ).toThrow("add arguments. notes is 2,001 characters; limit 2,000.");
   });
 
   it("reports every wrong field when a flattened call has more mistakes than the validator reports", () => {

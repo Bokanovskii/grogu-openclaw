@@ -180,7 +180,8 @@ global generation tokens.
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `title`            | Nonblank, up to 240 characters; required for `add`                                                                         |
 | `brief`            | Full working brief, at most 65,536 UTF-8 bytes; default empty                                                              |
-| `why`, `notes`     | Lookup summaries, at most 1,000 and 2,000 characters; default empty                                                        |
+| `why`              | Lookup summary of why the topic matters, at most 1,000 characters; default empty                                           |
+| `notes`            | Short lookup summary, at most 2,000 characters; default empty. Each write replaces it; details and history go in `brief`   |
 | `aliases`, `tags`  | Up to 32 each; nonblank aliases up to 160 characters, tags up to 80                                                        |
 | `sessionRefs`      | Up to 64 `{sessionKey, sessionId, messageId?}` references; key/ID/message limits 512/128/256 characters                    |
 | `sourceIds`        | Up to 20 previously defined provider-budget IDs, never conversation IDs                                                    |

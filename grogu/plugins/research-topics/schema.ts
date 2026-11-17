@@ -34,6 +34,7 @@ const sourceIds = Type.Array(id, { maxItems: 20 });
 const aliases = Type.Array(nonblank(160), { maxItems: 32 });
 const tags = Type.Array(nonblank(80), { maxItems: 32 });
 const sessionRefs = Type.Array(sessionRef, { maxItems: 64 });
+const notesLimit = 2_000;
 const scheduling = {
   workState: Type.Optional(workState),
   monitoringReason: Type.Optional(text(1_000)),
@@ -43,7 +44,9 @@ const topicFields = {
   title: Type.Optional(nonblank(240)),
   brief: Type.Optional(text(65_536)),
   why: Type.Optional(text(1_000)),
-  notes: Type.Optional(text(2_000)),
+  // parseRequest enforces notesLimit; a schema maxLength would make the core validator reject the
+  // call with union-branch errors before the plugin can name the repair.
+  notes: Type.Optional(Type.String()),
   findingsRef: Type.Optional(text(1_000)),
   priority: Type.Optional(priority),
   purpose: Type.Optional(purpose),
@@ -386,6 +389,16 @@ export function parseRequest(value: unknown): Request {
   if (fields?.brief !== undefined && Buffer.byteLength(fields.brief, "utf8") > 65_536) {
     throw new Error("Research brief exceeds 65536 UTF-8 bytes. Reconcile it before saving.");
   }
+  const notes = fields?.notes;
+  const notesLength = notes !== undefined && notes.length > notesLimit ? [...notes].length : 0;
+  if (notesLength > notesLimit) {
+    const field = value.action === "add" ? "notes" : "changes.notes";
+    const count = (n: number) => n.toLocaleString("en-US");
+    throw new Error(
+      `Invalid research_topics ${value.action} arguments. ${field} is ${count(notesLength)} characters; limit ${count(notesLimit)}. ` +
+        "notes is a short summary that replaces the old one; move details and history to brief.",
+    );
+  }
   return value;
 }
 
@@ -393,7 +406,8 @@ export const toolDescription =
   "Internal shared Research Topics owner; no routine ledger narration to the user. " +
   "lookup (default 8, max 20) finds bounded candidates by title/aliases/summary; category only filters lookup/due by tag, so label topics with tags. " +
   "Review semantic equivalence in this turn, get the full brief, then add/update/merge. " +
-  "add needs a new stable slug id and title. update patches supplied fields inside changes and requires expectedRevision. On conflict reread " +
+  "add needs a new stable slug id and title. update patches supplied fields inside changes and requires expectedRevision. " +
+  "notes is a short lookup summary (max 2,000 characters); each write replaces it, so never append history; details and history go in brief. On conflict reread " +
   "and reconcile, never blindly replay. merge also requires sourceRevision and reconciled title/brief; " +
   "it unions links and returns affectedSessionRefs for you to update those sessions. New sessionRefs " +
   "must be your current conversation; existing refs survive updates/merges. To receive updates on an existing " +

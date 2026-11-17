@@ -135,3 +135,76 @@ test("accepts reusable producer roles without giving every agent Main authority"
       .appendSystemContext.includes("# Main text coordination"),
   );
 });
+
+test("runs the system starts in a chat use the agent's configured model, not the chat's choice", () => {
+  const live = {
+    agents: {
+      defaults: { model: "shared/default-model" },
+      entries: { assistant: { model: { primary: "auto/worker-model", fallbacks: [] } } },
+    },
+  };
+  const host = register(configuration, {}, live);
+  const model = (ctx) =>
+    host.hooks.get("before_model_resolve")(
+      { prompt: "x" },
+      {
+        agentId: "assistant",
+        sessionKey: "agent:assistant:dashboard:trip",
+        modelProviderId: "chosen",
+        modelId: "owner-model",
+        trigger: "user",
+        ...ctx,
+      },
+    );
+  const automatic = { providerOverride: "auto", modelOverride: "worker-model" };
+  const system = (sourceTool, ctx) => ({
+    inputProvenance: {
+      kind: sourceTool === "sessions_send" ? "inter_session" : "internal_system",
+      sourceTool,
+    },
+    ...ctx,
+  });
+  for (const ctx of [
+    {},
+    { trigger: "heartbeat" },
+    { inputProvenance: { kind: "external_user" } },
+    system("openclaw_agent_consult"),
+    system("exec_approval_followup"),
+    system("stalled-turn-recovery"),
+    system("cron", { trigger: "cron", jobId: "inbox" }),
+    system("sessions_send", { jobId: "inbox" }),
+    { inputProvenance: { kind: "internal_system", sourceTool: "cron", jobId: "inbox" } },
+    system("sessions_send", { trigger: "memory" }),
+    system("sessions_send", { modelProviderId: "auto", modelId: "worker-model" }),
+    system("sessions_send", { agentId: "unrelated" }),
+  ]) {
+    assert.equal(model(ctx), undefined, JSON.stringify(ctx));
+  }
+  for (const ctx of [
+    system("sessions_send"),
+    { inputProvenance: { kind: "inter_session", sourceTool: "subagent_announce" } },
+    system("restart-sentinel"),
+    { inputProvenance: { kind: "internal_system" } },
+    system("heartbeat", { trigger: "heartbeat" }),
+    system("cron", { trigger: "heartbeat" }),
+    system("exec-event", { trigger: "user" }),
+  ]) {
+    assert.deepEqual(model(ctx), automatic, JSON.stringify(ctx));
+  }
+  // A configured heartbeat model owns heartbeat runs; other system runs still switch.
+  live.agents.defaults.heartbeat = { model: "beat/model" };
+  assert.equal(model(system("heartbeat", { trigger: "heartbeat" })), undefined);
+  assert.deepEqual(model(system("restart-sentinel")), automatic);
+  delete live.agents.defaults.heartbeat;
+  // The configured model is read live, falling back to the shared default.
+  live.agents.entries.assistant.model = { fallbacks: ["other/model"] };
+  assert.deepEqual(model(system("restart-sentinel")), {
+    providerOverride: "shared",
+    modelOverride: "default-model",
+  });
+  live.agents.defaults.model = "worker";
+  assert.throws(() => model(system("restart-sentinel")), /provider\/model/);
+  live.agents.defaults.model = "auto/worker-model";
+  host.dispose();
+  assert.equal(model(system("restart-sentinel")), undefined);
+});

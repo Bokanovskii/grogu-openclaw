@@ -276,8 +276,18 @@ export function createDelivery(api: OpenClawPluginApi) {
       assertCurrent: () => void,
     ) {
       const main = await mainSession(assertCurrent);
+      const currentConfig = api.runtime.config.current();
+      const agentModel = currentConfig.agents?.entries?.[agentId]?.model;
+      const defaultModel = currentConfig.agents?.defaults?.model;
+      const model =
+        (typeof agentModel === "string" ? agentModel : agentModel?.primary)?.trim() ||
+        (typeof defaultModel === "string" ? defaultModel : defaultModel?.primary)?.trim();
+      if (!model) {
+        throw new Error("Research handoffs require a configured primary model for Main.");
+      }
       const result = await api.runtime.subagent.run({
         sessionKey: main.sessionKey,
+        model,
         message:
           `Research text candidate for ${topic.title} (${topic.id}, revision ${topic.revision}).\n` +
           (topic.completionId

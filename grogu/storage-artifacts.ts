@@ -1,10 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { root as safeRoot } from "@openclaw/fs-safe";
 import { z } from "zod";
+import { withUpdateCommandExecutor } from "../src/cli/update-cli/update-command-executor.js";
+import { UpdateCommandRecoveryPendingError } from "../src/cli/update-cli/update-command-recovery-error.js";
+import { CONFIG_BACKUP_COUNT } from "../src/config/backup-rotation.js";
+import { withConfigSourceLocks } from "../src/config/write-lock.js";
 import { withFileLock } from "../src/infra/file-lock.js";
 import { isPathInside } from "../src/infra/path-guards.js";
+import {
+  executeExistingOpenClawStateRead,
+  withArtifactPreservingStateReads,
+} from "../src/state/openclaw-state-db-readonly.js";
 import type { OperatorProfile } from "./operator.js";
 
 const RELEASE_CANDIDATE_LIFETIME_MS = 24 * 60 * 60_000;
@@ -64,6 +73,109 @@ export async function withGroguStorageLock<T>(
       return run(assertCurrent);
     },
   );
+}
+
+export async function cleanupGroguConfigBackups(
+  profile: OperatorProfile,
+  options: { apply: boolean; assertCurrent: () => void },
+): Promise<ArtifactCleanupResult> {
+  const result: ArtifactCleanupResult = { eligible: [], removed: [], protected: [] };
+  const directory = path.dirname(profile.configFile);
+  const names = Array.from(
+    { length: CONFIG_BACKUP_COUNT },
+    (_, index) => `${path.basename(profile.configFile)}.bak${index === 0 ? "" : `.${index}`}`,
+  );
+  try {
+    if (!(await readdir(directory)).some((name) => names.includes(name))) {
+      return result;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return result;
+    }
+    throw error;
+  }
+  const env = {
+    ...process.env,
+    OPENCLAW_STATE_DIR: profile.stateDir,
+    OPENCLAW_CONFIG_PATH: profile.configFile,
+    OPENCLAW_OAUTH_DIR: profile.oauthDir,
+  };
+  const runId = `config-backup-cleanup-${randomUUID()}`;
+  try {
+    // Older update drivers can still borrow .bak for recovery between configuration writes.
+    return await withUpdateCommandExecutor(runId, async (executor) => {
+      const fence = await executor.enter(path.dirname(profile.runtime.cli), { preflight: true });
+      const assertCurrent = () => {
+        options.assertCurrent();
+        fence.assertCurrent();
+      };
+      assertCurrent();
+      const history = await withArtifactPreservingStateReads(() =>
+        executeExistingOpenClawStateRead(
+          { env },
+          { type: "updateRecoveryRetirement.read", input: { runId } },
+          { current: true, preferIndependentWarmRead: true },
+        ),
+      );
+      assertCurrent();
+      if (
+        history &&
+        (!history.ok ||
+          history.type !== "updateRecoveryRetirement.read" ||
+          history.activeRun ||
+          history.pendingRecovery)
+      ) {
+        result.protected.push({ path: directory, reason: "unfinished-or-unverified-recovery" });
+        return result;
+      }
+      return withConfigSourceLocks(
+        [profile.configFile],
+        async (assertWriteCurrent) => {
+          const root = await safeRoot(directory, {
+            symlinks: "reject",
+            hardlinks: "reject",
+            assertBeforeMutation: assertWriteCurrent,
+          });
+          for (const name of names) {
+            const candidate = path.join(directory, name);
+            let entry;
+            try {
+              entry = await lstat(candidate);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+                continue;
+              }
+              throw error;
+            }
+            if (
+              !entry.isFile() ||
+              entry.nlink !== 1 ||
+              (process.getuid && entry.uid !== process.getuid())
+            ) {
+              result.protected.push({ path: candidate, reason: "not-an-owned-regular-backup" });
+              continue;
+            }
+            assertWriteCurrent();
+            result.eligible.push(candidate);
+            if (options.apply) {
+              await root.remove(name);
+              result.removed.push(candidate);
+            }
+          }
+          return result;
+        },
+        env,
+        assertCurrent,
+      );
+    });
+  } catch (error) {
+    if (!(error instanceof UpdateCommandRecoveryPendingError)) {
+      throw error;
+    }
+    result.protected.push({ path: directory, reason: "active-update-or-recovery" });
+    return result;
+  }
 }
 
 export async function cleanupGroguArtifacts(

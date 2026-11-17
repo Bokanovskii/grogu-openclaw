@@ -290,6 +290,7 @@ export async function writeRootBoundJsonFile(params: {
   try {
     await using preparedFile = await prepareConfigFileWrite({
       configPath: targetAtCommit.absolutePath,
+      env: params.env,
       previousRaw: currentRaw,
       content,
       fsModule: writeGuard.fileSystem,

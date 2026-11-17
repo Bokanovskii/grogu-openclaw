@@ -2,18 +2,22 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stageGroguCompactionConfig } from "../../grogu/compaction-config.js";
 import type { OperatorProfile } from "../../grogu/operator.js";
 import { cleanupGroguArtifacts, withGroguStorageLock } from "../../grogu/storage-artifacts.js";
 import { bootstrapGroguStorage, cleanupGroguStorage } from "../../grogu/storage.js";
 import type { CronJob } from "../../packages/gateway-protocol/src/schema/cron.types.js";
+import { withUpdateCommandExecutor } from "../../src/cli/update-cli/update-command-executor.js";
+import { installPrivateUpdateHandoffStore } from "../helpers/private-update-handoff-store.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const execute = promisify(execFile);
 const directories = useAutoCleanupTempDirTracker(afterEach);
 const oldName = "2026-01-01T00-00-00.000Z-11111111-1111-4111-8111-111111111111";
 const freshName = "2026-01-01T00-00-00.000Z-22222222-2222-4222-8222-222222222222";
+
+afterEach(() => vi.restoreAllMocks());
 
 function makeJob(id: string, payload: CronJob["payload"], declarationKey?: string): CronJob {
   return {
@@ -34,6 +38,7 @@ function makeJob(id: string, payload: CronJob["payload"], declarationKey?: strin
 
 async function fixture(jobs: CronJob[] = []) {
   const directory = directories.make("grogu-storage-");
+  installPrivateUpdateHandoffStore(directory);
   const profile: OperatorProfile = {
     profileFile: path.join(directory, "profile.json"),
     runtime: {
@@ -134,6 +139,76 @@ async function artifact(root: string, name: string, kind: "backup" | "release", 
 }
 
 describe("Grogu small-disk storage policy", () => {
+  it("sweeps only the native configuration backup ring, preserving other recovery artifacts", async () => {
+    const { profile } = await fixture();
+    const original = '{"gateway":{"mode":"local"}}\n';
+    await fs.writeFile(profile.configFile, original);
+    const backups = ["", ".1", ".2", ".3", ".4"].map(
+      (suffix) => `${profile.configFile}.bak${suffix}`,
+    );
+    const preserved = [
+      `${profile.configFile}.bak-manual`,
+      `${profile.configFile}.bak.20260101`,
+      `${profile.configFile}.pre-update`,
+      path.join(profile.stateDir, "openclaw-config-backup-active"),
+    ];
+    for (const file of [...backups, ...preserved]) {
+      await fs.writeFile(file, original, { mode: 0o600 });
+    }
+
+    expect(await cleanupGroguStorage(profile)).toMatchObject({
+      configBackups: { eligible: backups, removed: [] },
+    });
+    for (const file of backups) {
+      expect(await fs.readFile(file, "utf8")).toBe(original);
+    }
+    expect(await cleanupGroguStorage(profile, true)).toMatchObject({
+      configBackups: { removed: backups },
+    });
+    for (const file of backups) {
+      await expect(fs.stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    for (const file of [profile.configFile, ...preserved]) {
+      expect(await fs.readFile(file, "utf8")).toBe(original);
+    }
+  });
+
+  it("preserves configuration backups that alias other files", async () => {
+    const { profile } = await fixture();
+    const backup = `${profile.configFile}.bak`;
+    const userFile = path.join(profile.stateDir, "preserved.txt");
+    await fs.writeFile(userFile, "preserve user artifact");
+    await fs.link(userFile, backup);
+
+    expect(await cleanupGroguStorage(profile, true)).toMatchObject({
+      configBackups: {
+        removed: [],
+        protected: [{ path: backup, reason: "not-an-owned-regular-backup" }],
+      },
+    });
+    expect(await fs.readFile(backup, "utf8")).toBe("preserve user artifact");
+    expect(await fs.readFile(userFile, "utf8")).toBe("preserve user artifact");
+  });
+
+  it("preserves configuration recovery copies while an update owns the installation", async () => {
+    const { profile } = await fixture();
+    const backup = `${profile.configFile}.bak`;
+    await fs.writeFile(backup, "active update recovery", { mode: 0o600 });
+    await withUpdateCommandExecutor("active-update", async (executor) => {
+      const fence = await executor.enter(path.dirname(profile.runtime.cli));
+      expect(await cleanupGroguStorage(profile, true)).toMatchObject({
+        configBackups: {
+          removed: [],
+          protected: [
+            { path: path.dirname(profile.configFile), reason: "active-update-or-recovery" },
+          ],
+        },
+      });
+      fence.assertCurrent();
+      expect(await fs.readFile(backup, "utf8")).toBe("active update recovery");
+    });
+  });
+
   it("retires completed backups immediately while retaining release candidates and unknown content", async () => {
     const { profile } = await fixture();
     const archive = await artifact(profile.recoveryDir, oldName, "backup", false);

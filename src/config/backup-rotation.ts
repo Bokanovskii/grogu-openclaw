@@ -3,6 +3,7 @@ import type fs from "node:fs";
 import path from "node:path";
 import { tempFile } from "@openclaw/fs-safe/advanced";
 import { replaceFileAtomicSync, type ReplaceFileAtomicSyncOptions } from "@openclaw/fs-safe/atomic";
+import { readGroguPrivateProfileDocument } from "../agents/grogu-private-profile.js";
 import { isRootFileMissingFailure, openRootFileSync } from "../infra/boundary-file-read.js";
 import { ConfigMutationConflictError } from "./mutation-conflict.js";
 import { createConfigWriteAuthorityGuard } from "./write-authority.js";
@@ -13,6 +14,7 @@ export const CONFIG_BACKUP_COUNT = 5;
 export async function prepareConfigFileWrite(
   params: {
     configPath: string;
+    env?: NodeJS.ProcessEnv;
     content: string;
     previousRaw: string | null;
     fsModule: typeof fs;
@@ -27,9 +29,13 @@ export async function prepareConfigFileWrite(
     params.assertBeforeMutation ?? assertCurrent,
   );
   assertCurrent?.();
+  const env = params.env ?? process.env;
+  const retainBackup =
+    env.GROGU_PROFILE_FILE === undefined ||
+    !readGroguPrivateProfileDocument(env.GROGU_PROFILE_FILE);
   let backup: Awaited<ReturnType<typeof tempFile>> | undefined;
   try {
-    if (params.previousRaw !== null) {
+    if (retainBackup && params.previousRaw !== null) {
       backup = await tempFile({
         rootDir: path.dirname(configPath),
         prefix: "openclaw-config-backup",

@@ -18,7 +18,11 @@ import {
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
-import { cleanupGroguArtifacts, withGroguStorageLock } from "./storage-artifacts.js";
+import {
+  cleanupGroguArtifacts,
+  cleanupGroguConfigBackups,
+  withGroguStorageLock,
+} from "./storage-artifacts.js";
 
 const STORAGE_CLEANUP_DECLARATION = "grogu-storage-cleanup-v1";
 const LEGACY_BACKUP_MARKER = "GROGU_BACKUP_OBSERVABILITY_V1";
@@ -155,6 +159,7 @@ export async function cleanupGroguStorage(profile: OperatorProfile, apply = fals
     const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
     const backups = await disableScheduledBackups(profile, directory, apply);
     const artifacts = await cleanupGroguArtifacts(profile, { apply, assertCurrent });
+    const configBackups = await cleanupGroguConfigBackups(profile, { apply, assertCurrent });
     const updateCaptures = await retireCompletedUpdateRecoveryCaptures({
       env: {
         ...process.env,
@@ -164,6 +169,7 @@ export async function cleanupGroguStorage(profile: OperatorProfile, apply = fals
       },
       apply,
       minimumAgeMs: 0,
+      retireSettledManualCopies: { installRoot: path.dirname(profile.runtime.cli) },
     });
     await writePrivateReceipt(directory, "storage-maintenance.json", {
       schemaVersion: 1,
@@ -174,6 +180,7 @@ export async function cleanupGroguStorage(profile: OperatorProfile, apply = fals
       mode: apply ? "applied" : "preview",
       backups,
       artifacts,
+      configBackups,
       updateCaptures,
       privateReceipts: directory,
     };

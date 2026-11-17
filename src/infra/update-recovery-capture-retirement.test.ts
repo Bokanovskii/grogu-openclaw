@@ -25,7 +25,11 @@ import { completeStandaloneDoctorCapture } from "./update-recovery-doctor-comple
 import { createRetainedUpdateRecovery } from "./update-retained-recovery.test-support.js";
 import { readUpdateRunDriver, type UpdateRunDriver } from "./update-run-driver.js";
 import * as processInspection from "./update-run-driver.js";
-import { createUpdateRun, finishUpdateRun } from "./update-run-ledger.js";
+import {
+  createUpdateRun,
+  finishUpdateRun,
+  recordUpdateRunVerification,
+} from "./update-run-ledger.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -216,6 +220,9 @@ it("retires a real completed capture's drained database staging but preserves un
       }
     }
 
+    for (const parent of [resolveUpdateCaptureRoot(state.stateDir), directory]) {
+      await fs.writeFile(path.join(parent, ".DS_Store"), "synthetic Finder metadata");
+    }
     for (const apply of [false, true]) {
       expect(
         await retireCompletedUpdateRecoveryCaptures({
@@ -232,6 +239,110 @@ it("retires a real completed capture's drained database staging but preserves un
     }
     await expect(fs.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await fs.readFile(state.configPath)).toEqual(liveConfig);
+  });
+});
+
+it("retires unsealed manual copies only after their native writers settle and only with producer-shaped content", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const { capture } = await fixture(state);
+    const driver = readUpdateRunDriver();
+    if (!driver) {
+      throw new Error("Missing fixture process identity.");
+    }
+    const completed = await capture();
+    const live = await capture("succeeded", driver);
+    const unknownContent = await capture();
+    const changed = await capture();
+    for (const { directory } of [completed, live, unknownContent, changed]) {
+      await fs.unlink(path.join(directory, "manifest.json"));
+      await fs.rename(
+        path.join(directory, "payload", "original.txt"),
+        path.join(directory, "payload", "0"),
+      );
+    }
+    await fs.writeFile(
+      path.join(unknownContent.directory, "payload", "notes.txt"),
+      "preserve note",
+    );
+    const afterCompletion = new Date(Date.now() + 1_000);
+    await fs.utimes(path.join(changed.directory, "payload", "0"), afterCompletion, afterCompletion);
+    await fs.mkdir(path.join(completed.directory, "database.databases", "openclaw"), {
+      recursive: true,
+    });
+    await fs.writeFile(path.join(completed.directory, ".DS_Store"), "synthetic Finder metadata");
+
+    expect(
+      (
+        await retireCompletedUpdateRecoveryCaptures({
+          env: state.env,
+          apply: true,
+          minimumAgeMs: 0,
+        })
+      ).retired,
+    ).toEqual([]);
+    for (const apply of [false, true]) {
+      const result = await retireCompletedUpdateRecoveryCaptures({
+        env: state.env,
+        apply,
+        minimumAgeMs: 0,
+        retireSettledManualCopies: { installRoot: state.root },
+      });
+      expect(result.eligible).toEqual([completed.directory]);
+      expect(result.retired).toEqual(apply ? [completed.directory] : []);
+      expect(result.protected.map((entry) => entry.path).toSorted()).toEqual(
+        [live.directory, unknownContent.directory, changed.directory].toSorted(),
+      );
+    }
+    await expect(fs.stat(completed.directory)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      await fs.readFile(path.join(unknownContent.directory, "payload", "notes.txt"), "utf8"),
+    ).toBe("preserve note");
+    expect(await fs.readFile(path.join(live.directory, "payload", "0"), "utf8")).toBe(
+      "synthetic original",
+    );
+  });
+});
+
+it("retires failed manual originals only with recorded restart safety and no unresolved recovery outcome", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const { capture } = await fixture(state);
+    const completed = await capture("failed");
+    const unsafe = await capture("failed");
+    const unresolved = await capture("failed");
+    for (const { runId } of [completed, unresolved]) {
+      recordUpdateRunVerification(
+        runId,
+        { recovery: { serviceRestartSafe: true, version: "1", service: "failed" } },
+        { env: state.env },
+      );
+    }
+    await fs.writeFile(
+      path.join(unresolved.directory, "outcome.json"),
+      JSON.stringify({
+        status: "restored",
+        manifestSha256: unresolved.digest,
+        error: "synthetic incomplete restoration",
+      }),
+    );
+    expect(
+      (
+        await retireCompletedUpdateRecoveryCaptures({
+          env: state.env,
+          apply: true,
+          minimumAgeMs: 0,
+        })
+      ).retired,
+    ).toEqual([]);
+    const result = await retireCompletedUpdateRecoveryCaptures({
+      env: state.env,
+      apply: true,
+      minimumAgeMs: 0,
+      retireSettledManualCopies: { installRoot: state.root },
+    });
+    expect(result.retired).toEqual([completed.directory]);
+    expect(result.protected.map((entry) => entry.path).toSorted()).toEqual(
+      [unsafe.directory, unresolved.directory].toSorted(),
+    );
   });
 });
 

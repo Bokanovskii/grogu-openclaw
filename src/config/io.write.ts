@@ -63,16 +63,14 @@ import {
   restoreAuthoredTildePathsForWrite,
 } from "./io.read-helpers.js";
 import { loggedConfigWarningFingerprints, setBoundedConfigIoWarningEntry } from "./io.state.js";
-import type {
-  ConfigWriteInputBasis,
-  ConfigWriteOptions,
-  InternalConfigWriteResult,
-  ReadConfigFileSnapshotInternalResult,
-} from "./io.types.js";
 import {
   ConfigRuntimeRefreshError,
   configWriteCommittedSnapshot,
   configWritePostCommitRollback,
+  type ConfigWriteInputBasis,
+  type ConfigWriteOptions,
+  type InternalConfigWriteResult,
+  type ReadConfigFileSnapshotInternalResult,
 } from "./io.types.js";
 import { logConfigWarningsOnce } from "./io.warnings.js";
 import {
@@ -537,6 +535,7 @@ export async function writeConfigFileFromContext(
       });
     await using preparedFile = await prepareConfigFileWrite({
       configPath,
+      env: deps.env,
       content: json,
       previousRaw: snapshot.raw,
       fsModule: writeGuard.fileSystem,

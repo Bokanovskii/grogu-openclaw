@@ -136,6 +136,56 @@ test("accepts reusable producer roles without giving every agent Main authority"
   );
 });
 
+test("Main text sends fill the owner route and block other destinations before dispatch", () => {
+  const delivery = {
+    agentId: "assistant",
+    channel: "telegram",
+    target: "telegram:100",
+    accountId: "owner-bot",
+  };
+  const live = { plugins: { entries: { "research-topics": { config: { delivery } } } } };
+  const host = register(configuration, {}, live);
+  const main = { agentId: "assistant", sessionKey: "agent:assistant:main", toolName: "message" };
+  const guard = (params, ctx = main) =>
+    host.hooks.get("before_tool_call")({ toolName: "message", params }, ctx);
+  const message = { action: "send", message: "Synthetic finding" };
+  assert.deepEqual(guard(message), {
+    params: { ...message, channel: "telegram", target: "telegram:100", accountId: "owner-bot" },
+  });
+  for (const fields of [
+    { target: "@someone" },
+    { channel: "discord" },
+    { accountId: "other-bot" },
+    { targets: ["telegram:200"] },
+    { threadId: "99" },
+    { replyTo: "88" },
+    { action: "broadcast" },
+  ]) {
+    const result = guard({ ...message, ...fields });
+    assert.equal(result.block, true);
+    assert.match(result.blockReason, /Main sends only direct owner texts/);
+    assert.equal(result.params, undefined);
+  }
+  assert.equal(
+    guard(
+      { ...message, target: "telegram:200" },
+      {
+        ...main,
+        sessionKey: "agent:assistant:chat:owner",
+      },
+    ),
+    undefined,
+  );
+  delivery.target = "telegram:300";
+  assert.equal(guard(message).params.target, "telegram:300");
+  assert.equal(guard({ ...message, target: "telegram:100" }).block, true);
+  delete live.plugins.entries["research-topics"];
+  assert.equal(guard(message).block, true);
+  live.plugins.entries["research-topics"] = { config: { delivery } };
+  host.dispose();
+  assert.equal(guard(message).block, true);
+});
+
 test("runs the system starts in a chat use the agent's configured model, not the chat's choice", () => {
   const live = {
     agents: {

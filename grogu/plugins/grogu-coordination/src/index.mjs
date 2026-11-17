@@ -74,15 +74,14 @@ export default definePluginEntry({
     // Compaction can drop the owner's route from Main's conversation, so rebuild it every turn
     // from the route Research Topics enforces. Read it live: this instance keeps its
     // registration-time config snapshot.
-    const ownerRouteContext = () => {
+    const ownerRoute = () => {
       const delivery =
         api.runtime.config.current().plugins?.entries?.["research-topics"]?.config?.delivery;
       if (!delivery || delivery.agentId !== mainAgentId) {
         return undefined;
       }
       const { channel, target, accountId } = delivery;
-      const route = JSON.stringify({ channel, target, ...(accountId ? { accountId } : {}) });
-      return `Owner text route for automatic texts (copy these message fields exactly): ${route}`;
+      return { channel, target, ...(accountId ? { accountId } : {}) };
     };
     let retired = false;
     api.lifecycle.onDispose(() => {
@@ -99,14 +98,53 @@ export default definePluginEntry({
         job?.agentId === ctx.agentId && job.sourceSessionKey
           ? `Originating subject: ${job.sourceSessionKey} (routing reference only).`
           : undefined;
+      const route = isMain ? ownerRoute() : undefined;
       return {
         appendSystemContext: isMain
-          ? [policy, mainPolicy, quietHoursContext, ownerRouteContext()]
+          ? [
+              policy,
+              mainPolicy,
+              quietHoursContext,
+              route
+                ? `Owner text route for automatic texts (copy these message fields exactly): ${JSON.stringify(route)}`
+                : undefined,
+            ]
               .filter(Boolean)
               .join("\n\n")
           : policy,
         ...(subject ? { appendContext: subject } : {}),
       };
+    });
+    api.on("before_tool_call", (event, ctx) => {
+      if (
+        ctx.agentId !== mainAgentId ||
+        ctx.sessionKey !== mainKey ||
+        event.toolName !== "message" ||
+        !["send", "broadcast"].includes(event.params.action)
+      ) {
+        return undefined;
+      }
+      const route = retired ? undefined : ownerRoute();
+      if (!route?.channel || !route.target) {
+        return {
+          block: true,
+          blockReason:
+            "Main's owner text route is unavailable. Check Research Topics delivery configuration.",
+        };
+      }
+      if (
+        event.params.action !== "send" ||
+        ["targets", "threadId", "replyTo"].some((key) => event.params[key] !== undefined) ||
+        ["channel", "target", "accountId"].some(
+          (key) => event.params[key] !== undefined && event.params[key] !== route[key],
+        )
+      ) {
+        return {
+          block: true,
+          blockReason: `Main sends only direct owner texts. Use action send with ${JSON.stringify(route)} and no targets, threadId, or replyTo.`,
+        };
+      }
+      return { params: { ...event.params, ...route } };
     });
     // A chat's model choice is for the owner's own messages. Runs the system starts in that
     // chat use the agent's configured model, for this run only.

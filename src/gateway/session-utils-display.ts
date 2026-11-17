@@ -105,9 +105,11 @@ export function projectGatewaySessionRunState(params: {
   const { key, entry, now, rowContext } = params;
   const subagentRuns = rowContext?.subagentRuns ?? buildSubagentSessionListReadIndex(now);
   const subagentRun = subagentRuns.getDisplaySubagentRun(key);
-  const subagentOwner =
+  const runOwner =
     normalizeOptionalString(subagentRun?.controllerSessionKey) ||
     normalizeOptionalString(subagentRun?.requesterSessionKey);
+  // A plugin turn in an agent's main session records that session as its own controller.
+  const subagentOwner = runOwner === key ? undefined : runOwner;
   const liveSubagentRunActive = isSubagentRunLive(subagentRun) || isSubagentRunQueued(subagentRun);
   const hasProjectedRun = (sessionKey: string, sessionId?: string) => {
     if (!rowContext?.projectedAgentRuns) {

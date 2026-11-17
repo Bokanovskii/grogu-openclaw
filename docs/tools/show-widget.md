@@ -126,7 +126,7 @@ Author widgets with four rules:
 3. Reserve `--accent-fill` for at most one primary action.
 4. Fit the iframe width at every viewport. Avoid fixed page or card widths. Use fluid sizing and wrap or stack multi-column layouts when narrow. Use horizontal scrolling only when exact geometry must remain.
 
-**Export:** In web chat, open the widget card menu. From there, copy the rendered widget to the clipboard or download it as a PNG. Older widget documents without the snapshot bridge fall back to an HTML file download. The PNG exporter does not inline external stylesheets or fonts; check the export when using them.
+**Export:** In web chat, open the widget card menu and select **Download HTML** to save the widget document. The download uses the loaded document when available, or fetches its saved HTML. It does not wait for an image export.
 
 ## Libraries and fonts
 

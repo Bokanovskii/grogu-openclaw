@@ -40,28 +40,32 @@ import {
   countRequestImages,
   normalizeReportedUsage,
 } from "../../model-request-telemetry-metadata.js";
-import { beginModelRequestTelemetry } from "../../model-request-telemetry.js";
+import {
+  beginModelRequestTelemetry,
+  type RequestTelemetryFields,
+} from "../../model-request-telemetry.js";
 import type { StreamFn } from "../../runtime/index.js";
 import type {
   createModelObserver,
   ModelCallEventBase,
 } from "./attempt.model-diagnostic-observation.js";
 
-export type ModelCallDiagnosticContext = Omit<PluginHookModelCallStartedEvent, "callId"> & {
-  config?: OpenClawConfig;
-  agentId?: string;
-  trace: DiagnosticTraceContext;
-  contentCapture?: DiagnosticModelContentCapturePolicy;
-  nextCallId: () => string;
-  ownerGeneration?: CoreModelRequestOwnerGeneration;
-  onStarted?: () => void;
-  /** Each streamed non-empty text, thinking or tool-call delta; keepalives never count. */
-  onOutputDelta?: () => void;
-  onTerminal?: () => void;
-  onSucceeded?: (startedAt: number) => void;
-  suppressPluginHooks?: boolean;
-  requestTimeoutMs?: number;
-};
+export type ModelCallDiagnosticContext = Omit<PluginHookModelCallStartedEvent, "callId"> &
+  Pick<RequestTelemetryFields, "trigger" | "inputProvenance"> & {
+    config?: OpenClawConfig;
+    agentId?: string;
+    trace: DiagnosticTraceContext;
+    contentCapture?: DiagnosticModelContentCapturePolicy;
+    nextCallId: () => string;
+    ownerGeneration?: CoreModelRequestOwnerGeneration;
+    onStarted?: () => void;
+    /** Each streamed non-empty text, thinking or tool-call delta; keepalives never count. */
+    onOutputDelta?: () => void;
+    onTerminal?: () => void;
+    onSucceeded?: (startedAt: number) => void;
+    suppressPluginHooks?: boolean;
+    requestTimeoutMs?: number;
+  };
 
 type ModelCallErrorFields = Pick<
   Extract<DiagnosticEventInput, { type: "model.call.error" }>,
@@ -255,6 +259,8 @@ export function createModelLifecycle(params: {
   };
   const telemetry = beginModelRequestTelemetry({
     ...eventBase,
+    trigger: params.ctx.trigger,
+    inputProvenance: params.ctx.inputProvenance,
     timeoutMs: params.requestTimeoutMs,
   });
   emitCoreModelRequestStartedDiagnosticEvent(

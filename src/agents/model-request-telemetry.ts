@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Model } from "../llm/types.js";
+import { isAutomaticInputProvenance, type InputProvenance } from "../sessions/input-provenance.js";
 import { loadGroguPrivateProfile } from "./grogu-private-profile.js";
 import {
   modelRequestMetadataSnapshot,
@@ -19,6 +20,7 @@ import {
   createRequestTelemetryClient,
   resolveModelTelemetryDirectory,
 } from "./model-request-telemetry-store.js";
+import type { EmbeddedRunTrigger } from "./run-trigger.js";
 
 const callContext = new AsyncLocalStorage<RequestTracker>();
 const httpContext = new AsyncLocalStorage<RequestTracker>();
@@ -130,6 +132,8 @@ export type RequestTelemetryFields = {
   jobId?: string;
   timeoutMs?: number;
   workClass?: string;
+  trigger?: EmbeddedRunTrigger | "budget";
+  inputProvenance?: InputProvenance;
 };
 
 type RequestQueueTelemetry = {
@@ -207,11 +211,19 @@ export function createRequestTracker(
     httpAttempts: 0,
     workClass: ["interactive", "scheduled", "utility"].includes(fields.workClass ?? "")
       ? fields.workClass!
-      : jobId
+      : jobId ||
+          fields.trigger === "cron" ||
+          fields.trigger === "heartbeat" ||
+          isAutomaticInputProvenance(fields.inputProvenance)
         ? "scheduled"
-        : telemetryUuid(fields.sessionId)
-          ? "interactive"
-          : "utility",
+        : fields.trigger && fields.trigger !== "user" && fields.trigger !== "manual"
+          ? "utility"
+          : fields.inputProvenance?.kind === "external_user" ||
+              fields.trigger === "user" ||
+              fields.trigger === "manual" ||
+              telemetryUuid(fields.sessionId)
+            ? "interactive"
+            : "utility",
   };
   const save = () => {
     record.updatedAtMs = time.wall();

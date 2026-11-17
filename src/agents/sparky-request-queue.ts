@@ -1,6 +1,7 @@
 import { parseRetryAfterHeadersSeconds } from "@openclaw/ai/internal/retry-after";
 import { toErrorObject } from "../infra/errors.js";
 import type { Model } from "../llm/types.js";
+import { withCommandLaneCapacitySuspended } from "../process/command-queue.capacity-suspension.js";
 import { currentHttpRequestTelemetry } from "./model-request-telemetry.js";
 
 type Priority = -1 | 0 | 1;
@@ -43,7 +44,8 @@ export function createSparkyAdmission(
 ) {
   const {
     maxWaiting = 32,
-    maxActive = 4,
+    // Reserve capacity against Sparky's lower known ceiling, not its occasional peak.
+    maxActive = 2,
     interactiveReserve = Math.min(1, maxActive),
     now = Date.now,
     agingMs = 120_000,
@@ -68,11 +70,11 @@ export function createSparkyAdmission(
   let nonInteractivePauses = 0;
   let lastPriority: Priority = 0;
   const waiting: AdmissionEntry[] = [];
-  const canAdmit = (entry: AdmissionEntry) => {
+  const canAdmit = (workClass: SparkyWorkClass) => {
     if (allPauses > 0 || active >= maxActive) {
       return false;
     }
-    if (entry.workClass === "interactive") {
+    if (workClass === "interactive") {
       return (
         nonInteractivePauses === 0 ||
         (interactiveReserve > 0 && activeByWorkClass.interactive < interactiveReserve)
@@ -87,20 +89,21 @@ export function createSparkyAdmission(
     while (active < maxActive && waiting.length) {
       const eligible = waiting
         .map((entry, index) => ({ entry, index }))
-        .filter(({ entry }) => canAdmit(entry));
+        .filter(({ entry }) => canAdmit(entry.workClass));
       if (eligible.length === 0) {
         return;
       }
+      const interactive = eligible.find(({ entry }) => entry.workClass === "interactive");
       const aged =
-        lastPriority >= 0
+        !interactive && lastPriority >= 0
           ? eligible.find(({ entry }) => now() - entry.queuedAt >= agingMs)?.index
           : undefined;
       const index =
-        aged !== undefined
-          ? aged
-          : eligible.reduce((best, current) =>
-              current.entry.priority > best.entry.priority ? current : best,
-            ).index;
+        interactive?.index ??
+        aged ??
+        eligible.reduce((best, current) =>
+          current.entry.priority > best.entry.priority ? current : best,
+        ).index;
       const next = waiting.splice(index, 1)[0]!;
       next.detach();
       if (next.signal?.aborted) {
@@ -160,7 +163,7 @@ export function createSparkyAdmission(
       if (!["interactive", "utility", "scheduled"].includes(workClass)) {
         return Promise.reject(new RangeError("Invalid request work class"));
       }
-      if (waiting.length >= maxWaiting) {
+      if (waiting.length >= maxWaiting && !canAdmit(workClass)) {
         return Promise.reject(
           new Error("Sparky request queue is full; retry after current work finishes"),
         );
@@ -281,14 +284,29 @@ export function queueSparkyFetch(
         : "utility";
     const priority = priorityForWorkClass(workClass);
     telemetry?.queue(pool.telemetry, waitMs, priority);
-    let release: () => void;
+    let release: (() => void) | undefined;
     try {
-      release = await pool.acquire(waitingSignal, workClass);
+      release = await withCommandLaneCapacitySuspended(async () => {
+        release = await pool.acquire(waitingSignal, workClass);
+        waitingSignal.addEventListener("abort", release, { once: true });
+        if (waitingSignal.aborted) {
+          release();
+        }
+        return release;
+      });
+    } catch (error) {
+      // Admission may succeed before the command loses authority while reacquiring.
+      release?.();
+      throw error;
     } finally {
+      if (release) {
+        waitingSignal.removeEventListener("abort", release);
+      }
       clearTimeout(timer);
     }
+    const releaseAdmission = release;
     if (waitingSignal.aborted || now() - queuedAt >= waitMs) {
-      release();
+      releaseAdmission();
       throw waitingSignal.aborted
         ? abortReason(waitingSignal)
         : new DOMException(
@@ -306,9 +324,9 @@ export function queueSparkyFetch(
       settled = true;
       detach();
       if (cooldown) {
-        void (options.sleep ?? sleep)(1_500).then(release, release);
+        void (options.sleep ?? sleep)(1_500).then(releaseAdmission, releaseAdmission);
       } else {
-        release();
+        releaseAdmission();
       }
     };
     try {

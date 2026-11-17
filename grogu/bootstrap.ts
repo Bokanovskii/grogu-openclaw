@@ -20,6 +20,7 @@ import {
   writePrivateReceipt,
   type OperatorProfile,
 } from "./operator.js";
+import { LEGACY_GROGU_AGENT_MAX_CONCURRENT } from "./policy.js";
 import {
   renderWorkerTriggerScript,
   workerTriggerScriptSha256,
@@ -306,12 +307,17 @@ export async function reconcileManagedJobs(profile: OperatorProfile, apply = fal
   };
 }
 
-export async function bootstrapGroguWidgetSandbox(profile: OperatorProfile, apply = false) {
+export async function bootstrapGroguRuntimeConfig(profile: OperatorProfile, apply = false) {
   const directory = await createPrivateArtifactDirectory(profile.recoveryDir);
   const configuration = z.object({
     mcp: z
       .object({
         apps: z.object({ sameOriginSandbox: z.boolean().optional() }).optional(),
+      })
+      .optional(),
+    agents: z
+      .object({
+        defaults: z.object({ maxConcurrent: z.number().optional() }).optional(),
       })
       .optional(),
   });
@@ -323,11 +329,18 @@ export async function bootstrapGroguWidgetSandbox(profile: OperatorProfile, appl
     })
     .parse(await callNative(profile, "config.get", {}, directory));
   const current = snapshot.config.mcp?.apps?.sameOriginSandbox;
-  const changed = current === undefined;
-  const planReceipt = await writePrivateReceipt(directory, "widget-sandbox-plan.json", {
+  const removeLegacyConcurrency =
+    snapshot.config.agents?.defaults?.maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT;
+  const changed = current === undefined || removeLegacyConcurrency;
+  const patch = {
+    ...(current === undefined ? { mcp: { apps: { sameOriginSandbox: true } } } : {}),
+    ...(removeLegacyConcurrency ? { agents: { defaults: { maxConcurrent: null } } } : {}),
+  };
+  const planReceipt = await writePrivateReceipt(directory, "runtime-config-plan.json", {
     apply,
     changed,
     sameOriginSandbox: current ?? true,
+    removeLegacyConcurrency,
     restartRequired: changed,
   });
   if (apply && changed) {
@@ -337,19 +350,28 @@ export async function bootstrapGroguWidgetSandbox(profile: OperatorProfile, appl
         "config.patch",
         {
           baseHash: snapshot.hash,
-          raw: JSON.stringify({ mcp: { apps: { sameOriginSandbox: true } } }),
-          note: "Enable Grogu's single-origin widget sandbox",
+          raw: JSON.stringify(patch),
+          note: "Apply Grogu runtime defaults and provider-specific admission",
         },
         directory,
       ),
     );
-    if (result.config.mcp?.apps?.sameOriginSandbox !== true) {
+    if (current === undefined && result.config.mcp?.apps?.sameOriginSandbox !== true) {
       throw new Error("Native configuration did not enable the widget sandbox");
+    }
+    if (
+      removeLegacyConcurrency &&
+      result.config.agents?.defaults?.maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT
+    ) {
+      throw new Error(
+        "Native configuration did not remove the legacy provider-wide concurrency cap",
+      );
     }
   }
   return {
     mode: apply ? "applied" : "preview",
     sameOriginSandbox: current ?? true,
+    removeLegacyConcurrency,
     changed,
     restartRequired: changed,
     planReceipt,

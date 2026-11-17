@@ -4,7 +4,12 @@ export type CommandLaneBlockReason = "lane" | "group-budget" | "sibling-reservat
 export type CommandLaneSnapshot = {
   lane: string;
   queuedCount: number;
+  /** Owned tasks, including suspended tasks until their owner settles them. */
   activeCount: number;
+  /** Still-owned tasks temporarily waiting without execution capacity. */
+  suspendedCount?: number;
+  /** Existing tasks queued to reacquire capacity, not additional root work. */
+  capacityWaitingCount?: number;
   maxConcurrent: number;
   /** Capacity applies independently to each session or swarm group. */
   concurrencyScope?: "session" | "swarm";
@@ -13,7 +18,7 @@ export type CommandLaneSnapshot = {
   draining: boolean;
   generation: number;
   group?: string;
-  /** Sum of active tasks across every member of the group. Always derived. */
+  /** Occupied execution capacity across every member of the group. Always derived. */
   groupActive?: number;
   /** Hard aggregate cap shared by the group's members. */
   groupBudget?: number;
@@ -42,7 +47,9 @@ export type CommandQueueEnqueueOptions = {
   }>;
   /** Owner-resolved capacity, installed atomically with this enqueue. */
   maxConcurrent?: number;
-  /** Cancels queued admission; the task owns cancellation after it starts. */
+  /** Allows cooperative capacity waits; never enable on serialization/ownership lanes. */
+  allowCapacitySuspension?: boolean;
+  /** Cancels admission/reacquisition; the task owns cancellation while executing. */
   abortSignal?: AbortSignal;
   /** Called only when this entry remains queued after immediate lane admission. */
   onQueued?: () => void;

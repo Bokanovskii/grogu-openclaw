@@ -412,6 +412,10 @@ export function createGatewaySubagentRuntime(
           sessionKey: params.sessionKey,
           message: params.message,
           deliver: params.deliver ?? false,
+          inputProvenance: {
+            kind: "internal_system",
+            sourceTool: "plugin_subagent",
+          },
           ...(allowOverride && params.provider && { provider: params.provider }),
           ...(allowOverride && params.model && { model: params.model }),
           ...(params.extraSystemPrompt && { extraSystemPrompt: params.extraSystemPrompt }),

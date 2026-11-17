@@ -1,6 +1,10 @@
 import { getLaneGroup } from "./command-queue.capacity-groups.js";
 import { enqueueCommandInLane, publishLaneConfiguration } from "./command-queue.js";
-import { getQueueState } from "./command-queue.state.js";
+import {
+  getLaneOccupiedCount,
+  getLaneQueuedTaskCount,
+  getQueueState,
+} from "./command-queue.state.js";
 import type { CommandLaneSnapshot, CommandQueueEnqueueOptions } from "./command-queue.types.js";
 import { getGatewayRestartDrainSignal } from "./gateway-work-admission.js";
 import { CommandLane } from "./lanes.js";
@@ -96,14 +100,21 @@ export function getBackgroundWorkSnapshot(): CommandLaneSnapshot {
     }
     const activeCount = state.activeTaskIds.size;
     snapshot.activeCount += activeCount;
-    snapshot.queuedCount += state.queue.length;
+    snapshot.queuedCount += getLaneQueuedTaskCount(state);
+    if (state.suspendedTasks?.size) {
+      snapshot.suspendedCount = (snapshot.suspendedCount ?? 0) + state.suspendedTasks.size;
+    }
+    if (state.queue.resumptions) {
+      snapshot.capacityWaitingCount =
+        (snapshot.capacityWaitingCount ?? 0) + state.queue.resumptions;
+    }
     snapshot.draining ||= state.draining;
     snapshot.generation = Math.max(snapshot.generation, state.generation);
-    if (state.queue.length > 0 && activeCount >= state.maxConcurrent) {
+    if (state.queue.length > 0 && getLaneOccupiedCount(state) >= state.maxConcurrent) {
       snapshot.blockedBy = "lane";
     }
   }
-  if (snapshot.activeCount >= BACKGROUND_WORK_MAX_CONCURRENT) {
+  if (snapshot.activeCount - (snapshot.suspendedCount ?? 0) >= BACKGROUND_WORK_MAX_CONCURRENT) {
     snapshot.blockedBy = "group-budget";
   }
   return snapshot;

@@ -390,6 +390,8 @@ export function installEmbeddedAttemptStreamGuards(
     agentId: sessionAgentId,
     ...(attempt.sessionKey && { sessionKey: attempt.sessionKey }),
     ...(attempt.sessionId && { sessionId: attempt.sessionId }),
+    trigger: attempt.trigger,
+    inputProvenance: attempt.inputProvenance,
     provider: attempt.provider,
     model: attempt.modelId,
     api: attempt.model.api,

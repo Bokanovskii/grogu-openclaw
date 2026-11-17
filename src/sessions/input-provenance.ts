@@ -125,6 +125,34 @@ export function isSubagentCoordinationInputProvenance(
   );
 }
 
+// Internal sources that no person waits on. Other internal sources, such as a
+// live voice consult or a companion ask, keep the priority of their trigger.
+const AUTOMATIC_INTERNAL_SOURCE_TOOLS = new Set([
+  "cron",
+  "device",
+  "exec",
+  "heartbeat",
+  "hook",
+  "node",
+  "plugin",
+  "plugin_subagent",
+  "restart",
+  "restart-sentinel",
+  "session",
+  "stalled-turn-recovery",
+  "task",
+  MAIN_SESSION_RESTART_RECOVERY_SOURCE_TOOL,
+]);
+
+/** Work that must yield provider and lane capacity to people. */
+export function isAutomaticInputProvenance(provenance: InputProvenance | undefined): boolean {
+  return (
+    provenance?.kind === "inter_session" ||
+    (provenance?.kind === "internal_system" &&
+      AUTOMATIC_INTERNAL_SOURCE_TOOLS.has(provenance.sourceTool?.toLowerCase() ?? ""))
+  );
+}
+
 export function isMainSessionRestartRecoveryInputProvenance(value: unknown): boolean {
   const provenance = normalizeInputProvenance(value);
   return (

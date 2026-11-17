@@ -6,7 +6,11 @@ import {
   getCommandLaneSnapshot,
   listCommandLaneTotals,
 } from "./command-queue.js";
-import { getQueueState } from "./command-queue.state.js";
+import {
+  getLaneOccupiedCount,
+  getLaneQueuedTaskCount,
+  getQueueState,
+} from "./command-queue.state.js";
 import {
   CommandLane,
   STATIC_COMMAND_LANES,
@@ -36,10 +40,17 @@ function getSubagentLaneSnapshot(): CommandLaneSnapshot {
     }
     const activeCount = state.activeTaskIds.size;
     snapshot.activeCount += activeCount;
-    snapshot.queuedCount += state.queue.length;
+    snapshot.queuedCount += getLaneQueuedTaskCount(state);
+    if (state.suspendedTasks?.size) {
+      snapshot.suspendedCount = (snapshot.suspendedCount ?? 0) + state.suspendedTasks.size;
+    }
+    if (state.queue.resumptions) {
+      snapshot.capacityWaitingCount =
+        (snapshot.capacityWaitingCount ?? 0) + state.queue.resumptions;
+    }
     snapshot.draining ||= state.draining;
     snapshot.generation = Math.max(snapshot.generation, state.generation);
-    if (activeCount >= state.maxConcurrent) {
+    if (getLaneOccupiedCount(state) >= state.maxConcurrent) {
       snapshot.saturatedLaneCount = (snapshot.saturatedLaneCount ?? 0) + 1;
       snapshot.blockedBy = "lane";
     }

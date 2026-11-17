@@ -17,7 +17,6 @@ export type QueueEntry = {
   queued?: true;
   previous?: QueueEntry;
   next?: QueueEntry;
-  task: (marker: CommandLaneTaskMarker) => Promise<unknown>;
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   /** Monotonic enqueue time; wall-clock corrections must not reorder work. */
@@ -37,6 +36,14 @@ export type QueueEntry = {
   taskTimeoutReleaseSignal?: AbortSignal;
   onWait?: (waitMs: number, queuedAhead: number) => void;
   releaseQueuedAbort?: () => void;
+} & (
+  | { task: (marker: CommandLaneTaskMarker) => Promise<unknown>; resume?: never }
+  | { task?: never; resume: CommandLaneTaskMarker }
+);
+
+export type CommandCapacitySuspension = {
+  resume: () => Promise<void>;
+  cancel: (reason: Error) => void;
 };
 
 type QueueFifo = {
@@ -49,12 +56,15 @@ type LaneQueue = {
   normal: QueueFifo;
   foreground: QueueFifo;
   length: number;
+  resumptions: number;
 };
 
 export type LaneState = {
   lane: string;
   queue: LaneQueue;
   activeTaskIds: Set<number>;
+  /** Suspended tasks retain ownership, but do not occupy execution capacity. */
+  suspendedTasks?: Map<number, CommandCapacitySuspension>;
   maxConcurrent: number;
   draining: boolean;
   generation: number;
@@ -77,6 +87,7 @@ export function createLaneQueue(): LaneQueue {
     normal: createQueueFifo(),
     foreground: createQueueFifo(),
     length: 0,
+    resumptions: 0,
   };
 }
 
@@ -105,6 +116,9 @@ export function enqueueLaneQueue(queue: LaneQueue, entry: QueueEntry): number {
   }
   fifo.tail = entry;
   queue.length += 1;
+  if (entry.resume) {
+    queue.resumptions += 1;
+  }
   return queuedAhead;
 }
 
@@ -153,6 +167,9 @@ export function removeLaneQueueEntry(queue: LaneQueue, entry: QueueEntry): boole
   }
   entry.queued = undefined;
   queue.length -= 1;
+  if (entry.resume) {
+    queue.resumptions -= 1;
+  }
   // A completed entry must not retain its neighbours or expose stale membership
   // if listener cleanup reenters the queue.
   const releaseQueuedAbort = entry.releaseQueuedAbort;
@@ -181,4 +198,30 @@ export function getQueueState() {
 
 export function normalizeLane(lane: string): string {
   return lane.trim() || CommandLane.Main;
+}
+
+export function getLaneOccupiedCount(state: LaneState): number {
+  return state.activeTaskIds.size - (state.suspendedTasks?.size ?? 0);
+}
+
+export function getLaneQueuedTaskCount(state: LaneState): number {
+  return state.queue.length - state.queue.resumptions;
+}
+
+export function isExpectedNonErrorLaneFailure(err: unknown): boolean {
+  return err instanceof Error && err.name === "LiveSessionModelSwitchError";
+}
+
+export function isQuietProbeLane(lane: string): boolean {
+  // setup-inference.ts retains its temp session key, so its derived session lane
+  // needs the same expected-failure treatment as the explicit probe lane.
+  return (
+    lane.startsWith("auth-probe:") ||
+    lane.startsWith("session:probe-") ||
+    lane.startsWith("session:temp:setup-inference:probe-setup-inference-")
+  );
+}
+
+export function getLaneDepth(state: LaneState): number {
+  return getLaneQueuedTaskCount(state) + state.activeTaskIds.size;
 }

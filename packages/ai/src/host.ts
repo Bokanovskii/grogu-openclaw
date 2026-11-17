@@ -136,6 +136,8 @@ export interface AiTransportHost {
   runInDetachedAsyncContext<T>(run: () => T): T;
   /** Retains accepted lifecycle work after its caller observes cancellation. */
   observePendingProviderWork?: (pending: Promise<unknown>) => void;
+  /** Cooperatively yields host execution capacity during rejected-admission waits. */
+  withProviderAdmissionWait?<T>(this: void, wait: () => Promise<T>): Promise<T>;
   /**
    * Builds a policy-guarded fetch for one model request.
    * Returning undefined keeps the provider SDK's default fetch.

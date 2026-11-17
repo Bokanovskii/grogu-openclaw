@@ -26,6 +26,11 @@ import { createHookRunnerWithRegistry } from "../../../plugins/hooks.test-fixtur
 import { withEnvAsync } from "../../../test-utils/env.js";
 import { makeAssistantMessageFixture } from "../../test-helpers/assistant-message-fixtures.js";
 import { wrapStreamFnWithDiagnosticModelCallEvents } from "./attempt.model-diagnostic-events.js";
+import {
+  createModelLifecycle,
+  type ModelCallDiagnosticContext,
+} from "./attempt.model-diagnostic-lifecycle.js";
+import { createModelObserver } from "./attempt.model-diagnostic-observation.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const modelFixture = { provider: "openai", model: "gpt-5.4", api: "openai-responses" };
@@ -99,6 +104,40 @@ describe("model diagnostic lifecycle", () => {
     resetDiagnosticRunActivityForTest();
     vi.restoreAllMocks();
   });
+
+  it.each([
+    { trigger: "user", inputProvenance: { kind: "external_user" }, expected: "interactive" },
+    { trigger: "user", inputProvenance: { kind: "inter_session" }, expected: "scheduled" },
+    { trigger: "user", inputProvenance: { kind: "internal_system" }, expected: "scheduled" },
+    { trigger: "cron", expected: "scheduled" },
+    { trigger: "heartbeat", expected: "scheduled" },
+    { trigger: "memory", expected: "utility" },
+    { trigger: "budget", expected: "utility" },
+    { trigger: "manual", expected: "interactive" },
+    { expected: "interactive" },
+  ] satisfies Array<
+    Pick<ModelCallDiagnosticContext, "trigger" | "inputProvenance"> & { expected: string }
+  >)(
+    "classifies provider admission from the current input, not just its session: %j",
+    ({ expected, ...input }) => {
+      const lifecycle = createModelLifecycle({
+        ctx: {
+          runId: "run-1",
+          sessionId: "00000000-0000-4000-8000-000000000001",
+          sessionKey: "agent:main:main",
+          ...modelFixture,
+          trace: createDiagnosticTraceContext(),
+          nextCallId: () => "call-1",
+          ...input,
+        },
+        options: undefined,
+        createObserver: (capturePromptStats) =>
+          createModelObserver({ streamContext: { messages: [] }, capturePromptStats }),
+      });
+      expect(lifecycle.telemetry.record.workClass).toBe(expected);
+      lifecycle.emitCompleted();
+    },
+  );
 
   it.each(["stop", "error"] as const)(
     "notifies terminal %s once after deferred EOF settlement",

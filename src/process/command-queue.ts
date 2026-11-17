@@ -17,10 +17,23 @@ import {
   validateCommandLaneGroupSpec,
 } from "./command-queue.capacity-groups.js";
 import {
+  admitCommandLaneCapacityResumption,
+  createCommandLaneCapacityScope,
+  describeCommandLaneCapacity,
+  retireAllCommandLaneCapacity,
+  retireCommandLaneCapacity,
+  runWithCommandLaneCapacity,
+} from "./command-queue.capacity-suspension.js";
+import {
   createLaneQueue,
   dequeueLaneQueue,
   enqueueLaneQueue,
   type CommandLaneTaskMarker,
+  getLaneDepth,
+  getLaneOccupiedCount,
+  getLaneQueuedTaskCount,
+  isExpectedNonErrorLaneFailure,
+  isQuietProbeLane,
   getQueueState,
   type LaneState,
   normalizeLane,
@@ -100,24 +113,6 @@ export function isCommandLaneTaskTimeoutError(err: unknown, lane?: string): bool
   return lane === undefined || err.message.includes(`Command lane "${lane}" task timed out`);
 }
 
-function isExpectedNonErrorLaneFailure(err: unknown): boolean {
-  return err instanceof Error && err.name === "LiveSessionModelSwitchError";
-}
-
-function isQuietProbeLane(lane: string): boolean {
-  // setup-inference.ts retains its temp session key, so its derived session lane
-  // needs the same expected-failure treatment as the explicit probe lane.
-  return (
-    lane.startsWith("auth-probe:") ||
-    lane.startsWith("session:probe-") ||
-    lane.startsWith("session:temp:setup-inference:probe-setup-inference-")
-  );
-}
-
-function getLaneDepth(state: LaneState): number {
-  return state.queue.length + state.activeTaskIds.size;
-}
-
 function getDefaultLaneConcurrency(lane: string): number {
   return lane.startsWith(SUBAGENT_LANE_PREFIX) && !lane.startsWith(SWARM_LANE_PREFIX)
     ? (getQueueState().lanes.get(CommandLane.Subagent)?.maxConcurrent ?? 1)
@@ -176,7 +171,7 @@ function resolveQueuePriority(priority: CommandQueueEnqueueOptions["priority"]):
 }
 
 async function runQueueEntryTask(
-  entry: QueueEntry,
+  entry: Extract<QueueEntry, { task: unknown }>,
   marker: CommandLaneTaskMarker,
 ): Promise<unknown> {
   const { lane } = marker;
@@ -345,11 +340,15 @@ function drainLane(
   try {
     while (
       started < maxStarts &&
-      state.activeTaskIds.size < state.maxConcurrent &&
+      getLaneOccupiedCount(state) < state.maxConcurrent &&
       state.queue.length > 0 &&
       canAdmitInGroup(lane)
     ) {
       const entry = dequeueLaneQueue(state.queue) as QueueEntry;
+      if (entry.resume) {
+        started += admitCommandLaneCapacityResumption(state, entry) ? 1 : 0;
+        continue;
+      }
       const waitedMs = Math.floor(performance.now()) - entry.enqueuedAt;
       const activeBeforeStart = state.activeTaskIds.size;
       const taskId = getQueueState().nextTaskId++;
@@ -384,6 +383,7 @@ function drainLane(
           // Admission diagnostics and task cleanup can throw too. Release and
           // pump exactly once, without letting an old generation free new work.
           if (taskGeneration === state.generation) {
+            retireCommandLaneCapacity(state, taskId);
             state.activeTaskIds.delete(taskId);
             drainReadyCommandLane(lane, state);
           }
@@ -550,7 +550,16 @@ export function enqueueCommandInLane<T>(
   }
   return new Promise<T>((resolve, reject) => {
     const entry: QueueEntry = {
-      task: (marker) => runInAsyncContext(runWithGatewayRootWorkReadmission, () => task(marker)),
+      task: (marker) =>
+        runInAsyncContext(runWithGatewayRootWorkReadmission, () =>
+          runWithCommandLaneCapacity(
+            opts?.allowCapacitySuspension === true &&
+              createCommandLaneCapacityScope(state, marker, entry.priority, opts.abortSignal, () =>
+                drainReadyCommandLane(cleaned, state),
+              ),
+            () => task(marker),
+          ),
+        ),
       resolve: (value) => resolve(value as T),
       reject,
       enqueuedAt: Math.floor(performance.now()),
@@ -615,8 +624,9 @@ export function getCommandLaneSnapshot(lane: string = CommandLane.Main): Command
   const state = getQueueState().lanes.get(resolved);
   const snapshot: CommandLaneSnapshot = {
     lane: state?.lane ?? resolved,
-    queuedCount: state?.queue.length ?? 0,
+    queuedCount: state ? getLaneQueuedTaskCount(state) : 0,
     activeCount: state?.activeTaskIds.size ?? 0,
+    ...describeCommandLaneCapacity(state),
     maxConcurrent: state?.maxConcurrent ?? getDefaultLaneConcurrency(resolved),
     draining: state?.draining ?? false,
     generation: state?.generation ?? 0,
@@ -638,7 +648,7 @@ export function listCommandLaneTotals() {
   return [...getQueueState().lanes.values()].map((state) => ({
     lane: state.lane,
     activeCount: state.activeTaskIds.size,
-    queuedCount: state.queue.length,
+    queuedCount: getLaneQueuedTaskCount(state),
   }));
 }
 
@@ -651,7 +661,7 @@ export function getCommandLaneActiveTaskIds(lane: string = CommandLane.Main): nu
   return state ? [...state.activeTaskIds] : [];
 }
 
-/** Return whether this exact lane task still owns an active queue slot. */
+/** Return whether this exact task remains owned, including during a capacity wait. */
 export function isCommandLaneTaskMarkerCurrent(marker: CommandLaneTaskMarker | undefined): boolean {
   if (!marker) {
     return false;
@@ -674,7 +684,7 @@ function selectQueuedCommandEntries(state: LaneState, matches: CommandLaneEntryF
   const entries: QueueEntry[] = [];
   for (const queue of [state.queue.foreground, state.queue.normal, state.queue.background]) {
     for (let entry = queue.head; entry; entry = entry.next) {
-      if (matches(entry.sessionTarget)) {
+      if (!entry.resume && matches(entry.sessionTarget)) {
         entries.push(entry);
       }
     }
@@ -716,15 +726,7 @@ export function clearCommandLane(
   if (!state) {
     return 0;
   }
-  if (matches) {
-    return prepareCommandLaneClear(cleaned, matches)();
-  }
-  const removed = state.queue.length;
-  let entry: QueueEntry | undefined;
-  while ((entry = dequeueLaneQueue(state.queue))) {
-    entry.reject(new CommandLaneClearedError(cleaned));
-  }
-  return removed;
+  return prepareCommandLaneClear(cleaned, matches ?? (() => true))();
 }
 
 /**
@@ -740,6 +742,7 @@ export function resetCommandLane(lane: string = CommandLane.Main): number {
   }
   const released = state.activeTaskIds.size;
   state.generation += 1;
+  retireAllCommandLaneCapacity(state);
   state.activeTaskIds.clear();
   state.draining = false;
   // Clearing activeTaskIds may release multiple shared slots. Re-arbitrate the
@@ -758,6 +761,7 @@ export function resetAllLanes(): void {
   const lanesToDrain: string[] = [];
   for (const state of queueState.lanes.values()) {
     state.generation += 1;
+    retireAllCommandLaneCapacity(state);
     state.activeTaskIds.clear();
     state.draining = false;
     if (state.queue.length > 0) {

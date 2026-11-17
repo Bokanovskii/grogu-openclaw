@@ -117,7 +117,7 @@ function run(override: { provider?: string; model?: string }) {
 }
 
 describe("plugin subagent initial override policy", () => {
-  it("keeps automatic Main handoffs out of Sparky's human reserve despite a UUID and user trigger", async () => {
+  it("keeps automatic Main handoffs out of Sparky's human priority despite a UUID and user trigger", async () => {
     vi.useFakeTimers();
     config.plugins = {
       entries: { "research-topics": { subagent: { allowModelOverride: true } } },

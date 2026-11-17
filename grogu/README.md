@@ -50,6 +50,8 @@ The loader rejects symlinks, hardlinks, group/world access and files over 1 MiB.
   `ownerOverrides` lists config paths or job IDs the owner deliberately routed
   elsewhere.
 - `bindings.researchCheckpoint`: research workspace, tracks and artifact prefix.
+- `bindings.sparkyQueue.maxActive`: optional active Sparky request limit, from
+  2 to 4. It defaults to 2. See [Provider concurrency](#provider-concurrency).
 - `native.jobs`: logical-name bindings for native jobs whose metadata bootstrap
   may reconcile. Bootstrap never changes schedules, models, delivery or pauses.
 
@@ -100,19 +102,29 @@ session, model, agent and job choices remain in force.
 
 ## Provider concurrency
 
-Only Sparky uses Grogu's provider-origin admission queue. Its conservative limit
-is two active requests, with one slot reserved for human requests. Scheduled and
-utility work share the other slot and cannot borrow the human reserve, even when
-it is idle. Waiting human requests run first in arrival order; aging can promote
-background work only when no human is eligible. Already-running requests are not
-preempted.
+Only Sparky uses Grogu's provider-origin admission queue. Its active request
+limit is `bindings.sparkyQueue.maxActive` from the private profile, or two when
+the profile omits it. The Sparky operator can change the provider limit between
+two and four. Grogu does not detect that change, so set the profile value to
+the announced limit and restart the Gateway. The profile is read once per
+Gateway process. A limit above the provider's real limit causes rejected
+requests and backoff.
+
+Human, scheduled and utility requests all share every idle slot. Waiting human
+requests run first in arrival order, so when a slot frees, a waiting person gets
+it before waiting automation. Aging can promote background work only when no
+human is eligible. Already-running requests are not preempted. An automation
+therefore yields at its next request boundary: the response it already received
+stays in its transcript and is not replayed, and its next model request waits
+behind the person. When 32 requests are already waiting, new automation requests
+are refused, but a person's request always joins the queue. A rejected
+background request pauses only background work; a rejected human request
+pauses all Sparky work for the cooldown.
 
 The current run's trigger and typed input provenance determine priority. System
 and inter-session handoffs do not gain human priority merely because they run in
 a conversation with a session ID. Native plugin dispatch marks automatic
 handoffs, including Research Topics notifications to Main, as internal input.
-Grogu keeps the two-request baseline even when
-upstream capacity rises; it does not guess or automatically detect that change.
 
 GitHub Copilot and other providers bypass the Sparky queue. While awaiting
 Sparky admission or rejected-admission cooldown, a run yields only its global

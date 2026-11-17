@@ -37,29 +37,20 @@ export function createSparkyAdmission(
   options: {
     maxWaiting?: number;
     maxActive?: number;
-    interactiveReserve?: number;
     now?: () => number;
     agingMs?: number;
   } = {},
 ) {
   const {
     maxWaiting = 32,
-    // Reserve capacity against Sparky's lower known ceiling, not its occasional peak.
+    // Sparky's lowest announced account limit; the private profile can raise it to four.
     maxActive = 2,
-    interactiveReserve = Math.min(1, maxActive),
     now = Date.now,
     agingMs = 120_000,
   } = options;
-  if (
-    !Number.isSafeInteger(maxActive) ||
-    maxActive < 1 ||
-    !Number.isSafeInteger(interactiveReserve) ||
-    interactiveReserve < 0 ||
-    interactiveReserve > maxActive
-  ) {
+  if (!Number.isSafeInteger(maxActive) || maxActive < 1) {
     throw new RangeError("Invalid Sparky admission capacity");
   }
-  const maxNonInteractive = maxActive - interactiveReserve;
   let active = 0;
   const activeByWorkClass: Record<SparkyWorkClass, number> = {
     interactive: 0,
@@ -70,21 +61,12 @@ export function createSparkyAdmission(
   let nonInteractivePauses = 0;
   let lastPriority: Priority = 0;
   const waiting: AdmissionEntry[] = [];
-  const canAdmit = (workClass: SparkyWorkClass) => {
-    if (allPauses > 0 || active >= maxActive) {
-      return false;
-    }
-    if (workClass === "interactive") {
-      return (
-        nonInteractivePauses === 0 ||
-        (interactiveReserve > 0 && activeByWorkClass.interactive < interactiveReserve)
-      );
-    }
-    return (
-      nonInteractivePauses === 0 &&
-      activeByWorkClass.utility + activeByWorkClass.scheduled < maxNonInteractive
-    );
-  };
+  // Every class may use an idle slot. People wait only for an active request to end, then
+  // pump() serves them before queued automation, which yields at its next request boundary.
+  const canAdmit = (workClass: SparkyWorkClass) =>
+    allPauses === 0 &&
+    active < maxActive &&
+    (workClass === "interactive" || nonInteractivePauses === 0);
   function pump() {
     while (active < maxActive && waiting.length) {
       const eligible = waiting
@@ -129,12 +111,6 @@ export function createSparkyAdmission(
     queueActiveInteractive: activeByWorkClass.interactive,
     queueActiveUtility: activeByWorkClass.utility,
     queueActiveScheduled: activeByWorkClass.scheduled,
-    queueInteractiveReserveAvailable:
-      active < maxActive &&
-      allPauses === 0 &&
-      (nonInteractivePauses === 0 ||
-        (interactiveReserve > 0 && activeByWorkClass.interactive < interactiveReserve)),
-    queueInteractiveReserveOccupied: active > maxNonInteractive,
     queueInteractiveCooldownActive: allPauses > 0,
     queueNonInteractiveCooldownActive: allPauses > 0 || nonInteractivePauses > 0,
   });
@@ -163,7 +139,8 @@ export function createSparkyAdmission(
       if (!["interactive", "utility", "scheduled"].includes(workClass)) {
         return Promise.reject(new RangeError("Invalid request work class"));
       }
-      if (waiting.length >= maxWaiting && !canAdmit(workClass)) {
+      // Only automation is refused when the queue is full; a person's chat waits for one request.
+      if (workClass !== "interactive" && waiting.length >= maxWaiting && !canAdmit(workClass)) {
         return Promise.reject(
           new Error("Sparky request queue is full; retry after current work finishes"),
         );
@@ -250,6 +227,7 @@ export function queueSparkyFetch(
   fetcher: typeof fetch,
   options: {
     pool?: Admission;
+    maxActive?: number;
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     timeoutMs?: number;
@@ -260,7 +238,8 @@ export function queueSparkyFetch(
   }
   const key = new URL(model.baseUrl).origin;
   const now = options.now ?? Date.now;
-  const pool = options.pool ?? pools.get(key) ?? createSparkyAdmission();
+  const pool =
+    options.pool ?? pools.get(key) ?? createSparkyAdmission({ maxActive: options.maxActive });
   if (!options.pool) {
     pools.set(key, pool);
   }

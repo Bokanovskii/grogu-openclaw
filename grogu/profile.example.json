@@ -24,6 +24,7 @@
       "tracks": ["example-track"],
       "artifactPrefix": "research/example/"
     },
+    "sparkyQueue": { "maxActive": 2 },
     "compaction": {
       "agentId": "grogu",
       "pluginDirectory": "/path/to/checkout/grogu/plugins/grogu-compaction"

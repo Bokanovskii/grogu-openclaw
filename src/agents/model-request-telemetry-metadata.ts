@@ -145,8 +145,6 @@ const booleanFields = new Set([
   "callerSignalAborted",
   "wireParserTruncated",
   "clockChanged",
-  "queueInteractiveReserveAvailable",
-  "queueInteractiveReserveOccupied",
   "queueInteractiveCooldownActive",
   "queueNonInteractiveCooldownActive",
 ]);

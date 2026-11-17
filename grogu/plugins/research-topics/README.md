@@ -87,17 +87,15 @@ Install a newer package over the running one with
 `openclaw plugins install --force /path/to/grogu-research-topics-<version>.tgz`.
 The Gateway applies it only while no agent run is active. Otherwise it waits about
 a minute and reports the install as saved but not applied.
-`openclaw plugins reload research-topics --wait` applies it once the runs finish,
-but a busy schedule may never go quiet. Disable the scheduled jobs that start
-runs, wait for running work to finish, install, and enable the same jobs again.
+A busy schedule may never go quiet, so do not wait for the runs to finish.
+Restart the Gateway as described in
+[Interrupt active work for maintenance](../../README.md#interrupt-active-work-for-maintenance).
+The restart applies the saved package.
 
 After an in-place replacement, scheduled trigger scripts that call
 `research_topics` fail with `ReferenceError: research_topics is not defined`
-until the Gateway restarts. Once the install has applied, run one plain
-`openclaw gateway restart --json` while no agent run is active, then search
-`gateway.log` for `trigger evaluation failed`. Do not use `--safe` for this
-restart: it defers behind running cron work and can leave Gateway admission
-closed for a long time.
+until the Gateway restarts. The bounded restart above also repairs this. After
+it, search `gateway.log` for `trigger evaluation failed`.
 
 ## Reconcile topics in the current turn
 

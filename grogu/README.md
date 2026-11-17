@@ -58,6 +58,34 @@ Fixed-command helpers that validate research checkpoints use the maintained
 `dist/research-checkpoint-guard.runtime.js` entrypoint; they must not import a
 hashed chunk or an operator-created dist patch.
 
+## Interrupt active work for maintenance
+
+Approved maintenance can interrupt active Grogu work. A busy schedule may never
+go quiet, so do not wait for automation runs to finish. Run these steps on the
+Gateway host:
+
+1. Record the active work. Run `openclaw gateway call health --json` and
+   `openclaw cron list --json`, and note the running jobs and chats.
+2. Request a bounded graceful restart with
+   `openclaw gateway restart --preserve-definition --wait 2m --json`. The
+   Gateway waits up to two minutes for active work, then interrupts it and
+   restarts. Do not use `--wait 0` or `--safe`. Both can keep admission closed
+   behind cron work for a long time.
+3. If the restart command fails or times out, run
+   `openclaw gateway restart --force --preserve-definition --json`. For a command
+   that needs the Gateway stopped, such as `openclaw doctor --fix` or
+   `openclaw update repair`, use `openclaw gateway stop --force --json` instead,
+   and run `openclaw gateway start --json` after the command.
+4. Make sure that the Gateway recovered. `openclaw gateway call health --json`
+   must report `ok`, connected channels and no plugin errors.
+5. Report each interrupted run to the user. `openclaw cron runs --id <jobId>`
+   shows `job interrupted by gateway restart` for each one. Scheduled jobs run
+   again at their next slot. Interrupted chat turns need a new message.
+
+Do not kill Gateway or child processes, and do not edit the SQLite databases to
+clear work. The native shutdown owns checkpoints, aborts and run settlement. Do
+not repeat a forced restart while one is in progress.
+
 ## Thinking defaults
 
 Grogu's Sparky utility completions inherit the agent, model and global thinking

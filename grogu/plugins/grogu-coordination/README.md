@@ -101,6 +101,13 @@ Grogu PR 92).
 This hook covers native provider execution. External CLI backends bypass these
 hooks and are not covered by this model policy.
 
+Main's normal `message` send is restricted to the configured owner route.
+The tool hook fills omitted channel, target, and configured account fields.
+It blocks conflicting routes, broadcasts, and reply/thread modifiers instead of
+guessing a recipient. Missing delivery configuration also blocks the send.
+This applies to Main, including manual messages there; other chats retain their
+normal messaging behavior. It adds no tool and sends no text itself.
+
 ## Update
 
 Install the reviewed package with the native installer, then reload through

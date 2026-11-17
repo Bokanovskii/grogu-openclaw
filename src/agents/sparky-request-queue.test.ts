@@ -44,40 +44,58 @@ describe("provider-origin admission", () => {
     });
   });
 
-  it("keeps one of two slots reserved for humans without lending it to background work", async () => {
-    const pool = createSparkyAdmission({ maxWaiting: 1 });
-    const background = await pool.acquire(undefined, "scheduled");
-    let utilityAdmitted = false;
-    const utility = pool.acquire(undefined, "utility").then((release) => {
-      utilityAdmitted = true;
-      return release;
-    });
-    await flush();
-    expect(utilityAdmitted).toBe(false);
-    expect(pool.activeByWorkClass).toEqual({ interactive: 0, utility: 0, scheduled: 1 });
-    expect(pool.telemetry).toMatchObject({
-      queueInteractiveReserveAvailable: true,
-      queueInteractiveReserveOccupied: false,
-    });
+  it.each([2, 4])(
+    "lets automation fill all %i idle slots, then serves a waiting person at the next request boundary",
+    async (maxActive) => {
+      const pool = createSparkyAdmission({ maxActive });
+      const automation = await Promise.all(
+        Array.from({ length: maxActive }, (_, index) =>
+          pool.acquire(undefined, index % 2 ? "utility" : "scheduled"),
+        ),
+      );
+      expect(pool.activeCount).toBe(maxActive);
+      const order: string[] = [];
+      const nextAutomation = pool.acquire(undefined, "scheduled").then((release) => {
+        order.push("automation");
+        return release;
+      });
+      const person = pool.acquire(undefined, "interactive").then((release) => {
+        order.push("person");
+        return release;
+      });
+      await flush();
+      expect(order).toEqual([]);
+      automation[0]!();
+      await flush();
+      expect(order).toEqual(["person"]);
+      automation[1]!();
+      await flush();
+      expect(order).toEqual(["person", "automation"]);
+      (await person)();
+      (await nextAutomation)();
+      automation.slice(2).forEach((release) => release());
+      expect(pool.activeCount).toBe(0);
+    },
+  );
 
-    const interactive = await pool.acquire(undefined, "interactive");
-    expect(pool.activeByWorkClass).toEqual({ interactive: 1, utility: 0, scheduled: 1 });
-    expect(pool.waiting).toBe(1);
-    expect(pool.telemetry).toMatchObject({
-      queueInteractiveReserveAvailable: false,
-      queueInteractiveReserveOccupied: true,
-    });
-    interactive();
-    await flush();
-    expect(utilityAdmitted).toBe(false);
-
-    background();
-    const utilityRelease = await utility;
-    utilityRelease();
-    expect(pool.activeCount).toBe(0);
+  it("sizes the shared origin pool from the admitted profile limit", async () => {
+    const responses = Array.from({ length: 5 }, () => createDeferred<Response>());
+    let calls = 0;
+    const fetcher = vi.fn<typeof fetch>(() => responses[calls++]!.promise);
+    const sparky = queueSparkyFetch(
+      { ...model, baseUrl: "https://profile-limit.example.invalid/v1" },
+      fetcher,
+      { maxActive: 4 },
+    );
+    const requests = responses.map(() => sparky("https://profile-limit.example.invalid"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    responses.forEach((response) => response.resolve(new Response(null)));
+    await Promise.all(requests);
+    expect(fetcher).toHaveBeenCalledTimes(5);
   });
 
-  it("keeps humans FIFO ahead of aged backgrounds, while aging still orders background work", async () => {
+  it("keeps humans FIFO ahead of aged backgrounds and never refuses them for a full queue", async () => {
     let now = 0;
     const pool = createSparkyAdmission({ maxActive: 2, now: () => now, maxWaiting: 4 });
     const releases = await Promise.all([
@@ -100,6 +118,13 @@ describe("provider-origin admission", () => {
       }),
     );
     await expect(pool.acquire()).rejects.toThrow(/full/);
+    interactive.push(
+      pool.acquire(undefined, "interactive").then((release) => {
+        order.push("third human");
+        return release;
+      }),
+    );
+    expect(pool.waiting).toBe(5);
     now = 120_001;
     releases[0]!();
     await flush();
@@ -109,18 +134,21 @@ describe("provider-origin admission", () => {
     const secondHuman = await interactive[1]!;
     expect(order).toEqual(["first human", "second human"]);
     secondHuman();
+    const thirdHuman = await interactive[2]!;
+    expect(order).toEqual(["first human", "second human", "third human"]);
+    thirdHuman();
     const backgroundRelease = await scheduled;
-    expect(order).toEqual(["first human", "second human", "scheduled"]);
+    expect(order).toEqual(["first human", "second human", "third human", "scheduled"]);
     backgroundRelease();
     const utilityRelease = await utility;
-    expect(order).toEqual(["first human", "second human", "scheduled", "utility"]);
+    expect(order).toEqual(["first human", "second human", "third human", "scheduled", "utility"]);
     utilityRelease();
     releases[1]!();
     expect(pool.activeCount).toBe(0);
   });
 
   it("dispatches a non-Sparky provider while Sparky is waiting for its own slot", async () => {
-    const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+    const pool = createSparkyAdmission({ maxActive: 1 });
     const release = await pool.acquire();
     const sparkyFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
     const sparky = queueSparkyFetch(model, sparkyFetch, { pool })("https://queue.example.invalid");
@@ -139,7 +167,7 @@ describe("provider-origin admission", () => {
 
   it("starts GHCP when every main slot is waiting for Sparky without releasing session ownership", async () => {
     setCommandLaneConcurrency("main", 2);
-    const pool = createSparkyAdmission();
+    const pool = createSparkyAdmission({ maxActive: 1 });
     const releaseProvider = await pool.acquire(undefined, "scheduled");
     const sparkyFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null));
     const sparky = queueSparkyFetch(model, sparkyFetch, { pool });
@@ -238,7 +266,7 @@ describe("provider-origin admission", () => {
   it.each([true, false])(
     "releases provider admission on cancellation during reacquisition (root cancellation=%s)",
     async (cancelRoot) => {
-      const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+      const pool = createSparkyAdmission({ maxActive: 1 });
       const releaseProvider = await pool.acquire();
       const signal = new AbortController();
       const waiting = createDeferred();
@@ -280,7 +308,7 @@ describe("provider-origin admission", () => {
 
   it("rechecks deadline just before dispatch after a host pause", async () => {
     let now = 0;
-    const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+    const pool = createSparkyAdmission({ maxActive: 1 });
     const release = await pool.acquire();
     const fetcher = vi.fn<typeof fetch>();
     const pending = queueSparkyFetch(model, fetcher, { pool, now: () => now, timeoutMs: 100 })(
@@ -294,7 +322,7 @@ describe("provider-origin admission", () => {
   });
 
   it("holds through headers and split SSE DONE, then releases before stuck HTTP cancellation", async () => {
-    const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+    const pool = createSparkyAdmission({ maxActive: 1 });
     const cancel = vi.fn(() => new Promise<void>(() => {}));
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -318,7 +346,7 @@ describe("provider-origin admission", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it("keeps the interactive reserve open during a bounded non-interactive 429 cooldown", async () => {
+  it("admits people to every free slot during a bounded non-interactive 429 cooldown", async () => {
     const pool = createSparkyAdmission();
     let resume: (() => void) | undefined;
     const delay = vi.fn(
@@ -348,49 +376,18 @@ describe("provider-origin admission", () => {
       queueInteractiveCooldownActive: false,
       queueNonInteractiveCooldownActive: true,
     });
-    let secondInteractiveAdmitted = false;
-    const secondInteractive = pool.acquire(undefined, "interactive").then((release) => {
-      secondInteractiveAdmitted = true;
-      return release;
-    });
+    const secondInteractiveRelease = await pool.acquire(undefined, "interactive");
+    expect(pool.activeByWorkClass).toEqual({ interactive: 2, utility: 0, scheduled: 0 });
+    expect(fetcher).not.toHaveBeenCalled();
     interactiveRelease();
-    await flush();
-    expect(secondInteractiveAdmitted).toBe(true);
-    const secondInteractiveRelease = await secondInteractive;
     secondInteractiveRelease();
     resume!();
     await next;
-  });
-
-  it("reopens the reserve after a preexisting interactive turn finishes during cooldown", async () => {
-    const pool = createSparkyAdmission();
-    const first = await pool.acquire(undefined, "interactive");
-    let resume: (() => void) | undefined;
-    const pause = pool.pauseFor(
-      120_000,
-      "non-interactive",
-      () =>
-        new Promise<void>((resolve) => {
-          resume = resolve;
-        }),
-    );
-    first();
-    let nextAdmitted = false;
-    const next = pool.acquire(undefined, "interactive").then((release) => {
-      nextAdmitted = true;
-      return release;
-    });
-
-    await flush();
-    expect(nextAdmitted).toBe(true);
-    const nextRelease = await next;
-    nextRelease();
-    resume!();
-    await pause;
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("pauses every class after an interactive 429 and releases aborted streams once", async () => {
-    const pool = createSparkyAdmission({ maxActive: 1, interactiveReserve: 0 });
+    const pool = createSparkyAdmission({ maxActive: 1 });
     let resume: (() => void) | undefined;
     const pause = pool.pauseFor(
       120_000,

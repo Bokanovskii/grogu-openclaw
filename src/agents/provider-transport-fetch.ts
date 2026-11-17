@@ -549,6 +549,7 @@ export function buildGuardedModelFetch(
         model,
         queueSparkyFetch(model, guardedFetch, {
           timeoutMs: requestTimeoutMs,
+          maxActive: groguProfile.bindings.sparkyQueue?.maxActive,
         }),
         { timeoutMs: requestTimeoutMs },
       )

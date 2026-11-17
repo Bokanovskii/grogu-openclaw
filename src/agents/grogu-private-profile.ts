@@ -8,9 +8,14 @@ export type ResearchCheckpointBinding = Readonly<{
   artifactPrefix?: string;
 }>;
 
+export type SparkyQueueBinding = Readonly<{ maxActive: number }>;
+
 export type GroguPrivateProfile = Readonly<{
   schemaVersion: 1;
-  bindings: Readonly<{ researchCheckpoint?: ResearchCheckpointBinding }>;
+  bindings: Readonly<{
+    researchCheckpoint?: ResearchCheckpointBinding;
+    sparkyQueue?: SparkyQueueBinding;
+  }>;
 }>;
 
 function invalid(): never {
@@ -43,9 +48,27 @@ export function parseGroguPrivateProfile(value: unknown): GroguPrivateProfile {
   if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.bindings)) {
     invalid();
   }
+  const queue = value.bindings.sparkyQueue;
+  let sparkyQueue: SparkyQueueBinding | undefined;
+  if (queue !== undefined) {
+    // The operator mirrors the provider's announced account limit; Grogu does not probe it.
+    const maxActive = isRecord(queue) ? queue.maxActive : undefined;
+    if (
+      typeof maxActive !== "number" ||
+      !Number.isInteger(maxActive) ||
+      maxActive < 2 ||
+      maxActive > 4
+    ) {
+      invalid();
+    }
+    sparkyQueue = Object.freeze({ maxActive });
+  }
   const binding = value.bindings.researchCheckpoint;
   if (binding === undefined) {
-    return Object.freeze({ schemaVersion: 1, bindings: Object.freeze({}) });
+    return Object.freeze({
+      schemaVersion: 1,
+      bindings: Object.freeze(sparkyQueue ? { sparkyQueue } : {}),
+    });
   }
   if (
     !isRecord(binding) ||
@@ -69,7 +92,10 @@ export function parseGroguPrivateProfile(value: unknown): GroguPrivateProfile {
     tracks: Object.freeze([...binding.tracks] as string[]),
     ...(binding.artifactPrefix === undefined ? {} : { artifactPrefix: binding.artifactPrefix }),
   });
-  return Object.freeze({ schemaVersion: 1, bindings: Object.freeze({ researchCheckpoint }) });
+  return Object.freeze({
+    schemaVersion: 1,
+    bindings: Object.freeze({ researchCheckpoint, ...(sparkyQueue ? { sparkyQueue } : {}) }),
+  });
 }
 
 const admittedProfiles = new Map<string, GroguPrivateProfile>();

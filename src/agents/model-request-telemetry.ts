@@ -141,8 +141,6 @@ type RequestQueueTelemetry = {
   queueActiveInteractive?: number;
   queueActiveUtility?: number;
   queueActiveScheduled?: number;
-  queueInteractiveReserveAvailable?: boolean;
-  queueInteractiveReserveOccupied?: boolean;
   queueInteractiveCooldownActive?: boolean;
   queueNonInteractiveCooldownActive?: boolean;
 };
@@ -255,8 +253,6 @@ export function createRequestTracker(
         queueActiveInteractive: pool.queueActiveInteractive ?? null,
         queueActiveUtility: pool.queueActiveUtility ?? null,
         queueActiveScheduled: pool.queueActiveScheduled ?? null,
-        queueInteractiveReserveAvailable: pool.queueInteractiveReserveAvailable ?? null,
-        queueInteractiveReserveOccupied: pool.queueInteractiveReserveOccupied ?? null,
         queueInteractiveCooldownActive: pool.queueInteractiveCooldownActive ?? null,
         queueNonInteractiveCooldownActive: pool.queueNonInteractiveCooldownActive ?? null,
       });
@@ -275,8 +271,6 @@ export function createRequestTracker(
               queueActiveInteractive: pool.queueActiveInteractive ?? null,
               queueActiveUtility: pool.queueActiveUtility ?? null,
               queueActiveScheduled: pool.queueActiveScheduled ?? null,
-              queueInteractiveReserveAvailable: pool.queueInteractiveReserveAvailable ?? null,
-              queueInteractiveReserveOccupied: pool.queueInteractiveReserveOccupied ?? null,
               queueInteractiveCooldownActive: pool.queueInteractiveCooldownActive ?? null,
               queueNonInteractiveCooldownActive: pool.queueNonInteractiveCooldownActive ?? null,
             }

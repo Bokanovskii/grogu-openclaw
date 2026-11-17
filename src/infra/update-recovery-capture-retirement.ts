@@ -23,6 +23,7 @@ import { standaloneDoctorCaptureId } from "./update-recovery-doctor-completion-c
 import { canonicalEntryPath } from "./update-recovery-path.js";
 import { recordedUpdateRunDrivers } from "./update-run-activity.js";
 import { inspectUpdateRunDriver, sameUpdateRunDriver } from "./update-run-driver.js";
+import type { UpdateRunRecord } from "./update-run-record.js";
 
 type CaptureRetirementResult = {
   eligible: string[];
@@ -31,11 +32,51 @@ type CaptureRetirementResult = {
   warnings: string[];
 };
 
-/** Successful history is evidence; the native executor supplies current deletion authority. */
+async function readCaptureRetirementRun(
+  env: NodeJS.ProcessEnv,
+  runId: string,
+  assertCurrent: () => void,
+): Promise<UpdateRunRecord | undefined> {
+  assertCurrent();
+  const reply = await withArtifactPreservingStateReads(() =>
+    executeExistingOpenClawStateRead(
+      { env },
+      { type: "updateRecoveryRetirement.read", input: { runId } },
+      { current: true, preferIndependentWarmRead: true },
+    ),
+  );
+  assertCurrent();
+  if (!reply?.ok || reply.type !== "updateRecoveryRetirement.read") {
+    throw new Error("Authoritative update history is unavailable.");
+  }
+  if (reply.activeRun || reply.pendingRecovery) {
+    throw new Error("Update/repair work remains unfinished.");
+  }
+  return reply.run;
+}
+
+function isCompletedCaptureRun(
+  run: UpdateRunRecord | undefined,
+  retireSettledManualCopies: boolean,
+): boolean {
+  return Boolean(
+    run &&
+    run.phase === "finished" &&
+    run.finishedAtMs !== null &&
+    (run.status === "succeeded" ||
+      (retireSettledManualCopies &&
+        run.status === "failed" &&
+        !run.origin.updateRecoveryCapture &&
+        run.verification.recovery?.serviceRestartSafe === true)),
+  );
+}
+
+/** Recorded settlement is evidence; the native executor supplies current deletion authority. */
 export async function retireCompletedUpdateRecoveryCaptures(params: {
   env: NodeJS.ProcessEnv;
   apply: boolean;
   minimumAgeMs: number;
+  retireSettledManualCopies?: { installRoot: string };
 }): Promise<CaptureRetirementResult> {
   if (typeof params.apply !== "boolean") {
     throw new TypeError("Capture retirement requires an explicit apply boolean.");
@@ -43,7 +84,7 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
   if (!Number.isFinite(params.minimumAgeMs) || params.minimumAgeMs < 0) {
     throw new RangeError("Capture retirement minimumAgeMs must be finite and nonnegative.");
   }
-  const { apply, minimumAgeMs } = params;
+  const { apply, minimumAgeMs, retireSettledManualCopies } = params;
   const result: CaptureRetirementResult = {
     eligible: [],
     retired: [],
@@ -89,15 +130,143 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
   }
   const rootPin = await pinDirectory(root);
   const rootGuard = capturePathRemovalGuard(root);
+  const retire = async (
+    directory: string,
+    pin: Awaited<ReturnType<typeof pinDirectory>>,
+    assertCurrent: () => void,
+    inspect: () => Promise<void>,
+  ) => {
+    await inspect();
+    await rootPin.assertCurrent();
+    await pin.assertCurrent();
+    const guard = capturePathRemovalGuard(directory);
+    if (!guard) {
+      throw new Error("Capture disappeared before retirement.");
+    }
+    await inspect();
+    result.eligible.push(directory);
+    if (apply) {
+      await removePathWithinRoot({
+        rootDir: root,
+        relativePath: path.basename(directory),
+        recursive: true,
+        force: false,
+        assertBeforeMutation: () => {
+          assertCurrent();
+          rootGuard?.();
+          guard();
+        },
+      });
+      result.retired.push(directory);
+    }
+  };
   try {
     for (const name of names.toSorted()) {
-      if (name === UPDATE_CAPTURE_PRIVACY_MARKER) {
+      if (name === UPDATE_CAPTURE_PRIVACY_MARKER || name === ".DS_Store") {
         continue;
       }
       const directory = path.join(root, name);
       try {
         await rootPin.assertCurrent();
         await assertPrivateDirectory(directory);
+        const manifestEntry = await fs
+          .lstat(path.join(directory, "manifest.json"))
+          .catch((error: unknown) => {
+            if (hasErrnoCode(error, "ENOENT")) {
+              return undefined;
+            }
+            throw error;
+          });
+        // An unsealed original cannot be restored. Its run still owns writer settlement.
+        if (!manifestEntry && retireSettledManualCopies) {
+          const pin = await pinDirectory(directory);
+          try {
+            await withUpdateCommandExecutor(`capture-cleanup-${randomUUID()}`, async (executor) => {
+              const fence = await executor.enter(retireSettledManualCopies.installRoot);
+              await retire(directory, pin, fence.assertCurrent, async () => {
+                const run = await readCaptureRetirementRun(env, name, fence.assertCurrent);
+                if (
+                  !run ||
+                  !isCompletedCaptureRun(run, true) ||
+                  run.origin.updateRecoveryCapture ||
+                  run.steps.some((step) => step.step === "driver:identity-unavailable")
+                ) {
+                  throw new Error("Unsealed capture has no settled, unreferenced update owner.");
+                }
+                const drivers = recordedUpdateRunDrivers(run);
+                if (
+                  !drivers.length ||
+                  drivers.some((driver) => inspectUpdateRunDriver(driver) !== "dead")
+                ) {
+                  throw new Error("Unsealed capture writer settlement is unverified.");
+                }
+                const completedAtMs = run.finishedAtMs;
+                if (
+                  typeof completedAtMs !== "number" ||
+                  !Number.isFinite(completedAtMs) ||
+                  completedAtMs > Date.now()
+                ) {
+                  throw new Error("Capture completion time is unverified.");
+                }
+                const source = await safeRoot(directory, {
+                  symlinks: "reject",
+                  hardlinks: "reject",
+                });
+                const allowed = new Set([
+                  UPDATE_CAPTURE_PRIVACY_MARKER,
+                  ".DS_Store",
+                  "payload",
+                  "database.databases",
+                ]);
+                if ((await source.list(".")).some((entry) => !allowed.has(entry))) {
+                  throw new Error("Unsealed capture contains unrecognized recovery artifacts.");
+                }
+                let latestWriteMs = completedAtMs;
+                const pending = ["."];
+                for (const relativePath of pending) {
+                  const stat = await source.stat(relativePath);
+                  if (
+                    stat.isSymbolicLink ||
+                    (!stat.isDirectory && !stat.isFile) ||
+                    (stat.isFile && stat.nlink !== 1) ||
+                    !Number.isFinite(stat.mtimeMs)
+                  ) {
+                    throw new Error("Capture write history is unverified.");
+                  }
+                  const parts = relativePath.split(path.sep);
+                  const metadata =
+                    relativePath === UPDATE_CAPTURE_PRIVACY_MARKER || relativePath === ".DS_Store";
+                  const payload =
+                    parts.length === 2 &&
+                    parts[0] === "payload" &&
+                    /^(0|[1-9]\d*)$/u.test(parts[1] ?? "");
+                  const staging = parts[0] === "database.databases";
+                  if (
+                    stat.isFile
+                      ? (!metadata && !payload) ||
+                        (relativePath !== ".DS_Store" && Math.floor(stat.mtimeMs) > completedAtMs)
+                      : relativePath !== "." && relativePath !== "payload" && !staging
+                  ) {
+                    throw new Error("Unsealed capture has unfinished or unrecognized content.");
+                  }
+                  latestWriteMs = Math.max(latestWriteMs, stat.mtimeMs);
+                  if (stat.isDirectory) {
+                    for (const entry of await source.list(relativePath)) {
+                      pending.push(path.join(relativePath, entry));
+                    }
+                  }
+                }
+                fence.assertCurrent();
+                if (Date.now() - latestWriteMs < minimumAgeMs) {
+                  throw new Error("Capture remains within the requested recovery window.");
+                }
+              });
+            });
+          } finally {
+            await pin.close();
+          }
+          continue;
+        }
         await withRecoveryMetadata(
           { directory, manifestPath: path.join(directory, "manifest.json") },
           async ({ manifest, ref, outcome, pin }) => {
@@ -116,6 +285,7 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
               "outcome.json",
               "payload",
               "database.databases",
+              ".DS_Store",
             ]);
             const entries = await fs.readdir(directory);
             if (entries.some((entry) => !allowed.has(entry))) {
@@ -148,35 +318,21 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
             await withUpdateCommandExecutor(`capture-cleanup-${randomUUID()}`, async (executor) => {
               const fence = await executor.enter(manifest.installRoot);
               const inspect = async () => {
-                fence.assertCurrent();
-                const reply = await withArtifactPreservingStateReads(() =>
-                  executeExistingOpenClawStateRead(
-                    { env },
-                    { type: "updateRecoveryRetirement.read", input: { runId: name } },
-                    { current: true, preferIndependentWarmRead: true },
-                  ),
-                );
-                fence.assertCurrent();
-                if (!reply?.ok || reply.type !== "updateRecoveryRetirement.read") {
-                  throw new Error("Authoritative update history is unavailable.");
-                }
-                const { run } = reply;
+                const run = await readCaptureRetirementRun(env, name, fence.assertCurrent);
                 const doctorCompletion = outcome?.doctorCompletion;
                 const standalone = standaloneDoctorCaptureId.test(name);
                 if (
-                  (standalone
+                  standalone
                     ? run !== undefined ||
                       !doctorCompletion ||
                       doctorCompletion.manifestSha256 !== ref.manifestSha256 ||
                       !sameUpdateRunDriver(doctorCompletion.driver, manifest.creator) ||
                       doctorCompletion.completedAtMs < Date.parse(manifest.createdAt) ||
                       doctorCompletion.completedAtMs > Date.now()
-                    : !run ||
-                      run.status !== "succeeded" ||
-                      run.phase !== "finished" ||
-                      run.finishedAtMs === null) ||
-                  reply.activeRun ||
-                  reply.pendingRecovery
+                    : !isCompletedCaptureRun(
+                        run,
+                        retireSettledManualCopies !== undefined && outcome === undefined,
+                      )
                 ) {
                   throw new Error(
                     "Update completion is unverified or update/repair work remains unfinished.",
@@ -240,6 +396,7 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
                   if (
                     stat.isSymbolicLink ||
                     (!stat.isDirectory && !stat.isFile) ||
+                    (relativePath === ".DS_Store" && !stat.isFile) ||
                     (stat.isFile && stat.nlink !== 1) ||
                     !Number.isFinite(stat.mtimeMs)
                   ) {
@@ -257,30 +414,7 @@ export async function retireCompletedUpdateRecoveryCaptures(params: {
                   throw new Error("Capture remains within the requested recovery window.");
                 }
               };
-              await inspect();
-              await rootPin.assertCurrent();
-              await pin.assertCurrent();
-              const guard = capturePathRemovalGuard(directory);
-              if (!guard) {
-                throw new Error("Capture disappeared before retirement.");
-              }
-              await inspect();
-              result.eligible.push(directory);
-              if (!apply) {
-                return;
-              }
-              await removePathWithinRoot({
-                rootDir: root,
-                relativePath: name,
-                recursive: true,
-                force: false,
-                assertBeforeMutation: () => {
-                  fence.assertCurrent();
-                  rootGuard?.();
-                  guard();
-                },
-              });
-              result.retired.push(directory);
+              await retire(directory, pin, fence.assertCurrent, inspect);
             });
           },
         );

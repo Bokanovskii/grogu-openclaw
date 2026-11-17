@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { useConfigCliIntegrationHarness } from "../cli/config-cli.integration.test-harness.js";
+import { captureUpdateDoctorConfigWrites } from "../infra/update-doctor-result.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import { createPreUpdateConfigSnapshot } from "./backup-rotation.js";
 import { withExecutor } from "./config-executor.test-support.js";
 import {
@@ -12,6 +14,8 @@ import {
   resolveConfigPathFromTempState,
 } from "./config.backup-rotation.test-helpers.js";
 import { createConfigIO } from "./io.factory.js";
+import { writeConfigFile } from "./io.runtime.js";
+import { setRuntimeConfigSnapshotRefreshHandler } from "./runtime-snapshot.js";
 import { withTempHome } from "./test-helpers.js";
 
 const { runRegisteredConfigCommand, withConfigFileHarness } = useConfigCliIntegrationHarness();
@@ -31,6 +35,69 @@ async function expectPathMissing(filePath: string): Promise<void> {
 }
 
 describe("config backup rotation", () => {
+  it.each(["root", "include"] as const)(
+    "does not create optional configuration copies for Grogu %s writes",
+    async (targetKind) => {
+      const rootRaw =
+        targetKind === "include"
+          ? '{"gateway":{"mode":"local"},"logging":{"$include":"logging.json"}}\n'
+          : '{"gateway":{"mode":"local"},"logging":{"level":"info"}}\n';
+      await withConfigFileHarness(
+        "openclaw-grogu-config-no-backups-",
+        rootRaw,
+        async ({ configPath, tempDir }) => {
+          const profileFile = path.join(tempDir, "profile.json");
+          await fs.writeFile(profileFile, '{"schemaVersion":1,"bindings":{}}', { mode: 0o600 });
+          const target = targetKind === "include" ? path.join(tempDir, "logging.json") : configPath;
+          if (targetKind === "include") {
+            await fs.writeFile(target, '{"level":"info"}\n', { mode: 0o600 });
+          }
+          await withEnvAsync({ GROGU_PROFILE_FILE: profileFile }, async () => {
+            await runRegisteredConfigCommand(["config", "set", "logging.level", "debug"]);
+            await runRegisteredConfigCommand(["config", "set", "logging.level", "warn"]);
+          });
+          const saved = JSON.parse(await fs.readFile(target, "utf8"));
+          expect(targetKind === "include" ? saved.level : saved.logging.level).toBe("warn");
+          await expectPathMissing(`${target}.bak`);
+          await expectPathMissing(`${target}.bak.1`);
+          if (targetKind === "include") {
+            expect(await fs.readFile(configPath, "utf8")).toBe(rootRaw);
+          }
+        },
+      );
+    },
+  );
+
+  it("restores original Grogu configuration bytes when runtime activation fails without a backup", async () => {
+    const original = '{"gateway":{"mode":"local","port":18789}}\n';
+    await withConfigFileHarness(
+      "openclaw-grogu-config-rollback-",
+      original,
+      async ({ configPath, tempDir }) => {
+        const profileFile = path.join(tempDir, "profile.json");
+        await fs.writeFile(profileFile, '{"schemaVersion":1,"bindings":{}}', { mode: 0o600 });
+        await withEnvAsync({ GROGU_PROFILE_FILE: profileFile }, async () => {
+          setRuntimeConfigSnapshotRefreshHandler({
+            refresh: () => {
+              throw new Error("synthetic activation failure");
+            },
+          });
+          try {
+            await captureUpdateDoctorConfigWrites(configPath, async () => {
+              await expect(
+                writeConfigFile({ gateway: { mode: "local", port: 19001 } }),
+              ).rejects.toThrow(/synthetic activation failure/);
+            });
+          } finally {
+            setRuntimeConfigSnapshotRefreshHandler(null);
+          }
+        });
+        expect(await fs.readFile(configPath, "utf8")).toBe(original);
+        await expectPathMissing(`${configPath}.bak`);
+      },
+    );
+  });
+
   it("openclaw config set keeps five recovery points and preserves manual and pre-update backups", async () => {
     const original = '{"gateway":{"mode":"local","port":19000}}\n';
     await withConfigFileHarness(

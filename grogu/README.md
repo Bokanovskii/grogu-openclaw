@@ -333,6 +333,8 @@ Compaction does not restore expired detail.
 
 Grogu must not retain backups. Updates and standalone Doctor runs with an
 admitted `GROGU_PROFILE_FILE` skip optional full-state copies for manual recovery.
+Configuration writes also skip the rotating `.bak` copies for the root and included
+files. The `.pre-update` configuration copy remains available to update recovery.
 Temporary snapshots required for transactional rollback remain under their
 update or repair owner until that operation finishes. Already-admitted recovery
 lineage remains valid when an older installed updater starts the operation.
@@ -368,13 +370,29 @@ They expire after 24 hours so cleanup cannot delete a newly built candidate
 before the operator installs it. Cleanup requires producer receipts
 and shares a lock with package builders and archive readers. It preserves the
 running installation, state, credentials, active work, and unrecognized files.
+The same sweep removes the root configuration's native `.bak` through `.bak.4`
+ring under native update ownership and the configuration writer lock.
+Active updates and unfinished recovery block removal. It preserves aliased files,
+manual backup names, existing `.pre-update` copies, and temporary write files.
+Active configuration rollback uses the writer's original bytes, not this ring.
 The cleanup also retires native update captures and future standalone Doctor
 captures after verified success without an extra recovery window.
+Grogu also retires unsealed manual copies after their recorded update finishes
+and every recorded writer exits. Only numbered payload files and empty database
+staging directories qualify. Later payload writes and unknown content block removal.
+Finder metadata does not make an otherwise completed capture permanent.
+Failed manual originals qualify only when native history records restart-safe
+package state and no recovery capture reference or unresolved outcome remains.
 Native update ownership and unfinished recovery always block removal.
 Older Doctor captures without completion evidence remain protected.
-Older incomplete captures and retained updater code require their native
-recovery owner's settlement or a reviewed one-time cleanup. Missing metadata
-does not authorize deleting an active writer's files.
+Retained updater code and copies without matching native history remain protected.
+Missing metadata does not authorize deleting an active writer's files.
+The `setup` directory contains operator deployment and recovery artifacts without
+a shared completion contract. Its owner must settle each operation before a
+reviewed cleanup. Session archives can contain retained conversation history.
+Full-output `web_fetch` files preserve fetched text that tool results reference.
+Neither category is a disposable backup based on its name or age.
+Workspace documents and research artifacts remain intact.
 Preview cleanup before the first removal:
 
 ```sh

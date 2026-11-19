@@ -24,11 +24,15 @@ import type { EmbeddedRunTrigger } from "./run-trigger.js";
 
 const callContext = new AsyncLocalStorage<RequestTracker>();
 const httpContext = new AsyncLocalStorage<RequestTracker>();
+const suppressRequestTelemetry = new AsyncLocalStorage<boolean>();
+export function withoutModelRequestTelemetry<T>(run: () => T): T {
+  return suppressRequestTelemetry.run(true, run);
+}
 const clock = { wall: () => Date.now(), monotonic: () => performance.now() };
 let store: ReturnType<typeof createRequestTelemetryClient> | undefined;
 let lastWarning = -Infinity;
 function persist(record: ModelRequestRecord) {
-  if (!loadGroguPrivateProfile()) {
+  if (suppressRequestTelemetry.getStore() || !loadGroguPrivateProfile()) {
     return;
   }
   try {
@@ -81,7 +85,7 @@ export function measureHostGap(
 const hostGaps: Array<{ startedAtMs: number; updatedAtMs: number; schedulingGapMs: number }> = [];
 let hostTimer: NodeJS.Timeout | undefined;
 function startHostMonitor() {
-  if (hostTimer || !loadGroguPrivateProfile()) {
+  if (hostTimer || suppressRequestTelemetry.getStore() || !loadGroguPrivateProfile()) {
     return;
   }
   let previous = { wall: clock.wall(), monotonic: clock.monotonic() };
@@ -423,7 +427,7 @@ export function instrumentModelFetch(
   fetcher: typeof fetch,
   options: { timeoutMs?: number } = {},
 ): typeof fetch {
-  if (!loadGroguPrivateProfile()) {
+  if (suppressRequestTelemetry.getStore() || !loadGroguPrivateProfile()) {
     return fetcher;
   }
   return async (input, init) => {

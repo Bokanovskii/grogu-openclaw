@@ -462,6 +462,7 @@ export async function resolveEmbeddedRunModelSetup(params: {
       authProfileId: runParams.authProfileId,
       preparedModelRuntime: params.preparedModelRuntime,
       staticCatalogOwnsTransport: pluginHarnessOwnsTransport,
+      localMetadataOnly: runParams.requestModelCredential !== undefined,
     });
     provider = tieredResolution.provider;
     modelResolution = tieredResolution.resolution;

@@ -4,10 +4,17 @@ import path from "node:path";
 import { containsAsciiControlCharacter } from "@openclaw/normalization-core/string-normalization";
 import { WIDGET_HTML_MAX_UTF8_BYTES } from "../../packages/gateway-protocol/src/schema/canvas.js";
 import { resolveStateDir } from "../config/paths.js";
+import type { AuthorizedUserFiles } from "../infra/authorized-user-files.js";
 import { root as fsRoot } from "../infra/fs-safe.js";
 import { CANVAS_DOCUMENTS_PATH } from "./constants.js";
 
 const CANVAS_DOCUMENT_MANIFEST_MAX_BYTES = 2 * 1024 * 1024;
+
+export type CanvasDocumentStorageScope = {
+  files: AuthorizedUserFiles;
+  /** Chosen by the authenticated chat binding, never by widget code. */
+  directory: string;
+};
 
 type CanvasDocumentKind = "html_bundle" | "url_embed" | "document" | "image" | "video_asset";
 
@@ -74,9 +81,30 @@ export function resolveCanvasDocumentsDir(stateDir = resolveStateDir()): string 
 
 export async function readCanvasDocumentHtmlSource(
   documentId: string,
-  options?: { stateDir?: string; maxBytes?: number },
+  options?: { stateDir?: string; maxBytes?: number; storage?: CanvasDocumentStorageScope },
 ): Promise<{ html: string; cspSandbox?: "scripts" }> {
   const id = normalizeCanvasDocumentId(documentId);
+  if (options?.storage) {
+    const { files, directory } = options.storage;
+    files.assertCurrent();
+    const manifest: unknown = JSON.parse(await files.readText(`${directory}/${id}/manifest.json`));
+    if (
+      !manifest ||
+      typeof manifest !== "object" ||
+      !("id" in manifest) ||
+      manifest.id !== id ||
+      !("localEntrypoint" in manifest) ||
+      manifest.localEntrypoint !== "index.html"
+    ) {
+      throw new Error("Widget document is not available.");
+    }
+    const html = await files.readText(`${directory}/${id}/index.html`);
+    if (Buffer.byteLength(html) > (options.maxBytes ?? WIDGET_HTML_MAX_UTF8_BYTES)) {
+      throw new Error("Widget document exceeds the allowed size.");
+    }
+    files.assertCurrent();
+    return { html, cspSandbox: "scripts" };
+  }
   // Keep the document directory inside the guarded root so aliases cannot select another document.
   const root = await fsRoot(resolveCanvasDocumentsDir(options?.stateDir), {
     maxBytes: CANVAS_DOCUMENT_MANIFEST_MAX_BYTES,
@@ -179,11 +207,51 @@ export async function createCanvasDocument(
   options?: {
     stateDir?: string;
     maxDocumentsPerScope?: number;
+    storage?: CanvasDocumentStorageScope;
   },
 ): Promise<CanvasDocumentManifest> {
   const id = input.id?.trim()
     ? normalizeCanvasDocumentId(input.id)
     : `cv_${randomUUID().replaceAll("-", "")}`;
+  if (options?.storage) {
+    const { files, directory } = options.storage;
+    files.assertCurrent();
+    if (input.id || options.maxDocumentsPerScope) {
+      throw new Error("Owned widget documents are immutable and require explicit deletion.");
+    }
+    if (Buffer.byteLength(input.html) > WIDGET_HTML_MAX_UTF8_BYTES) {
+      throw new Error("Widget document exceeds the allowed size.");
+    }
+    const manifest: CanvasDocumentManifest = {
+      id,
+      kind: "html_bundle",
+      title: input.title?.trim(),
+      surface: "assistant_message",
+      cspSandbox: "scripts",
+      createdAt: new Date().toISOString(),
+      // Protected documents have no public document route.
+      entryUrl: "",
+      localEntrypoint: "index.html",
+      assets: [],
+    };
+    try {
+      await files.create(`${directory}/${id}/index.html`, input.html);
+      await files.create(`${directory}/${id}/manifest.json`, JSON.stringify(manifest));
+    } catch (error) {
+      try {
+        await files.remove(`${directory}/${id}`);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Widget save failed; cleanup is incomplete.",
+          { cause: cleanupError },
+        );
+      }
+      throw error;
+    }
+    files.assertCurrent();
+    return manifest;
+  }
   const rootDir = path.join(resolveCanvasDocumentsDir(options?.stateDir), id);
   await fs.rm(rootDir, { recursive: true, force: true });
   await fs.mkdir(rootDir, { recursive: true });

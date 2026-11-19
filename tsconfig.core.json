@@ -11,6 +11,7 @@
   "include": ["src/**/*", "packages/**/*"],
   "exclude": [
     "packages/mermaid-renderer/**",
+    "packages/widget-host/src/protected-host.ts",
     "node_modules",
     "dist",
     "**/dist/**",

@@ -18,6 +18,7 @@ import {
   listUserModelAccounts,
   readSelectedUserModelAccount,
 } from "./user-model-accounts.js";
+import { updateUserProfileAccess } from "./user-profile-access.worker.js";
 import {
   selectProfileAccessEntries,
   selectStoredGitHubIdentities,
@@ -43,6 +44,7 @@ import {
   ensureGatewayOwnerProfile,
   ensureProfileForEmail,
   ensureProfileForTailscaleIdentity,
+  ensureProfileForVerifiedIdentity,
 } from "./user-profiles.js";
 import type { ProfileDisplayRow, UserProfileAvatarMime } from "./user-profiles.types.js";
 import type {
@@ -115,6 +117,11 @@ const userProfileWriteOperations = {
     (input: Parameters<typeof ensureProfileForTailscaleIdentity>[0], owned) =>
       ensureProfileForTailscaleIdentity(input, owned),
   ),
+  "userProfiles.ensureVerifiedIdentity": createUserProfileWriteOperation(
+    "userProfiles.ensureVerifiedIdentity",
+    (input: Parameters<typeof ensureProfileForVerifiedIdentity>[0], owned) =>
+      ensureProfileForVerifiedIdentity(input, owned),
+  ),
   "userProfiles.syncGitHub": createUserProfileWriteOperation(
     "userProfiles.syncGitHub",
     (input: Parameters<typeof syncGitHubIdentity>[0], owned) => syncGitHubIdentity(input, owned),
@@ -148,6 +155,7 @@ export type UserProfileWriteOperations = WorkerOperations<typeof userProfileWrit
 
 export const userProfileOperations = {
   ...userProfileWriteOperations,
+  "userProfiles.access": updateUserProfileAccess,
   "userProfiles.modelAccount.connect": accountWrite(
     (
       input: Omit<

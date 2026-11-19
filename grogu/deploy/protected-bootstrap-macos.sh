@@ -284,6 +284,30 @@ case "${1-}" in
       /usr/bin/tar -xf "$SERVICE_HOME/inbox/runtime.tar" -C "$SERVICE_HOME/service"
     rm "$SERVICE_HOME/inbox/runtime.tar"
     ;;
+  update)
+    [ "$#" -eq 1 ] || exit 64
+    archive="$SERVICE_HOME/inbox/runtime.tar"
+    [ -f "$archive" ] && [ ! -L "$archive" ] || exit 66
+    [ -d "$SERVICE_HOME/service" ] && [ ! -L "$SERVICE_HOME/service" ] || exit 77
+    if ls -d "$SERVICE_HOME"/service-update.* >/dev/null 2>&1; then
+      echo "An earlier update left staging state that requires inspection." >&2
+      exit 73
+    fi
+    staged="$(mktemp -d "$SERVICE_HOME/service-update.XXXXXX")"
+    trap '/bin/rm -rf "$staged"' EXIT
+    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+      /usr/bin/tar -xf "$archive" -C "$staged/"
+    for required in grogu/protected/main.ts scripts/tsx.mjs pnpm-lock.yaml protected-client/index.html; do
+      [ -f "$staged/$required" ] && [ ! -L "$staged/$required" ] || exit 65
+    done
+    /bin/chmod "$(/usr/bin/stat -f %Lp "$SERVICE_HOME/service")" "$staged"
+    previous="$staged.previous"
+    /bin/mv "$SERVICE_HOME/service" "$previous"
+    /bin/mv "$staged" "$SERVICE_HOME/service" || { /bin/mv "$previous" "$SERVICE_HOME/service"; exit 74; }
+    trap - EXIT
+    /bin/rm -rf "$previous"
+    rm "$archive"
+    ;;
   dependencies)
     [ "$#" -eq 1 ] || exit 64
     cd "$SERVICE_HOME/service"

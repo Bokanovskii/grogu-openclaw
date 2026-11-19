@@ -26,6 +26,16 @@ that the package's top-level native launcher was installed or use the older
 `bin/pnpm.cjs` path. An already provisioned service needs only the root-owned
 maintenance helper corrected, not another account bootstrap or source install.
 
+`install` accepts only an empty `service/`. Later releases use `update`, which
+runs as the service account with no added privilege. Stop the runtime, then run
+`receive`, `update`, `dependencies`, and `restart runtime`. `update` extracts
+`inbox/runtime.tar` into a fresh staging directory under the service home. It
+checks for the runtime entry point, `scripts/tsx.mjs`, `pnpm-lock.yaml`, and
+`protected-client/index.html`. It then swaps the staged tree into `service/`
+and removes the previous tree and the archive. Nothing durable lives in
+`service/`, so no backup is kept. Leftover `service-update.*` staging state
+stops the next update until someone inspects it.
+
 The configuration is a non-writable-by-group/others JSON file with these keys:
 
 | Key               | Value                                                                         |

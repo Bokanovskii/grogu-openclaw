@@ -17,6 +17,9 @@ export const sparkyRef = {
   id: "SPARKY_API_KEY",
 } satisfies SecretRef;
 export const subjectPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
+// Sparky streams long reasoning and large widget calls slowly when it shares its GPU; a two-minute
+// budget ended ordinary travel replies. Stop and identity revalidation still end a turn early.
+export const protectedTurnTimeoutMs = 15 * 60_000;
 
 export async function readSettingsJson(filename: string): Promise<unknown> {
   const info = await lstat(filename);

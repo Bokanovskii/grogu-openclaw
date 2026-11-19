@@ -4,9 +4,10 @@ import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promis
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { test } from "node:test";
+import { FailoverError } from "../../src/agents/failover/error.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
-import { ProtectedError } from "./errors.js";
+import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
 import { createProviderRelay } from "./provider-relay.js";
@@ -397,6 +398,7 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const activeProvider = Promise.withResolvers<void>();
   const providerDisconnected = Promise.withResolvers<void>();
   const sourceUrl = "https://example.com/family-source";
+  const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
   const githubToken = `gho_family_${suffix}`;
   const anthropicKey = `sk-ant-family-${suffix}`;
@@ -505,6 +507,12 @@ void test("Family canonical turn streams sources and widgets, then drains an act
         chunks.push(Buffer.from(chunk));
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (JSON.stringify(body.messages).includes(rejectedKeyPrompt)) {
+        response
+          .writeHead(401, { "content-type": "application/json" })
+          .end('{"error":{"message":"Invalid API key","code":"invalid_api_key"}}');
+        return;
+      }
       seen.push({ auth: request.headers.authorization, body });
       response.writeHead(200, { "content-type": "text/event-stream" });
       if (seen.length === 3) {
@@ -801,6 +809,15 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const history = await restart.call(route);
   assert.equal(history.status, 200);
   assert.doesNotMatch(JSON.stringify(await history.json()), /Queued during shutdown/);
+  const rejected = await restart.call(`${route}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: rejectedKeyPrompt }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(rejected.status, 200);
+  const rejectedStream = await rejected.text();
+  assert.match(rejectedStream, /"code":"provider_rejected"/, rejectedStream);
+  assert.doesNotMatch(rejectedStream, /operation_failed|Invalid API key/);
   await restart.shutdown();
   for (const dir of [stateDir, process.env.HOME!]) {
     for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
@@ -813,4 +830,18 @@ void test("Family canonical turn streams sources and widgets, then drains an act
       }
     }
   }
+});
+
+void test("Family rate limits separate busy Sparky from personal plan limits", () => {
+  const limited = (provider: string) =>
+    publicError(
+      new Error("Run failed", {
+        cause: new FailoverError("Concurrency limit reached for this token owner", {
+          reason: "rate_limit",
+          provider,
+        }),
+      }),
+    ).code;
+  assert.equal(limited("sparky"), "provider_busy");
+  assert.equal(limited("github-copilot"), "rate_limit");
 });

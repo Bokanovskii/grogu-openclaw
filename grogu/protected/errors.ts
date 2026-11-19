@@ -1,3 +1,5 @@
+import { type FailoverError, isFailoverError } from "../../src/agents/failover/error.js";
+
 export class ProtectedError extends Error {
   constructor(
     readonly status: number,
@@ -12,10 +14,75 @@ export function unavailable(message: string): never {
   throw new ProtectedError(503, "unavailable", message);
 }
 
+export const providerTimeout = () =>
+  new ProtectedError(
+    504,
+    "provider_timeout",
+    "The model took too long to answer. Send again, or ask for a shorter reply.",
+  );
+
+// Codes stay outside 401/409/412 so clients never read a provider failure as a session or chat
+// conflict. Client copy treats rate_limit and plan_limit codes as personal plan limits.
+function providerFailure({ reason, provider }: FailoverError): ProtectedError {
+  const sparky = provider === "sparky";
+  switch (reason) {
+    case "rate_limit":
+    case "overloaded":
+      return sparky || reason === "overloaded"
+        ? new ProtectedError(
+            503,
+            "provider_busy",
+            sparky
+              ? "Sparky is busy with other work. Wait a minute, then send again."
+              : "The model service is busy. Wait a minute, then send again.",
+          )
+        : new ProtectedError(
+            429,
+            "rate_limit",
+            "The model account reached its rate limit. Wait, then send again.",
+          );
+    case "timeout":
+      return providerTimeout();
+    case "auth":
+    case "auth_permanent":
+    case "session_expired":
+      return new ProtectedError(
+        502,
+        "provider_rejected",
+        sparky
+          ? "Sparky did not accept the Family service key. Choose another model, or ask the owner to check Sparky."
+          : "The model account did not accept this request. Reconnect this provider.",
+      );
+    case "billing":
+      return new ProtectedError(
+        402,
+        "plan_limit",
+        "The model account has no usage left. Check the account plan, or choose another model.",
+      );
+    case "context_overflow":
+      return new ProtectedError(
+        413,
+        "chat_too_long",
+        "This chat is too long for the model. Start a new chat.",
+      );
+    case "model_not_found":
+      return new ProtectedError(422, "model_unavailable", "This model is not available.");
+    default:
+      return new ProtectedError(
+        502,
+        "provider_failed",
+        "The model could not answer. Send again, or choose another model.",
+      );
+  }
+}
+
 export function publicError(error: unknown): ProtectedError {
   const seen = new Set<unknown>();
   for (let cause = error; cause && typeof cause === "object" && !seen.has(cause);) {
     seen.add(cause);
+    if (isFailoverError(cause)) {
+      return providerFailure(cause);
+    }
     if (
       ("code" in cause &&
         (cause.code === "ENOSPC" || cause.code === "EDQUOT" || cause.code === "SQLITE_FULL")) ||

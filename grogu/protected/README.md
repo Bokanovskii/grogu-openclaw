@@ -71,6 +71,17 @@ search plugin and isolated credential or endpoint (for example, Brave with its
 own `BRAVE_API_KEY`). The Sparky key is not a search credential, and Family does
 not inherit provider keys or configuration from personal Grogu.
 
+A turn can run for up to 15 minutes, because Sparky with Ultra reasoning can
+take several minutes to write a widget. While a turn runs, the turn stream sends
+a blank line every 15 seconds. The blank line keeps the Cloudflare tunnel from
+closing a quiet response, and clients skip it. A provider failure reaches the
+client as a code and a fixed message, without provider text: `provider_busy`,
+`rate_limit`, `provider_timeout`, `provider_rejected`, `plan_limit`,
+`chat_too_long`, `model_unavailable`, or `provider_failed`. Sparky limits
+concurrent requests for each key. If Family uses the same Sparky key as personal
+Grogu, the two services share that limit, and Family reports `provider_busy`
+while personal Grogu is busy. Give Family its own Sparky key.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and

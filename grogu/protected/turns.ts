@@ -15,7 +15,8 @@ import { onAgentEventForRun } from "../../src/infra/agent-events.js";
 import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import { chatFilesDirectory } from "./chat-files.js";
-import { ProtectedError } from "./errors.js";
+import { ProtectedError, providerTimeout } from "./errors.js";
+import { protectedTurnTimeoutMs } from "./settings.js";
 import { projectToolResult, type Source, type Widget } from "./tool-events.js";
 
 export type { ProtectedModel };
@@ -171,7 +172,7 @@ export function createCanonicalProtectedTurns(options: {
               sessionId: turn.id,
             }),
             runId: turn.runId,
-            timeoutMs: 120_000,
+            timeoutMs: protectedTurnTimeoutMs,
             abortSignal: turn.signal,
             config: options.config,
             workspaceDir: options.workspaceDir,
@@ -215,6 +216,9 @@ export function createCanonicalProtectedTurns(options: {
             : new Error("Could not publish the turn update.", { cause: updateError });
         }
         await turn.revalidate();
+        if (result.meta.timeoutPhase !== undefined) {
+          throw providerTimeout();
+        }
         if (result.payloads?.some((payload) => payload.isError) || result.meta.aborted) {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
         }

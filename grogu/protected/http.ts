@@ -19,6 +19,7 @@ import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
+import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
 
@@ -562,7 +563,7 @@ export function createProtectedHttp(options: {
           shutdown.signal,
           request.signal,
           run.controller.signal,
-          AbortSignal.timeout(125_000),
+          AbortSignal.timeout(protectedTurnTimeoutMs + 5000),
         ]);
         const assertRun = () => {
           assertCurrent();
@@ -586,8 +587,19 @@ export function createProtectedHttp(options: {
         liveCheck.unref();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
+            const encoder = new TextEncoder();
             const send = (event: ProtectedTurnEvent) =>
-              controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+              controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+            // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
+            // from closing an idle response; clients skip blank lines.
+            const keepalive = setInterval(() => {
+              try {
+                controller.enqueue(encoder.encode("\n"));
+              } catch {
+                // Client disconnected.
+              }
+            }, 15_000);
+            keepalive.unref();
             const complete = async () => {
               try {
                 assertRun();
@@ -665,6 +677,7 @@ export function createProtectedHttp(options: {
                   // Client disconnected.
                 }
               } finally {
+                clearInterval(keepalive);
                 storage?.release();
                 clearInterval(liveCheck);
                 runs.delete(id);

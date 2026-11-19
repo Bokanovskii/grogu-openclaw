@@ -20,6 +20,12 @@ OPENCLAW_CONFIG_PATH=/absolute/private/config/openclaw.json \
 node --import ./scripts/tsx.mjs grogu/protected/main.ts /absolute/private/config/protected.json
 ```
 
+The fixed macOS maintenance helper runs pinned pnpm 12.15.0 through its
+`bin/pnpm.mjs` Node fallback. Its install scripts are disabled, so do not assume
+that the package's top-level native launcher was installed or use the older
+`bin/pnpm.cjs` path. An already provisioned service needs only the root-owned
+maintenance helper corrected, not another account bootstrap or source install.
+
 The configuration is a non-writable-by-group/others JSON file with these keys:
 
 | Key               | Value                                                                         |

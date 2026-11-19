@@ -288,7 +288,7 @@ case "${1-}" in
     [ "$#" -eq 1 ] || exit 64
     cd "$SERVICE_HOME/service"
     exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
-      "$SERVICE_HOME/runtime/node/bin/node" "$SERVICE_HOME/runtime/pnpm/lib/node_modules/pnpm/bin/pnpm.cjs" \
+      "$SERVICE_HOME/runtime/node/bin/node" "$SERVICE_HOME/runtime/pnpm/lib/node_modules/pnpm/bin/pnpm.mjs" \
       install --frozen-lockfile --ignore-scripts
     ;;
   verify)

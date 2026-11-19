@@ -77,6 +77,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   await Promise.all([
     writeFile(path.join(bundleDir, "index.html"), "<h1>Family notebook</h1>"),
     writeFile(path.join(bundleDir, "assets/index-Family.js"), "export {};"),
+    writeFile(path.join(bundleDir, "assets/notebook-Ab12_cd.woff2"), "wOF2"),
     symlink("../index.html", path.join(bundleDir, "assets/index-Symlink.js")),
   ]);
   const staticClient = await createProtectedStaticClient(await root(bundleDir));
@@ -144,7 +145,11 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(shell.status, 200);
   assert.equal(shell.headers.get("cache-control"), "no-store");
   assert.match(shell.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.match(shell.headers.get("content-security-policy") ?? "", /font-src 'self'/);
   assert.equal(await shell.text(), "<h1>Family notebook</h1>");
+  const font = await fetch(`${first.url}/assets/notebook-Ab12_cd.woff2`);
+  assert.equal(font.status, 200);
+  assert.equal(font.headers.get("content-type"), "font/woff2");
   const assetUrl = `${first.url}/assets/index-Family.js`;
   const asset = await fetch(assetUrl, { method: "HEAD" });
   assert.equal(asset.status, 200);
@@ -153,6 +158,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await fetch(assetUrl, { method: "POST" })).status, 405);
   for (const route of [
     "/assets/index-Symlink.js",
+    "/assets/notebook.Ab12.woff2",
     "/cdn-cgi/access/logout",
     "/api/unknown",
     "/no-spa",

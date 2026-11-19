@@ -6,6 +6,7 @@ const types = new Map([
   [".css", "text/css; charset=utf-8"],
   [".webmanifest", "application/manifest+json"],
   [".svg", "image/svg+xml"],
+  [".woff2", "font/woff2"],
 ]);
 const headers = {
   "cache-control": "no-store",
@@ -13,9 +14,9 @@ const headers = {
   "referrer-policy": "no-referrer",
   "cross-origin-resource-policy": "same-origin",
   "content-security-policy":
-    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'",
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'",
 };
-const asset = /^assets\/index-[A-Za-z0-9_-]+\.(?:js|css)$/u;
+const asset = /^assets\/(?:index-[A-Za-z0-9_-]+\.(?:js|css)|[A-Za-z0-9_-]+\.woff2)$/u;
 const standalone = new Set(["sw.js", "manifest.webmanifest", "notebook.svg"]);
 const readOptions = {
   symlinks: "reject",

@@ -154,6 +154,19 @@ void test("the test client is denied without every proof requirement", async () 
     echoes.answerProof(new Request(`${origin}${protectedAccessProofPath}?challenge=short`)),
     { status: 401 },
   );
+  const expired = token({
+    sub: "",
+    common_name: testClientId,
+    exp: Math.floor(Date.now() / 1000) - 60,
+  });
+  await assert.rejects(
+    echoes.answerProof(
+      new Request(`${origin}${protectedAccessProofPath}?challenge=${"x".repeat(43)}`, {
+        headers: { "cf-access-jwt-assertion": expired },
+      }),
+    ),
+    { status: 401 },
+  );
 });
 
 void test("human identities keep cookie and identity-lookup behavior", async () => {

@@ -162,6 +162,10 @@ export function createCloudflareAccessVerifier(options: {
     ) {
       return denied();
     }
+    // Checked after the awaited key load so a slow fetch cannot admit an assertion that expired meanwhile.
+    if (Date.now() >= claims.exp * 1000) {
+      return denied();
+    }
     return {
       testClient: claims.sub.trim() ? undefined : options.testClientId,
       subject: claims.sub,

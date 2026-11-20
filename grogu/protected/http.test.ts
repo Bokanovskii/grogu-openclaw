@@ -101,6 +101,10 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const submitted = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   t.after(() => release.resolve());
+  const awayStarted = Promise.withResolvers<void>();
+  const awayRelease = Promise.withResolvers<void>();
+  const awayDelivered = Promise.withResolvers<boolean>();
+  t.after(() => awayRelease.resolve());
   const origin = "https://family.example";
   const open = async (freeFloorBytes = 1) => {
     const app = createProtectedHttp({
@@ -117,6 +121,17 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
         async run(turn) {
           if (turn.input.text === "Write an oversized file") {
             await turn.files.write(`chats/${turn.id}/oversized.txt`, "x".repeat(64_001));
+            return;
+          }
+          if (turn.input.text === "Keep going offline") {
+            awayStarted.resolve();
+            await awayRelease.promise;
+            try {
+              await turn.delta("Written after the phone went away.");
+              awayDelivered.resolve(!turn.signal.aborted);
+            } catch {
+              awayDelivered.resolve(false);
+            }
             return;
           }
           submitted.resolve();
@@ -137,7 +152,14 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       headers.set("content-type", headers.get("content-type") ?? "application/json");
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
-    return { server, url, call, revokeProfile: (id: string) => app.revokeProfile(id) };
+    return {
+      server,
+      url,
+      call,
+      fetch: app.fetch,
+      shutdown: () => app.shutdown(),
+      revokeProfile: (id: string) => app.revokeProfile(id),
+    };
   };
   const first = await open();
   t.after(() => close(first.server));
@@ -372,8 +394,35 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     ).status,
     204,
   );
-  assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
+  const carolCreated = await first.call("carol", "/chats", { method: "POST", body: "{}" });
+  assert.equal(carolCreated.status, 200);
+  const carolRoute = `/chats/${(await carolCreated.json()).chat.id}`;
+  const carolMe = await (await first.call("carol", "/me")).json();
+  const leaving = new AbortController();
+  const away = await first.fetch(
+    new Request(`${origin}/api/protected/v1${carolRoute}/turns`, {
+      method: "POST",
+      signal: leaving.signal,
+      headers: {
+        origin,
+        cookie: "synthetic=carol",
+        "content-type": "application/json",
+        "x-grogu-profile": carolMe.user.id,
+      },
+      body: '{"provider":"anthropic","text":"Keep going offline","credential":{"accessToken":"synthetic-only"}}',
+    }),
+  );
+  const awayReader = away.body!.getReader();
+  const awayRun = JSON.parse(new TextDecoder().decode((await awayReader.read()).value)).runId;
+  await awayStarted.promise;
+  leaving.abort();
+  await awayReader.cancel();
+  const reopenedChat = await (await first.call("carol", carolRoute)).json();
+  assert.deepEqual(reopenedChat.activeRun, { id: awayRun });
+  awayRelease.resolve();
+  assert.equal(await awayDelivered.promise, true);
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
+  await first.shutdown();
   await close(first.server);
 
   const reopened = await open(Number.MAX_SAFE_INTEGER);
@@ -663,8 +712,8 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const stream = await response.text();
   assert.match(stream, /"type":"done"/);
   const events = stream
-    .trim()
     .split("\n")
+    .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
   assert.ok(
     events.some(

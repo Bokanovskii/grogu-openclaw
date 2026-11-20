@@ -105,15 +105,18 @@ export function createCloudflareAccessVerifier(options: {
   };
   return async (request) => {
     try {
-      const cookie = request.headers.get("cookie") ?? "";
-      const matches = cookie
-        .split(";")
-        .map((part) => part.trim())
-        .filter((part) => part.startsWith("CF_Authorization="));
-      if (matches.length !== 1) {
-        return denied();
+      let token = request.headers.get("cf-access-jwt-assertion");
+      if (token === null) {
+        const cookie = request.headers.get("cookie") ?? "";
+        const matches = cookie
+          .split(";")
+          .map((part) => part.trim())
+          .filter((part) => part.startsWith("CF_Authorization="));
+        if (matches.length !== 1) {
+          return denied();
+        }
+        token = matches[0]!.slice("CF_Authorization=".length);
       }
-      const token = matches[0]!.slice("CF_Authorization=".length);
       if (token.length > 16 * 1024 || !/^[\w-]+\.[\w-]+\.[\w-]+$/u.test(token)) {
         return denied();
       }
@@ -198,7 +201,7 @@ export function createCloudflareAccessVerifier(options: {
         revalidate,
       };
     } catch {
-      // Fetch errors can retain the cookie. Never propagate their cause or message.
+      // Fetch errors can retain the token. Never propagate their cause or message.
       return denied();
     }
   };

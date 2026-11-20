@@ -83,6 +83,18 @@ concurrent requests for each key. If Family uses the same Sparky key as personal
 Grogu, the two services share that limit, and Family reports `provider_busy`
 while personal Grogu is busy. Give Family its own Sparky key.
 
+After admission, a turn continues if the browser disconnects or the phone sleeps.
+The runtime saves the reply without an attached reader. Request credentials stay
+in memory for that turn, never in the saved chat. Stop, logout, revoked access,
+session expiry, the turn timeout, and listener shutdown still interrupt work.
+
+`GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
+but only for the profile and Access session that started it. Clients can read
+the chat again to find the saved reply. This does not replay the stream or start
+another model request. Another Access session can read its user's chat, but it
+does not receive the run ID. Active runs do not survive a listener restart.
+Updates drain or interrupt them before the new listener starts.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and

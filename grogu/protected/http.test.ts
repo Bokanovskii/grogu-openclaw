@@ -101,10 +101,6 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const submitted = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   t.after(() => release.resolve());
-  const awayStarted = Promise.withResolvers<void>();
-  const awayRelease = Promise.withResolvers<void>();
-  const awayDelivered = Promise.withResolvers<boolean>();
-  t.after(() => awayRelease.resolve());
   const origin = "https://family.example";
   const open = async (freeFloorBytes = 1) => {
     const app = createProtectedHttp({
@@ -121,17 +117,6 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
         async run(turn) {
           if (turn.input.text === "Write an oversized file") {
             await turn.files.write(`chats/${turn.id}/oversized.txt`, "x".repeat(64_001));
-            return;
-          }
-          if (turn.input.text === "Keep going offline") {
-            awayStarted.resolve();
-            await awayRelease.promise;
-            try {
-              await turn.delta("Written after the phone went away.");
-              awayDelivered.resolve(!turn.signal.aborted);
-            } catch {
-              awayDelivered.resolve(false);
-            }
             return;
           }
           submitted.resolve();
@@ -152,14 +137,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       headers.set("content-type", headers.get("content-type") ?? "application/json");
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
-    return {
-      server,
-      url,
-      call,
-      fetch: app.fetch,
-      shutdown: () => app.shutdown(),
-      revokeProfile: (id: string) => app.revokeProfile(id),
-    };
+    return { server, url, call, revokeProfile: (id: string) => app.revokeProfile(id) };
   };
   const first = await open();
   t.after(() => close(first.server));
@@ -394,35 +372,8 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     ).status,
     204,
   );
-  const carolCreated = await first.call("carol", "/chats", { method: "POST", body: "{}" });
-  assert.equal(carolCreated.status, 200);
-  const carolRoute = `/chats/${(await carolCreated.json()).chat.id}`;
-  const carolMe = await (await first.call("carol", "/me")).json();
-  const leaving = new AbortController();
-  const away = await first.fetch(
-    new Request(`${origin}/api/protected/v1${carolRoute}/turns`, {
-      method: "POST",
-      signal: leaving.signal,
-      headers: {
-        origin,
-        cookie: "synthetic=carol",
-        "content-type": "application/json",
-        "x-grogu-profile": carolMe.user.id,
-      },
-      body: '{"provider":"anthropic","text":"Keep going offline","credential":{"accessToken":"synthetic-only"}}',
-    }),
-  );
-  const awayReader = away.body!.getReader();
-  const awayRun = JSON.parse(new TextDecoder().decode((await awayReader.read()).value)).runId;
-  await awayStarted.promise;
-  leaving.abort();
-  await awayReader.cancel();
-  const reopenedChat = await (await first.call("carol", carolRoute)).json();
-  assert.deepEqual(reopenedChat.activeRun, { id: awayRun });
-  awayRelease.resolve();
-  assert.equal(await awayDelivered.promise, true);
+  assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
-  await first.shutdown();
   await close(first.server);
 
   const reopened = await open(Number.MAX_SAFE_INTEGER);
@@ -434,7 +385,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await lowDisk.json()).error.code, "storage_full");
 });
 
-void test("Family canonical turn streams sources and widgets, then drains an active run on close", async (t) => {
+void test("Family canonical turns save sources, widgets, and offline replies, then drain on shutdown", async (t) => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
     stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
@@ -452,6 +403,12 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   }> = [];
   const activeProvider = Promise.withResolvers<void>();
   const providerDisconnected = Promise.withResolvers<void>();
+  const offlineProvider = Promise.withResolvers<void>();
+  const offlineRelease = Promise.withResolvers<void>();
+  const offlineSettled = Promise.withResolvers<void>();
+  const offlineDisconnected = Promise.withResolvers<void>();
+  const offlinePrompt = "Finish this reply after the connection closes";
+  t.after(() => offlineRelease.resolve());
   const sourceUrl = "https://example.com/family-source";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
@@ -570,11 +527,16 @@ void test("Family canonical turn streams sources and widgets, then drains an act
       }
       seen.push({ auth: request.headers.authorization, body });
       response.writeHead(200, { "content-type": "text/event-stream" });
-      if (seen.length === 3) {
+      if (JSON.stringify(body.messages).includes("Hold the provider response open")) {
         response.once("close", () => providerDisconnected.resolve());
         response.flushHeaders();
         activeProvider.resolve();
         return;
+      }
+      if (JSON.stringify(body.messages).includes(offlinePrompt)) {
+        response.flushHeaders();
+        offlineProvider.resolve();
+        await offlineRelease.promise;
       }
       const widgetArguments = JSON.stringify({
         title: "Synthetic widget",
@@ -690,6 +652,11 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const open = async () => {
     const app = createProtectedHttp(options);
     const server = createProtectedServer(origin, app.fetch);
+    server.on("request", (incoming, outgoing) => {
+      if (incoming.headers["x-proof-disconnect"] === "yes") {
+        outgoing.once("close", () => offlineDisconnected.resolve());
+      }
+    });
     const url = await listen(server);
     t.after(() => close(server));
     const call = (route: string, init?: RequestInit) => {
@@ -873,7 +840,49 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const rejectedStream = await rejected.text();
   assert.match(rejectedStream, /"code":"provider_rejected"/, rejectedStream);
   assert.doesNotMatch(rejectedStream, /operation_failed|Invalid API key/);
-  await restart.shutdown();
+  const canonicalRun = options.turns.run.bind(options.turns);
+  options.turns.run = async (turn) => {
+    try {
+      await canonicalRun(turn);
+    } finally {
+      if (turn.input.text === offlinePrompt) {
+        offlineSettled.resolve();
+      }
+    }
+  };
+  const { chat: offline } = await (
+    await restart.call("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const offlineRoute = `/chats/${offline.id}`;
+  const offlineResponse = await restart.call(`${offlineRoute}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: offlinePrompt }),
+    headers: { "x-grogu-profile": user.id, "x-proof-disconnect": "yes" },
+  });
+  assert.equal(offlineResponse.status, 200);
+  const offlineReader = offlineResponse.body!.getReader();
+  const offlineStart = JSON.parse(new TextDecoder().decode((await offlineReader.read()).value));
+  assert.equal(offlineStart.type, "start");
+  await offlineProvider.promise;
+  await offlineReader.cancel();
+  await offlineDisconnected.promise;
+  const detached = await (await restart.call(offlineRoute)).json();
+  offlineRelease.resolve();
+  await offlineSettled.promise;
+  try {
+    const savedOffline = await (await reopened(offlineRoute)).json();
+    assert.ok(
+      savedOffline.chat.messages.some(
+        (message: { role: string; text: string }) =>
+          message.role === "user" && message.text === offlinePrompt,
+      ),
+    );
+    assert.equal(savedOffline.chat.messages.at(-1)?.status, "complete");
+    assert.match(savedOffline.chat.messages.at(-1)?.text, /Committed synthetic answer\./);
+    assert.deepEqual(detached.activeRun, { id: offlineStart.runId });
+  } finally {
+    await restart.shutdown();
+  }
   for (const dir of [stateDir, process.env.HOME!]) {
     for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) {

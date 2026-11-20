@@ -108,6 +108,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       stateDir,
       usersRoot,
       verifyIdentity,
+      answerAccessProof: async (request) => Response.json({ answered: request.url }),
       maxChatsPerUser: 3,
       maxFileBytes: 64_000,
       storageLimits: { globalBytes: 95_000, userBytes: 58_000, freeFloorBytes },
@@ -141,6 +142,11 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   };
   const first = await open();
   t.after(() => close(first.server));
+  // The proof route answers from its own assertion; entering the verifier here would recurse.
+  const proof = await fetch(`${first.url}/api/protected/v1/access-proof?challenge=c`);
+  assert.deepEqual(await proof.json(), {
+    answered: `${origin}/api/protected/v1/access-proof?challenge=c`,
+  });
   const shell = await fetch(first.url);
   assert.equal(shell.status, 200);
   assert.equal(shell.headers.get("cache-control"), "no-store");

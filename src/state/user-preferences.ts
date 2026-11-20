@@ -48,11 +48,13 @@ export async function getUserPreferenceValues(
 export function getCanonicalUserPreferences(
   profileId: string,
   keys?: readonly string[],
-  options: Pick<OpenClawStateDatabaseOptions, "path" | "env"> = {},
+  options: Pick<OpenClawStateDatabaseOptions, "path" | "env"> & {
+    requireExactProfile?: boolean;
+  } = {},
 ): Promise<CanonicalUserPreferences | undefined> {
   return executeOpenClawStateWorker(captureOpenClawStateWorkerContext(options), {
     type: "userPreferences.read",
-    input: { profileId, keys },
+    input: { profileId, keys, requireExactProfile: options.requireExactProfile },
   });
 }
 
@@ -62,6 +64,7 @@ export async function setCanonicalUserPreferences(
   options: Pick<OpenClawStateDatabaseOptions, "path" | "env"> & {
     assertCurrent?: () => void;
     expectedEntries?: Record<string, unknown>;
+    requireExactProfile?: boolean;
   } = {},
 ): Promise<Result<{ profileId: string }, UserPreferenceError> | undefined> {
   const prepared = prepareUserPreferenceUpdate(entries, options.expectedEntries);
@@ -77,7 +80,11 @@ export async function setCanonicalUserPreferences(
       (scope) =>
         scope.execute({
           type: "userPreferences.write",
-          input: { profileId, update: prepared.value },
+          input: {
+            profileId,
+            update: prepared.value,
+            requireExactProfile: options.requireExactProfile,
+          },
         }),
       {
         assertCurrent: options.assertCurrent,

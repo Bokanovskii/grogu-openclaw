@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
+import { sql } from "kysely";
 import { ModelAccountConnectAuthorityError } from "../gateway/model-account-connect-errors.js";
-import { executeSqliteQuerySync } from "../infra/kysely-sync.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import {
   deferSqliteWorkerCommitReceipt,
   requestSqliteWorkerOperationAdmission,
 } from "../infra/sqlite-worker-operation-admission.js";
+import type { DB } from "./openclaw-state-db.generated.js";
 import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
@@ -18,6 +20,7 @@ import {
   listUserModelAccounts,
   readSelectedUserModelAccount,
 } from "./user-model-accounts.js";
+import { ensureUserPreferencesSchema } from "./user-preferences.store.js";
 import { updateUserProfileAccess } from "./user-profile-access.worker.js";
 import {
   selectProfileAccessEntries,
@@ -46,7 +49,11 @@ import {
   ensureProfileForTailscaleIdentity,
   ensureProfileForVerifiedIdentity,
 } from "./user-profiles.js";
-import type { ProfileDisplayRow, UserProfileAvatarMime } from "./user-profiles.types.js";
+import type {
+  ProfileDisplayRow,
+  UserProfileAvatarMime,
+  UserProfilesDatabase,
+} from "./user-profiles.types.js";
 import type {
   WorkerOperationHandlers,
   WorkerOperations,
@@ -133,8 +140,15 @@ const userProfileWriteOperations = {
   ),
   "userProfiles.setDisplayName": createUserProfileWriteOperation(
     "userProfiles.setDisplayName",
-    (input: { profileId: string; name: string | null }, owned, display) => ({
-      profile: setDisplayName(input.profileId, input.name, owned),
+    (
+      input: { profileId: string; name: string | null; requireExactProfile?: boolean },
+      owned,
+      display,
+    ) => ({
+      profile: setDisplayName(input.profileId, input.name, {
+        ...owned,
+        requireExactProfile: input.requireExactProfile,
+      }),
       display: display(),
     }),
     (input) => input.profileId,
@@ -230,6 +244,70 @@ export const userProfileOperations = {
       },
       { databaseLabel: database.path, operationLabel: "user-profiles.directory" },
     );
+  },
+  "userProfiles.verifiedDirectory": (
+    input: {
+      issuer: string;
+      subjects: readonly string[];
+      preferenceKey: string;
+      after: string | null;
+      limit: number;
+    },
+    { open, stateOptions },
+  ) => {
+    const database = open();
+    const options = { ...stateOptions(), database };
+    ensureUserProfilesSchema(options, database);
+    ensureUserPreferencesSchema(options);
+    if (input.subjects.length === 0) {
+      return { people: [], nextCursor: null };
+    }
+    return runSqliteDeferredTransactionSync(database.db, () => {
+      const db = getNodeSqliteKysely<UserProfilesDatabase & DB>(database.db);
+      let query = db
+        .selectFrom("user_profiles as p")
+        .innerJoin("user_profile_identities as i", "i.profile_id", "p.id")
+        .leftJoin("user_profile_access_denials as d", "d.profile_id", "p.id")
+        .leftJoin("user_preferences as s", (join) =>
+          join.onRef("s.profile_id", "=", "p.id").on("s.pref_key", "=", input.preferenceKey),
+        )
+        .select([
+          "p.id",
+          "p.display_name",
+          sql<string>`CASE WHEN s.value_json IS NULL THEN '' ELSE json_extract(s.value_json, '$.description') END`.as(
+            "description",
+          ),
+        ])
+        .where("i.provider", "=", `verified:${input.issuer}`)
+        .where("i.subject", "in", [...input.subjects])
+        .where("p.merged_into", "is", null)
+        .where("d.profile_id", "is", null)
+        .where(
+          sql<boolean>`CASE WHEN s.value_json IS NULL THEN 1
+                WHEN json_valid(s.value_json) = 0 THEN 0
+                WHEN json_type(s.value_json) != 'object' THEN 0
+                WHEN json_type(s.value_json, '$.hidden') IS NOT 'false' THEN 0
+                WHEN json_type(s.value_json, '$.description') IS NOT 'text' THEN 0
+                WHEN length(json_extract(s.value_json, '$.description')) > 140 THEN 0
+                ELSE 1 END`,
+        )
+        .groupBy(["p.id", "p.display_name", "s.value_json"])
+        .orderBy("p.id", "asc")
+        .limit(input.limit + 1);
+      if (input.after !== null) {
+        query = query.where("p.id", ">", input.after);
+      }
+      const rows = executeSqliteQuerySync(database.db, query).rows;
+      const page = rows.slice(0, input.limit);
+      return {
+        people: page.map((row) => ({
+          id: row.id,
+          displayName: (row.display_name?.trim() || "Family member").slice(0, 40),
+          description: row.description.slice(0, 140),
+        })),
+        nextCursor: rows.length > input.limit ? page.at(-1)!.id : null,
+      };
+    });
   },
   "userProfiles.channelIdentity.change": (
     input: Parameters<typeof executeUserChannelIdentityChange>[0],

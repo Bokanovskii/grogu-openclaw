@@ -8,6 +8,7 @@ type JsonWebKey = webcrypto.JsonWebKey;
 export type VerifiedProtectedIdentity = {
   issuer: string;
   subject: string;
+  kind: "human" | "development";
   displayName?: string;
   expiresAt: number;
   sessionId: string;
@@ -192,6 +193,7 @@ export function createCloudflareAccessVerifier(options: {
       return {
         issuer: issuer.origin,
         subject,
+        kind: testClient ? "development" : "human",
         expiresAt,
         sessionId: createHash("sha256").update(token).digest("hex"),
         assertCurrent,

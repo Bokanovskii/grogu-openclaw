@@ -17,6 +17,7 @@ export const sparkyRef = {
   id: "SPARKY_API_KEY",
 } satisfies SecretRef;
 export const subjectPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
+export const testClientIdPattern = /^[a-f0-9]{32}\.access$/u;
 // Sparky streams long reasoning and large widget calls slowly when it shares its GPU; a two-minute
 // budget ended ordinary travel replies. Stop and identity revalidation still end a turn early.
 export const protectedTurnTimeoutMs = 15 * 60_000;
@@ -56,6 +57,11 @@ export function parseRuntimeSettings(value: unknown) {
     throw new Error("Invalid protected runtime settings");
   }
   const { stateDir, allowedSubjects, sparkySecret } = value;
+  const testClientId =
+    value.testClientId === undefined ||
+    (typeof value.testClientId === "string" && testClientIdPattern.test(value.testClientId))
+      ? value.testClientId
+      : null;
   const limits = value.storageLimits;
   const positive = (number: unknown): number is number =>
     typeof number === "number" && Number.isSafeInteger(number) && number > 0;
@@ -66,6 +72,7 @@ export function parseRuntimeSettings(value: unknown) {
     !allowedSubjects.every(
       (subject): subject is string => typeof subject === "string" && subjectPattern.test(subject),
     ) ||
+    testClientId === null ||
     !isRecord(sparkySecret) ||
     sparkySecret.source !== sparkyRef.source ||
     sparkySecret.provider !== sparkyRef.provider ||
@@ -82,6 +89,7 @@ export function parseRuntimeSettings(value: unknown) {
     ...deploy,
     stateDir,
     allowedSubjects,
+    ...(testClientId === undefined ? {} : { testClientId }),
     sparkySecret: sparkyRef,
     storageLimits: {
       userBytes: limits.userBytes,

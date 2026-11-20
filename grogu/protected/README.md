@@ -46,6 +46,7 @@ The configuration is a non-writable-by-group/others JSON file with these keys:
 | `accessIssuer`    | Exact `https://<team>.cloudflareaccess.com` issuer origin.                    |
 | `accessAudience`  | Access application audience.                                                  |
 | `allowedSubjects` | Explicit subject strings from that issuer; `[]` denies all.                   |
+| `testClientId`    | Optional Access service-token client ID for the hidden test user.             |
 | `sparkySecret`    | `{"source":"env","provider":"default","id":"SPARKY_API_KEY"}`.                |
 | `storageLimits`   | Integer byte limits: `userBytes`, `globalBytes`, and `freeFloorBytes`.        |
 
@@ -115,6 +116,14 @@ account is allowed.
 Run `maintain.ts` under the isolated service account and environment.
 `init --deploy-json FILE` creates the deny-all configuration; `add-subject UUID`
 adds an exact subject, which takes effect after a protected listener restart.
+`test-client CLIENT_ID` admits one Access service token as a hidden
+development user, and `test-client none` removes it. Both take effect after a
+protected listener restart. The runtime accepts that token only when the Access
+token names the exact client ID and the live identity response confirms it. The
+user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
+That subject gets its own profile and storage, like any other user. The future
+account directory and sharing must exclude it. To revoke the test user, delete
+the service token or its Access policy, or run `test-client none` and restart.
 For owner-driven revocation, stop the listener before invoking
 `revoke-profile PROFILE_ID` and restart after it succeeds; the canonical denial
 survives the restart. `GET /healthz` reports listener readiness without user data.

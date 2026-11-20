@@ -67,6 +67,7 @@ async function main() {
       issuer: accessIssuer,
       audience: accessAudience,
       isAllowed: ({ subject }) => allowed.has(subject),
+      testClientId: settings.testClientId,
     }),
     providerRelay: createProviderRelay(),
     turns: createCanonicalProtectedTurns({

@@ -10,6 +10,7 @@ import {
   readSettingsJson,
   sparkyRef,
   subjectPattern,
+  testClientIdPattern,
 } from "./settings.js";
 
 async function main() {
@@ -66,8 +67,10 @@ async function main() {
     process.stdout.write("Initialized Family config with no admitted subjects.\n");
     return;
   }
-  if (action === "add-subject" && arg && subjectPattern.test(arg) && rest.length === 0) {
-    await withFileLock(
+  const updateSettings = (
+    change: (settings: ReturnType<typeof parseRuntimeSettings>) => object | undefined,
+  ) =>
+    withFileLock(
       runtimePath,
       {
         retries: { retries: 5, factor: 2, minTimeout: 25, maxTimeout: 300 },
@@ -79,22 +82,37 @@ async function main() {
         if (settings.stateDir !== stateDir) {
           throw new Error("Family config state directory mismatch.");
         }
-        const subject = arg.toLowerCase();
-        if (!settings.allowedSubjects.includes(subject)) {
-          await writeJsonAtomic(
-            runtimePath,
-            { ...settings, allowedSubjects: [...settings.allowedSubjects, subject] },
-            { mode: 0o600, durable: true },
-          );
+        const next = change(settings);
+        if (next) {
+          await writeJsonAtomic(runtimePath, next, { mode: 0o600, durable: true });
         }
       },
+    );
+  if (action === "add-subject" && arg && subjectPattern.test(arg) && rest.length === 0) {
+    const subject = arg.toLowerCase();
+    await updateSettings((settings) =>
+      settings.allowedSubjects.includes(subject)
+        ? undefined
+        : { ...settings, allowedSubjects: [...settings.allowedSubjects, subject] },
     );
     process.stdout.write("Family allowlist updated.\n");
     return;
   }
+  if (
+    action === "test-client" &&
+    arg &&
+    (arg === "none" || testClientIdPattern.test(arg)) &&
+    rest.length === 0
+  ) {
+    await updateSettings(({ testClientId: _previous, ...settings }) =>
+      arg === "none" ? settings : { ...settings, testClientId: arg },
+    );
+    process.stdout.write("Family test client updated.\n");
+    return;
+  }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, add-subject UUID, revoke-profile PROFILE_ID.",
+      "Supported commands: init --deploy-json FILE, add-subject UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID.",
     );
   }
   const { updateCanonicalUserProfileAccess } =

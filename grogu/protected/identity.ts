@@ -46,11 +46,17 @@ async function boundedJson(response: Response, maxBytes: number): Promise<unknow
   }
 }
 
-/** Uses only the pinned Access issuer, never a URL supplied by a token. */
+const testSubjectPrefix = "service-token:";
+
+/**
+ * Uses only the pinned Access issuer, never a URL supplied by a token. An Access service token
+ * has an empty `sub`; only the one configured test client maps to a fixed, separate test subject.
+ */
 export function createCloudflareAccessVerifier(options: {
   issuer: string;
   audience: string;
   isAllowed: (identity: { issuer: string; subject: string }) => boolean;
+  testClientId?: string;
   fetchImpl?: typeof fetch;
 }): ProtectedIdentityVerifier {
   const issuer = new URL(options.issuer);
@@ -125,7 +131,8 @@ export function createCloudflareAccessVerifier(options: {
         !isRecord(claims) ||
         claims.iss !== issuer.origin ||
         typeof claims.sub !== "string" ||
-        !claims.sub.trim() ||
+        (!claims.sub.trim() &&
+          (!options.testClientId || claims.common_name !== options.testClientId)) ||
         typeof claims.exp !== "number" ||
         !Number.isFinite(claims.exp) ||
         !Array.isArray(claims.aud) ||
@@ -148,10 +155,14 @@ export function createCloudflareAccessVerifier(options: {
       ) {
         return denied();
       }
-      const subject = claims.sub;
+      const testClient = claims.sub.trim() ? undefined : options.testClientId;
+      const subject = testClient ? `${testSubjectPrefix}${testClient}` : claims.sub;
       const expiresAt = claims.exp * 1000;
       const assertCurrent = () => {
-        if (Date.now() >= expiresAt || !options.isAllowed({ issuer: issuer.origin, subject })) {
+        if (
+          Date.now() >= expiresAt ||
+          (!testClient && !options.isAllowed({ issuer: issuer.origin, subject }))
+        ) {
           denied();
         }
       };
@@ -166,7 +177,14 @@ export function createCloudflareAccessVerifier(options: {
           64 * 1024,
         );
         assertCurrent();
-        if (!isRecord(identity) || (identity.user_uuid !== subject && identity.sub !== subject)) {
+        if (
+          !isRecord(identity) ||
+          (testClient
+            ? identity.service_token_status !== true ||
+              // Cloudflare does not document whether service_token_id is the client ID or the token UUID.
+              (identity.service_token_id !== testClient && identity.common_name !== testClient)
+            : identity.user_uuid !== subject && identity.sub !== subject)
+        ) {
           denied();
         }
       };

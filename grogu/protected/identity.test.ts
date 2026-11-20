@@ -90,6 +90,20 @@ void test("continues to accept a human identity from a browser cookie", async ()
   assert.equal(identity.subject, subject);
 });
 
+void test("accepts only the exact configured single-string audience", async () => {
+  const verify = verifier(
+    { service_token_status: true, service_token_id: testClientId },
+    testClientId,
+  );
+  const claims = { sub: "", common_name: testClientId };
+  const identity = await verify(request(token({ ...claims, aud: audience })));
+  assert.equal(identity.subject, `service-token:${testClientId}`);
+  await assert.rejects(verify(request(token({ ...claims, aud: `${audience}x` }))), { status: 401 });
+  await assert.rejects(verify(request(token({ ...claims, aud: [`${audience}x`] }))), {
+    status: 401,
+  });
+});
+
 void test("does not fall back to a cookie when an assertion is invalid", async () => {
   const jwt = token({ sub: "", common_name: testClientId });
   await assert.rejects(

@@ -138,8 +138,10 @@ export function createCloudflareAccessVerifier(options: {
           (!options.testClientId || claims.common_name !== options.testClientId)) ||
         typeof claims.exp !== "number" ||
         !Number.isFinite(claims.exp) ||
-        !Array.isArray(claims.aud) ||
-        !claims.aud.includes(options.audience) ||
+        !(
+          claims.aud === options.audience ||
+          (Array.isArray(claims.aud) && claims.aud.includes(options.audience))
+        ) ||
         (claims.nbf !== undefined &&
           (typeof claims.nbf !== "number" || claims.nbf * 1000 > Date.now()))
       ) {

@@ -95,6 +95,25 @@ another model request. Another Access session can read its user's chat, but it
 does not receive the run ID. Active runs do not survive a listener restart.
 Updates drain or interrupt them before the new listener starts.
 
+## File encryption API
+
+The internal `createProtectedHttp` API accepts a host-owned `encryption` handle
+from `createStorageValueEncryption`. With that handle, authorized user files use
+AES-256-GCM and a fresh data key for each write. The service key wraps each data
+key. Both the wrapped key and the content are bound to the canonical profile.
+Moving a file within that profile does not require re-encryption.
+
+The file owner preserves its path, directory-identity, link, and authority checks.
+Reads reject plaintext, damaged content, the wrong key, and content copied from
+another profile. File limits and returned sizes describe plaintext bytes. Quotas
+include the encrypted size, which adds 96 bytes per file. The caller must retain
+the handle until requests settle, then dispose it.
+
+This API does not enable encryption in `main.ts`. The deployed service still
+stores plaintext. Key provisioning, migration, and encryption of canonical chats
+remain separate work. Do not enable a managed-encryption indicator or point an
+encrypted file scope at existing plaintext files.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and

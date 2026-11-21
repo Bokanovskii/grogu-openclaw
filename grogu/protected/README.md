@@ -306,6 +306,10 @@ or revoked grant can require signing in again. No fallback to a host provider
 account is allowed.
 
 Run `maintain.ts` under the isolated service account and environment.
+The protected admission and usage tables are first-use state. Normal startup
+accepts prior-version state without these tables or their indexes, then the
+protected admission worker creates them before it migrates configured subjects.
+This upgrade keeps the shared schema version and existing state unchanged.
 `init --deploy-json FILE` creates the deny-all configuration; `add-subject UUID`
 adds an exact subject to canonical admission storage. Stop the protected listener
 before this maintenance and restart it afterward; active turns can be interrupted.

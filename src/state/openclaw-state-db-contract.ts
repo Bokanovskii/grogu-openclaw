@@ -28,6 +28,13 @@ export const DOCTOR_OWNED_STATE_TABLES = ["agent_deletion_journal"] as const;
 // their feature-local first write. The canonical SQL still owns their shape.
 export const FIRST_USE_STATE_TABLES = [
   "user_profile_identities",
+  "protected_access_requests",
+  "protected_admissions",
+  "protected_admission_migrations",
+  "protected_policy_sync",
+  "protected_policy_barrier",
+  "protected_usage_daily",
+  "protected_usage_runs",
   "local_workspace_projections",
   "update_runs",
   "session_repository_workspaces",
@@ -61,6 +68,8 @@ export const FIRST_USE_STATE_TABLES = [
 export const FIRST_USE_STATE_INDEXES = [
   "idx_user_profile_identities_profile_id",
   "idx_user_profile_identities_authorization",
+  "idx_protected_usage_daily_day",
+  "idx_protected_usage_runs_day",
   "idx_update_runs_created",
   "idx_update_runs_active",
   "idx_github_repository_publication_shared_request",

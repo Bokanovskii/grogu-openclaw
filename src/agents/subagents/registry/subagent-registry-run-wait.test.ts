@@ -1,13 +1,22 @@
 import { expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../../test/helpers/promise.js";
+import { setGatewayDedupeEntry } from "../../../gateway/agent-turn/agent-job.js";
+import { withLocalGatewayRequestScope } from "../../../gateway/local-request-context.js";
+import { getAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../../infra/kysely-sync.js";
 import { SqliteWorkerError } from "../../../infra/sqlite-worker-contract.js";
+import { LegacyPluginSdkResourceHost } from "../../../plugins/legacy-sdk-resource-host.js";
+import {
+  bindGatewayContextResolver,
+  getPluginRuntimeGatewayRequestScope,
+} from "../../../plugins/runtime/gateway-request-scope.js";
 import type { DB } from "../../../state/openclaw-state-db.generated.js";
 import {
   closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
 } from "../../../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
+import { restoreSubagentRunsFromDisk } from "./subagent-registry-persistence.js";
 import { withQueuedRegistrationFixture } from "./subagent-registry-queued-registration.test-support.js";
 
 function storedPayload(runId: string): string | undefined {
@@ -20,6 +29,174 @@ function storedPayload(runId: string): string | undefined {
       .where("run_id", "=", runId),
   ).rows[0]?.payload_json;
 }
+
+it("keeps request-owned child content out of the durable registry", async () => {
+  await withQueuedRegistrationFixture(async (f) => {
+    vi.spyOn(f.manager, "waitForSubagentCompletion").mockResolvedValue();
+    await f.manager.registerSubagentRun({
+      ...f.registration,
+      queued: false,
+      queuedLaunch: undefined,
+      collect: false,
+      cleanup: "delete",
+      expectsCompletionMessage: false,
+      task: "private task text",
+      taskName: "private task name",
+      sessionEntry: { sessionId: "child-id", lifecycleRevision: "child-revision" },
+      requestScopedTransient: true,
+    });
+    expect(f.current().task).toBe("private task text");
+    expect(storedPayload(f.registration.runId)).not.toContain("private task");
+    const killClaim = await f.manager.claimSubagentRunKill({
+      runId: f.registration.runId,
+      expected: f.current(),
+      sessionId: "child-id",
+      sessionLifecycleRevision: "child-revision",
+    });
+    if (!killClaim) {
+      throw new Error("The native cancellation claim was not admitted");
+    }
+    expect(f.stored()?.killIntent).toMatchObject(killClaim);
+    await restoreSubagentRunsFromDisk({ runs: f.runs });
+    expect(f.current().killIntent).toMatchObject(killClaim);
+    await expect(
+      f.manager.releaseSubagentRunKillClaim({
+        runId: f.registration.runId,
+        expected: f.current(),
+        claim: killClaim,
+      }),
+    ).resolves.toBe(true);
+    await f.change((draft) => {
+      draft.execution = {
+        ...draft.execution,
+        status: "terminal",
+        endedAt: 4,
+        outcome: { status: "error", error: "private error text", endedAt: 4 },
+      };
+      draft.completion = {
+        required: false,
+        resultText: "private result text",
+        fallbackResultText: "private fallback text",
+        capturedAt: 4,
+      };
+      draft.killReconciliation = { killedAt: 4, taskCancellationAccepted: true };
+    });
+    expect(f.current().completion?.resultText).toBe("private result text");
+    const stored = storedPayload(f.registration.runId);
+    expect(stored).not.toContain("private result");
+    expect(stored).not.toContain("private fallback");
+    expect(stored).not.toContain("private error");
+    expect(f.stored()).toMatchObject({
+      runId: f.registration.runId,
+      childSessionIdentity: { sessionId: "child-id", lifecycleRevision: "child-revision" },
+      requesterSessionKey: f.registration.requesterSessionKey,
+      killReconciliation: { killedAt: 4, taskCancellationAccepted: true },
+    });
+    await restoreSubagentRunsFromDisk({ runs: f.runs });
+    expect(f.current().task).toBe("private task text");
+    expect(f.current().completion?.resultText).toBe("private result text");
+    expect(f.current().killReconciliation).toEqual({ killedAt: 4, taskCancellationAccepted: true });
+    await f.change((draft) => {
+      draft.cleanupHandled = true;
+    });
+    expect(f.current().cleanupHandled).toBe(true);
+    expect(storedPayload(f.registration.runId)).not.toContain("private result");
+  });
+});
+
+it("observes a locally owned child without a Gateway socket", async () => {
+  await withQueuedRegistrationFixture(async (f) => {
+    await f.register();
+    await f.change((draft) => {
+      draft.childSessionIdentity = { sessionId: "owned-child", lifecycleRevision: "owned-rev" };
+    });
+    const host = new LegacyPluginSdkResourceHost();
+    try {
+      await host.run(() =>
+        withLocalGatewayRequestScope({ deps: {}, getRuntimeConfig: () => ({}) }, async () => {
+          const scope = getPluginRuntimeGatewayRequestScope();
+          if (!scope?.context || !scope.resolveGatewayContext) {
+            throw new Error("Missing local Gateway owner");
+          }
+          const entry = f.current();
+          bindGatewayContextResolver(entry, scope.resolveGatewayContext);
+          setGatewayDedupeEntry({
+            dedupe: scope.context.dedupe,
+            key: `agent:${entry.runId}`,
+            session: {
+              sessionKey: entry.childSessionKey,
+              sessionId: "owned-child",
+              lifecycleGeneration: getAgentEventLifecycleGeneration(),
+            },
+            entry: { ts: Date.now(), ok: true, payload: { runId: entry.runId, status: "ok" } },
+          });
+          const gateway = vi.spyOn(f.options, "callGateway");
+          const complete = vi.spyOn(f.options, "completeSubagentRun");
+          await f.manager.waitForSubagentCompletion(entry.runId, entry, 100);
+          expect(gateway).not.toHaveBeenCalled();
+          expect(complete).toHaveBeenCalledWith(
+            expect.objectContaining({
+              runId: entry.runId,
+              outcome: expect.objectContaining({ status: "ok" }),
+            }),
+          );
+        }),
+      );
+    } finally {
+      await host.close();
+    }
+  });
+});
+
+it("does not reconnect when the child Gateway owner has closed", async () => {
+  await withQueuedRegistrationFixture(async (f) => {
+    await f.register();
+    const entry = f.current();
+    bindGatewayContextResolver(entry, () => undefined);
+    const gateway = vi.spyOn(f.options, "callGateway");
+    const complete = vi.spyOn(f.options, "completeSubagentRun");
+    await f.manager.waitForSubagentCompletion(entry.runId, entry, 100);
+    expect(gateway).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+  });
+});
+
+it("does not settle a child from another session's run observation", async () => {
+  await withQueuedRegistrationFixture(async (f) => {
+    await f.register();
+    await f.change((draft) => {
+      draft.childSessionIdentity = { sessionId: "owned-child", lifecycleRevision: "owned-rev" };
+    });
+    const host = new LegacyPluginSdkResourceHost();
+    try {
+      await host.run(() =>
+        withLocalGatewayRequestScope({ deps: {}, getRuntimeConfig: () => ({}) }, async () => {
+          const scope = getPluginRuntimeGatewayRequestScope();
+          if (!scope?.context || !scope.resolveGatewayContext) {
+            throw new Error("Missing local Gateway owner");
+          }
+          const entry = f.current();
+          bindGatewayContextResolver(entry, scope.resolveGatewayContext);
+          setGatewayDedupeEntry({
+            dedupe: scope.context.dedupe,
+            key: `agent:${entry.runId}`,
+            session: {
+              sessionKey: entry.childSessionKey,
+              sessionId: "different-child",
+              lifecycleGeneration: getAgentEventLifecycleGeneration(),
+            },
+            entry: { ts: Date.now(), ok: true, payload: { runId: entry.runId, status: "ok" } },
+          });
+          const complete = vi.spyOn(f.options, "completeSubagentRun");
+          await f.manager.waitForSubagentCompletion(entry.runId, entry, 100);
+          expect(complete).not.toHaveBeenCalled();
+        }),
+      );
+    } finally {
+      await host.close();
+    }
+  });
+});
 
 it.each(["live", "closing"] as const)(
   "settles failed completion recovery with a %s state database",

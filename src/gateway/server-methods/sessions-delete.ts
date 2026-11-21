@@ -20,6 +20,7 @@ import {
   withIncognitoSessionBinding,
 } from "../../config/sessions/session-incognito-binding.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
+import { readSessionTransientLifetime } from "../../config/sessions/session-transient-lifetime.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
   isIncognitoSessionKey,
@@ -359,12 +360,15 @@ async function deleteGatewaySessionInScope(
           const pluginOwnerId = normalizeOptionalString(postCleanupEntry?.pluginOwnerId);
           const incognito =
             postCleanupEntry?.incognito === true || isIncognitoSessionKey(target.canonicalKey);
+          // Request-scoped children never archive: their transcript state is deleted with the row.
+          const noArchive =
+            incognito || readSessionTransientLifetime(postCleanupEntry) !== undefined;
           const deletionParams = {
             agentId: target.agentId,
-            archiveTranscript: incognito ? false : deleteTranscript,
+            archiveTranscript: noArchive ? false : deleteTranscript,
             commitGuard,
             deleteDeliveryArtifacts: true,
-            deleteTranscriptWithoutArchive: incognito,
+            deleteTranscriptWithoutArchive: noArchive,
             expectedEntry: postCleanupEntry,
             expectedLifecycleRevision,
             expectedSessionId: initialDeleteEntry?.sessionId ?? null,

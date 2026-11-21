@@ -81,6 +81,9 @@ export async function recoverInterruptedSubagentRow(
     if ((!session && !replayTerminal) || !isCurrent()) {
       return { status: "deferred" };
     }
+    if (session?.sessionEntry?.transientLifetime !== undefined) {
+      return { status: "handled" };
+    }
     if (!replayTerminal && session?.retained?.isCurrent()) {
       return { status: "handled", retained: session.retained };
     }

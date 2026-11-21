@@ -26,6 +26,7 @@ import {
   callAgentToolGatewayRequest,
   type AgentToolGatewayRequestCaller as GatewayCaller,
 } from "./in-process-gateway.js";
+import { getHostSessionAccess, resolveHostSessionAccess } from "./scoped-session-access.js";
 
 const CURRENT_SESSION_CLIENT_ALIAS_IDS = new Set<string>([
   GATEWAY_CLIENT_IDS.TUI,
@@ -289,6 +290,25 @@ export async function resolveSessionReference(params: {
     }) ?? params.sessionKey.trim();
   const raw =
     rawInput === "current" && params.requesterInternalKey ? params.requesterInternalKey : rawInput;
+  const hostScope = getHostSessionAccess();
+  if (hostScope) {
+    const resolved = await resolveHostSessionAccess(hostScope, {
+      action: params.action,
+      requesterSessionKey: params.requesterInternalKey ?? "",
+      reference: raw,
+    });
+    if (!resolved || isIncognitoSessionKey(resolved.sessionKey)) {
+      return { ok: false, status: "forbidden", error: "Session is not available." };
+    }
+    return {
+      ok: true,
+      agentId: resolved.agentId,
+      key: resolved.sessionKey,
+      displayKey: resolved.sessionKey,
+      resolvedViaSessionId: raw !== resolved.sessionKey,
+      requesterOwned: resolved.sessionKey === params.requesterInternalKey,
+    };
+  }
   if (shouldResolveSessionIdInput(raw)) {
     // Prefer key resolution to avoid misclassifying custom keys as sessionIds.
     for (const kind of ["key", "sessionId"] as const) {
@@ -393,6 +413,24 @@ export async function resolveVisibleSessionReference(params: {
   // incognito target must remain unreachable even from an incognito requester.
   if (isIncognitoSessionKey(resolvedKey)) {
     return invisible();
+  }
+  const hostScope = getHostSessionAccess();
+  if (hostScope) {
+    const resolved = await resolveHostSessionAccess(hostScope, {
+      action: params.action,
+      requesterSessionKey: params.requesterSessionKey,
+      reference: resolvedKey,
+    });
+    if (!resolved || resolved.sessionKey !== resolvedKey || isIncognitoSessionKey(resolvedKey)) {
+      return invisible();
+    }
+    return {
+      ok: true,
+      agentId: resolved.agentId,
+      key: resolved.sessionKey,
+      displayKey,
+      requesterOwned: requesterOwnedByResolution,
+    };
   }
   const input = params.visibilitySessionKey.trim();
   const isExplicitKey =

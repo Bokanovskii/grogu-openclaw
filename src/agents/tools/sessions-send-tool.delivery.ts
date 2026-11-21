@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { runWithInProcessGatewaySessionMutation } from "../../gateway/server-plugin-in-process-dispatch.js";
+import { resolveGatewaySessionStoreTargetWithStore } from "../../gateway/session-utils-store-lookup.js";
 import type { GatewaySessionStoreTarget } from "../../gateway/session-utils-store.types.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { withSystemEventOwner } from "../../infra/system-event-ownership.js";
@@ -43,12 +44,25 @@ import {
   hasInProcessGatewayToolContext,
   type AgentToolGatewayRequestCaller,
 } from "./in-process-gateway.js";
+import { getHostSessionAccess } from "./scoped-session-access.js";
 import { queueSessionsSendSteeringWithCustody } from "./sessions-send-tool.steering.js";
 
 // Bind at dispatch: child followup custody installs its context after tool construction.
 export const callSessionsSendGateway: AgentToolGatewayRequestCaller = async <T>(
   request: Parameters<AgentToolGatewayRequestCaller>[0],
 ): Promise<T> => await bindAgentToolGatewayRequest({ revalidateOnCompletion: false })<T>(request);
+
+export function readSessionsSendSession(cfg: OpenClawConfig, key: string, agentId: string) {
+  return resolveGatewaySessionStoreTargetWithStore({
+    cfg,
+    key,
+    agentId,
+    readOnly: true,
+    exactRead: true,
+    clone: false,
+    projection: "full",
+  });
+}
 
 export async function notifySessionsSendSession(params: {
   message: string;
@@ -156,6 +170,10 @@ export async function trySessionsSendActiveRunDelivery(
 ): Promise<SessionsSendStart | { fallbackSessionKey?: string }> {
   const assertCaller = captureGatewayToolCallerAssertion();
   try {
+    const hostScope = getHostSessionAccess();
+    if (hostScope && (!hostScope.signal || params.mode !== "steer")) {
+      throw new Error("Request-bound session steering requires a live request signal.");
+    }
     const selection = resolveGatewayToolOperatorSelection();
     selection.assertCurrent();
     let fallbackSessionKey: string | undefined;
@@ -190,7 +208,8 @@ export async function trySessionsSendActiveRunDelivery(
         let accepted = false;
         const assertInputCurrent = () => {
           assertCurrent();
-          if (!accepted) {
+          hostScope?.assertCurrent();
+          if (!accepted || hostScope) {
             params.assertSendCurrent?.();
           }
         };
@@ -198,6 +217,7 @@ export async function trySessionsSendActiveRunDelivery(
           steeringMode: "all",
           debounceMs: 0,
           deliveryTimeoutMs: params.deliveryTimeoutMs,
+          ...(hostScope?.signal ? { abortSignal: hostScope.signal } : {}),
           ...lifecycle,
           ...(params.assertSendCurrent
             ? {
@@ -209,9 +229,11 @@ export async function trySessionsSendActiveRunDelivery(
               }
             : {}),
           // Waiting for a busy run's transcript would withdraw accepted guidance at the deadline.
-          ...(params.mode === "steer" || ownChild
-            ? { waitForTranscriptCommit: false }
-            : { waitForTranscriptCommit: true, sourceReplyDeliveryMode }),
+          ...(hostScope
+            ? { waitForTranscriptCommit: true }
+            : params.mode === "steer" || ownChild
+              ? { waitForTranscriptCommit: false }
+              : { waitForTranscriptCommit: true, sourceReplyDeliveryMode }),
           // The receiving runtime owns transcript writes to this exact incarnation.
           userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
             assertOriginalInputCommit: assertInputCurrent,
@@ -249,7 +271,11 @@ export async function trySessionsSendActiveRunDelivery(
             : queueEmbeddedAgentMessageWithOutcomeAsync(activeRunSessionId, messageText, options);
         assertInputCurrent();
         let outcome = await dispatchQueue(queueOptions);
-        if (!outcome.queued && outcome.reason === "transcript_commit_wait_unsupported") {
+        if (
+          !hostScope &&
+          !outcome.queued &&
+          outcome.reason === "transcript_commit_wait_unsupported"
+        ) {
           const bestEffortQueueOptions = { ...queueOptions };
           delete bestEffortQueueOptions.waitForTranscriptCommit;
           outcome = await dispatchQueue(bestEffortQueueOptions);

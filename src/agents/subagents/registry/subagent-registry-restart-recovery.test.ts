@@ -172,6 +172,36 @@ describe("subagent registry restart recovery", () => {
     });
   });
 
+  it("leaves request-owned children for their profile's fenced cleanup after restart", async () => {
+    const entry = run();
+    entry.execution.lifecycleGeneration = getAgentEventLifecycleGeneration();
+    Object.assign(mocks.entries[childSessionKey]!, {
+      transientLifetime: {
+        kind: "request",
+        profileId: "profile-one",
+        parentSessionKey: entry.requesterSessionKey,
+        parentSessionId: "parent-id",
+      },
+      lifecycleRunId: entry.runId,
+      abortedLastRun: false,
+    });
+    rotateAgentEventLifecycleGeneration();
+
+    expect(await recover(entry)).toEqual({ status: "handled" });
+    expect(mocks.applySessionEntryExactReplacements).not.toHaveBeenCalled();
+    expect(dispatchAgent).not.toHaveBeenCalled();
+    expect(mocks.entries[childSessionKey]?.abortedLastRun).toBe(false);
+    const { sweeper, completeSubagentRunWithRecovery, finalizeInterruptedSubagentRun } =
+      createSubagentSweeperHarness({ current: gatewayRuntime }, entry);
+    try {
+      await sweeper.sweepOnce();
+      expect(completeSubagentRunWithRecovery).not.toHaveBeenCalled();
+      expect(finalizeInterruptedSubagentRun).not.toHaveBeenCalled();
+    } finally {
+      await sweeper.reset();
+    }
+  });
+
   describe("orphaned session executions", () => {
     it.each([60_000, 3 * 24 * 60 * 60_000])(
       "reconciles a hard-kill orphan last observed %i ms ago",

@@ -66,6 +66,10 @@ import {
 import { isCliProvider } from "../model-selection.js";
 import { resolveOpenAIRuntimeProvider } from "../openai-routing.js";
 import type { PreparedModelRuntimePluginGeneration } from "../prepared-model-runtime.types.js";
+import {
+  getRequestScopedChildExecution,
+  runRequestScopedChild,
+} from "../request-scoped-child-execution.js";
 import { hasVerifiedRequesterCompletionHandoff } from "../requester-tool-policy.js";
 import { buildAgentRuntimeAuthPlan } from "../runtime-plan/auth.js";
 import type { AgentMessage } from "../runtime/index.js";
@@ -858,6 +862,21 @@ export function runAgentAttempt(
     embeddedRunParams,
     readChannelSourceTurnSameThreadRequired(params.runContext),
   );
-  return runEmbeddedAgent(embeddedRunParams);
+  if (!getRequestScopedChildExecution()) {
+    return runEmbeddedAgent(embeddedRunParams);
+  }
+  if (!params.sessionEntry?.lifecycleRevision) {
+    throw new Error("Request-scoped child session generation is unavailable.");
+  }
+  return runRequestScopedChild(
+    {
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      lifecycleRevision: params.sessionEntry.lifecycleRevision,
+    },
+    embeddedRunParams,
+    runEmbeddedAgent,
+  );
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

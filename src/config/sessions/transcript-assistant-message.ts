@@ -1,5 +1,6 @@
 import type { AgentMessage } from "../../agents/runtime/index.js";
 import type { SessionManager } from "../../agents/sessions/session-manager.js";
+import { chargeTranscriptWrite } from "../../agents/sessions/transcript-write-budget.js";
 import { applyAssistantDeliveryDirectives } from "./transcript-assistant-delivery.js";
 
 export type AssistantBeforeMessageWrite = (params: {
@@ -14,7 +15,13 @@ export function applyBeforeMessageWriteToAssistant(params: {
   explicitIdempotencyKey?: string;
   agentId?: string;
   sessionKey: string;
+  chargeWrite?: boolean;
 }): Parameters<SessionManager["appendMessage"]>[0] | undefined {
+  if (params.chargeWrite && !params.beforeMessageWrite) {
+    // Quota-only preparation preserves the exact message already admitted by the caller.
+    chargeTranscriptWrite(params.message);
+    return params.message;
+  }
   const nextMessage = params.beforeMessageWrite
     ? params.beforeMessageWrite({
         message: params.message as AgentMessage,
@@ -25,8 +32,12 @@ export function applyBeforeMessageWriteToAssistant(params: {
   if (nextMessage?.role !== "assistant") {
     return undefined;
   }
-  return Object.assign(
+  const prepared = Object.assign(
     applyAssistantDeliveryDirectives(nextMessage),
     params.explicitIdempotencyKey ? { idempotencyKey: params.explicitIdempotencyKey } : {},
   ) as Parameters<SessionManager["appendMessage"]>[0];
+  if (params.chargeWrite) {
+    chargeTranscriptWrite(prepared);
+  }
+  return prepared;
 }

@@ -8,13 +8,19 @@ import {
   upsertSessionEntryCore,
 } from "../../../config/sessions/session-accessor.js";
 import { writeSessionEntry } from "../../../config/sessions/session-accessor.sqlite-entry-store.js";
+import { readSessionEntryReadOnlyInWorker } from "../../../config/sessions/session-entry-read-runtime.js";
+import { recoverTransientSessionEntries } from "../../../config/sessions/session-transient-recovery.js";
+import { defaultPayload } from "../../../infra/gateway-state-owner-record.js";
+import { acquireGatewayStateOwner } from "../../../infra/gateway-state-owner.js";
 import { recordSessionParticipantBestEffort } from "../../../sessions/session-participant-recording.js";
 import { AsyncWorkScope } from "../../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
 import { openOpenClawAgentDatabase } from "../../../state/openclaw-agent-db.js";
 import { resolveOpenClawAgentSqlitePath } from "../../../state/openclaw-agent-db.paths.js";
 import { runOpenClawAgentWriteAdmission } from "../../../state/openclaw-agent-write-admission.js";
+import { resolveOpenClawStateSqlitePath } from "../../../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
+import { retireTransientSubagentRun } from "../registry/subagent-registry-transient-recovery.js";
 import { prepareSubagentSessionContext } from "./subagent-spawn-context.js";
 import { createInitialSubagentSession } from "./subagent-spawn-session-patch.js";
 import * as spawnRuntime from "./subagent-spawn.runtime.js";
@@ -388,5 +394,138 @@ it("spawns from a parent without a stored row, as before lineage receipts", asyn
       spawnedBy: sessionKey,
       spawnedBySenderIsOwner: false,
     });
+  });
+});
+
+it("rejects transient children owned by a different parent profile", async () => {
+  await withOpenClawTestState({ label: "spawn-transient-owner" }, async () => {
+    const parentKey = "agent:main:parent";
+    const storePath = resolveOpenClawAgentSqlitePath({ agentId: "main" });
+    const parent = { agentId: "main", sessionKey: parentKey, storePath };
+    await upsertSessionEntryCore(parent, {
+      sessionId: "parent-id",
+      lifecycleRevision: "parent-revision",
+      updatedAt: 1,
+      createdVia: "plugin",
+      createdActor: { type: "human", source: "profile", id: "p1" },
+    });
+    const create = (childSessionKey: string, profileId: string) =>
+      createInitialSubagentSession({
+        ...lineageSpawnParams(parentKey, childSessionKey, {
+          expectedParentSessionId: "parent-id",
+          senderIsOwner: false,
+        }),
+        transientLifetime: { parentSessionKey: parentKey, parentSessionId: "parent-id", profileId },
+      });
+
+    const wrongChild = "agent:main:subagent:wrong-profile";
+    expect(await create(wrongChild, "p2")).toMatchObject({ status: "error" });
+    expect(loadSessionEntry({ storePath, sessionKey: wrongChild })).toBeUndefined();
+  });
+});
+
+it("commits transient classification with the child and recovers only exactly owned children", async () => {
+  await withOpenClawTestState({ label: "spawn-transient-child" }, async (state) => {
+    const agentId = "main";
+    const parentKey = "agent:main:parent";
+    const storePath = resolveOpenClawAgentSqlitePath({ agentId });
+    await upsertSessionEntryCore(
+      { agentId, sessionKey: parentKey, storePath },
+      {
+        sessionId: "parent-id",
+        updatedAt: 1,
+        createdVia: "plugin",
+        createdActor: { type: "human", source: "profile", id: "p1" },
+      },
+    );
+    const otherParentKey = "agent:main:other-parent";
+    await upsertSessionEntryCore(
+      { agentId, sessionKey: otherParentKey, storePath },
+      {
+        sessionId: "other-parent-id",
+        updatedAt: 1,
+        createdVia: "plugin",
+        createdActor: { type: "human", source: "profile", id: "p2" },
+      },
+    );
+    const create = (
+      childSessionKey: string,
+      transientLifetime?: { parentSessionKey: string; parentSessionId: string; profileId: string },
+    ) => {
+      const requester = transientLifetime?.parentSessionKey ?? parentKey;
+      return createInitialSubagentSession({
+        cfg: {},
+        requesterAgentId: agentId,
+        targetAgentId: agentId,
+        childSessionKey,
+        incognito: false,
+        requesterInternalKey: requester,
+        expectedParentSessionId: requester === otherParentKey ? "other-parent-id" : "parent-id",
+        transientLifetime,
+        creationPolicy: { actor: { type: "agent", id: agentId } },
+        completionOwnerSessionKey: requester,
+        modelPatch: {},
+        collect: false,
+      });
+    };
+    const lifetime = { parentSessionKey: parentKey, parentSessionId: "parent-id", profileId: "p1" };
+    const read = (sessionKey: string) =>
+      readSessionEntryReadOnlyInWorker({
+        agentId,
+        env: state.env,
+        sessionKey,
+        storePath,
+        projection: "full",
+      });
+
+    expect(
+      await create("agent:main:subagent:wrong", { ...lifetime, parentSessionId: "other" }),
+    ).toMatchObject({ status: "error" });
+    await create("agent:main:subagent:ordinary");
+    await create("agent:main:subagent:mine", lifetime);
+    await create("agent:main:subagent:theirs", {
+      parentSessionKey: otherParentKey,
+      parentSessionId: "other-parent-id",
+      profileId: "p2",
+    });
+    expect(await read("agent:main:subagent:wrong")).toBeUndefined();
+    expect(
+      (await read("agent:main:subagent:mine")) as { transientLifetime?: unknown },
+    ).toMatchObject({
+      transientLifetime: { kind: "request", profileId: "p1" },
+      createdActor: { type: "human", source: "profile", id: "p1" },
+    });
+
+    const databasePath = resolveOpenClawStateSqlitePath(state.env);
+    const owner = acquireGatewayStateOwner({
+      databasePath,
+      payload: { ...defaultPayload(databasePath), role: "exclusive-service" },
+    });
+    const result = await recoverTransientSessionEntries({
+      agentId,
+      env: state.env,
+      storePath,
+      owns: ({ lifetime: found, parent }) =>
+        found.profileId === "p1" && parent.sessionId === "parent-id",
+      retireRegistry: ({
+        sessionKey,
+        sessionId,
+        lifecycleRevision,
+        parentSessionKey,
+        assertCurrent,
+      }) =>
+        retireTransientSubagentRun({
+          env: state.env,
+          childSessionKey: sessionKey,
+          childSessionId: sessionId,
+          childLifecycleRevision: lifecycleRevision,
+          parentSessionKey,
+          assertCurrent,
+        }),
+    }).finally(() => owner.release());
+    expect(result).toEqual({ deleted: 1, skipped: 1 });
+    expect(await read("agent:main:subagent:mine")).toBeUndefined();
+    expect(await read("agent:main:subagent:theirs")).toBeDefined();
+    expect(await read("agent:main:subagent:ordinary")).toBeDefined();
   });
 });

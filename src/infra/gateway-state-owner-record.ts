@@ -64,6 +64,10 @@ export const isStateDatabaseMaintenanceContention = (error: unknown): boolean =>
     : error instanceof StateDatabaseAdmissionPendingError ||
       error instanceof StateDatabaseOfflineMaintenanceError;
 
+/** Roles whose own process may use ordinary SQLite access without a maintenance scope. */
+export const isLocalOrdinaryStateAccessRole = (role: string): boolean =>
+  role === "gateway" || role === "agent-embedded" || role === "exclusive-service";
+
 /** Persisted ownership can identify a holder but cannot lend this process maintenance authority. */
 export function assertPersistedStateDatabaseAccessAllowed(params: {
   databasePath: string;
@@ -101,6 +105,15 @@ export function assertPersistedStateDatabaseAccessAllowed(params: {
     throw new Error(unavailable);
   }
   const role = owner.role ?? "gateway";
+  if (role === "exclusive-service") {
+    // The service's own threads share the lock; every other process stays out.
+    if (owner.pid === process.pid) {
+      return;
+    }
+    throw new Error(
+      `OpenClaw state at ${databasePath} is exclusively owned by process ${owner.pid}; stop that process before accessing this state.`,
+    );
+  }
   if (role === "gateway" || role === "agent-embedded") {
     return;
   }

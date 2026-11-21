@@ -1,5 +1,6 @@
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { sleepWithAbort } from "@openclaw/retry";
+import { GatewayClientRequestError } from "../../../../packages/gateway-client/src/request-error.js";
 import type { callGateway } from "../../../gateway/call.js";
 import { waitForChatAbortControllerRemoval } from "../../../gateway/chat-abort-lifecycle-internal.js";
 import type { ChatAbortControllerEntry } from "../../../gateway/chat-abort.js";
@@ -77,6 +78,7 @@ export function bindSubagentSpawnCleanup(params: {
     const identity = params.getSessionIdentity();
     const payload = asNullableRecord(request.params);
     const assertCurrent = () => {
+      request.signal?.throwIfAborted();
       const currentIdentity = params.getSessionIdentity();
       if (
         !isCurrent(method) ||
@@ -109,6 +111,49 @@ export function bindSubagentSpawnCleanup(params: {
         context?.chatAbortControllers.get(acceptedRun.runId) !== acceptedRun.entry)
     ) {
       return { aborted: false, runIds: [] };
+    }
+    if (context?.localEmbedded === true) {
+      request.signal?.throwIfAborted();
+      await request.prepareDispatchCurrent?.();
+      assertCurrent();
+      if (method === "chat.abort") {
+        const [{ createChatAbortOps }, { abortChatRunById }] = await Promise.all([
+          import("../../../gateway/chat-abort-ops.js"),
+          import("../../../gateway/chat-abort.js"),
+        ]);
+        assertCurrent();
+        const runId = acceptedRun?.runId;
+        if (!runId) {
+          throw new Error("Subagent cleanup has no accepted run");
+        }
+        const { aborted } = abortChatRunById(createChatAbortOps(context), {
+          runId,
+          sessionKey: params.childSessionKey,
+          stopReason: "rpc",
+        });
+        return { aborted, runIds: aborted ? [runId] : [] };
+      }
+      const { deleteGatewaySession } =
+        await import("../../../gateway/server-methods/sessions-delete.js");
+      assertCurrent();
+      const result = await context.trackExecution(() =>
+        deleteGatewaySession({
+          client: null,
+          context,
+          assertCurrent,
+          params: {
+            key: params.childSessionKey,
+            expectedSessionId: identity.expectedSessionId,
+            expectedLifecycleRevision: identity.expectedLifecycleRevision,
+            deleteTranscript: payload?.deleteTranscript === true,
+            emitLifecycleHooks: payload?.emitLifecycleHooks === true,
+          },
+        }),
+      );
+      if (!result.ok) {
+        throw new GatewayClientRequestError(result.error);
+      }
+      return result.result;
     }
     if (!context?.recoveryRuntime) {
       throw new Error("Subagent cleanup Gateway is unavailable");

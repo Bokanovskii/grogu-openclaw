@@ -1,6 +1,10 @@
 import { removeInternalSessionEffectsSession } from "../../internal-session-effects.js";
 import { shouldSuppressSubagentRecoverySessionEffects } from "./subagent-recovery-state.js";
 import {
+  publishSubagentDeleteCleanupSettlement,
+  settleSubagentDeleteCleanup,
+} from "./subagent-registry-child-result-hook.js";
+import {
   safeRemoveAttachmentsDir,
   shouldRemoveSubagentAttachments,
 } from "./subagent-registry-helpers.js";
@@ -93,5 +97,7 @@ export async function retireSupersededSubagentRun(params: {
   );
   if (deleted) {
     params.clearPendingLifecycleError(params.runId);
+    settleSubagentDeleteCleanup(admitted, "changed");
+    publishSubagentDeleteCleanupSettlement(admitted);
   }
 }

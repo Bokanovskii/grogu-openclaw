@@ -15,6 +15,7 @@ import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-w
 import { withoutGatewayToolCallerIdentity } from "../../tools/gateway-caller-context.js";
 import { blockSubagentCompletionDelivery } from "../completion/subagent-completion-admission.store.js";
 import { getDeliveryLastError, isDeliverySuspended } from "./subagent-delivery-state.js";
+import { publishSubagentDeleteCleanupSettlement } from "./subagent-registry-child-result-hook.js";
 import { resolveAnnounceDeliveryDeadline } from "./subagent-registry-cleanup.js";
 import {
   ANNOUNCE_COMPLETION_HARD_EXPIRY_MS,
@@ -298,6 +299,7 @@ export function runDetachedCleanupAttempt(
   const params = context.options;
   const runId = entry.runId;
   let startCommitted = false;
+  let cleanupFailure: unknown;
   const identity = getSubagentRunRuntimeKey(entry);
   context.activeCleanupAttempts.set(
     identity,
@@ -341,6 +343,7 @@ export function runDetachedCleanupAttempt(
           context.cleanupFailureCounts.delete(identity);
         }
       } catch (err) {
+        cleanupFailure = err;
         defaultRuntime.log(`[warn] subagent cleanup finalize failed (${runId}): ${String(err)}`);
         if (hasSqliteWorkerOutcomeUnknown(err)) {
           throw err;
@@ -410,6 +413,7 @@ export function runDetachedCleanupAttempt(
       }
     })
       .catch((err: unknown) => {
+        cleanupFailure = err;
         defaultRuntime.log(`[warn] subagent cleanup admission failed (${runId}): ${String(err)}`);
       })
       .finally(() => {
@@ -421,6 +425,7 @@ export function runDetachedCleanupAttempt(
           context.activeCleanupAttempts.delete(identity);
         }
         context.pruneRetiredRuns([runId]);
+        publishSubagentDeleteCleanupSettlement(entry, cleanupFailure);
       });
   });
 }

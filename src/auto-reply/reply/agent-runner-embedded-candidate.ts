@@ -6,7 +6,12 @@ import type {
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
+import {
+  getRequestScopedChildExecution,
+  runRequestScopedChild,
+} from "../../agents/request-scoped-child-execution.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
+import { readRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
 import { resolveGroupSessionKey } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { resolveSessionPinnedHarnessId } from "../../sessions/agent-harness-session-key.js";
@@ -298,7 +303,25 @@ export async function runEmbeddedFallbackCandidate(
             : undefined,
         };
       };
-      return runEmbeddedAgent(embeddedRunParams);
+      const activeEntry = turn.getActiveSessionEntry();
+      const requestChild =
+        getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(params.runId);
+      if (!requestChild) {
+        return runEmbeddedAgent(embeddedRunParams);
+      }
+      if (!activeEntry?.lifecycleRevision) {
+        throw new Error("Request-scoped child session generation is unavailable.");
+      }
+      return runRequestScopedChild(
+        {
+          runId: params.runId,
+          sessionKey: turn.sessionKey,
+          sessionId: turn.followupRun.run.sessionId,
+          lifecycleRevision: activeEntry.lifecycleRevision,
+        },
+        embeddedRunParams,
+        runEmbeddedAgent,
+      );
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);
     attemptCompactionCount = Math.max(attemptCompactionCount, resultCompactionCount);

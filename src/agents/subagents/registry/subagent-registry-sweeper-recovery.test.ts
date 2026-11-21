@@ -26,6 +26,7 @@ import { observeMainThreadSql } from "../../../test-utils/main-thread-sql-spies.
 import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
 import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import { prepareSubagentKillSession } from "./subagent-control-session.js";
+import { bindSubagentBeforeDeleteCleanupHook } from "./subagent-registry-child-result-hook.js";
 import { mutateSubagentRuns } from "./subagent-registry-persistence.js";
 import { reconcileDurableSubagentKillIntent } from "./subagent-registry-sweep-kill.js";
 import { retireSupersededSubagentRun } from "./subagent-registry-sweeper-retire.js";
@@ -962,6 +963,8 @@ describe("superseded subagent retirement", () => {
           }),
           { runs },
         );
+        const settled = vi.fn();
+        bindSubagentBeforeDeleteCleanupHook(runs.get(entry.runId)!, undefined, settled);
         const clearPendingLifecycleError = vi.fn();
         const worker = probe.command(stateWorker, async (command, executeOptions, scope) => {
           if (
@@ -1015,8 +1018,10 @@ describe("superseded subagent retirement", () => {
           expect(persisted.runs.has(successor.runId)).toBe(!retireSuccessor);
           if (refused) {
             expect(clearPendingLifecycleError).not.toHaveBeenCalled();
+            expect(settled).not.toHaveBeenCalled();
           } else {
             expect(clearPendingLifecycleError).toHaveBeenCalledExactlyOnceWith(entry.runId);
+            expect(settled).toHaveBeenCalledExactlyOnceWith("changed", undefined);
           }
         } finally {
           worker.mockRestore();

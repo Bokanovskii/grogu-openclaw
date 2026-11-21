@@ -156,6 +156,7 @@ export async function prepareAgentRequestRouting(params: {
   }
   if (requestedSessionKey) {
     const unavailable = respondUnavailableAgentSessionForKey({
+      cfg: params.cfg,
       sessionKey: requestedSessionKey,
       requestedSessionId,
       isRawModelRun: params.isRawModelRun,
@@ -185,11 +186,15 @@ export async function prepareAgentRequestRouting(params: {
     let currentSessionId: string | undefined;
     try {
       currentSessionId = normalizeOptionalString(
-        loadSessionEntry(requestedSessionKeyRaw, {
-          ...(agentId ? { agentId } : {}),
-          clone: false,
-          projection: "list",
-        }).entry?.sessionId,
+        loadSessionEntry(
+          requestedSessionKeyRaw,
+          {
+            ...(agentId ? { agentId } : {}),
+            clone: false,
+            projection: "list",
+          },
+          params.cfg,
+        ).entry?.sessionId,
       );
     } catch {}
     if (
@@ -234,11 +239,15 @@ export async function prepareAgentRequestRouting(params: {
   // otherwise concurrent callers can dispatch the same id without a session owner.
   params.reserveDedupe(preAcceptedReservedSessionKey, agentId);
   const loaded = requestedSessionKey
-    ? loadSessionEntry(requestedSessionKey, {
-        ...(agentId ? { agentId } : {}),
-        clone: false,
-        projection: "list",
-      })
+    ? loadSessionEntry(
+        requestedSessionKey,
+        {
+          ...(agentId ? { agentId } : {}),
+          clone: false,
+          projection: "list",
+        },
+        params.cfg,
+      )
     : undefined;
   if (loaded) {
     params.bindDedupeSessionTarget({

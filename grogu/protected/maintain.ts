@@ -13,6 +13,8 @@ import {
   testClientIdPattern,
 } from "./settings.js";
 
+class MaintenanceRefused extends Error {}
+
 async function main() {
   const [action, arg, ...rest] = process.argv.slice(2);
   const stateDir = process.env.OPENCLAW_STATE_DIR;
@@ -115,19 +117,35 @@ async function main() {
       "Supported commands: init --deploy-json FILE, add-subject UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID.",
     );
   }
-  const { updateCanonicalUserProfileAccess } =
-    await import("../../src/state/user-profile-access.js");
-  const changed = await updateCanonicalUserProfileAccess(
-    { action: "revoke", profileId: arg },
-    { env: { OPENCLAW_STATE_DIR: stateDir } },
-  );
+  const { acquireProtectedStateOwner } = await import("./state-owner.js");
+  const owner = await acquireProtectedStateOwner(stateDir);
+  if (!owner) {
+    throw new MaintenanceRefused("Stop the Family listener before revoking a profile.");
+  }
+  let changed: boolean;
+  try {
+    const { updateCanonicalUserProfileAccess } =
+      await import("../../src/state/user-profile-access.js");
+    owner.assertCurrent();
+    changed = await updateCanonicalUserProfileAccess(
+      { action: "revoke", profileId: arg },
+      { env: { OPENCLAW_STATE_DIR: stateDir } },
+    );
+  } finally {
+    owner.release();
+  }
   if (!changed) {
     throw new Error("No matching active Family profile");
   }
   process.stdout.write("Family profile revoked.\n");
 }
 
-void main().catch(() => {
+void main().catch((error: unknown) => {
+  if (error instanceof MaintenanceRefused) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
   process.stderr.write(
     "Family maintenance failed. Check the isolated account, config, and command arguments.\n",
   );

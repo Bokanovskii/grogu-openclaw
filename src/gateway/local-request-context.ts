@@ -40,6 +40,7 @@ import type { SessionRowProjection } from "./session-row-projection.js";
 type LocalGatewayRequestContextParams = {
   deps: CliDeps;
   getRuntimeConfig: () => OpenClawConfig;
+  requireNewContext?: boolean;
 };
 
 async function cronUnavailable(): Promise<never> {
@@ -235,6 +236,9 @@ export function withLocalGatewayRequestScope<T>(
 ): T {
   const existing = getPluginRuntimeGatewayRequestScope();
   if (existing?.context || existing?.resolveGatewayContext) {
+    if (params.requireNewContext) {
+      throw new Error("An isolated local Gateway context cannot reuse an existing Gateway.");
+    }
     return run();
   }
   const context = createLocalGatewayRequestContext(params);

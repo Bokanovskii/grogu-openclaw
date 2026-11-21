@@ -6,6 +6,7 @@ import type { Model } from "openclaw/plugin-sdk/llm";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { isSecretValueRegisteredForRedaction } from "../../../logging/secret-redaction-registry.js";
+import { resetSecretRedactionRegistryForTest } from "../../../logging/secret-redaction-registry.test-support.js";
 import { SecretSurfaceUnavailableError } from "../../../secrets/runtime-degraded-state.js";
 import {
   looksLikeSecretSentinel,
@@ -263,6 +264,45 @@ describe("createEmbeddedRunAuthController", () => {
     expect(harness.runtimeAuthState?.sourceApiKey).toBe("source-api-key");
     expect(harness.runtimeAuthState?.authMode).toBe("api-key");
     expect(harness.runtimeAuthState?.profileId).toBe("default");
+  });
+
+  it("does not turn public runtime identity into a secret on auth retry", async () => {
+    resetSecretRedactionRegistryForTest();
+    const harness = createMutableAuthControllerHarness();
+    mocks.getApiKeyForModelCore.mockResolvedValue({
+      apiKey: "source-api-key",
+      mode: "api-key",
+      profileId: "default",
+      source: "env",
+    });
+    mocks.prepareProviderRuntimeAuth.mockImplementation(async ({ context }) => ({
+      apiKey: "runtime-api-key",
+      publicHeaders: { "Openai-Organization": "github-copilot" },
+      request: {
+        headers: Object.fromEntries(
+          Object.entries(context.model.headers ?? {}).filter(
+            ([name, value]) => context.previousPublicHeaders?.[name] !== value,
+          ),
+        ),
+      },
+    }));
+    const controller = createMutableEmbeddedRunAuthController({
+      harness,
+      setRuntimeApiKey: vi.fn(),
+    });
+
+    try {
+      await controller.initializeAuthProfile();
+      expect(harness.models.runtime.headers?.["Openai-Organization"]).toBe("github-copilot");
+      expect(await controller.maybeRefreshRuntimeAuthForAuthError("401 unauthorized", false)).toBe(
+        true,
+      );
+      expect(isSecretValueRegisteredForRedaction("github-copilot")).toBe(false);
+      expect(harness.models.runtime.headers?.["Openai-Organization"]).toBe("github-copilot");
+    } finally {
+      controller.stopRuntimeAuthRefreshTimer();
+      resetSecretRedactionRegistryForTest();
+    }
   });
 
   it("does not rotate profiles after an explicit SecretRef owner becomes unavailable", async () => {

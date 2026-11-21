@@ -122,17 +122,16 @@ encrypted file scope at existing plaintext files.
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
-real profile and chat storage. Run it from the checkout with Node 26.12.1:
+real profile and chat storage. On macOS, run it from the checkout with Node
+26.12.1:
 
 ```sh
-proof="$PWD/.artifacts/protected-proof-$$"
-mkdir -m 700 -p "$proof/home" "$proof/state"
-trap 'rm -rf "$proof"' EXIT
-env -i PATH="$PATH" HOME="$proof/home" TMPDIR="$proof" \
-  OPENCLAW_STATE_DIR="$proof/state" OPENCLAW_CONFIG_PATH="$proof/state/openclaw.json" \
-  "$HOME/.local/bin/heavy" -- node --import ./scripts/tsx.mjs \
-  --test --test-timeout=90000 grogu/protected/http.test.ts
+~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh
 ```
+
+The launcher denies non-loopback network traffic for the entire test process,
+including work that outlives a test. Direct and unsupported invocations fail
+before the fixture runs.
 
 This proves neither a real provider nor the Access identity response. The
 authoritative client DTOs are exported from `@openclaw/gateway-protocol/protected`.

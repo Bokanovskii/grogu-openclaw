@@ -13,13 +13,12 @@ import {
 } from "../../infra/kysely-sync.js";
 import { isPathInside } from "../../infra/path-guards.js";
 import { openSqliteReadOnlyDatabase } from "../../infra/sqlite-snapshot-source.js";
-import { readSqliteUserVersion } from "../../infra/sqlite-user-version.js";
 import {
   registerSqliteCacheExitClose,
   runInSqliteMaintenanceContext,
 } from "../../infra/sqlite-wal.js";
 import { isArtifactPreservingStateRead } from "../../state/artifact-preserving-state-reads.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../../state/openclaw-agent-db-contract.js";
+import { assertSupportedAgentSchemaVersion } from "../../state/openclaw-agent-db-schema-read.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../../state/openclaw-state-db-contract.js";
 
 const AUTH_PROFILE_READ_HANDLE_CAP = 64;
@@ -159,13 +158,19 @@ export function acquireAuthProfileReadDatabase(
   let readable = false;
   try {
     enableNodeSqliteKyselyStatementCache(db);
-    // The pooled reader bypasses canonical bootstrap and validates its schema on open.
-    readable = readSqliteUserVersion(db) <= OPENCLAW_AGENT_SCHEMA_VERSION;
+    // This reader bypasses canonical bootstrap, but still admits protected schema and key state.
+    assertSupportedAgentSchemaVersion(db, resolvedPath);
+    readable = true;
   } catch {
     // Invalid readers are disposed below, where native close failures propagate.
   }
-  const closeCandidate = () =>
-    inspection ? db.close() : closeAuthProfileReadDatabase(resolvedPath);
+  const closeCandidate = () => {
+    if (inspection) {
+      db.close();
+    } else {
+      closeAuthProfileReadDatabase(resolvedPath);
+    }
+  };
   if (!readable) {
     closeCandidate();
     return { status: "unreadable" };

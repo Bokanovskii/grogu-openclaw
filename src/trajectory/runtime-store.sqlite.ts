@@ -1,6 +1,7 @@
 // SQLite trajectory runtime store owns session-scoped runtime event rows.
 
 import { parseDateStringTimestampMs } from "@openclaw/normalization-core/number-coercion";
+import { sql } from "kysely";
 import {
   resolveSqliteReadScope,
   toDatabaseOptions,
@@ -21,6 +22,11 @@ import {
   runOpenClawAgentWriteTransaction,
   type OpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import {
+  hasSqliteStorageValueEncryption,
+  openSqliteStorageText,
+  sealSqliteStorageText,
+} from "../storage/sqlite-encryption.js";
 import { TRAJECTORY_RUNTIME_CAPTURE_MAX_BYTES } from "./paths.js";
 import type { TrajectoryRuntimeRetentionPlan } from "./runtime-retention.contract.js";
 import {
@@ -32,6 +38,10 @@ import {
   trajectoryRuntimeRetentionDue,
   trajectoryRuntimeRetentionState,
 } from "./runtime-retention.sqlite.js";
+import {
+  trajectoryRuntimeEventStorageContext,
+  trajectoryRuntimeEventStorageContextSql,
+} from "./storage-context.js";
 import type { TrajectoryEvent } from "./types.js";
 
 type SqliteTrajectoryRuntimeDatabase = Pick<
@@ -185,11 +195,20 @@ export function appendSqliteTrajectoryRuntimeEventsWithWriter(
       row.seq = seq++;
     }
     for (let index = 0; index < rows.length; index += TRAJECTORY_RUNTIME_INSERT_BATCH_SIZE) {
+      const batch = rows.slice(index, index + TRAJECTORY_RUNTIME_INSERT_BATCH_SIZE);
+      const storedRows = hasSqliteStorageValueEncryption(database.db)
+        ? batch.map((row) => ({
+            ...row,
+            event_json: sealSqliteStorageText(
+              database.db,
+              row.event_json,
+              trajectoryRuntimeEventStorageContext(row.session_id, row.seq),
+            ),
+          }))
+        : batch;
       executeSqliteQuerySync(
         database.db,
-        db
-          .insertInto("trajectory_runtime_events")
-          .values(rows.slice(index, index + TRAJECTORY_RUNTIME_INSERT_BATCH_SIZE)),
+        db.insertInto("trajectory_runtime_events").values(storedRows),
       );
     }
     if (window.removeThroughSeq !== undefined) {
@@ -267,7 +286,14 @@ export function loadSqliteTrajectoryRuntimeEventRowsSync(
           ) {
             assertSqliteJsonlReadBudget(
               database.db,
-              events.select("event_json").as("events"),
+              events
+                .select(
+                  sql<string>`openclaw_storage_text_open(
+                    ${sql.ref("trajectory_runtime_events.event_json")},
+                    ${trajectoryRuntimeEventStorageContextSql()}
+                  )`.as("event_json"),
+                )
+                .as("events"),
               Math.floor(scope.maxEventBytes),
               "Trajectory runtime store",
             );
@@ -288,10 +314,14 @@ export function loadSqliteTrajectoryRuntimeEventRowsSync(
           if (maxEvents !== undefined) {
             query = query.limit(maxEvents);
           }
-          const rows = executeSqliteQuerySync(database.db, query).rows.map((row) => ({
-            event: JSON.parse(row.event_json) as TrajectoryEvent,
-            seq: row.seq,
-          }));
+          const rows = executeSqliteQuerySync(database.db, query).rows.map((row) => {
+            const eventJson = openSqliteStorageText(
+              database.db,
+              row.event_json,
+              trajectoryRuntimeEventStorageContext(scope.sessionId, row.seq),
+            );
+            return { event: JSON.parse(eventJson) as TrajectoryEvent, seq: row.seq };
+          });
           return tailEvents === undefined ? rows : rows.toReversed();
         },
         {
@@ -333,11 +363,27 @@ function prepareSqliteTrajectoryRuntimeWindow(
           eb
             .case()
             .when(utf8)
-            .then(eb.fn<number>("octet_length", ["event_json"]))
+            .then(
+              sql<number>`octet_length(openclaw_storage_text_open(
+                ${sql.ref("trajectory_runtime_events.event_json")},
+                ${trajectoryRuntimeEventStorageContextSql()}
+              ))`,
+            )
             .else(0)
             .end()
             .as("event_bytes"),
-          eb.case().when(utf8).then(null).else(eb.ref("event_json")).end().as("event_json"),
+          eb
+            .case()
+            .when(utf8)
+            .then(null)
+            .else(
+              sql<string>`openclaw_storage_text_open(
+                ${sql.ref("trajectory_runtime_events.event_json")},
+                ${trajectoryRuntimeEventStorageContextSql()}
+              )`,
+            )
+            .end()
+            .as("event_json"),
         ];
       })
       .where("session_id", "=", sessionId)

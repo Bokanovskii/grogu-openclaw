@@ -35,6 +35,7 @@ import {
   readExistingAgentSchemaMeta,
   assertExistingAgentSchemaOwner,
   assertCurrentAgentSchemaMetadata,
+  assertSupportedAgentSchemaVersion,
 } from "./openclaw-agent-db-schema-read.js";
 import {
   ensureSessionAdditiveColumns,
@@ -67,6 +68,7 @@ import { withLegacyAgentStorageSchema } from "./openclaw-agent-storage-schema.js
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 
 export {
+  assertCurrentAgentDatabaseSchemaMetadata,
   assertSupportedAgentSchemaVersion,
   assertCurrentAgentSchemaMetadata,
   assertCanonicalAgentPersistenceVersion,
@@ -154,8 +156,9 @@ export function assertOpenClawAgentCurrentRuntimeSchema(
   options: { agentId: string; pathname: string },
 ): void {
   const agentId = normalizeAgentId(options.agentId);
+  const schemaVersion = assertSupportedAgentSchemaVersion(database, options.pathname);
   const metadata = readExistingAgentSchemaMeta(database);
-  assertCurrentAgentSchemaMetadata(metadata, agentId, options.pathname);
+  assertCurrentAgentSchemaMetadata(metadata, agentId, options.pathname, schemaVersion);
   if (hasRetiredAgentStateLeaseSchema(database)) {
     throw new SqliteSchemaMismatchError(
       `OpenClaw agent database ${options.pathname} retains retired state_leases storage; run openclaw doctor --fix before using it.`,

@@ -41,6 +41,7 @@ const nativeFixtureEvent =
 function createTable(database: DatabaseSync): void {
   // Deliberately omit production constraints so reads also exercise corrupted persisted records.
   database.exec(`CREATE TABLE transcript_events (
+    session_id TEXT NOT NULL DEFAULT 'payload-test',
     seq INTEGER PRIMARY KEY, event_json TEXT, event_zstd BLOB,
     event_utf8_bytes INTEGER, navigation_json TEXT
   ) STRICT`);
@@ -48,7 +49,9 @@ function createTable(database: DatabaseSync): void {
 
 function insert(database: DatabaseSync, seq: number, row: TranscriptPayloadRecord): void {
   database
-    .prepare("INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?)")
+    .prepare(
+      "INSERT INTO transcript_events (seq, event_json, event_zstd, event_utf8_bytes, navigation_json) VALUES (?, ?, ?, ?, ?)",
+    )
     .run(seq, row.event_json, row.event_zstd, row.event_utf8_bytes, row.navigation_json);
 }
 
@@ -127,8 +130,7 @@ describe("transcript payload storage boundary", () => {
       target.exec(`PRAGMA encoding = '${targetEncoding}'`);
       createTable(source);
       createTable(target);
-      target.exec(`ALTER TABLE transcript_events ADD COLUMN session_id TEXT;
-        ALTER TABLE transcript_events ADD COLUMN created_at INTEGER`);
+      target.exec("ALTER TABLE transcript_events ADD COLUMN created_at INTEGER");
       const eventJson = `{"type":"custom","id":"first","id":"last","data":"${"fixture".repeat(1024)}"}`;
       const prepared = prepareTranscriptPayloadForReuse(source, eventJson);
       expect(prepared.storageEncoding).toBe(sourceEncoding);
@@ -626,7 +628,7 @@ describe("transcript payload storage boundary", () => {
       for (const [index, message] of messages.entries()) {
         insert(database, index + 1, prepareTranscriptPayload(database, JSON.stringify(message)));
       }
-      database.exec(`ALTER TABLE transcript_events ADD COLUMN session_id TEXT DEFAULT 'selected';
+      database.exec(`UPDATE transcript_events SET session_id = 'selected';
         CREATE TABLE session_transcript_active_events (
           session_id TEXT, event_seq INTEGER, message_position INTEGER
         );

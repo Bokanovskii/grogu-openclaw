@@ -71,7 +71,12 @@ export function assertSessionTranscriptContextAnchorInDatabase(
         .selectAll("authority"),
     );
     const entry =
-      row && validateCanonicalSessionRowEntry(row, parseSessionEntryJson(row, "list"), "read");
+      row &&
+      validateCanonicalSessionRowEntry(
+        row,
+        parseSessionEntryJson(row, "list", database.db),
+        "read",
+      );
     if (
       !entry ||
       entry.permissionMode !== expectedAuthority.permissionMode ||

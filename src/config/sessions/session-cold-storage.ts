@@ -96,6 +96,7 @@ function workerDatabaseOptions(options: OpenClawAgentDatabaseOptions) {
     agentId: options.agentId,
     path: resolveOpenClawAgentSqlitePath(options),
     env: {
+      ...captureSessionTranscriptStorageEnvironment(sourceEnv),
       OPENCLAW_STATE_DIR: resolveOpenClawStateDirForDatabasePath(
         options.database?.path ?? resolveOpenClawStateSqlitePath(sourceEnv),
       ),

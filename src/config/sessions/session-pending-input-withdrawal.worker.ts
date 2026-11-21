@@ -11,6 +11,10 @@ import {
 } from "../../state/openclaw-agent-db.js";
 import { parseSessionPendingInputMessage } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import {
+  openSessionPendingInputMessage,
+  sealSessionPendingInputMessage,
+} from "./session-pending-input-encryption.js";
 
 export type SessionPendingInputWithdrawal = {
   sessionKey: string;
@@ -79,12 +83,21 @@ export function discardSessionPendingInputInWorker(
       if (!row) {
         return commitResult(false);
       }
-      const message = parseSessionPendingInputMessage(row.message_json);
+      const message = parseSessionPendingInputMessage(
+        openSessionPendingInputMessage(current.db, row.input_id, row.message_json),
+      );
       const result = executeSqliteQuerySync(
         current.db,
         db
           .updateTable("session_pending_inputs")
-          .set({ state: "cancelled", message_json: JSON.stringify({ ...message, display: false }) })
+          .set({
+            state: "cancelled",
+            message_json: sealSessionPendingInputMessage(
+              current.db,
+              row.input_id,
+              JSON.stringify({ ...message, display: false }),
+            ),
+          })
           .where("input_id", "=", row.input_id)
           .where("session_key", "=", input.sessionKey)
           .where("session_id", "=", input.sessionId)

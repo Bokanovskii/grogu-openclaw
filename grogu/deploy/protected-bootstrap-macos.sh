@@ -162,6 +162,8 @@ as_service() {
 as_service /bin/mkdir -p "$service_home/runtime/bin" "$service_home/service" \
   "$service_home/config" "$service_home/secrets" "$service_home/state/logs" "$service_home/inbox"
 as_service /bin/chmod 700 "$service_home/secrets" "$service_home/inbox"
+as_service /usr/bin/openssl rand -out "$service_home/secrets/storage-key" 32
+as_service /bin/chmod 600 "$service_home/secrets/storage-key"
 cat "$stage/cloudflared" | as_service /usr/bin/tee "$service_home/runtime/bin/cloudflared" >/dev/null
 as_service /bin/chmod 700 "$service_home/runtime/bin/cloudflared"
 cat "$tunnel_input" | as_service /usr/bin/tee "$service_home/secrets/tunnel-token" >/dev/null
@@ -180,6 +182,7 @@ context() {
 exec >> "$SERVICE_HOME/state/logs/runtime.stdout.log" 2>> "$SERVICE_HOME/state/logs/runtime.stderr.log"
 export HOME="$SERVICE_HOME" OPENCLAW_STATE_DIR="$SERVICE_HOME/state"
 export OPENCLAW_CONFIG_PATH="$SERVICE_HOME/config/openclaw.json"
+export OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$SERVICE_HOME/secrets/storage-key"
 export PATH="$SERVICE_HOME/runtime/node/bin:$SERVICE_HOME/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SPARKY_API_KEY="$(cat "$SERVICE_HOME/secrets/sparky-key")"
 [ -n "$SPARKY_API_KEY" ] || { echo "The isolated Sparky credential is empty." >&2; exit 78; }
@@ -233,6 +236,7 @@ SCRIPT
 [ "$(id -un)" = "$SERVICE_USER" ] || exit 77
 export HOME="$SERVICE_HOME" OPENCLAW_STATE_DIR="$SERVICE_HOME/state"
 export OPENCLAW_CONFIG_PATH="$SERVICE_HOME/config/openclaw.json"
+export OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$SERVICE_HOME/secrets/storage-key"
 export PATH="$SERVICE_HOME/runtime/node/bin:$SERVICE_HOME/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$SERVICE_HOME"
 case "${1-}" in
@@ -321,12 +325,21 @@ case "${1-}" in
     id
     if ! stat -f '%N owner=%Su mode=%Lp' "$SERVICE_HOME" \
       "$SERVICE_HOME/secrets/tunnel-token" "$SERVICE_HOME/secrets/sparky-key" \
+      "$SERVICE_HOME/secrets/storage-key" \
       /Library/PrivilegedHelperTools/ai.grogu.protected-runtime \
       /Library/PrivilegedHelperTools/ai.grogu.protected-tunnel \
       /Library/PrivilegedHelperTools/ai.grogu.protected-control \
       /Library/PrivilegedHelperTools/ai.grogu.protected-maintain \
       /Library/LaunchDaemons/ai.grogu.protected.runtime.plist \
       /Library/LaunchDaemons/ai.grogu.protected.tunnel.plist; then failed=1; fi
+  if [ ! -f "$SERVICE_HOME/secrets/storage-key" ] ||
+    [ -L "$SERVICE_HOME/secrets/storage-key" ] ||
+    [ "$(stat -f '%Lp' "$SERVICE_HOME/secrets/storage-key")" != 600 ] ||
+    [ "$(stat -f '%z' "$SERVICE_HOME/secrets/storage-key")" != 32 ] ||
+    [ "$(stat -f '%u' "$SERVICE_HOME/secrets/storage-key")" != "$(id -u)" ]; then
+    echo "The protected storage key is missing or has unsafe ownership or permissions." >&2
+    failed=1
+  fi
     for endpoint in "protected http://127.0.0.1:19789/healthz" \
       "tunnel http://127.0.0.1:19790/ready" "personal http://127.0.0.1:18789/"; do
       name="${endpoint%% *}"
@@ -344,6 +357,7 @@ case "${1-}" in
     cd "$SERVICE_HOME/service"
     exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
       OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
+      OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$OPENCLAW_PROTECTED_STORAGE_KEY_FILE" \
       "$SERVICE_HOME/runtime/node/bin/node" --import "$SERVICE_HOME/service/scripts/tsx.mjs" \
       "$SERVICE_HOME/service/grogu/protected/maintain.ts" "$@"
     ;;

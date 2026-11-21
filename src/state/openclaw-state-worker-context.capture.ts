@@ -69,6 +69,9 @@ export function captureOpenClawStateReadWorkerContextWithAdmission(
   const env = process.platform === "win32" ? cloneEnvWithPlatformSemantics(source) : source;
   const environment: OpenClawStateWorkerContext["environment"] = {
     OPENCLAW_STATE_DIR: resolveStateDir(env),
+    ...(env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE
+      ? { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE }
+      : {}),
     ...(isGatewayExternallySupervised(env) ? { OPENCLAW_SUPERVISOR_MODE: "external" } : {}),
   };
   return {

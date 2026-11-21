@@ -1,9 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
-import { classifyAgentRunTerminalOutcome } from "@openclaw/normalization-core/agent-run-terminal-outcome";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Selectable } from "kysely";
-import type { AgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.types.js";
 import {
   isAgentEventLifecycleGenerationCurrent,
   registerAgentEventLifecycleRotationHandler,
@@ -26,6 +24,7 @@ import type {
   SessionPendingInputAuthorityFacts,
 } from "./session-pending-input-authority.js";
 import { SessionPendingInputCustodyError } from "./session-pending-input-custody-error.js";
+import { openSessionPendingInputMessage } from "./session-pending-input-encryption.js";
 import type { SessionPendingInputState } from "./session-pending-input-receipt.types.js";
 
 export type SessionPendingInput = {
@@ -347,96 +346,6 @@ export function parseSessionPendingInputMessage(messageJson: string): PersistedU
   return value as PersistedUserTurnMessage;
 }
 
-export function isFinalInputCompletion(outcome: AgentRunTerminalOutcome): boolean {
-  return (
-    outcome.reason === "completed" ||
-    (outcome.reason === "cancelled" && outcome.stopReason !== "restart")
-  );
-}
-
-type SessionInputCompletionScope = Pick<ResolvedTranscriptScope, "sessionId" | "sessionKey"> & {
-  idempotencyKey: string;
-};
-
-export function readSessionInputCompletion(
-  database: PendingInputDatabase,
-  scope: SessionInputCompletionScope,
-) {
-  const row = executeSqliteQueryTakeFirstSync(
-    database.db,
-    getSessionKysely(database.db)
-      .selectFrom("session_input_completions")
-      .selectAll()
-      .where("session_key", "=", scope.sessionKey)
-      .where("session_id", "=", scope.sessionId)
-      .where("idempotency_key", "=", scope.idempotencyKey),
-  );
-  if (!row) {
-    return undefined;
-  }
-  // SAFETY: only writeSessionInputCompletion writes this feature-owned table with typed terminal outcomes.
-  const outcome = JSON.parse(row.outcome_json) as AgentRunTerminalOutcome;
-  return { ...row, outcome };
-}
-
-/** The caller holds the write transaction and has revalidated the exact live admission owner. */
-export function writeSessionInputCompletion(
-  database: PendingInputDatabase,
-  scope: SessionInputCompletionScope & {
-    runId: string;
-    requestHash: string;
-    lifecycleGeneration: string;
-  },
-  outcome: AgentRunTerminalOutcome,
-): AgentRunTerminalOutcome {
-  const retained = readSessionInputCompletion(database, scope);
-  if (retained && isFinalInputCompletion(retained.outcome)) {
-    return retained.outcome;
-  }
-  const succeeded = classifyAgentRunTerminalOutcome(outcome) === "success";
-  executeSqliteQuerySync(
-    database.db,
-    getSessionKysely(database.db)
-      .insertInto("session_input_completions")
-      .values({
-        session_key: scope.sessionKey,
-        session_id: scope.sessionId,
-        idempotency_key: scope.idempotencyKey,
-        run_id: scope.runId,
-        request_hash: scope.requestHash,
-        outcome_json: JSON.stringify(outcome),
-        succeeded: succeeded ? 1 : 0,
-        completed_at: Date.now(),
-      })
-      .onConflict((conflict) =>
-        conflict
-          .columns(["session_id", "idempotency_key"])
-          .doUpdateSet({
-            outcome_json: JSON.stringify(outcome),
-            succeeded: succeeded ? 1 : 0,
-            completed_at: Date.now(),
-          })
-          .where("session_input_completions.succeeded", "=", 0),
-      ),
-  );
-  if (isFinalInputCompletion(outcome)) {
-    // Handled hooks can finish without appending a user message. The completion
-    // receipt retires that exact custody atomically in the caller's transaction.
-    executeSqliteQuerySync(
-      database.db,
-      getSessionKysely(database.db)
-        .deleteFrom("session_pending_inputs")
-        .where("session_key", "=", scope.sessionKey)
-        .where("session_id", "=", scope.sessionId)
-        .where("idempotency_key", "=", scope.idempotencyKey)
-        .where("run_id", "=", scope.runId)
-        .where("request_hash", "=", scope.requestHash)
-        .where("lifecycle_generation", "=", scope.lifecycleGeneration),
-    );
-  }
-  return outcome;
-}
-
 export function projectSessionPendingInput(row: SessionPendingInputRow): SessionPendingInput {
   if (row.state !== "queued" && row.state !== "interrupted" && row.state !== "cancelled") {
     throw new Error("Pending input has an invalid disposition");
@@ -508,7 +417,7 @@ export function readSessionPendingInputByKey(
   if (!hasSessionPendingInputsSchema(database.db)) {
     return undefined;
   }
-  return executeSqliteQueryTakeFirstSync(
+  const row = executeSqliteQueryTakeFirstSync(
     database.db,
     getSessionKysely(database.db)
       .selectFrom("session_pending_inputs")
@@ -517,6 +426,12 @@ export function readSessionPendingInputByKey(
       .where("session_key", "=", scope.sessionKey)
       .where("idempotency_key", "=", idempotencyKey),
   );
+  return row
+    ? {
+        ...row,
+        message_json: openSessionPendingInputMessage(database.db, row.input_id, row.message_json),
+      }
+    : undefined;
 }
 
 export type SessionPendingInputAppend = {
@@ -621,7 +536,17 @@ export function resolveSessionPendingInputAppend(
             "in",
             owner.sources.map((source) => source.idempotencyKey),
           ),
-      ).rows.map((sourceRow) => [sourceRow.idempotency_key, sourceRow]),
+      ).rows.map((sourceRow) => [
+        sourceRow.idempotency_key,
+        {
+          ...sourceRow,
+          message_json: openSessionPendingInputMessage(
+            database.db,
+            sourceRow.input_id,
+            sourceRow.message_json,
+          ),
+        },
+      ]),
     );
     const sources = owner.sources.map((source) => {
       const accepted = acceptedByKey.get(source.idempotencyKey);

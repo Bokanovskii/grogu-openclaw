@@ -13,6 +13,7 @@ import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
+import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/storage/sqlite-encryption.js";
 import { createStorageAdmission, type StorageLimits } from "./capacity.js";
 import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
@@ -107,6 +108,13 @@ export function createProtectedHttp(options: {
   if (new URL(options.origin).origin !== options.origin) {
     throw new TypeError("Configure the exact protected client origin.");
   }
+  const ownedEncryption = createSqliteStorageValueEncryptionFromEnvironment();
+  if (!ownedEncryption) {
+    throw new Error(
+      "Protected storage encryption requires OPENCLAW_PROTECTED_STORAGE_KEY_FILE; provision the private key before starting the service.",
+    );
+  }
+  const encryption = options.encryption ?? ownedEncryption;
   const chats = createProtectedChats(options);
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...options, chats, limits: options.storageLimits })
@@ -222,6 +230,7 @@ export function createProtectedHttp(options: {
       ) =>
         createAuthorizedUserFiles({
           ...options,
+          encryption,
           profileId: profile.id,
           assertCurrent: assert,
           signal,
@@ -270,7 +279,7 @@ export function createProtectedHttp(options: {
         return json({
           user: { id: profile.id, displayName: profile.displayName ?? "Family member" },
           disclosure:
-            "Family keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
+            "Encrypted on Grogu's server. The server admin can read your chats. Family keeps your chats and generated files until you delete them, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
           models: options.turns.models,
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
@@ -803,6 +812,7 @@ export function createProtectedHttp(options: {
       while (pending.size) {
         await Promise.allSettled(pending);
       }
+      ownedEncryption?.dispose();
     },
     async revokeProfile(profileId: string) {
       deniedProfiles.add(profileId);

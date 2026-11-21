@@ -6,6 +6,11 @@ import { isDeepStrictEqual } from "node:util";
 import { getEnvironmentData, isMainThread, setEnvironmentData } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
+  createSqliteStorageValueEncryptionFromEnvironment,
+  disposeSqliteStorageValueEncryption,
+  registerSqliteStorageValueEncryption,
+} from "../storage/sqlite-encryption.js";
+import {
   ensureSqliteLibrarySelected,
   getSqliteRuntimeCapabilities,
   SQLITE_NATIVE_RUNTIME_ADMISSION_KEY,
@@ -247,6 +252,16 @@ export function openNodeSqliteDatabase(
   const database = new sqlite.DatabaseSync(resolvedLocation, options ?? {});
   // Schema tracking must precede the statement-cache authorizer wrapper.
   trackSqliteSchema(database, sqlite);
+  let encryption: ReturnType<typeof createSqliteStorageValueEncryptionFromEnvironment> = undefined;
+  try {
+    encryption = createSqliteStorageValueEncryptionFromEnvironment();
+    registerSqliteStorageValueEncryption(database, encryption);
+  } catch (error) {
+    encryption?.dispose();
+    database.close();
+    throw error;
+  }
+  registerNodeSqliteDisposeCallback(database, () => disposeSqliteStorageValueEncryption(database));
   if (!getSqliteRuntimeCapabilities().explicitSqliteCloseReleasesNativeResources) {
     registerNodeSqliteDisposeCallback(database, () => {
       bunSqliteNativeCleanupPending = true;

@@ -1,10 +1,8 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { AgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.types.js";
 import type { PersistedUserTurnMessage } from "../../sessions/user-turn-transcript.types.js";
-import type {
-  SessionPendingInputRow,
-  readSessionInputCompletion,
-} from "./session-accessor.sqlite-pending-inputs.js";
+import type { SessionPendingInputRow } from "./session-accessor.sqlite-pending-inputs.js";
+import type { readSessionInputCompletion } from "./session-input-completion-store.js";
 import type { SessionPendingInputAuthorityFacts } from "./session-pending-input-authority.js";
 
 type PendingInputIdentity = {

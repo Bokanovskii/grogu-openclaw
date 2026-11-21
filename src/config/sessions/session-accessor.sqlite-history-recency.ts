@@ -2,6 +2,7 @@ import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import { isRecentSessionMaintenanceEntry } from "./store-maintenance-activity.js";
 
 export function collectRecentSessionHistoryIds(params: {
@@ -23,7 +24,7 @@ export function collectRecentSessionHistoryIds(params: {
         "session_nodes.current_session_id",
         "session_nodes.session_key",
         "session_nodes.updated_at",
-        "session_nodes.entry_json",
+        sessionEntryJsonSql(params.database.db).as("entry_json"),
         "session_windows.session_id",
       ]),
   ).rows;
@@ -60,7 +61,7 @@ export function isRecentHistoricalSessionId(params: {
       .innerJoin("session_nodes", "session_nodes.session_key", "session_windows.session_key")
       .select([
         "session_nodes.current_session_id",
-        "session_nodes.entry_json",
+        sessionEntryJsonSql(params.database.db).as("entry_json"),
         "session_nodes.session_key",
         "session_nodes.updated_at",
       ])

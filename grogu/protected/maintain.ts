@@ -2,6 +2,7 @@ import path from "node:path";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { writeJsonAtomic } from "../../src/infra/json-files.js";
+import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/storage/sqlite-encryption.js";
 import { measureStorageLimits } from "./capacity.js";
 import {
   parseDeploySettings,
@@ -35,6 +36,11 @@ async function main() {
     rest.length === 1 &&
     path.isAbsolute(rest[0]!)
   ) {
+    const storageEncryption = createSqliteStorageValueEncryptionFromEnvironment();
+    if (!storageEncryption) {
+      throw new Error("Protected storage key is unavailable; provision it before initialization.");
+    }
+    storageEncryption.dispose();
     const deploy = parseDeploySettings(await readSettingsJson(rest[0]!));
     const storageLimits = measureStorageLimits(stateDir);
     const configRoot = await root(configDir);

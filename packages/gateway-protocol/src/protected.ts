@@ -97,7 +97,11 @@ export const ProtectedErrorSchema = node({
 });
 export const ProtectedChatsSchema = node({ chats: Type.Array(ProtectedChatSummarySchema) });
 export const ProtectedExportSchema = node({ chats: Type.Array(ProtectedChatSchema) });
-export const ProtectedChatResponseSchema = node({ chat: ProtectedChatSchema });
+export const ProtectedChatResponseSchema = node({
+  chat: ProtectedChatSchema,
+  // A reply that this signed-in session started and that is still running on the server.
+  activeRun: Type.Optional(node({ id })),
+});
 export const ProtectedCreateChatSchema = node({
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
 });

@@ -1,4 +1,5 @@
-import { sealSecretSentinel } from "../secrets/sentinel.js";
+import { holdSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
+import { createRequestSecretSentinel } from "../secrets/sentinel.js";
 import type { ResolvedProviderAuth } from "./model-auth-runtime-shared.js";
 
 const brand = Symbol("requestModelCredential");
@@ -10,19 +11,29 @@ type Credential = {
   expiresAt?: number;
   assertCurrent: () => void;
 };
-const credentials = new WeakMap<RequestModelCredential, Credential>();
+const credentials = new WeakMap<RequestModelCredential, Credential & { sentinel: string }>();
 
 /** Host-only capability. Neither the token nor renewal material is serialized in run parameters. */
 export function createRequestModelCredential(input: Credential) {
   if (!input.accessToken || !input.provider || !input.model) {
     throw new TypeError("A request credential requires an exact provider and model.");
   }
+  const releaseRedaction = holdSecretValueForRedaction(input.accessToken);
+  let requestSentinel: ReturnType<typeof createRequestSecretSentinel>;
+  try {
+    requestSentinel = createRequestSecretSentinel(input.accessToken);
+  } catch (error) {
+    releaseRedaction();
+    throw error;
+  }
   const handle: RequestModelCredential = Object.freeze({ [brand]: true });
-  credentials.set(handle, { ...input });
+  credentials.set(handle, { ...input, sentinel: requestSentinel.sentinel });
   return {
     handle,
     close() {
       credentials.delete(handle);
+      requestSentinel.close();
+      releaseRedaction();
     },
   };
 }
@@ -43,7 +54,7 @@ export function resolveRequestModelCredential(
   }
   credential.assertCurrent();
   return {
-    apiKey: sealSecretSentinel(credential.accessToken, { label: `request-model-auth:${provider}` }),
+    apiKey: credential.sentinel,
     mode: provider === "openai" ? "oauth" : provider === "github-copilot" ? "token" : "api-key",
     source: "request-only",
   };

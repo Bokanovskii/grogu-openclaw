@@ -36,6 +36,7 @@ void test("protected chunks publish without remote access work and stop at local
   const app = createProtectedHttp({
     origin,
     stateDir,
+    directory: { issuer: origin, allowedSubjects: [] },
     usersRoot: await root(usersDir),
     maxChatsPerUser: 10,
     maxFileBytes: 64_000,
@@ -44,6 +45,7 @@ void test("protected chunks publish without remote access work and stop at local
       return {
         issuer: origin,
         subject,
+        kind: "human",
         expiresAt,
         sessionId: createHash("sha256").update(subject).digest("hex"),
         assertCurrent() {

@@ -6,6 +6,8 @@ import type {
   ProtectedMessage,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
+import { FailoverError } from "../../src/agents/failover/error.js";
 import {
   createSessionEntryWithTranscript,
   deleteSessionEntryLifecycle,
@@ -17,7 +19,7 @@ import {
 } from "../../src/config/sessions/session-entry-read-runtime.js";
 import { readTranscriptStatsAsync } from "../../src/config/sessions/session-transcript-stats.js";
 import type { SessionEntry } from "../../src/config/sessions/types.js";
-import { ProtectedError } from "./errors.js";
+import { ProtectedError, publicError } from "./errors.js";
 import { projectToolResult } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
@@ -155,7 +157,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
       if (message.role !== "user" && message.role !== "assistant") {
         continue;
       }
-      const text =
+      const content =
         typeof message.content === "string"
           ? message.content
           : Array.isArray(message.content)
@@ -164,6 +166,17 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
                 .map((block) => (typeof block.text === "string" ? block.text : ""))
                 .join("\n")
             : "";
+      const provider = typeof message.provider === "string" ? message.provider : undefined;
+      const errorText = typeof message.errorMessage === "string" ? message.errorMessage : "";
+      const text =
+        message.role === "assistant" && message.stopReason === "error"
+          ? publicError(
+              new FailoverError("Saved assistant failure", {
+                reason: classifyFailoverReason(errorText, { provider }) ?? "unknown",
+                provider,
+              }),
+            ).message
+          : content;
       const status =
         message.role === "assistant"
           ? message.stopReason === "aborted"

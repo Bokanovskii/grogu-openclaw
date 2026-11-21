@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { ProtectedModel, ProtectedTurnEvent } from "@openclaw/gateway-protocol/protected";
+import type {
+  ProtectedModel,
+  ProtectedActivity,
+  ProtectedTurnEvent,
+  ProtectedTurnRequest,
+} from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   createOperationalRunInstanceRef,
@@ -16,8 +21,9 @@ import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
+import type { fetchProtectedCopilotModels } from "./models.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
-import { projectToolResult, type Source, type Widget } from "./tool-events.js";
+import { projectActivity, projectToolResult, type Source, type Widget } from "./tool-events.js";
 
 export type { ProtectedModel };
 export type TurnInput = {
@@ -25,6 +31,8 @@ export type TurnInput = {
   provider: ProtectedModel["provider"];
   model: string;
   credential?: { accessToken: string; expiresAt?: number };
+  thinking?: ProtectedTurnRequest["thinking"];
+  copilotModel?: Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number];
 };
 export type ProtectedTurn = {
   id: string;
@@ -38,6 +46,8 @@ export type ProtectedTurn = {
   revalidate: () => Promise<void>;
   markTiming: (phase: "providerRequestStartMs" | "firstProviderOutputMs") => void;
   delta: (text: string) => Promise<void>;
+  reasoning: (text: string) => Promise<void>;
+  activity: (item: ProtectedActivity) => Promise<void>;
   sources: (sources: Source[]) => Promise<void>;
   widget: (widget: Widget) => Promise<void>;
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
@@ -78,8 +88,23 @@ export function createCanonicalProtectedTurns(options: {
       });
       let updates = Promise.resolve();
       let updateError: unknown;
+      let lastReasoning = "";
       const draftBytes = new Map<string, number>();
       const unsubscribe = onAgentEventForRun(turn.runId, ({ stream, data }) => {
+        if (stream === "tool" && (data.phase === "start" || data.phase === "result")) {
+          const activity = projectActivity(
+            data.name,
+            data.toolCallId,
+            data.phase === "start" ? "running" : data.isError === true ? "failed" : "done",
+          );
+          if (activity) {
+            updates = updates
+              .then(() => turn.activity(activity))
+              .catch((error: unknown) => {
+                updateError ??= error;
+              });
+          }
+        }
         if (
           stream !== "tool" ||
           data.phase !== "input_delta" ||
@@ -178,7 +203,21 @@ export function createCanonicalProtectedTurns(options: {
               runId: turn.runId,
               timeoutMs: protectedTurnTimeoutMs,
               abortSignal: turn.signal,
-              config: options.config,
+              config: turn.input.copilotModel
+                ? {
+                    ...options.config,
+                    models: {
+                      ...options.config.models,
+                      providers: {
+                        ...options.config.models?.providers,
+                        "github-copilot": {
+                          baseUrl: turn.input.copilotModel.baseUrl,
+                          models: [turn.input.copilotModel.definition],
+                        },
+                      },
+                    },
+                  }
+                : options.config,
               workspaceDir: options.workspaceDir,
               agentDir: options.agentDir,
               prompt: turn.input.text,
@@ -186,7 +225,8 @@ export function createCanonicalProtectedTurns(options: {
               trigger: "user",
               provider,
               model,
-              thinkLevel: provider === "sparky" ? "ultra" : undefined,
+              thinkLevel: turn.input.thinking,
+              reasoningLevel: "stream",
               agentHarnessRuntimeOverride: "openclaw",
               preparedRunAdmission: admission,
               requestModelCredential: requestCredential.handle,
@@ -211,6 +251,23 @@ export function createCanonicalProtectedTurns(options: {
                   .digest("hex"),
               },
               onAgentToolResult,
+              onAssistantMessageStart: () => {
+                lastReasoning = "";
+              },
+              onReasoningStream: ({ text }) => {
+                if (!text || text === lastReasoning) {
+                  return;
+                }
+                const delta = text.startsWith(lastReasoning)
+                  ? text.slice(lastReasoning.length)
+                  : text;
+                lastReasoning = text;
+                updates = updates
+                  .then(() => turn.reasoning(delta))
+                  .catch((error: unknown) => {
+                    updateError ??= error;
+                  });
+              },
               onPartialReply: async ({ delta }) => {
                 if (delta) {
                   await turn.delta(delta);

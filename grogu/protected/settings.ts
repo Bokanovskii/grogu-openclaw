@@ -10,6 +10,7 @@ export const sparky: ProtectedModel = {
   provider: "sparky",
   id: "qwen3.8-flash-next",
   label: "Sparky",
+  contextWindow: 128_000,
 };
 export const sparkyRef = {
   source: "env",

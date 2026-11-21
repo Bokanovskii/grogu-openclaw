@@ -144,10 +144,11 @@ export function readPendingCanonicalSessionValidationBatch(
 /** Keep the exact validated flat fields private and immutable across awaited write admission. */
 export function validateCanonicalSessionValidationBatch(
   batch: CanonicalSessionValidationBatch,
+  database?: DatabaseSync,
 ): ValidatedCanonicalSessionValidationBatch {
   const rows = batch.rows.map((row) => {
     const snapshot = { ...row };
-    validateCanonicalSessionRow(snapshot);
+    validateCanonicalSessionRow(snapshot, "admission", database);
     return Object.freeze(snapshot);
   });
   const validated: ValidatedCanonicalSessionValidationBatch = {

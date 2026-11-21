@@ -36,6 +36,7 @@ import {
 } from "./session-accessor.sqlite-scope.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
 import { resolveSessionColdArchivePath } from "./session-cold-storage-codec.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import { collectAdmissionProtectedSessionIds } from "./session-history-eviction.js";
 import { deleteSessionTranscriptIndexInTransaction } from "./session-transcript-index.js";
 
@@ -43,10 +44,17 @@ type SessionStoreResetScope = { agentId: string; storePath: string };
 
 function readResetInventory(database: OpenClawAgentReadOnlyDatabase) {
   const db = getSessionKysely(database.db);
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   return {
     nodes: executeSqliteQuerySync(
       database.db,
-      db.selectFrom("session_nodes").selectAll().orderBy("session_key"),
+      db
+        .selectFrom("session_nodes")
+        .selectAll()
+        .$if(protectedEntry !== undefined, (query) =>
+          query.select(protectedEntry!.as("protected_entry_json")),
+        )
+        .orderBy("session_key"),
     ).rows,
     transcripts: executeSqliteQuerySync(
       database.db,
@@ -194,7 +202,7 @@ export async function resetSessionStore(scope: SessionStoreResetScope): Promise<
       }
     };
     const entries = inventory.nodes.flatMap((row) => {
-      const entry = parseSessionEntryJson(row);
+      const entry = parseSessionEntryJson(row, "full", retained.database.db);
       return entry ? [{ sessionKey: row.session_key, entry }] : [];
     });
     const identity = readOpenClawAgentDatabaseIdentity(retained.database).identity;

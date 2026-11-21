@@ -10,16 +10,19 @@ import {
 } from "../../state/openclaw-agent-pending-inputs-schema.js";
 import { readSessionEntryRow } from "./session-accessor.sqlite-entry-read.js";
 import {
-  isFinalInputCompletion,
   parseSessionPendingInputMessage,
-  readSessionInputCompletion,
   readSessionPendingInputByKey,
-  writeSessionInputCompletion,
 } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { readTranscriptMessageByScopedIdempotencyKey } from "./session-accessor.sqlite-transcript-store.js";
+import {
+  isFinalInputCompletion,
+  readSessionInputCompletion,
+  writeSessionInputCompletion,
+} from "./session-input-completion-store.js";
 import { readSessionPendingInputAuthorityFacts } from "./session-pending-input-authority.kernel.js";
 import { SessionPendingInputCustodyError } from "./session-pending-input-custody-error.js";
+import { sealSessionPendingInputMessage } from "./session-pending-input-encryption.js";
 import type {
   PendingInputCustodyGrant,
   PendingInputMutation,
@@ -152,18 +155,24 @@ export function mutatePendingInput(
       } else {
         executeSqliteQuerySync(
           current.db,
-          getSessionKysely(current.db).insertInto("session_pending_inputs").values({
-            input_id: input.inputId,
-            session_key: input.sessionKey,
-            session_id: input.sessionId,
-            idempotency_key: input.idempotencyKey,
-            run_id: input.runId,
-            request_hash: input.requestHash,
-            message_json: input.messageJson,
-            lifecycle_generation: input.lifecycleGeneration,
-            state: "queued",
-            accepted_at: Date.now(),
-          }),
+          getSessionKysely(current.db)
+            .insertInto("session_pending_inputs")
+            .values({
+              input_id: input.inputId,
+              session_key: input.sessionKey,
+              session_id: input.sessionId,
+              idempotency_key: input.idempotencyKey,
+              run_id: input.runId,
+              request_hash: input.requestHash,
+              message_json: sealSessionPendingInputMessage(
+                current.db,
+                input.inputId,
+                input.messageJson,
+              ),
+              lifecycle_generation: input.lifecycleGeneration,
+              state: "queued",
+              accepted_at: Date.now(),
+            }),
         );
       }
     } else if (input.kind === "complete") {

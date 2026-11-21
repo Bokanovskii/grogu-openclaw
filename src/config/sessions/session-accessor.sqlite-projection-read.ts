@@ -19,7 +19,11 @@ import type { resolveSqliteTranscriptReadScope } from "./session-accessor.sqlite
 import { SessionTranscriptColdError } from "./session-cold-storage-state.js";
 import type { SessionTranscriptProjectionState } from "./session-transcript-index.js";
 import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
-import { readTranscriptPayload, type TranscriptPayloadRecord } from "./transcript-payload.js";
+import {
+  readTranscriptPayload,
+  transcriptEventJsonSql,
+  type TranscriptPayloadRecord,
+} from "./transcript-payload.js";
 
 type ActiveTranscriptDatabase = Pick<
   OpenClawAgentKyselyDatabase,
@@ -116,7 +120,12 @@ export function readSnapshotEventRows(
   const sessionId = projection.resolved.sessionId;
   const query = getActiveTranscriptKysely(projection.database)
     .selectFrom("transcript_events as event")
-    .select(["event.seq", "event.event_json", "event.event_zstd", "event.event_utf8_bytes"])
+    .select([
+      "event.seq",
+      transcriptEventJsonSql(projection.database.db, "event").as("event_json"),
+      "event.event_zstd",
+      "event.event_utf8_bytes",
+    ])
     .where("event.session_id", "=", sessionId);
   return executeSqliteQuerySync(
     projection.database.db,
@@ -190,11 +199,14 @@ export function selectMessageRows(
         .where("active.message_position", "<", selection.endExclusive);
 }
 
-export function selectMessagePayload(query: ReturnType<typeof selectMessageRows>) {
+export function selectMessagePayload(
+  database: Pick<TranscriptReadDatabase, "db">,
+  query: ReturnType<typeof selectMessageRows>,
+) {
   return query.select([
     "active.event_seq",
     "active.message_position",
-    "event.event_json",
+    transcriptEventJsonSql(database.db, "event").as("event_json"),
     "event.event_zstd",
     "event.event_utf8_bytes",
   ]);
@@ -237,6 +249,7 @@ const messageRangeReaders = createSqliteQueryCache((db) => {
       Parameters<typeof parseActiveTranscriptMessageRow>[0]
     >(database.db, (parameter) =>
       selectMessagePayload(
+        database,
         selectMessageRows(
           database,
           parameter((params) => params.sessionId),
@@ -255,6 +268,7 @@ const messageRangeReaders = createSqliteQueryCache((db) => {
       Parameters<typeof parseActiveTranscriptMessageRow>[0]
     >(database.db, (parameter) =>
       selectMessagePayload(
+        database,
         selectMessageRows(
           database,
           parameter((params) => params.sessionId),

@@ -1,4 +1,4 @@
-import { expressionBuilder } from "kysely";
+import { expressionBuilder, sql } from "kysely";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely,
@@ -6,6 +6,10 @@ import {
 } from "../../infra/kysely-sync.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
+import {
+  hasSqliteStorageValueEncryption,
+  sealSqliteStorageText,
+} from "../../storage/sqlite-encryption.js";
 import type { SessionEntry } from "./types.js";
 
 export type SessionEntrySnapshot = {
@@ -28,6 +32,10 @@ const snapshotColumns = [
   ["systemPromptReport", "system_prompt_report_json"],
 ] as const;
 
+function snapshotContext(sessionKey: string, field: SessionEntrySnapshotField): string {
+  return `openclaw:protected-session-entry-snapshot:${sessionKey}:${field}`;
+}
+
 /** One statement owns hot and cold facts; JSON remains opaque to SQLite's depth limit. */
 export function sessionEntrySnapshotColumnsForKeys(
   keys?: readonly string[],
@@ -42,13 +50,21 @@ export function sessionEntrySnapshotColumnsForKeys(
     .map(([field, alias]) => {
       const snapshot = eb
         .selectFrom("session_entry_snapshots")
-        .select("value_json")
         .whereRef("session_entry_snapshots.session_key", "=", "session_nodes.session_key")
         .where("field", "=", field);
+      const value = sql<string>`openclaw_storage_text_open(
+        ${sql.ref("session_entry_snapshots.value_json")},
+        'openclaw:protected-session-entry-snapshot:' ||
+          ${sql.ref("session_entry_snapshots.session_key")} || ':' || ${field}
+      )`.as("value_json");
       return (
         selectedKeys === undefined
-          ? snapshot
-          : eb.case().when("session_nodes.session_key", "in", selectedKeys).then(snapshot).end()
+          ? snapshot.select(value)
+          : eb
+              .case()
+              .when("session_nodes.session_key", "in", selectedKeys)
+              .then(snapshot.select(value))
+              .end()
       ).as(alias);
     });
 }
@@ -130,7 +146,13 @@ export function writeSessionEntrySnapshots(
           snapshots.map((snapshot) => ({
             session_key: sessionKey,
             field: snapshot.field,
-            value_json: snapshot.valueJson,
+            value_json: hasSqliteStorageValueEncryption(database.db)
+              ? sealSqliteStorageText(
+                  database.db,
+                  snapshot.valueJson,
+                  snapshotContext(sessionKey, snapshot.field),
+                )
+              : snapshot.valueJson,
           })),
         )
         .onConflict((conflict) =>

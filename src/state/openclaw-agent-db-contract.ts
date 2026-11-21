@@ -7,6 +7,7 @@ import type {
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db-contract.js";
 
 export const OPENCLAW_AGENT_SCHEMA_VERSION = 25;
+export const PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 1;
 export const CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION = 25;
 export const AGENT_STORAGE_SCHEMA_VERSION = 23;
 export const TRANSCRIPT_FTS_ROW_SCHEMA_VERSION = 22;

@@ -95,24 +95,44 @@ another model request. Another Access session can read its user's chat, but it
 does not receive the run ID. Active runs do not survive a listener restart.
 Updates drain or interrupt them before the new listener starts.
 
-## File encryption API
+## Encrypted storage
 
-The internal `createProtectedHttp` API accepts a host-owned `encryption` handle
-from `createStorageValueEncryption`. With that handle, authorized user files use
-AES-256-GCM and a fresh data key for each write. The service key wraps each data
-key. Both the wrapped key and the content are bound to the canonical profile.
-Moving a file within that profile does not require re-encryption.
+The protected runtime requires the host-owned 32-byte key at
+`$SERVICE_HOME/secrets/storage-key`, outside the state directory and readable
+only by the `groguProtected` service account. The bootstrap creates it with mode
+`0600`; protected runtime startup and initialization refuse a missing or invalid
+key. Never replace an existing key to recover access. Losing the key makes
+encrypted chats and files unrecoverable.
 
-The file owner preserves its path, directory-identity, link, and authority checks.
-Reads reject plaintext, damaged content, the wrong key, and content copied from
-another profile. File limits and returned sizes describe plaintext bytes. Quotas
-include the encrypted size, which adds 96 bytes per file. The caller must retain
-the handle until requests settle, then dispose it.
+The service encrypts chat transcript events, session titles and summaries,
+session snapshots, queued messages and completion results, trajectories, ACP
+parent-stream events, and archived transcripts. Each value uses AES-256-GCM
+with its own fresh data key, wrapped by the service key and bound to its owner.
+Widgets and other per-user files use the same per-file data-key design. The
+server admin can read chats; this protects copied storage files, not a running
+service or its administrator.
 
-This API does not enable encryption in `main.ts`. The deployed service still
-stores plaintext. Key provisioning, migration, and encryption of canonical chats
-remain separate work. Do not enable a managed-encryption indicator or point an
-encrypted file scope at existing plaintext files.
+Subagent task and terminal-result text are excluded from this encryption path:
+the companion transient-run lifecycle repair removes their durable retention
+and keeps only cleanup identity in `subagent_runs`.
+
+Full-text transcript search is disabled for protected encrypted stores because
+its index would create a readable copy. Session reference lookup and deletion
+safety continue to use the non-content projection. User-requested exports may
+be readable to the user who requested them.
+
+The forward migration verifies encrypted read-back before removing plaintext
+archive files. It checkpoints and vacuums SQLite after conversion, but this
+cannot promise forensic erasure from filesystem snapshots, storage-device
+remapping, or copies outside the managed state. Grogu keeps no backups.
+Interrupted migration can be retried; missing or wrong keys and unsupported
+schema versions fail closed rather than reopening the store as plaintext.
+Protected encrypted agent databases use schema version 26 so older builds
+refuse them. Ordinary personal Grogu databases keep the upstream schema and
+version. When merging this fork with upstream, resolve the shared numeric
+sequence first: select an unused protected version above the updated upstream
+agent schema and update the protected-version contract, migration checks, and
+tests together; never reuse an upstream number.
 
 ## Verification and release gates
 

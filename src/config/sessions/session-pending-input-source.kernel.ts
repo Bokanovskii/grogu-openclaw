@@ -6,6 +6,7 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { parseSessionPendingInputMessage } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { readTranscriptMessageByScopedIdempotencyKey } from "./session-accessor.sqlite-transcript-store.js";
+import { openSessionPendingInputMessage } from "./session-pending-input-encryption.js";
 import type {
   PendingInputSourceRead,
   PendingInputSourceSnapshot,
@@ -56,7 +57,17 @@ export function readPendingInputSourceInDatabase(
       if (pending.bytes > MAX_PAYLOAD_BYTES) {
         throw new Error("Submitted input exceeds the Gateway payload limit");
       }
-      snapshot.pending = executeSqliteQueryTakeFirstSync(database.db, pendingQuery.selectAll());
+      const row = executeSqliteQueryTakeFirstSync(database.db, pendingQuery.selectAll());
+      snapshot.pending = row
+        ? {
+            ...row,
+            message_json: openSessionPendingInputMessage(
+              database.db,
+              row.input_id,
+              row.message_json,
+            ),
+          }
+        : undefined;
     } else if (!input.pendingOnly) {
       if (sessionTranscriptIndexNeedsReconcile(database.db, input.sessionId)) {
         throw new SessionTranscriptProjectionUnavailableError(input.sessionId);

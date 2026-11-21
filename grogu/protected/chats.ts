@@ -17,6 +17,7 @@ import {
 } from "../../src/config/sessions/session-entry-read-runtime.js";
 import { readTranscriptStatsAsync } from "../../src/config/sessions/session-transcript-stats.js";
 import type { SessionEntry } from "../../src/config/sessions/types.js";
+import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encryption.js";
 import { ProtectedError } from "./errors.js";
 import { projectToolResult } from "./tool-events.js";
 
@@ -45,7 +46,10 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     throw new TypeError("Protected chats require an isolated absolute state directory and budget.");
   }
   const agentId = "protected";
-  const env = Object.freeze({ OPENCLAW_STATE_DIR: options.stateDir });
+  const env = Object.freeze({
+    OPENCLAW_STATE_DIR: options.stateDir,
+    [PROTECTED_STORAGE_KEY_FILE_ENV]: process.env[PROTECTED_STORAGE_KEY_FILE_ENV],
+  });
   const storePath = path.join(
     options.stateDir,
     "agents",

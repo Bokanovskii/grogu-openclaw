@@ -4,6 +4,7 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { readLegacyCompactionHistory } from "./legacy-compaction-history.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope-helpers.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import { isSessionEntryDiskBudgetEvictable } from "./store-maintenance.js";
 import type { SessionEntry } from "./types.js";
 
@@ -50,7 +51,9 @@ export function addRetainedWindowSessionReferences(
       "session_nodes.updated_at",
       "session_nodes.pinned_at",
     ])
-    .$if(diskBudget !== undefined, (projection) => projection.select("session_nodes.entry_json"))
+    .$if(diskBudget !== undefined, (projection) =>
+      projection.select(sessionEntryJsonSql(database.db).as("entry_json")),
+    )
     .where((eb) =>
       eb.or([
         eb("session_nodes.archived_at", "is not", null),

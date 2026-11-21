@@ -16,6 +16,10 @@ import {
   resolveSqliteScope,
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
+import {
+  protectedSessionEntryPayloadSql,
+  sessionEntryJsonSql,
+} from "./session-entry-encryption.js";
 import type { SessionEntry } from "./types.js";
 
 function isInside(root: string, target: string): boolean {
@@ -70,19 +74,24 @@ function listLegacyWorktreeSessionEntries(params: {
   const resolved = resolveSqliteScope({ ...params, sessionKey: "" });
   const result = withOpenClawAgentDatabaseReadOnly((database) => {
     const db = getSessionKysely(database.db);
+    const entryJson = sessionEntryJsonSql(database.db);
+    const protectedEntry = protectedSessionEntryPayloadSql(database.db);
     const rows = executeSqliteQuerySync(
       database.db,
       db
         .selectFrom("session_nodes")
         .selectAll()
+        .$if(protectedEntry !== undefined, (query) =>
+          query.select(protectedEntry!.as("protected_entry_json")),
+        )
         .where(
           /* kysely-allow-raw: Legacy worktree detection targets the retired JSON shape without materializing every session. */
           sql<boolean>`session_nodes.entry_valid != 1 OR (
-            json_valid(session_nodes.entry_json)
-            AND json_type(session_nodes.entry_json, '$.worktree') = 'object'
+            json_valid(${entryJson})
+            AND json_type(${entryJson}, '$.worktree') = 'object'
             AND (
-              json_type(session_nodes.entry_json, '$.worktree.canonicalWorkspaceDir') IS NULL
-              OR json_extract(session_nodes.entry_json, '$.worktree.canonicalWorkspaceDir') = ''
+              json_type(${entryJson}, '$.worktree.canonicalWorkspaceDir') IS NULL
+              OR json_extract(${entryJson}, '$.worktree.canonicalWorkspaceDir') = ''
             )
           )`,
         )

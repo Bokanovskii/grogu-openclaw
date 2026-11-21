@@ -886,7 +886,7 @@ describe("openclaw agent database", () => {
       unsupported.close();
     }
     expect(() => withOpenClawAgentDatabaseReadOnly(() => "unused", options)).toThrow(
-      `newer schema version ${OPENCLAW_AGENT_SCHEMA_VERSION + 1}`,
+      "encrypted schema version but no encryption marker",
     );
   });
 
@@ -2405,7 +2405,7 @@ describe("openclaw agent database", () => {
       databasePath,
       stateDir,
     });
-    const futureVersion = OPENCLAW_AGENT_SCHEMA_VERSION + 1;
+    const futureVersion = OPENCLAW_AGENT_SCHEMA_VERSION + 2;
     try {
       await opener.ready;
       opener.child.stdin.end("go\n");

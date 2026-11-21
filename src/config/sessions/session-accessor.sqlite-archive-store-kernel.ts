@@ -10,12 +10,20 @@ import {
   SESSION_TRANSCRIPT_ARCHIVES_TABLE,
 } from "../../state/openclaw-agent-session-transcript-archive-schema.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
-import { resolveRegisteredSqliteTranscriptArchiveName } from "./session-accessor.sqlite-archive-artifact.js";
+import {
+  hashSessionArchiveBytes,
+  resolveRegisteredSqliteTranscriptArchiveName,
+} from "./session-accessor.sqlite-archive-artifact.js";
 import type {
   MaterializedSessionStateDeletePlan,
   TranscriptArchivePublishPlan,
   TranscriptArchivePublishResult,
 } from "./session-accessor.sqlite-archive-types.js";
+import {
+  isProtectedSessionTranscriptArchiveStore,
+  openSessionTranscriptArchiveBytes,
+  sealSessionTranscriptArchiveBytes,
+} from "./session-transcript-archive-encryption.js";
 
 type TranscriptArchiveDatabase = Pick<OpenClawAgentKyselyDatabase, "session_transcript_archives">;
 
@@ -198,14 +206,19 @@ export function persistSessionTranscriptArchive(
   }
   ensureSessionTranscriptArchiveSchema(database.db);
   const db = getNodeSqliteKysely<TranscriptArchiveDatabase>(database.db);
+  const protectedStore = isProtectedSessionTranscriptArchiveStore(database.db);
+  const storedBytes = protectedStore
+    ? sealSessionTranscriptArchiveBytes(database.db, archive.bytes, plan.sessionId, generation)
+    : Buffer.from(archive.bytes);
+  const storedHash = hashSessionArchiveBytes(storedBytes);
   const inserted = executeSqliteQuerySync(
     database.db,
     db
       .insertInto("session_transcript_archives")
       .values({
-        archive_blob: archive.bytes,
+        archive_blob: storedBytes,
         archive_name: archive.archiveName,
-        archive_sha256: archive.sha256,
+        archive_sha256: storedHash,
         created_at: archive.createdAt,
         encoding: archive.encoding,
         generation,
@@ -240,12 +253,16 @@ export function persistSessionTranscriptArchive(
   if (
     !persisted ||
     persisted.archive_name !== archive.archiveName ||
-    persisted.archive_sha256 !== archive.sha256 ||
     persisted.created_at !== archive.createdAt ||
     persisted.encoding !== archive.encoding ||
     persisted.reason !== plan.reason ||
     persisted.session_key !== sessionKey ||
-    !Buffer.from(persisted.archive_blob).equals(Buffer.from(archive.bytes))
+    !openSessionTranscriptArchiveBytes(
+      database.db,
+      persisted.archive_blob,
+      plan.sessionId,
+      generation,
+    ).equals(Buffer.from(archive.bytes))
   ) {
     throw new Error(`Conflicting SQLite transcript archive for ${plan.sessionId}`);
   }

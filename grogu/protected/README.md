@@ -77,6 +77,10 @@ levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
 available to that account. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
+`thinking.nativeChoices` groups aliases for the same model effort.
+`thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
+An absent native list means that the model's native choices are unknown.
+The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
 

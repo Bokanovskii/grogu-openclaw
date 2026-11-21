@@ -108,6 +108,15 @@ export const ProtectedModelSchema = node({
     node({
       levels: Type.Array(ProtectedThinkLevelSchema),
       default: ProtectedThinkLevelSchema,
+      nativeChoices: Type.Optional(
+        Type.Array(
+          node({
+            level: ProtectedThinkLevelSchema,
+            aliases: Type.Array(ProtectedThinkLevelSchema),
+          }),
+        ),
+      ),
+      orchestrationLevels: Type.Optional(Type.Array(ProtectedThinkLevelSchema)),
     }),
   ),
 });

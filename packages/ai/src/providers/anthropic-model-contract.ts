@@ -18,7 +18,7 @@ import {
   supportsClaudeNativeXhighEffort,
 } from "@openclaw/llm-core";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { clampThinkingLevel } from "../model-utils.js";
+import { clampThinkingLevel, type ThinkingModel } from "../model-utils.js";
 import type { AnthropicEffort } from "../provider-options.js";
 import type {
   Context,
@@ -173,7 +173,7 @@ export function defaultsClaudeAdaptiveThinking(model: {
 
 /** Resolve provider-native effort once for direct and managed Claude requests. */
 export function resolveAnthropicThinkingEffort(
-  model: Model<"anthropic-messages">,
+  model: ThinkingModel<"anthropic-messages">,
   level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
   const requestedLevel: ModelThinkingLevel | undefined =

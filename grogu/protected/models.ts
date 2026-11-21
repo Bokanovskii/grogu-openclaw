@@ -1,5 +1,8 @@
+import { resolveAnthropicThinkingEffort } from "@openclaw/ai/internal/anthropic";
 import type { ProtectedModel } from "@openclaw/gateway-protocol/protected";
+import { mapThinkingLevel } from "../../src/agents/embedded-agent-runner/utils.js";
 import {
+  resolveNativeThinkingChoices,
   resolveThinkingDefaultForModel,
   resolveThinkingProfile,
   type ThinkLevel,
@@ -32,7 +35,36 @@ export function withThinking(model: ProtectedModel, catalogEntry?: ThinkingCatal
     });
   const preferred = model.provider === "sparky" ? "ultra" : resolveThinkingDefaultForModel(params);
   const defaultLevel = levels.includes(preferred) ? preferred : (levels[0] ?? "off");
-  return { ...model, thinking: { levels, default: defaultLevel } };
+  const nativeChoices = resolveNativeThinkingChoices({
+    ...params,
+    levels,
+    mapLevel: mapThinkingLevel,
+    ...(catalogEntry?.api === "anthropic-messages" && catalogEntry.reasoning
+      ? {
+          mapEffort: (level: Exclude<ThinkLevel, "ultra" | "adaptive">) =>
+            resolveAnthropicThinkingEffort(
+              {
+                id: catalogEntry.id,
+                provider: catalogEntry.provider,
+                api: "anthropic-messages",
+                reasoning: catalogEntry.reasoning === true,
+                thinkingLevelMap: catalogEntry.thinkingLevelMap,
+                params: catalogEntry.params,
+              },
+              level,
+            ),
+        }
+      : {}),
+  });
+  return {
+    ...model,
+    thinking: {
+      levels,
+      default: defaultLevel,
+      ...(nativeChoices ? { nativeChoices } : {}),
+      orchestrationLevels: levels.filter((level) => level === "ultra"),
+    },
+  };
 }
 
 export async function fetchProtectedCopilotModels(

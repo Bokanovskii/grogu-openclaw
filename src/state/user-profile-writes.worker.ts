@@ -496,13 +496,16 @@ export function syncGitHubIdentity(
 export function setDisplayName(
   profileId: string,
   name: string | null,
-  options: UserProfileMutationOptions = {},
+  options: UserProfileMutationOptions & { requireExactProfile?: boolean } = {},
 ): UserProfileListItem {
   const now = Date.now();
   ensureUserProfilesSchema(options);
   return runUserProfileWriteTransaction(
     ({ db }) => {
       const profile = requireResolvedUserProfileMetadataById(db, profileId);
+      if (options.requireExactProfile && profile.id !== profileId) {
+        throw new UserProfileNotFoundError(profileId);
+      }
       options.mutation?.before(db, profile.id);
       executeSqliteQuerySync(
         db,

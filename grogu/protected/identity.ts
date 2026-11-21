@@ -8,6 +8,7 @@ type JsonWebKey = webcrypto.JsonWebKey;
 export type VerifiedProtectedIdentity = {
   issuer: string;
   subject: string;
+  kind: "human" | "development";
   displayName?: string;
   /** Expiry of the stored session record; assertCurrent enforces the assertion's own expiry. */
   expiresAt: number;
@@ -255,6 +256,7 @@ export function createCloudflareAccessVerifier(options: {
       return {
         issuer: issuer.origin,
         subject,
+        kind: testClient ? "development" : "human",
         // A test client session follows its credential generation, not each short-lived assertion.
         // Its record never expires, so logout lasts until the credential rotates.
         expiresAt: testClient ? Number.MAX_SAFE_INTEGER : expiresAt,

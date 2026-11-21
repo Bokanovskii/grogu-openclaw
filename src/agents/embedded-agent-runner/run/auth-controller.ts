@@ -198,6 +198,7 @@ export function createEmbeddedRunAuthController(params: {
     apiKey: string;
     authMode: string;
     profileId?: string;
+    previousPublicHeaders?: Readonly<Record<string, string>>;
   }) => {
     const assertRequestCredential = () => {
       if (params.requestModelCredential) {
@@ -228,6 +229,7 @@ export function createEmbeddedRunAuthController(params: {
         ),
         authMode: prepareParams.authMode,
         profileId: prepareParams.profileId,
+        previousPublicHeaders: prepareParams.previousPublicHeaders,
       },
     });
     assertRequestCredential();
@@ -279,6 +281,7 @@ export function createEmbeddedRunAuthController(params: {
         apiKey: sourceApiKey,
         authMode: runtimeAuthState.authMode,
         profileId: runtimeAuthState.profileId,
+        previousPublicHeaders: runtimeAuthState.publicHeaders,
       });
       if (!preparedAuth?.apiKey) {
         throw new Error(
@@ -302,6 +305,7 @@ export function createEmbeddedRunAuthController(params: {
       state.runtimeAuthState = {
         ...activeRuntimeAuthState,
         expiresAt: preparedAuth.expiresAt,
+        publicHeaders: preparedAuth.publicHeaders,
       };
       if (preparedAuth.expiresAt) {
         const remaining = preparedAuth.expiresAt - Date.now();
@@ -564,6 +568,7 @@ export function createEmbeddedRunAuthController(params: {
           authMode: apiKeyInfo.mode,
           profileId,
           expiresAt: preparedAuth.expiresAt,
+          publicHeaders: preparedAuth.publicHeaders,
         };
         if (preparedAuth.expiresAt) {
           scheduleRuntimeAuthRefresh();

@@ -2,13 +2,50 @@ import { describe, expect, it } from "vitest";
 import { isSecretValueRegisteredForRedaction } from "../logging/secret-redaction-registry.js";
 import { looksLikeSecretSentinel, mintSecretSentinel } from "../secrets/sentinel.js";
 import {
+  applyPreparedRuntimeAuthToModel,
   attachModelProviderRequestTransport,
   getModelProviderRequestTransport,
 } from "./provider-request-config.js";
 import { protectPreparedProviderRuntimeAuth } from "./provider-runtime-auth-protection.js";
 import { unwrapModelHeaderSentinelsForProviderEgress } from "./provider-secret-egress.js";
+import { castAgentMessage } from "./test-helpers/agent-message-fixtures.js";
+import { redactTranscriptMessage } from "./transcript-redact.js";
 
 describe("protectPreparedProviderRuntimeAuth", () => {
+  it("keeps public provider identity out of transcript redaction while protecting headers", () => {
+    const headerSecret = "runtime-custom-header-secret";
+    const result = protectPreparedProviderRuntimeAuth({
+      provider: "github-copilot",
+      preparedAuth: {
+        apiKey: "runtime-copilot-token",
+        publicHeaders: { "Openai-Organization": "github-copilot" },
+        request: {
+          headers: { "x-custom-auth": headerSecret },
+          auth: { mode: "header", headerName: "x-auth", value: "runtime-auth-header-secret" },
+        },
+      },
+    });
+
+    expect(isSecretValueRegisteredForRedaction("github-copilot")).toBe(false);
+    const saved = redactTranscriptMessage(
+      castAgentMessage({ role: "assistant", content: [], provider: "github-copilot" }),
+      {},
+    );
+    expect(saved).toHaveProperty("provider", "github-copilot");
+    expect(result?.request?.headers?.["Openai-Organization"]).toBe("github-copilot");
+    expect(looksLikeSecretSentinel(result?.request?.headers?.["x-custom-auth"] ?? "")).toBe(true);
+    expect(isSecretValueRegisteredForRedaction(headerSecret)).toBe(true);
+    expect(looksLikeSecretSentinel(result?.apiKey ?? "")).toBe(true);
+    const auth = result?.request?.auth;
+    expect(auth?.mode === "header" && looksLikeSecretSentinel(auth.value)).toBe(true);
+    expect(isSecretValueRegisteredForRedaction("runtime-auth-header-secret")).toBe(true);
+    const inputModel: { provider: string; headers?: Record<string, string> } = {
+      provider: "github-copilot",
+    };
+    const model = applyPreparedRuntimeAuthToModel(inputModel, result);
+    expect(model.headers?.["Openai-Organization"]).toBe("github-copilot");
+  });
+
   it("sentinels a real credential returned by the auth exchange and registers it for redaction", () => {
     const runtimeToken = "bedrock-api-key-egress-runtime-token";
     const result = protectPreparedProviderRuntimeAuth({

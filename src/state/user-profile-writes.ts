@@ -202,9 +202,15 @@ export async function setCanonicalUserProfileRole(
 export async function setCanonicalUserProfileDisplayName(
   profileId: string,
   name: string | null,
-  options: ProfileWriteOptions = {},
+  options: ProfileWriteOptions & { requireExactProfile?: boolean } = {},
 ) {
-  return unwrap(await write("userProfiles.setDisplayName", { profileId, name }, options));
+  return unwrap(
+    await write(
+      "userProfiles.setDisplayName",
+      { profileId, name, requireExactProfile: options.requireExactProfile },
+      options,
+    ),
+  );
 }
 export async function setCanonicalUserProfileAvatar(
   profileId: string,

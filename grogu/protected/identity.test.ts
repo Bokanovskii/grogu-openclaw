@@ -82,6 +82,7 @@ void test("the test client proves its credential through a fresh Access request"
   const verify = verifier(testClientId, forwardValid(current));
   const first = await verify(serviceRequest(serviceToken()));
   assert.equal(first.subject, `service-token:${testClientId}`);
+  assert.equal(first.kind, "development");
   const [proof] = verify.proofs;
   assert.equal(proof?.get("cookie"), null);
   assert.equal(proof?.get("cf-access-jwt-assertion"), null);
@@ -176,6 +177,7 @@ void test("human identities keep cookie and identity-lookup behavior", async () 
     new Request(`${origin}/me`, { headers: { cookie: `CF_Authorization=${jwt}` } }),
   );
   assert.equal(identity.subject, human);
+  assert.equal(identity.kind, "human");
   const next = await verify(
     new Request(`${origin}/me`, {
       headers: { cookie: `CF_Authorization=${token({ sub: human })}` },

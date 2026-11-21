@@ -83,6 +83,37 @@ concurrent requests for each key. If Family uses the same Sparky key as personal
 Grogu, the two services share that limit, and Family reports `provider_busy`
 while personal Grogu is busy. Give Family its own Sparky key.
 
+After admission, a turn continues if the browser disconnects or the phone sleeps.
+The runtime saves the reply without an attached reader. Request credentials stay
+in memory for that turn, never in the saved chat. Stop, logout, revoked access,
+session expiry, the turn timeout, and listener shutdown still interrupt work.
+
+`GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
+but only for the profile and Access session that started it. Clients can read
+the chat again to find the saved reply. This does not replay the stream or start
+another model request. Another Access session can read its user's chat, but it
+does not receive the run ID. Active runs do not survive a listener restart.
+Updates drain or interrupt them before the new listener starts.
+
+## File encryption API
+
+The internal `createProtectedHttp` API accepts a host-owned `encryption` handle
+from `createStorageValueEncryption`. With that handle, authorized user files use
+AES-256-GCM and a fresh data key for each write. The service key wraps each data
+key. Both the wrapped key and the content are bound to the canonical profile.
+Moving a file within that profile does not require re-encryption.
+
+The file owner preserves its path, directory-identity, link, and authority checks.
+Reads reject plaintext, damaged content, the wrong key, and content copied from
+another profile. File limits and returned sizes describe plaintext bytes. Quotas
+include the encrypted size, which adds 96 bytes per file. The caller must retain
+the handle until requests settle, then dispose it.
+
+This API does not enable encryption in `main.ts`. The deployed service still
+stores plaintext. Key provisioning, migration, and encryption of canonical chats
+remain separate work. Do not enable a managed-encryption indicator or point an
+encrypted file scope at existing plaintext files.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
@@ -136,8 +167,31 @@ until the secret is rotated. The raw secret is
 kept only in memory for the request. The
 user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
 That subject gets its own profile and storage, like any other user. The future
-account directory and sharing must exclude it. To revoke the test user, delete
+sharing feature must exclude it. To revoke the test user, delete
 the service token or its Access policy, or run `test-client none` and restart.
 For owner-driven revocation, stop the listener before invoking
 `revoke-profile PROFILE_ID` and restart after it succeeds; the canonical denial
 survives the restart. `GET /healthz` reports listener readiness without user data.
+
+## Accounts and people
+
+`GET /api/protected/v1/account` returns the signed-in person's profile and
+directory settings. `PUT /api/protected/v1/account/name` saves a `displayName`
+of 1 to 40 characters. `PUT /api/protected/v1/account/directory-settings`
+saves a `description` of up to 140 characters and a Boolean `hidden` value.
+These are separate saves. Neither endpoint accepts another person's ID.
+
+`GET /api/protected/v1/people` returns eligible people with their ID, display
+name, and description. It returns up to 100 people and a `nextCursor`. If the
+cursor is not null, pass it as the `cursor` query parameter for the next page.
+The directory does not include email addresses or identity claims. People are
+listed by default. Hide me removes a person from the directory. It does not
+revoke a share. The development identity is always hidden and receives an
+empty directory, even if its stored settings say otherwise.
+
+Names use the canonical profile store. Directory settings use the existing
+profile preferences store. They remain after logout or access revocation and
+follow the existing profile merge and deletion rules. A revoked or no longer
+allowed identity is not listed. Older versions ignore the directory settings
+and do not provide this API. They cannot enforce Hide me for a separate
+directory implementation.

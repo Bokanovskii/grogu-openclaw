@@ -84,6 +84,13 @@ Existing one-argument hooks remain compatible, and direct callers can omit confi
     },
     ```
 
+    The result's `request.headers` values are treated as secrets. Put only
+    provider-owned public constants in `publicHeaders`. Keep user-supplied
+    headers and credentials in `request.headers` or `request.auth`.
+    On refresh, `previousPublicHeaders` identifies the public constants from
+    the previous exchange. Use it to distinguish those constants from other
+    model headers when constructing new request overrides.
+
   </Tab>
   <Tab title="Custom headers">
     For providers that need custom request headers or body modifications:

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   isProtectedCreateChat,
+  isProtectedAccountName,
+  isProtectedDirectorySettings,
   isProtectedRenew,
   isProtectedSteer,
   isProtectedTurnRequest,
@@ -12,7 +14,16 @@ import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
+import {
+  getCanonicalUserPreferences,
+  setCanonicalUserPreferences,
+} from "../../src/state/user-preferences.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
+import {
+  prepareCurrentUserProfileAliases,
+  readVerifiedUserProfileDirectory,
+} from "../../src/state/user-profile-reads.js";
+import { setCanonicalUserProfileDisplayName } from "../../src/state/user-profile-writes.js";
 import { createStorageAdmission, type StorageLimits } from "./capacity.js";
 import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
@@ -23,13 +34,14 @@ import {
   type ProtectedIdentityVerifier,
 } from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
-import { protectedTurnTimeoutMs } from "./settings.js";
+import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
 
 const base = "/api/protected/v1";
 const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
 const maxBodyBytes = 48_000;
+const directoryPreference = "grogu.protected.directory";
 type Run = {
   id: string;
   profileId: string;
@@ -100,8 +112,10 @@ export function createProtectedHttp(options: {
   origin: string;
   stateDir: string;
   verifyIdentity: ProtectedIdentityVerifier;
+  directory: { issuer: string; allowedSubjects: readonly string[] };
   answerAccessProof?: (request: Request) => Promise<Response>;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
+  encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
   providerRelay?: ReturnType<typeof createProviderRelay>;
   maxChatsPerUser: number;
@@ -163,6 +177,9 @@ export function createProtectedHttp(options: {
         );
       }
       const identity = await options.verifyIdentity(request);
+      if (identity.issuer !== options.directory.issuer) {
+        return unauthorized();
+      }
       const rawCurrent = () => {
         identity.assertCurrent();
         if (revokedSessions.has(identity.sessionId)) {
@@ -284,6 +301,111 @@ export function createProtectedHttp(options: {
             openaiConnect: options.providerRelay !== undefined,
           },
         });
+      }
+      if (pathname === "/account" && method === "GET") {
+        const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+          env: chats.env,
+        });
+        const preferences = await getCanonicalUserPreferences(profile.id, [directoryPreference], {
+          env: chats.env,
+          requireExactProfile: true,
+        });
+        await revalidate();
+        profileAuthority.assertCurrent();
+        if (!preferences) {
+          return unauthorized();
+        }
+        const saved = preferences.entries[directoryPreference];
+        if (saved !== undefined && !isProtectedDirectorySettings(saved)) {
+          throw new ProtectedError(
+            409,
+            "account_settings_invalid",
+            "Save your directory settings again.",
+          );
+        }
+        return json({
+          user: {
+            id: profile.id,
+            displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
+          },
+          directory: {
+            description: saved?.description ?? "",
+            hidden: identity.kind === "development" || saved?.hidden === true,
+          },
+        });
+      }
+      if (pathname === "/account/name" && method === "PUT") {
+        const input = await body(request);
+        if (!isProtectedAccountName(input) || !input.displayName.trim()) {
+          return invalid();
+        }
+        await revalidate();
+        const updated = await setCanonicalUserProfileDisplayName(
+          profile.id,
+          input.displayName.trim(),
+          {
+            env: chats.env,
+            assertCurrent,
+            requireExactProfile: true,
+          },
+        );
+        assertCurrent();
+        return json({ user: { id: updated.profile.id, displayName: updated.profile.displayName } });
+      }
+      if (pathname === "/account/directory-settings" && method === "PUT") {
+        const input = await body(request);
+        if (!isProtectedDirectorySettings(input)) {
+          return invalid();
+        }
+        if (identity.kind === "development" && !input.hidden) {
+          throw new ProtectedError(
+            403,
+            "development_hidden",
+            "The development account is always hidden.",
+          );
+        }
+        await revalidate();
+        const saved = await setCanonicalUserPreferences(
+          profile.id,
+          { [directoryPreference]: input },
+          { env: chats.env, assertCurrent, requireExactProfile: true },
+        );
+        if (!saved?.ok) {
+          throw new ProtectedError(
+            409,
+            "account_settings_not_saved",
+            "Could not save your directory settings.",
+          );
+        }
+        assertCurrent();
+        return json({ directory: input });
+      }
+      if (pathname === "/people" && method === "GET") {
+        if (identity.kind === "development") {
+          await revalidate();
+          return json({ people: [], nextCursor: null });
+        }
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        if (cursor !== null && !subjectPattern.test(cursor)) {
+          return invalid();
+        }
+        const result = await readVerifiedUserProfileDirectory(
+          {
+            issuer: options.directory.issuer,
+            subjects: options.directory.allowedSubjects.filter((subject) =>
+              subjectPattern.test(subject),
+            ),
+            preferenceKey: directoryPreference,
+            after: cursor,
+            limit: 100,
+          },
+          { env: chats.env },
+        );
+        await revalidate();
+        if (!result.isCurrent() || result.people.some((person) => deniedProfiles.has(person.id))) {
+          throw new ProtectedError(409, "directory_changed", "The directory changed. Try again.");
+        }
+        return json({ people: result.people, nextCursor: result.nextCursor });
       }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);
@@ -463,7 +585,13 @@ export function createProtectedHttp(options: {
       if (!rest && method === "GET") {
         const chat = await readChat(id);
         await revalidate();
-        return json({ chat });
+        const active = runs.get(id);
+        return json({
+          chat,
+          ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
+            ? { activeRun: { id: active.id } }
+            : {}),
+        });
       }
       if (!rest && method === "DELETE") {
         const version = request.headers.get("if-match");
@@ -555,10 +683,15 @@ export function createProtectedHttp(options: {
         if (runs.has(id) || mutations.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
         }
-        const storage = await admitStorage?.(profile.id, assertCurrent, "turn");
+        // Storage charges continue after the client disconnects, so they check only the grant.
+        const storage = await admitStorage?.(profile.id, assertGrant, "turn");
         if (shutdown.signal.aborted || runs.has(id) || mutations.has(id)) {
           storage?.release();
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+        }
+        if (request.signal.aborted) {
+          storage?.release();
+          request.signal.throwIfAborted();
         }
         const run: Run = {
           id: randomUUID(),
@@ -567,20 +700,23 @@ export function createProtectedHttp(options: {
           steering: new Map(),
         };
         runs.set(id, run);
+        // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
+        // detaches from the stream, and the reply still finishes and saves.
         const signal = AbortSignal.any([
           shutdown.signal,
-          request.signal,
           run.controller.signal,
           AbortSignal.timeout(protectedTurnTimeoutMs + 5000),
         ]);
         const assertRun = () => {
-          assertCurrent();
+          assertGrant();
           signal.throwIfAborted();
         };
         const checkRun = async () => {
-          await revalidate();
+          assertRun();
+          await checkGrant();
           assertRun();
         };
+        const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
         let checking = false;
         const liveCheck = setInterval(() => {
           if (!checking) {
@@ -593,26 +729,29 @@ export function createProtectedHttp(options: {
           }
         }, 5000);
         liveCheck.unref();
+        let attached = true;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             const encoder = new TextEncoder();
-            const send = (event: ProtectedTurnEvent) =>
-              controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+            const write = (line: string) => {
+              if (attached) {
+                try {
+                  controller.enqueue(encoder.encode(line));
+                } catch {
+                  attached = false;
+                }
+              }
+            };
+            const send = (event: ProtectedTurnEvent) => write(`${JSON.stringify(event)}\n`);
             // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
             // from closing an idle response; clients skip blank lines.
-            const keepalive = setInterval(() => {
-              try {
-                controller.enqueue(encoder.encode("\n"));
-              } catch {
-                // Client disconnected.
-              }
-            }, 15_000);
+            const keepalive = setInterval(() => write("\n"), 15_000);
             keepalive.unref();
             const complete = async () => {
               try {
                 assertRun();
                 send({ type: "start", runId: run.id });
-                const before = await chats.read(authority, id);
+                const before = await chats.read(runAuthority, id);
                 await files(
                   async (owned) => {
                     const execute = () =>
@@ -620,7 +759,7 @@ export function createProtectedHttp(options: {
                         id,
                         runId: run.id,
                         profileId: profile.id,
-                        target: chats.scope(authority, id),
+                        target: chats.scope(runAuthority, id),
                         input,
                         files: storage?.files(owned) ?? owned,
                         signal,
@@ -652,7 +791,7 @@ export function createProtectedHttp(options: {
                   signal,
                 );
                 storage?.assertResult();
-                const chat = await chats.read(authority, id);
+                const chat = await chats.read(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 if (
@@ -679,11 +818,7 @@ export function createProtectedHttp(options: {
                 const issue = signal.aborted
                   ? new ProtectedError(409, "interrupted", "The turn was interrupted.")
                   : publicError(failure);
-                try {
-                  send({ type: "error", code: issue.code, message: issue.message });
-                } catch {
-                  // Client disconnected.
-                }
+                send({ type: "error", code: issue.code, message: issue.message });
               } finally {
                 clearInterval(keepalive);
                 storage?.release();
@@ -692,7 +827,8 @@ export function createProtectedHttp(options: {
                 for (const queued of run.steering.values()) {
                   queued.abort();
                 }
-                if (controller.desiredSize !== null) {
+                if (attached) {
+                  attached = false;
                   controller.close();
                 }
               }
@@ -700,7 +836,8 @@ export function createProtectedHttp(options: {
             void track(complete());
           },
           cancel() {
-            run.controller.abort();
+            // Stop is an explicit route. A closed connection only detaches the reader.
+            attached = false;
           },
         });
         return new Response(stream, {

@@ -38,7 +38,7 @@ import {
   buildGithubCopilotReplayPolicy,
   sanitizeGithubCopilotReplayHistory,
 } from "./replay-policy.js";
-import { buildCopilotRuntimeHeaders } from "./runtime-identity.js";
+import { buildCopilotRuntimeHeaderParts } from "./runtime-identity.js";
 import { wrapCopilotProviderStream } from "./stream.js";
 
 const COPILOT_ENV_VAR = "COPILOT_GITHUB_TOKEN";
@@ -627,12 +627,16 @@ export default definePluginEntry({
             config: ctx.config,
           }),
         });
+        const headers = buildCopilotRuntimeHeaderParts({
+          config: ctx.config,
+          headers: ctx.model.headers,
+          previousPublicHeaders: ctx.previousPublicHeaders,
+        });
         return {
           apiKey: auth.apiKey,
           baseUrl: auth.baseUrl,
-          request: {
-            headers: buildCopilotRuntimeHeaders({ config: ctx.config, headers: ctx.model.headers }),
-          },
+          publicHeaders: headers.publicHeaders,
+          request: { headers: headers.headers },
         };
       },
       resolveUsageAuth: async (ctx) => await ctx.resolveOAuthToken(),

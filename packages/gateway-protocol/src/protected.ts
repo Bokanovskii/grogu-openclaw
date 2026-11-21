@@ -171,9 +171,38 @@ export const ProtectedAutomationCapabilitiesSchema = node({
   draftValidation: Type.Boolean(),
   list: Type.Boolean(),
   create: Type.Boolean(),
+  scheduleControl: Type.Boolean(),
   run: Type.Boolean(),
   sharing: Type.Boolean(),
   notifications: Type.Boolean(),
+});
+export const ProtectedAutomationScheduleSchema = Type.Union([
+  node({
+    kind: Type.Literal("every"),
+    everyMs: Type.Integer({ minimum: 1, maximum: MAX_DATE_TIMESTAMP_MS }),
+  }),
+  node({
+    kind: Type.Literal("cron"),
+    expr: Type.String({ minLength: 1, maxLength: 128 }),
+    tz: Type.String({ minLength: 1, maxLength: 64 }),
+  }),
+]);
+export const ProtectedAutomationCronCatalogSchema = node({
+  format: Type.Literal("5-field"),
+  repeats: Type.Array(
+    Type.Union([Type.Literal("daily"), Type.Literal("weekdays"), Type.Literal("saturday")]),
+    { minItems: 1, uniqueItems: true },
+  ),
+  timeZones: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), {
+    minItems: 1,
+    uniqueItems: true,
+  }),
+  timePrecision: Type.Literal("minute"),
+  staggerMs: Type.Literal(0),
+  daylightSaving: node({
+    nonexistentLocalTime: Type.Literal("skip"),
+    repeatedLocalTime: Type.Literal("first"),
+  }),
 });
 export const ProtectedAutomationCatalogSchema = node({
   capabilities: node({
@@ -183,11 +212,18 @@ export const ProtectedAutomationCatalogSchema = node({
   agents: Type.Array(ProtectedAgentSchema),
   models: Type.Array(ProtectedModelSchema, { minItems: 1, maxItems: 1 }),
   schedule: node({
-    kinds: Type.Array(Type.Literal("every"), { minItems: 1, maxItems: 1 }),
-    everyMs: node({
-      minimum: Type.Integer(),
-      maximum: Type.Integer(),
+    kinds: Type.Array(Type.Union([Type.Literal("every"), Type.Literal("cron")]), {
+      minItems: 1,
+      maxItems: 2,
+      uniqueItems: true,
     }),
+    everyMs: Type.Optional(
+      node({
+        minimum: Type.Integer(),
+        maximum: Type.Integer(),
+      }),
+    ),
+    cron: Type.Optional(ProtectedAutomationCronCatalogSchema),
   }),
   limits: node({
     definitionBytes: Type.Integer({ minimum: 1 }),
@@ -197,7 +233,7 @@ export const ProtectedAutomationCatalogSchema = node({
     doneWhenCodeUnits: Type.Integer({ minimum: 1 }),
   }),
 });
-export const ProtectedAutomationDraftSchema = node({
+const protectedAutomationDraftFields = {
   name: Type.String({ minLength: 1, maxLength: 80, pattern: "\\S" }),
   instructions: Type.String({ minLength: 1, maxLength: 16_384, pattern: "\\S" }),
   whenToNotify: Type.String({ minLength: 1, maxLength: 4_096, pattern: "\\S" }),
@@ -208,10 +244,40 @@ export const ProtectedAutomationDraftSchema = node({
     id,
   }),
   thinking: Type.Optional(ProtectedThinkLevelSchema),
-  schedule: node({
-    kind: Type.Literal("every"),
-    everyMs: Type.Integer({ minimum: 1, maximum: MAX_DATE_TIMESTAMP_MS }),
-  }),
+  schedule: ProtectedAutomationScheduleSchema,
+};
+export const ProtectedAutomationDraftSchema = node(protectedAutomationDraftFields);
+export const ProtectedAutomationCreateRequestSchema = ProtectedAutomationDraftSchema;
+export const ProtectedAutomationPatchRequestSchema = node({
+  name: Type.Optional(protectedAutomationDraftFields.name),
+  instructions: Type.Optional(protectedAutomationDraftFields.instructions),
+  whenToNotify: Type.Optional(protectedAutomationDraftFields.whenToNotify),
+  doneWhen: Type.Optional(
+    Type.Union([Type.String({ minLength: 1, maxLength: 2_000, pattern: "\\S" }), Type.Null()]),
+  ),
+  agentId: Type.Optional(protectedAutomationDraftFields.agentId),
+  model: Type.Optional(protectedAutomationDraftFields.model),
+  thinking: Type.Optional(Type.Union([ProtectedThinkLevelSchema, Type.Null()])),
+  schedule: Type.Optional(ProtectedAutomationScheduleSchema),
+});
+export const ProtectedAutomationRecordSchema = node({
+  ...protectedAutomationDraftFields,
+  thinking: ProtectedThinkLevelSchema,
+  id,
+  version: Type.String({ minLength: 1, maxLength: 128 }),
+  enabled: Type.Boolean(),
+  state: Type.Union([Type.Literal("active"), Type.Literal("paused")]),
+  nextCheckAt: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+});
+export const ProtectedAutomationListResponseSchema = node({
+  automations: Type.Array(ProtectedAutomationRecordSchema),
+});
+export const ProtectedAutomationResponseSchema = node({
+  automation: ProtectedAutomationRecordSchema,
+});
+export const ProtectedAutomationRunResponseSchema = node({
+  runId: id,
+  status: Type.Literal("queued"),
 });
 export const ProtectedAutomationDraftValidationSchema = Type.Union([
   node({
@@ -448,7 +514,17 @@ export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
+export type ProtectedAutomationSchedule = Static<typeof ProtectedAutomationScheduleSchema>;
+export type ProtectedAutomationCronCatalog = Static<typeof ProtectedAutomationCronCatalogSchema>;
 export type ProtectedAutomationDraft = Static<typeof ProtectedAutomationDraftSchema>;
+export type ProtectedAutomationCreateRequest = Static<
+  typeof ProtectedAutomationCreateRequestSchema
+>;
+export type ProtectedAutomationPatchRequest = Static<typeof ProtectedAutomationPatchRequestSchema>;
+export type ProtectedAutomationRecord = Static<typeof ProtectedAutomationRecordSchema>;
+export type ProtectedAutomationListResponse = Static<typeof ProtectedAutomationListResponseSchema>;
+export type ProtectedAutomationResponse = Static<typeof ProtectedAutomationResponseSchema>;
+export type ProtectedAutomationRunResponse = Static<typeof ProtectedAutomationRunResponseSchema>;
 export type ProtectedAutomationDraftValidation = Static<
   typeof ProtectedAutomationDraftValidationSchema
 >;

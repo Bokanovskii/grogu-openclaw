@@ -51,6 +51,22 @@ describe("cron schedule", () => {
   describe("daylight-saving transitions", () => {
     it.each([
       {
+        label: "Los Angeles schedules the first occurrence of a repeated local time",
+        timezone: "America/Los_Angeles",
+        expression: "30 1 * * *",
+        now: "2026-11-01T08:45:00.000Z",
+        next: "2026-11-02T09:30:00.000Z",
+        previous: "2026-11-01T08:30:00.000Z",
+      },
+      {
+        label: "Los Angeles skips a nonexistent spring-forward reminder",
+        timezone: "America/Los_Angeles",
+        expression: "30 2 * * *",
+        now: "2026-03-08T09:45:00.000Z",
+        next: "2026-03-09T09:30:00.000Z",
+        previous: "2026-03-07T10:30:00.000Z",
+      },
+      {
         label: "New York repeated hour retains the later same-day reminder",
         timezone: "America/New_York",
         expression: "30 1,3 * * *",

@@ -403,6 +403,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     draftValidation: true,
     list: false,
     create: false,
+    scheduleControl: false,
     run: false,
     sharing: false,
     notifications: false,
@@ -412,6 +413,18 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.deepEqual(automationCatalog.schedule.everyMs, {
     minimum: 1,
     maximum: 8_640_000_000_000_000,
+  });
+  assert.deepEqual(automationCatalog.schedule.kinds, ["every", "cron"]);
+  assert.deepEqual(automationCatalog.schedule.cron, {
+    format: "5-field",
+    repeats: ["daily", "weekdays", "saturday"],
+    timeZones: ["America/Los_Angeles"],
+    timePrecision: "minute",
+    staggerMs: 0,
+    daylightSaving: {
+      nonexistentLocalTime: "skip",
+      repeatedLocalTime: "first",
+    },
   });
   assert.equal(automationCatalog.models.length, 1);
   assert.equal(automationCatalog.models[0].provider, "sparky");
@@ -524,6 +537,18 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   });
   assert.equal(invalidIntervalResponse.status, 200);
   assert.equal((await invalidIntervalResponse.json()).valid, false);
+  const calendarDraft = {
+    ...automationDraft,
+    schedule: { kind: "cron", expr: "0 7 * * 1-5", tz: "America/Los_Angeles" },
+  };
+  const calendarValidationResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify(calendarDraft),
+  });
+  assert.deepEqual(await calendarValidationResponse.json(), {
+    valid: true,
+    draft: { ...calendarDraft, thinking: "ultra" },
+  });
   assert.equal(first.observedAgents.length, 0);
   assert.equal((await (await first.call("alice", "/storage/chats")).json()).usedBytes, 0);
   const catalogResponse = await first.call("alice", "/agents");

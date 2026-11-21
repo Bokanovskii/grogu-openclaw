@@ -22,10 +22,22 @@ const capabilities = {
   draftValidation: true,
   list: false,
   create: false,
+  scheduleControl: false,
   run: false,
   sharing: false,
   notifications: false,
 } as const;
+const cronCatalog: NonNullable<ProtectedAutomationCatalog["schedule"]["cron"]> = {
+  format: "5-field",
+  repeats: ["daily", "weekdays", "saturday"],
+  timeZones: ["America/Los_Angeles"],
+  timePrecision: "minute",
+  staggerMs: 0,
+  daylightSaving: {
+    nonexistentLocalTime: "skip",
+    repeatedLocalTime: "first",
+  },
+};
 
 const tooLongMessages: Record<string, string> = {
   name: "The name exceeds the character limit.",
@@ -63,6 +75,7 @@ function schemaErrors(value: unknown) {
 export function createProtectedAutomationCatalog(input: {
   agents: ProtectedAgentCatalogDto;
   models: readonly ProtectedModel[];
+  calendarDraftValidationAvailable?: boolean;
 }): ProtectedAutomationCatalog | undefined {
   const sparky = input.models.find((model) => model.provider === "sparky");
   if (
@@ -78,8 +91,9 @@ export function createProtectedAutomationCatalog(input: {
     agents: input.agents.agents,
     models: [sparky],
     schedule: {
-      kinds: ["every"],
+      kinds: input.calendarDraftValidationAvailable ? ["every", "cron"] : ["every"],
       everyMs: { minimum: 1, maximum: MAX_DATE_TIMESTAMP_MS },
+      ...(input.calendarDraftValidationAvailable ? { cron: cronCatalog } : {}),
     },
     limits,
   };
@@ -158,6 +172,12 @@ export function validateProtectedAutomationDraft(
   const resolvedDraft = draft
     ? { ...draft, thinking: draft.thinking ?? model.thinking.default }
     : undefined;
+  if (resolvedDraft) {
+    const scheduleError = validateSchedule(resolvedDraft.schedule, catalog);
+    if (scheduleError) {
+      errors.push(scheduleError);
+    }
+  }
   if (
     resolvedDraft &&
     Buffer.byteLength(JSON.stringify(resolvedDraft), "utf8") > limits.definitionBytes
@@ -179,4 +199,37 @@ export function validateProtectedAutomationDraft(
     valid: true,
     draft: resolvedDraft,
   };
+}
+
+function validateSchedule(
+  schedule: ProtectedAutomationDraft["schedule"],
+  catalog: ProtectedAutomationCatalog,
+) {
+  if (schedule.kind === "every") {
+    const every = catalog.schedule.everyMs;
+    return catalog.schedule.kinds.includes("every") &&
+      every !== undefined &&
+      schedule.everyMs >= every.minimum &&
+      schedule.everyMs <= every.maximum
+      ? undefined
+      : error("schedule", "unsupported_schedule", "Choose a supported schedule.");
+  }
+
+  const cron = catalog.schedule.cron;
+  const match = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5|6)$/u.exec(schedule.expr);
+  if (!catalog.schedule.kinds.includes("cron") || !cron) {
+    return error("schedule", "unsupported_schedule", "Choose a supported schedule.");
+  }
+  if (!match) {
+    return error("schedule", "unsupported_schedule", "Choose a supported repeat option.");
+  }
+  const minute = Number(match[1]);
+  const hour = Number(match[2]);
+  if (minute > 59 || hour > 23) {
+    return error("schedule", "invalid_value", "Enter a valid local time.");
+  }
+  if (!cron.timeZones.includes(schedule.tz)) {
+    return error("schedule", "unsupported_schedule", "Choose a supported time zone.");
+  }
+  return undefined;
 }

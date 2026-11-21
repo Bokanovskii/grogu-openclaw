@@ -45,6 +45,10 @@ import {
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
+import {
+  createProtectedAutomationCatalog,
+  validateProtectedAutomationDraft,
+} from "./automations.js";
 import { createStorageAdmission, measureProtectedStorage, type StorageLimits } from "./capacity.js";
 import {
   chatArtifactsDirectory,
@@ -169,6 +173,10 @@ export function createProtectedHttp(options: {
     throw new TypeError("Configure the exact protected client origin.");
   }
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const automationCatalog = createProtectedAutomationCatalog({
+    agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
+    models: options.turns.models,
+  });
   const chats = createProtectedChats({ ...options, agentCatalog });
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...options, chats, limits: options.storageLimits })
@@ -852,6 +860,24 @@ export function createProtectedHttp(options: {
           agents: agentCatalog.list(),
         };
         return json(catalog);
+      }
+      if (pathname === "/automations/catalog" && method === "GET") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        await revalidate();
+        return json(automationCatalog);
+      }
+      if (pathname === "/automations/drafts/validate" && method === "POST") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        const draft = await body(request);
+        assertCurrent();
+        const result = validateProtectedAutomationDraft(draft, automationCatalog);
+        await revalidate();
+        assertCurrent();
+        return json(result);
       }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);

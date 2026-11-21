@@ -117,6 +117,35 @@ limit, not the host's free disk space. To delete a reviewed chat, send its
 `version` in `If-Match` to the existing `DELETE /api/protected/v1/chats/:id`
 route. Read storage again after deletion to show the new total.
 
+## Automation discovery and draft validation
+
+`GET /api/protected/v1/automations/catalog` is authenticated feature discovery.
+It returns the public protected-agent catalog, the configured Sparky model and
+its supported reasoning levels/default, and capabilities. `/me` remains
+unchanged for strict older clients. If Sparky or its reasoning catalog is
+unavailable, the automation catalog route returns 404; older servers also
+return 404, so clients can keep the feature unavailable without breaking sign-in.
+At this stage only `catalog` and `draftValidation` are true; list, create, run,
+sharing, and notification capabilities are false.
+
+`POST /api/protected/v1/automations/drafts/validate` accepts an in-memory draft:
+`name`, `instructions`, `whenToNotify`, optional `doneWhen`, `agentId`,
+`model: { provider: "sparky", id }`, optional `thinking`, and
+`schedule: { kind: "every", everyMs }`. Names are limited to 80 JavaScript
+string code units; instructions to 16,384 UTF-8 bytes; notification rules to
+4,096 UTF-8 bytes; completion rules to 2,000 code units; and the normalized
+definition to 32,768 UTF-8 bytes. The request body is capped at 48,000 bytes.
+Agents, Sparky model ID, and thinking levels must match the live catalogs.
+Omitted thinking uses the catalog's actual default.
+
+Valid input returns `{ valid: true, draft }`, including the resolved thinking
+level. Invalid input returns `{ valid: false, errors }` with field, code, and
+message entries. The schedule interval is checked against the native Cron
+schema's technical range of 1 through 8,640,000,000,000,000 milliseconds; it
+does not enable scheduling or recommend a cadence. This route does not call a
+model or provider, save a draft, create a schedule, or produce a run. There is
+no automation list or persistence route yet.
+
 The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
 and display the resulting sources. It does not have a search provider;
 `web_search` is disabled. Managed search would require a separately approved

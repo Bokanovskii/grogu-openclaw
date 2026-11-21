@@ -19,6 +19,15 @@ import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
+import {
+  bindProtectedProfile,
+  editProtectedAccessRequest,
+  listProtectedAdmissions,
+  listProtectedAccessRequests,
+  readProtectedAccessRequest,
+  setProtectedRequestStatus,
+  submitProtectedAccessRequest,
+} from "./admission-store.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
@@ -95,6 +104,9 @@ function text(value: unknown, max: number) {
 export function createProtectedHttp(options: {
   origin: string;
   stateDir: string;
+  accessIssuer: string;
+  ownerSubject?: string;
+  onRemoveSubject?: (subject: string) => void;
   verifyIdentity: ProtectedIdentityVerifier;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
@@ -155,6 +167,94 @@ export function createProtectedHttp(options: {
           "Use the protected app to make this request.",
         );
       }
+      if (path === "/api/protected/v1/request-access/status" && method === "GET") {
+        const cookie = (request.headers.get("cookie") ?? "")
+          .split(";")
+          .map((part) => part.trim())
+          .find((part) => part.startsWith("protected_access_receipt="));
+        const receipt = cookie?.slice("protected_access_receipt=".length);
+        if (!receipt) {
+          return json({ request: null }, 200);
+        }
+        const requestStatus = await readProtectedAccessRequest(options.stateDir, receipt);
+        return json({ request: requestStatus ?? null }, 200);
+      }
+      if (path === "/api/protected/v1/request-access" && method === "POST") {
+        const value = await body(request);
+        const email = text(value.email, 254);
+        const name = text(value.name, 80);
+        const note = typeof value.note === "string" ? value.note : "";
+        if (note.length > 1000) {
+          return invalid();
+        }
+        const result = await submitProtectedAccessRequest(options.stateDir, { email, name, note });
+        if (!result) {
+          throw new ProtectedError(429, "request_limit", "Try again later.");
+        }
+        const headers = new Headers(commonHeaders);
+        if (result.receipt) {
+          headers.set(
+            "set-cookie",
+            `protected_access_receipt=${result.receipt}; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=Strict`,
+          );
+        }
+        return Response.json(
+          { request: { id: result.request.id, status: result.request.status } },
+          { status: 201, headers },
+        );
+      }
+      if (path === "/api/protected/v1/request-access/edit" && method === "POST") {
+        const cookie = (request.headers.get("cookie") ?? "")
+          .split(";")
+          .map((part) => part.trim())
+          .find((part) => part.startsWith("protected_access_receipt="));
+        const receipt = cookie?.slice("protected_access_receipt=".length);
+        if (!receipt) {
+          throw new ProtectedError(401, "receipt_required", "Sign in with this browser's receipt.");
+        }
+        const current = await readProtectedAccessRequest(options.stateDir, receipt);
+        if (!current || current.status !== "open" && current.status !== "denied") {
+          throw new ProtectedError(404, "request_not_found", "Request not found.");
+        }
+        const value = await body(request);
+        const name = text(value.name, 80);
+        const note = typeof value.note === "string" ? value.note : "";
+        if (note.length > 1000) {
+          return invalid();
+        }
+        const updated = await editProtectedAccessRequest(options.stateDir, {
+          receipt,
+          name,
+          note,
+        });
+        if (updated === "rate_limit") {
+          throw new ProtectedError(429, "edit_limit", "Try again later.");
+        }
+        if (!updated) {
+          throw new ProtectedError(404, "request_not_found", "Request not found.");
+        }
+        return json({ request: { id: updated.id, status: updated.status } });
+      }
+      if (path === "/api/protected/v1/request-access/withdraw" && method === "POST") {
+        const cookie = (request.headers.get("cookie") ?? "")
+          .split(";")
+          .map((part) => part.trim())
+          .find((part) => part.startsWith("protected_access_receipt="));
+        const receipt = cookie?.slice("protected_access_receipt=".length);
+        if (!receipt) {
+          throw new ProtectedError(401, "receipt_required", "Sign in with this browser's receipt.");
+        }
+        const current = await readProtectedAccessRequest(options.stateDir, receipt);
+        if (!current) {
+          throw new ProtectedError(404, "request_not_found", "Request not found.");
+        }
+        await setProtectedRequestStatus(options.stateDir, {
+          id: current.id,
+          status: "withdrawn",
+          issuer: options.accessIssuer,
+        });
+        return noContent();
+      }
       const identity = await options.verifyIdentity(request);
       const rawCurrent = () => {
         identity.assertCurrent();
@@ -163,9 +263,74 @@ export function createProtectedHttp(options: {
         }
       };
       rawCurrent();
+      const isOwner =
+        identity.issuer === options.accessIssuer &&
+        options.ownerSubject !== undefined &&
+        identity.subject === options.ownerSubject;
+      if (pathname === "/admin/requests" && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        return json({ requests: await listProtectedAccessRequests(options.stateDir) });
+      }
+      if (pathname === "/admin/people" && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        return json({ people: await listProtectedAdmissions(options.stateDir) });
+      }
+      const adminRequest = /^\/admin\/requests\/([a-f0-9-]{36})\/(approve|deny|remove)$/u.exec(pathname);
+      if (adminRequest && (method === "POST")) {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const status =
+          adminRequest[2] === "approve"
+            ? "approved"
+            : adminRequest[2] === "deny"
+              ? "denied"
+              : "removed";
+        const requestStatus = await setProtectedRequestStatus(options.stateDir, {
+          id: adminRequest[1]!,
+          status,
+          issuer: options.accessIssuer,
+        });
+        if (!requestStatus) {
+          throw new ProtectedError(404, "request_not_found", "Request not found.");
+        }
+        if (status === "removed") {
+          if (requestStatus.subject) {
+            options.onRemoveSubject?.(requestStatus.subject);
+          }
+          if (requestStatus.profileId) {
+            deniedProfiles.add(requestStatus.profileId);
+            options.providerRelay?.invalidate({ profileId: requestStatus.profileId });
+            for (const run of runs.values()) {
+              if (run.profileId === requestStatus.profileId) {
+                run.controller.abort();
+              }
+            }
+            await updateCanonicalUserProfileAccess(
+              { action: "revoke", profileId: requestStatus.profileId },
+              { env: chats.env, assertCurrent: rawCurrent },
+            );
+          }
+          // Canonical removal is reconciled by the profile lifecycle below when a profile exists.
+          return json({ request: requestStatus, policy: "removal_pending" });
+        }
+        if (status === "approved") {
+          return json({ request: requestStatus, policy: "sync_pending" });
+        }
+        return json({ request: requestStatus });
+      }
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
+      });
+      await bindProtectedProfile(options.stateDir, {
+        issuer: identity.issuer,
+        subject: identity.subject,
+        profileId: profile.id,
       });
       const assertGrant = () => {
         shutdown.signal.throwIfAborted();
@@ -275,6 +440,7 @@ export function createProtectedHttp(options: {
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
             openaiConnect: options.providerRelay !== undefined,
+            admin: isOwner,
           },
         });
       }

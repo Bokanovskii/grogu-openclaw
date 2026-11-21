@@ -28,8 +28,14 @@ export async function createProtectedStaticClient(root: Root) {
   await root.readBytes("index.html", readOptions);
   return async (request: Request): Promise<Response | undefined> => {
     const pathname = new URL(request.url).pathname;
-    const name = pathname === "/" ? "index.html" : pathname.slice(1);
-    if (pathname !== "/" && !standalone.has(name) && !asset.test(name)) {
+    const name =
+      pathname === "/" || pathname === "/request-access" ? "index.html" : pathname.slice(1);
+    if (
+      pathname !== "/" &&
+      pathname !== "/request-access" &&
+      !standalone.has(name) &&
+      !asset.test(name)
+    ) {
       return undefined;
     }
     const type = types.get(name.slice(name.lastIndexOf(".")));

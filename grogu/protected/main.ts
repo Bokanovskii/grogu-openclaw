@@ -55,10 +55,33 @@ async function main() {
   const { createCloudflareAccessVerifier } = await import("./identity.js");
   const { createProtectedHttp } = await import("./http.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
-  const allowed = new Set(allowedSubjects);
+  const admissionStore = await import("./admission-store.js");
+  await admissionStore.migrateProtectedSubjects(stateDir, {
+    subjects: allowedSubjects,
+    issuer: accessIssuer,
+  });
+  const admissions = await admissionStore.listProtectedAdmissions(stateDir);
+  const removedSubjects = new Set(
+    admissions
+      .filter((admission) => admission.status === "removed" && admission.subject)
+      .map((admission) => admission.subject!),
+  );
+  const allowed = new Set(
+    admissions
+      .filter((admission) => admission.status === "approved" && admission.subject)
+      .map((admission) => admission.subject!),
+  );
+  for (const subject of allowedSubjects) {
+    if (!removedSubjects.has(subject)) {
+      allowed.add(subject);
+    }
+  }
   const app = createProtectedHttp({
     origin,
     stateDir,
+    accessIssuer,
+    ownerSubject: settings.ownerSubject,
+    onRemoveSubject: (subject) => allowed.delete(subject),
     usersRoot,
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
@@ -67,6 +90,13 @@ async function main() {
       issuer: accessIssuer,
       audience: accessAudience,
       isAllowed: ({ subject }) => allowed.has(subject),
+      bindVerifiedIdentity: async (identity) => {
+        const bound = await admissionStore.bindProtectedAdmission(stateDir, identity);
+        if (bound) {
+          allowed.add(identity.subject);
+        }
+        return bound;
+      },
       testClientId: settings.testClientId,
     }),
     providerRelay: createProviderRelay(),

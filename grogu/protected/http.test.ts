@@ -157,6 +157,28 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.match(asset.headers.get("content-type") ?? "", /^text\/javascript/);
   assert.equal(await asset.text(), "");
   assert.equal((await fetch(assetUrl, { method: "POST" })).status, 405);
+  const publicSubmit = await first.call("alice", "/request-access", {
+    method: "POST",
+    body: JSON.stringify({
+      email: "requester@example.invalid",
+      name: "Synthetic requester",
+      note: "Synthetic access request",
+    }),
+  });
+  const publicSubmitBody = await publicSubmit.text();
+  assert.equal(publicSubmit.status, 201, publicSubmitBody);
+  const receiptCookie = publicSubmit.headers.get("set-cookie");
+  assert.match(receiptCookie ?? "", /^protected_access_receipt=[A-Za-z0-9_-]+;/u);
+  const statusWithoutReceipt = await first.call("alice", "/request-access/status", {
+    method: "GET",
+  });
+  assert.equal(statusWithoutReceipt.status, 200);
+  const receipt = (receiptCookie ?? "").split(";", 1)[0]!;
+  const statusWithReceipt = await first.call("alice", "/request-access/status", {
+    method: "GET",
+    headers: { cookie: receipt },
+  });
+  assert.equal(statusWithReceipt.status, 200);
   for (const route of [
     "/assets/index-Symlink.js",
     "/assets/notebook.Ab12.woff2",
@@ -175,7 +197,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const me = await first.call("alice", "/me");
   assert.equal(me.status, 200);
   const { user, capabilities } = await me.json();
-  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true });
+  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true, admin: false });
   const created = await first.call("alice", "/chats", {
     method: "POST",
     body: '{"title":"Alice private"}',

@@ -9,6 +9,7 @@ export type VerifiedProtectedIdentity = {
   issuer: string;
   subject: string;
   displayName?: string;
+  email?: string;
   expiresAt: number;
   sessionId: string;
   assertCurrent: () => void;
@@ -56,6 +57,11 @@ export function createCloudflareAccessVerifier(options: {
   issuer: string;
   audience: string;
   isAllowed: (identity: { issuer: string; subject: string }) => boolean;
+  bindVerifiedIdentity?: (identity: {
+    issuer: string;
+    subject: string;
+    email: string;
+  }) => Promise<boolean>;
   testClientId?: string;
   fetchImpl?: typeof fetch;
 }): ProtectedIdentityVerifier {
@@ -158,16 +164,21 @@ export function createCloudflareAccessVerifier(options: {
       const testClient = claims.sub.trim() ? undefined : options.testClientId;
       const subject = testClient ? `${testSubjectPrefix}${testClient}` : claims.sub;
       const expiresAt = claims.exp * 1000;
-      const assertCurrent = () => {
+      const assertTokenCurrent = () => {
         if (
-          Date.now() >= expiresAt ||
-          (!testClient && !options.isAllowed({ issuer: issuer.origin, subject }))
+          Date.now() >= expiresAt
         ) {
           denied();
         }
       };
+      const assertCurrent = () => {
+        assertTokenCurrent();
+        if (!testClient && !options.isAllowed({ issuer: issuer.origin, subject })) {
+          denied();
+        }
+      };
       const revalidate = async () => {
-        assertCurrent();
+        assertTokenCurrent();
         const identity = await boundedJson(
           await fetchImpl(`${issuer.origin}/cdn-cgi/access/get-identity`, {
             headers: { Cookie: `CF_Authorization=${token}` },
@@ -176,7 +187,7 @@ export function createCloudflareAccessVerifier(options: {
           }),
           64 * 1024,
         );
-        assertCurrent();
+        assertTokenCurrent();
         if (
           !isRecord(identity) ||
           (testClient
@@ -187,6 +198,23 @@ export function createCloudflareAccessVerifier(options: {
         ) {
           denied();
         }
+        const email =
+          typeof identity.email === "string"
+            ? identity.email
+            : typeof identity.email_address === "string"
+              ? identity.email_address
+              : undefined;
+        if (email && options.bindVerifiedIdentity) {
+          const bound = await options.bindVerifiedIdentity({
+            issuer: issuer.origin,
+            subject,
+            email,
+          });
+          if (!bound && !options.isAllowed({ issuer: issuer.origin, subject })) {
+            denied();
+          }
+        }
+        assertCurrent();
       };
       await revalidate();
       return {

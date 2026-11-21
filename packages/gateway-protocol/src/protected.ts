@@ -78,7 +78,66 @@ export const ProtectedMeSchema = node({
   user: node({ id, displayName: Type.String() }),
   disclosure: Type.String(),
   models: Type.Array(ProtectedModelSchema),
-  capabilities: node({ copilotConnect: Type.Boolean(), openaiConnect: Type.Boolean() }),
+  capabilities: node({
+    copilotConnect: Type.Boolean(),
+    openaiConnect: Type.Boolean(),
+    admin: Type.Boolean(),
+  }),
+});
+export const ProtectedAccessRequestStatusSchema = Type.Union([
+  Type.Literal("open"),
+  Type.Literal("approved"),
+  Type.Literal("denied"),
+  Type.Literal("removed"),
+  Type.Literal("withdrawn"),
+]);
+export const ProtectedPublicAccessRequestSchema = node({
+  id,
+  email: Type.String({ minLength: 3, maxLength: 254 }),
+  name: Type.String({ maxLength: 80 }),
+  note: Type.String({ maxLength: 1000 }),
+  status: ProtectedAccessRequestStatusSchema,
+  createdAt: Type.Integer(),
+  updatedAt: Type.Integer(),
+});
+export const ProtectedAccessRequestSubmitSchema = node({
+  email: Type.String({ minLength: 3, maxLength: 254 }),
+  name: Type.String({ minLength: 1, maxLength: 80 }),
+  note: Type.String({ maxLength: 1000 }),
+});
+export const ProtectedAccessRequestEditSchema = node({
+  name: Type.String({ minLength: 1, maxLength: 80 }),
+  note: Type.String({ maxLength: 1000 }),
+});
+export const ProtectedAccessRequestReceiptResultSchema = node({
+  request: node({
+    id,
+    status: ProtectedAccessRequestStatusSchema,
+  }),
+});
+export const ProtectedAccessRequestStatusResponseSchema = node({
+  request: Type.Union([ProtectedPublicAccessRequestSchema, Type.Null()]),
+});
+export const ProtectedAdminRequestSchema = ProtectedPublicAccessRequestSchema;
+export const ProtectedAdminRequestsResponseSchema = node({
+  requests: Type.Array(ProtectedAdminRequestSchema),
+});
+export const ProtectedAdminPersonSchema = node({
+  email: Type.String({ minLength: 3, maxLength: 254 }),
+  issuer: Type.String({ minLength: 1 }),
+  subject: Type.Optional(id),
+  profileId: Type.Optional(id),
+  status: Type.Union([Type.Literal("approved"), Type.Literal("removed")]),
+  revision: Type.Integer({ minimum: 1 }),
+});
+export const ProtectedAdminPeopleResponseSchema = node({
+  people: Type.Array(ProtectedAdminPersonSchema),
+});
+export const ProtectedOwnerActionResponseSchema = node({
+  request: ProtectedPublicAccessRequestSchema,
+  policy: Type.Optional(
+    Type.Union([Type.Literal("sync_pending"), Type.Literal("removal_pending")]),
+  ),
 });
 export const ProtectedDevicePromptSchema = node({
   id,
@@ -127,6 +186,21 @@ export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
+export type ProtectedAccessRequestStatus = Static<typeof ProtectedAccessRequestStatusSchema>;
+export type ProtectedPublicAccessRequest = Static<typeof ProtectedPublicAccessRequestSchema>;
+export type ProtectedAccessRequestSubmit = Static<typeof ProtectedAccessRequestSubmitSchema>;
+export type ProtectedAccessRequestEdit = Static<typeof ProtectedAccessRequestEditSchema>;
+export type ProtectedAccessRequestReceiptResult = Static<
+  typeof ProtectedAccessRequestReceiptResultSchema
+>;
+export type ProtectedAccessRequestStatusResponse = Static<
+  typeof ProtectedAccessRequestStatusResponseSchema
+>;
+export type ProtectedAdminRequest = Static<typeof ProtectedAdminRequestSchema>;
+export type ProtectedAdminRequestsResponse = Static<typeof ProtectedAdminRequestsResponseSchema>;
+export type ProtectedAdminPerson = Static<typeof ProtectedAdminPersonSchema>;
+export type ProtectedAdminPeopleResponse = Static<typeof ProtectedAdminPeopleResponseSchema>;
+export type ProtectedOwnerActionResponse = Static<typeof ProtectedOwnerActionResponseSchema>;
 export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>

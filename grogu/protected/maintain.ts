@@ -110,9 +110,14 @@ async function main() {
     process.stdout.write("Family test client updated.\n");
     return;
   }
+  if (action === "set-owner" && arg && subjectPattern.test(arg) && rest.length === 0) {
+    await updateSettings((settings) => ({ ...settings, ownerSubject: arg.toLowerCase() }));
+    process.stdout.write("Family owner subject updated. Restart the listener.\n");
+    return;
+  }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, add-subject UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID.",
+      "Supported commands: init --deploy-json FILE, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID.",
     );
   }
   const { updateCanonicalUserProfileAccess } =

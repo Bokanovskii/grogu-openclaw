@@ -50,8 +50,9 @@ The loader rejects symlinks, hardlinks, group/world access and files over 1 MiB.
   `ownerOverrides` lists config paths or job IDs the owner deliberately routed
   elsewhere.
 - `bindings.researchCheckpoint`: research workspace, tracks and artifact prefix.
-- `bindings.sparkyQueue.maxActive`: optional active Sparky request limit, from
-  2 to 4. It defaults to 2. See [Provider concurrency](#provider-concurrency).
+- `bindings.sparkyQueue.maxActive`: optional positive integer limit for active
+  Sparky requests. Omit `sparkyQueue` to let the provider schedule requests without
+  a local provider cap. See [Provider concurrency](#provider-concurrency).
 - `native.jobs`: logical-name bindings for native jobs whose metadata bootstrap
   may reconcile. Bootstrap never changes schedules, models, delivery or pauses.
 
@@ -102,15 +103,18 @@ session, model, agent and job choices remain in force.
 
 ## Provider concurrency
 
-Only Sparky uses Grogu's provider-origin admission queue. Its active request
-limit is `bindings.sparkyQueue.maxActive` from the private profile, or two when
-the profile omits it. The Sparky operator can change the provider limit between
-two and four. Grogu does not detect that change, so set the profile value to
-the announced limit and restart the Gateway. The profile is read once per
-Gateway process. A limit above the provider's real limit causes rejected
-requests and backoff.
+Only Sparky uses Grogu's provider-origin admission queue. By default, Grogu adds
+no active-request cap and lets Sparky schedule concurrent requests. The provider
+can queue requests or reject them when busy; no local setting guarantees unlimited
+provider capacity.
 
-Human, scheduled and utility requests all share every idle slot. Waiting human
+To impose a local cap, set `bindings.sparkyQueue.maxActive` in the private profile
+to a positive safe integer. Existing explicit limits remain in force. Remove
+`bindings.sparkyQueue` to retire an old two- or four-request override. Install the
+updated runtime and restart the Gateway after changing the profile, which is read
+once per process.
+
+When a local cap or provider cooldown makes requests wait, waiting human
 requests run first in arrival order, so when a slot frees, a waiting person gets
 it before waiting automation. Aging can promote background work only when no
 human is eligible. Already-running requests are not preempted. An automation
@@ -120,6 +124,9 @@ behind the person. When 32 requests are already waiting, new automation requests
 are refused, but a person's request always joins the queue. A rejected
 background request pauses only background work; a rejected human request
 pauses all Sparky work for the cooldown.
+Human, scheduled and utility requests share every idle slot when a local cap
+is configured. Without that cap, priority applies only to local cooldown waits;
+Sparky owns scheduling after dispatch.
 
 The current run's trigger and typed input provenance determine priority. System
 and inter-session handoffs do not gain human priority merely because they run in

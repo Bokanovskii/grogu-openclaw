@@ -78,22 +78,25 @@ describe("provider-origin admission", () => {
     },
   );
 
-  it("sizes the shared origin pool from the admitted profile limit", async () => {
-    const responses = Array.from({ length: 5 }, () => createDeferred<Response>());
-    let calls = 0;
-    const fetcher = vi.fn<typeof fetch>(() => responses[calls++]!.promise);
-    const sparky = queueSparkyFetch(
-      { ...model, baseUrl: "https://profile-limit.example.invalid/v1" },
-      fetcher,
-      { maxActive: 4 },
-    );
-    const requests = responses.map(() => sparky("https://profile-limit.example.invalid"));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(fetcher).toHaveBeenCalledTimes(4);
-    responses.forEach((response) => response.resolve(new Response(null)));
-    await Promise.all(requests);
-    expect(fetcher).toHaveBeenCalledTimes(5);
-  });
+  it.each([undefined, 4, 8])(
+    "leaves scheduling to the provider unless the profile caps requests at %s",
+    async (maxActive) => {
+      const responses = Array.from({ length: 9 }, () => createDeferred<Response>());
+      let calls = 0;
+      const fetcher = vi.fn<typeof fetch>(() => responses[calls++]!.promise);
+      const baseUrl = `https://profile-limit-${maxActive ?? "unset"}.example.invalid/v1`;
+      const sparky = queueSparkyFetch({ ...model, baseUrl }, fetcher, { maxActive });
+      const requests = responses.map(() => sparky(baseUrl));
+      await vi.advanceTimersByTimeAsync(0);
+      try {
+        expect(fetcher).toHaveBeenCalledTimes(maxActive ?? 9);
+      } finally {
+        responses.forEach((response) => response.resolve(new Response(null)));
+        await Promise.all(requests);
+      }
+      expect(fetcher).toHaveBeenCalledTimes(9);
+    },
+  );
 
   it("keeps humans FIFO ahead of aged backgrounds and never refuses them for a full queue", async () => {
     let now = 0;

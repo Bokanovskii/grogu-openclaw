@@ -85,8 +85,11 @@ while personal Grogu is busy. Give Family its own Sparky key.
 
 After admission, a turn continues if the browser disconnects or the phone sleeps.
 The runtime saves the reply without an attached reader. Request credentials stay
-in memory for that turn, never in the saved chat. Stop, logout, revoked access,
-session expiry, the turn timeout, and listener shutdown still interrupt work.
+in memory for that turn, never in the saved chat. Redaction protects request
+credentials while a turn is active and releases their entries when the last
+turn using them ends, unless another owner registered them. Stop, logout,
+revoked access, session expiry, the turn timeout, and listener shutdown still
+interrupt work.
 
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read

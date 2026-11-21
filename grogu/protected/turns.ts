@@ -65,13 +65,6 @@ export function createCanonicalProtectedTurns(options: {
           "Connect this provider first.",
         );
       }
-      const credential = createRequestModelCredential({
-        provider,
-        model,
-        accessToken,
-        expiresAt: turn.input.credential?.expiresAt,
-        assertCurrent: turn.assertCurrent,
-      });
       const admission = prepareAgentRunAdmission({
         cfg: options.config,
         operationalRunInstance: createOperationalRunInstanceRef(turn.runId),
@@ -161,7 +154,16 @@ export function createCanonicalProtectedTurns(options: {
             });
         }
       };
+      let credential: ReturnType<typeof createRequestModelCredential> | undefined;
       try {
+        const requestCredential = createRequestModelCredential({
+          provider,
+          model,
+          accessToken,
+          expiresAt: turn.input.credential?.expiresAt,
+          assertCurrent: turn.assertCurrent,
+        });
+        credential = requestCredential;
         const result = await withoutModelRequestTelemetry(() =>
           runEmbeddedAgent({
             ...turn.target,
@@ -185,7 +187,7 @@ export function createCanonicalProtectedTurns(options: {
             thinkLevel: provider === "sparky" ? "ultra" : undefined,
             agentHarnessRuntimeOverride: "openclaw",
             preparedRunAdmission: admission,
-            requestModelCredential: credential.handle,
+            requestModelCredential: requestCredential.handle,
             bootstrapContextMode: "lightweight",
             disableMessageTool: true,
             disableToolSearch: true,
@@ -223,9 +225,12 @@ export function createCanonicalProtectedTurns(options: {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
         }
       } finally {
-        unsubscribe();
-        admission.close();
-        credential.close();
+        try {
+          unsubscribe();
+          admission.close();
+        } finally {
+          credential?.close();
+        }
       }
     },
     async steer(input: {

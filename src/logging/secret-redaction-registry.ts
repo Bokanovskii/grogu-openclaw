@@ -9,6 +9,7 @@ const MAX_SECRET_VALUES = 512;
 type SecretValueRedactor = (text: string, mask: (value: string, index: number) => string) => string;
 type SecretRedactionRegistryState = {
   registeredValues: Map<string, true>;
+  activeValues: Map<string, number>;
   registryRevision: number;
   registeredValueRedactor: SecretValueRedactor | undefined;
 };
@@ -18,6 +19,7 @@ const state = resolveGlobalSingleton<SecretRedactionRegistryState>(
   Symbol.for("openclaw.secretRedactionRegistry"),
   () => ({
     registeredValues: new Map<string, true>(),
+    activeValues: new Map<string, number>(),
     registryRevision: 0,
     registeredValueRedactor: undefined,
   }),
@@ -57,34 +59,71 @@ function registerOneSecretValue(value: string): void {
   invalidateMatcher();
 }
 
-/** Registers one resolved secret for exact-value log redaction. */
-export function registerSecretValueForRedaction(value: string): void {
-  if (value.length < MIN_SECRET_VALUE_LENGTH) {
-    return;
+function secretValueForms(value: string, minimumLength = MIN_SECRET_VALUE_LENGTH): string[] {
+  if (value.length < minimumLength) {
+    return [];
   }
   // URL egress percent-encodes injected values; redact that surface form too.
   const encoded = encodeURIComponent(value);
-  if (encoded !== value) {
-    registerOneSecretValue(encoded);
-  }
   // Captured structured payloads are serialized before persistence, so retain
   // the JSON string-content form for credentials with escaped characters.
   const jsonEscaped = JSON.stringify(value).slice(1, -1);
-  if (jsonEscaped !== value) {
-    registerOneSecretValue(jsonEscaped);
+  // Keep the raw value newest in the bounded registry.
+  return [
+    ...(encoded !== value ? [encoded] : []),
+    ...(jsonEscaped !== value && jsonEscaped !== encoded ? [jsonEscaped] : []),
+    value,
+  ];
+}
+
+/** Registers one resolved secret for exact-value log redaction. */
+export function registerSecretValueForRedaction(value: string): void {
+  for (const form of secretValueForms(value)) {
+    registerOneSecretValue(form);
   }
-  // Keep the raw value newest so bounded-registry eviction cannot drop the
-  // active credential while retaining only a transformed representation.
-  registerOneSecretValue(value);
+}
+
+/** Holds exact-value redaction for the lifetime of a request. */
+export function holdSecretValueForRedaction(value: string): () => void {
+  let forms: string[] | undefined = secretValueForms(value, 1);
+  for (const form of forms) {
+    state.activeValues.set(form, (state.activeValues.get(form) ?? 0) + 1);
+  }
+  if (forms.length) {
+    invalidateMatcher();
+  }
+  return () => {
+    if (!forms) {
+      return;
+    }
+    for (const form of forms) {
+      const count = state.activeValues.get(form);
+      if (count === 1) {
+        state.activeValues.delete(form);
+      } else if (count !== undefined) {
+        state.activeValues.set(form, count - 1);
+      }
+    }
+    if (forms.length) {
+      invalidateMatcher();
+    }
+    forms = undefined;
+  };
 }
 
 /** Returns whether a value has SecretRef provenance in the process registry. */
 export function isSecretValueRegisteredForRedaction(value: string): boolean {
-  return (registrySnapshots.getStore()?.values ?? state.registeredValues).has(value);
+  const scoped = registrySnapshots.getStore();
+  return scoped
+    ? scoped.values.has(value)
+    : state.registeredValues.has(value) || state.activeValues.has(value);
 }
 
 export function hasRegisteredSecretValuesForRedaction(): boolean {
-  return (registrySnapshots.getStore()?.values ?? state.registeredValues).size > 0;
+  const scoped = registrySnapshots.getStore();
+  return scoped
+    ? scoped.values.size > 0
+    : state.registeredValues.size > 0 || state.activeValues.size > 0;
 }
 
 /** Changes with registry membership, including bounded eviction and test resets. */
@@ -97,7 +136,10 @@ export function captureSecretRedactionRegistrySnapshot(): SecretRedactionRegistr
   const scoped = registrySnapshots.getStore();
   return scoped
     ? { revision: scoped.snapshot.revision, values: [...scoped.values] }
-    : { revision: state.registryRevision, values: [...state.registeredValues.keys()] };
+    : {
+        revision: state.registryRevision,
+        values: [...new Set([...state.registeredValues.keys(), ...state.activeValues.keys()])],
+      };
 }
 
 /** Replaces registered exact values while preserving the caller's mask convention. */
@@ -110,10 +152,12 @@ export function redactRegisteredSecretValues(
     scoped.redactor ??= createSecretValueRedactor(scoped.snapshot.values);
     return scoped.redactor(text, mask);
   }
-  if (!text || state.registeredValues.size === 0) {
+  if (!text || (state.registeredValues.size === 0 && state.activeValues.size === 0)) {
     return text;
   }
-  state.registeredValueRedactor ??= createSecretValueRedactor([...state.registeredValues.keys()]);
+  state.registeredValueRedactor ??= createSecretValueRedactor(
+    captureSecretRedactionRegistrySnapshot().values,
+  );
   return state.registeredValueRedactor(text, mask);
 }
 
@@ -138,8 +182,12 @@ export function createSecretValueRedactor(values: readonly string[]): SecretValu
     }
     if (!compiledMatcher) {
       const buckets = new Map<string, string[]>();
+      const prefixLength = values.reduce(
+        (length, value) => Math.min(length, value.length),
+        MIN_SECRET_VALUE_LENGTH,
+      );
       for (const value of values.toSorted((left, right) => right.length - left.length)) {
-        const prefix = value.slice(0, MIN_SECRET_VALUE_LENGTH);
+        const prefix = value.slice(0, prefixLength);
         const bucket = buckets.get(prefix);
         if (bucket) {
           bucket.push(value);
@@ -180,6 +228,7 @@ export function createSecretValueRedactor(values: readonly string[]): SecretValu
 
 function resetSecretRedactionRegistryForTest(): void {
   state.registeredValues.clear();
+  state.activeValues.clear();
   invalidateMatcher();
 }
 

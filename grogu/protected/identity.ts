@@ -10,6 +10,7 @@ export type VerifiedProtectedIdentity = {
   subject: string;
   kind: "human" | "development";
   displayName?: string;
+  email?: string;
   /** Expiry of the stored session record; assertCurrent enforces the assertion's own expiry. */
   expiresAt: number;
   sessionId: string;
@@ -69,10 +70,17 @@ export function createCloudflareAccessVerifier(options: {
   issuer: string;
   audience: string;
   isAllowed: (identity: { issuer: string; subject: string }) => boolean;
+  bindVerifiedIdentity?: (
+    identity: { issuer: string; subject: string; email: string },
+    assertCurrent: () => void,
+  ) => Promise<boolean>;
   testClientId?: string;
   origin?: string;
   fetchImpl?: typeof fetch;
-}): ProtectedIdentityVerifier & { answerProof: (request: Request) => Promise<Response> } {
+}): ProtectedIdentityVerifier & {
+  answerProof: (request: Request) => Promise<Response>;
+  invalidateSubject: (subject: string) => void;
+} {
   const issuer = new URL(options.issuer);
   if (
     issuer.protocol !== "https:" ||
@@ -88,6 +96,7 @@ export function createCloudflareAccessVerifier(options: {
   if (proofUrl && (proofUrl.protocol !== "https:" || proofUrl.origin !== options.origin)) {
     throw new TypeError("Configure the exact protected origin for the test client.");
   }
+  const boundEmails = new Map<string, string>();
   const fetchImpl = options.fetchImpl ?? fetch;
   let keys: Array<JsonWebKey & { kid: string }> = [];
   let keysUntil = 0;
@@ -200,11 +209,14 @@ export function createCloudflareAccessVerifier(options: {
       ) {
         return denied();
       }
+      const assertTokenCurrent = () => {
+        if (Date.now() >= expiresAt) {
+          denied();
+        }
+      };
       const assertCurrent = () => {
-        if (
-          Date.now() >= expiresAt ||
-          (!testClient && !options.isAllowed({ issuer: issuer.origin, subject }))
-        ) {
+        assertTokenCurrent();
+        if (!testClient && !options.isAllowed({ issuer: issuer.origin, subject })) {
           denied();
         }
       };
@@ -238,7 +250,7 @@ export function createCloudflareAccessVerifier(options: {
         if (testClient) {
           return proveTestClient(testClient, clientSecret!);
         }
-        assertCurrent();
+        assertTokenCurrent();
         const identity = await boundedJson(
           await fetchImpl(`${issuer.origin}/cdn-cgi/access/get-identity`, {
             headers: { Cookie: `CF_Authorization=${token}` },
@@ -247,10 +259,33 @@ export function createCloudflareAccessVerifier(options: {
           }),
           64 * 1024,
         );
-        assertCurrent();
+        assertTokenCurrent();
         if (!isRecord(identity) || (identity.user_uuid !== subject && identity.sub !== subject)) {
           denied();
         }
+        const email =
+          typeof identity.email === "string"
+            ? identity.email
+            : typeof identity.email_address === "string"
+              ? identity.email_address
+              : undefined;
+        if (!testClient && email && options.bindVerifiedIdentity) {
+          const allowed = options.isAllowed({ issuer: issuer.origin, subject });
+          if (!allowed) {
+            boundEmails.delete(subject);
+          }
+          if (!allowed || boundEmails.get(subject) !== email) {
+            const bound = await options.bindVerifiedIdentity(
+              { issuer: issuer.origin, subject, email },
+              assertTokenCurrent,
+            );
+            if (!bound) {
+              denied();
+            }
+            boundEmails.set(subject, email);
+          }
+        }
+        assertCurrent();
       };
       await revalidate();
       return {
@@ -296,7 +331,12 @@ export function createCloudflareAccessVerifier(options: {
       return denied();
     }
   };
-  return Object.assign(verifier, { answerProof });
+  return Object.assign(verifier, {
+    answerProof,
+    invalidateSubject: (subject: string) => {
+      boundEmails.delete(subject);
+    },
+  });
 }
 
 export async function resolveProtectedProfile(

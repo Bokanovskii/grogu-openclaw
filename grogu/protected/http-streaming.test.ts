@@ -35,6 +35,7 @@ void test("protected chunks publish without remote access work and stop at local
   });
   const app = createProtectedHttp({
     origin,
+    accessIssuer: origin,
     stateDir,
     directory: { issuer: origin, allowedSubjects: [] },
     usersRoot: await root(usersDir),

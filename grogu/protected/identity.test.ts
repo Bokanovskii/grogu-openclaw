@@ -232,3 +232,42 @@ void test("other service tokens and unconfigured test clients are denied", async
     { status: 401 },
   );
 });
+
+void test("verified email binds new admission and is cached only while admission remains current", async () => {
+  const subject = "11111111-1111-1111-1111-111111111111";
+  let allowed = false;
+  let approved = true;
+  let bindings = 0;
+  const verify = createCloudflareAccessVerifier({
+    issuer,
+    audience,
+    isAllowed: () => allowed,
+    bindVerifiedIdentity: async (_identity, assertCurrent) => {
+      assertCurrent();
+      bindings++;
+      allowed = approved;
+      return allowed;
+    },
+    fetchImpl: (async (url: string) =>
+      Response.json(
+        url.endsWith("/certs")
+          ? { keys: [jwk] }
+          : { user_uuid: subject, email: "member@example.invalid" },
+      )) as typeof fetch,
+  });
+  const identity = await verify(
+    new Request(`${origin}/me`, {
+      headers: { cookie: `CF_Authorization=${token({ sub: subject })}` },
+    }),
+  );
+  await identity.revalidate();
+  await identity.revalidate();
+  assert.equal(bindings, 1);
+  verify.invalidateSubject(subject);
+  await identity.revalidate();
+  assert.equal(bindings, 2);
+  approved = false;
+  allowed = false;
+  await assert.rejects(identity.revalidate(), { status: 401 });
+  assert.equal(bindings, 3);
+});

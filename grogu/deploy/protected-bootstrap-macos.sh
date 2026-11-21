@@ -7,6 +7,7 @@ usage() {
   echo "Usage: sudo /bin/bash $0 --operator USER [--staging-dir DIR] [--service-user groguProtected]"
   echo "       /bin/bash $0 --operator USER --verify"
   echo "       /bin/bash $0 --operator USER --add-subject UUID"
+  echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --install-policy-helper"
   echo "Creates isolated service ownership. It does not activate either service."
 }
 
@@ -29,6 +30,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --help) usage; exit 0 ;;
     --verify) mode="verify"; shift ;;
+    --install-policy-helper) mode="install-policy-helper"; shift ;;
     *) usage >&2; exit 64 ;;
   esac
 done
@@ -57,7 +59,19 @@ if [ "$mode" = add-subject ]; then
   [[ "$subject" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
     echo "Supply the verified Access subject UUID, not an email address." >&2; exit 64;
   }
-  /usr/bin/sudo -n -u "$service_user" "$helpers/$label-maintain" run add-subject "$subject"
+  was_running=0
+  if /usr/bin/sudo -n "$helpers/$label-control" status runtime >/dev/null 2>&1; then
+    was_running=1
+    /usr/bin/sudo -n "$helpers/$label-control" stop runtime
+  fi
+  if ! /usr/bin/sudo -n -u "$service_user" "$helpers/$label-maintain" run add-subject "$subject"; then
+    if [ "$was_running" -eq 1 ]; then
+      /usr/bin/sudo -n "$helpers/$label-control" start runtime || {
+        echo "Maintenance failed and the listener could not be restarted." >&2; exit 1;
+      }
+    fi
+    exit 1
+  fi
   exec /usr/bin/sudo -n "$helpers/$label-control" restart runtime
 fi
 [ "$(id -u)" -eq 0 ] || { echo "Run the install step through sudo." >&2; exit 77; }
@@ -68,6 +82,65 @@ staging_dir="${staging_dir:-/Users/$operator/.config/grogu-protected/staging}"
   [ "$(stat -f '%Lp' "$staging_dir")" = 700 ] || {
     echo "The staging directory must be operator-owned, private, and not a link." >&2; exit 77;
   }
+if [ "$mode" = install-policy-helper ]; then
+  id "$service_user" >/dev/null
+  helper_input="$staging_dir/protected-policy-helper.py"
+  policy_input="$staging_dir/protected-policy-config.json"
+  for input in "$helper_input" "$policy_input"; do
+    [ -f "$input" ] && [ ! -L "$input" ] && [ -s "$input" ] &&
+      [ "$(stat -f '%u' "$input")" = "$operator_uid" ] &&
+      [ "$(stat -f '%Lp' "$input")" = 600 ] &&
+      [ "$(stat -f '%l' "$input")" = 1 ] || {
+        echo "Policy staging inputs must be operator-owned regular files, mode 0600, without links." >&2
+        exit 77
+      }
+  done
+  echo "76a94aa66caea08759a535a2e9c4e594dc4574c30d703e49016108fd5ab04b4b  $helper_input" |
+    /usr/bin/shasum -a 256 -c - >/dev/null || {
+      echo "Policy helper source does not match the reviewed installer." >&2; exit 65;
+    }
+  /usr/bin/plutil -convert xml1 -o /dev/null "$policy_input"
+  for field in accountId appId policyId policyName ownerEmail token; do
+    /usr/bin/plutil -extract "$field" raw -expect string -o - "$policy_input" |
+      /usr/bin/grep -q . || { echo "Policy configuration is incomplete." >&2; exit 65; }
+  done
+  policy_dir="/private/var/db/ai.grogu.protected"
+  policy_sudoers="/private/etc/sudoers.d/ai-grogu-protected-policy"
+  for directory in "$helpers" /private/etc/sudoers.d /private/var/db; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] &&
+      [ "$(stat -f '%u' "$directory")" = 0 ] &&
+      [ "$(stat -f '%Lp' "$directory")" = 755 ] || {
+        echo "The policy helper requires root-owned system directories." >&2; exit 77;
+      }
+  done
+  for output in "$helpers/$label-policy" "$helpers/$label-policy.py" "$policy_sudoers" "$policy_dir"; do
+    [ ! -e "$output" ] && [ ! -L "$output" ] || {
+      echo "An existing policy helper requires inspection before installation." >&2; exit 73;
+    }
+  done
+  stage="$(mktemp -d /private/tmp/grogu-protected-policy.XXXXXX)"
+  trap '/bin/rm -f "$stage/wrapper" "$stage/sudoers"; /bin/rmdir "$stage"' EXIT
+  cat > "$stage/wrapper" <<'SCRIPT'
+#!/bin/sh
+set -eu
+[ "$(id -u)" -eq 0 ] && [ "$#" -eq 0 ] || exit 64
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  /usr/bin/python3 -I -S /Library/PrivilegedHelperTools/ai.grogu.protected-policy.py
+SCRIPT
+  printf '%s\n' \
+    "$service_user ALL=(root) NOPASSWD: $helpers/$label-policy \"\"" > "$stage/sudoers"
+  /bin/sh -n "$stage/wrapper"
+  /usr/sbin/visudo -cf "$stage/sudoers" >/dev/null
+  /bin/mkdir -m 700 "$policy_dir"
+  /usr/bin/install -o root -g wheel -m 600 "$policy_input" "$policy_dir/policy.json"
+  /usr/bin/install -o root -g wheel -m 644 "$helper_input" "$helpers/$label-policy.py"
+  /usr/bin/install -o root -g wheel -m 755 "$stage/wrapper" "$helpers/$label-policy"
+  /usr/bin/install -o root -g wheel -m 440 "$stage/sudoers" "$policy_sudoers"
+  /usr/bin/cmp -s "$policy_input" "$policy_dir/policy.json"
+  /usr/bin/sudo -u "$operator" /bin/rm "$policy_input"
+  echo "Installed the root-owned fixed policy helper. No Cloudflare request was made."
+  exit 0
+fi
 tunnel_input="$staging_dir/cloudflared-tunnel-token"
 sparky_input="$staging_dir/sparky-api-key"
 deploy_input="$staging_dir/cloudflare-deploy.json"

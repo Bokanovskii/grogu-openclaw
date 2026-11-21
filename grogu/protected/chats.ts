@@ -178,7 +178,13 @@ export function createProtectedChats(options: {
           throw new Error("Cannot account for an ambiguous transient Family session.");
         }
         return [
-          { profileId: lifetime.profileId, id: entry.sessionId, sessionKey, chargeFiles: true },
+          {
+            profileId: lifetime.profileId,
+            id: entry.sessionId,
+            sessionKey,
+            updatedAt: entry.updatedAt,
+            transient: true,
+          },
         ];
       }
       const actor = entry.createdActor;
@@ -192,7 +198,15 @@ export function createProtectedChats(options: {
       ) {
         return [];
       }
-      return [{ profileId: actor.id, id: entry.sessionId, sessionKey, chargeFiles: true }];
+      return [
+        {
+          profileId: actor.id,
+          id: entry.sessionId,
+          sessionKey,
+          updatedAt: entry.updatedAt,
+          transient: false,
+        },
+      ];
     });
   };
   const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {

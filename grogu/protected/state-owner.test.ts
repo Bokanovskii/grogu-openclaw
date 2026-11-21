@@ -7,7 +7,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { assertStateDatabaseAccessAllowed } from "../../src/infra/gateway-state-owner.js";
+import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
+import { listProtectedAdmissions } from "./admission-store.js";
+import { sparkyRef } from "./settings.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -35,25 +38,83 @@ const transcriptWrite = `
 `;
 
 void test("the service owner excludes foreign-process state writes until released", async (t) => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "protected-owner-"));
-  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "protected-owner-"));
+  const stateDir = path.join(home, "state");
+  const configDir = path.join(home, "config");
+  const runtimePath = path.join(configDir, "protected.json");
+  t.after(async () => {
+    await closeOpenClawStateDatabaseByPathAsync(
+      resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
+    );
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  await fs.mkdir(configDir, { mode: 0o700 });
+  const issuer = "https://synthetic.cloudflareaccess.com";
+  const subject = "00000000-0000-4000-8000-000000000001";
+  const settings = {
+    origin: "https://chat.bokanovski.com",
+    port: 19789,
+    accessIssuer: issuer,
+    accessAudience: "a".repeat(64),
+    stateDir,
+    allowedSubjects: [],
+    sparkySecret: sparkyRef,
+    storageLimits: { userBytes: 1024, globalBytes: 4096, freeFloorBytes: 1 },
+  };
+  await fs.writeFile(runtimePath, JSON.stringify(settings), { mode: 0o600 });
+  await fs.writeFile(path.join(configDir, "openclaw.json"), "{}", { mode: 0o600 });
+  const addSubject = () =>
+    spawnSync(
+      process.execPath,
+      ["--import", "./scripts/tsx.mjs", "grogu/protected/maintain.ts", "add-subject", subject],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          HOME: home,
+          OPENCLAW_STATE_DIR: stateDir,
+          OPENCLAW_CONFIG_PATH: path.join(configDir, "openclaw.json"),
+        },
+        encoding: "utf8",
+      },
+    );
   const first = await acquireProtectedStateOwner(stateDir);
   assert.ok(first);
-  assert.equal(await acquireProtectedStateOwner(stateDir), undefined);
-  assertStateDatabaseAccessAllowed(
-    resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
-  );
+  try {
+    assert.equal(await acquireProtectedStateOwner(stateDir), undefined);
+    assertStateDatabaseAccessAllowed(
+      resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
+    );
 
-  for (const script of [sharedStateWrite, transcriptWrite]) {
-    const refused = runForeignProcess(stateDir, script);
+    for (const script of [sharedStateWrite, transcriptWrite]) {
+      const refused = runForeignProcess(stateDir, script);
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /exclusively owned by process/u);
+    }
+
+    const refused = addSubject();
     assert.notEqual(refused.status, 0);
-    assert.match(refused.stderr, /exclusively owned by process/u);
+    assert.match(refused.stderr, /Stop the listener before adding a subject\./u);
+    first.assertCurrent();
+    assert.deepEqual(JSON.parse(await fs.readFile(runtimePath, "utf8")), settings);
+  } finally {
+    first.release();
   }
 
-  first.release();
   assert.equal(runForeignProcess(stateDir, sharedStateWrite).status, 0);
   const released = runForeignProcess(stateDir, transcriptWrite);
   assert.doesNotMatch(released.stderr, /exclusively owned by process/u);
+  const admitted = addSubject();
+  assert.equal(admitted.status, 0, admitted.stderr);
+  assert.match(admitted.stdout, /Alcove admission is recorded/u);
+  assert.deepEqual(
+    (await listProtectedAdmissions(stateDir)).map((entry) => entry.subject),
+    [subject],
+  );
+  assert.deepEqual(JSON.parse(await fs.readFile(runtimePath, "utf8")), settings);
+  const restarted = await acquireProtectedStateOwner(stateDir);
+  assert.ok(restarted, "maintenance releases the native owner before a listener restarts");
+  restarted.release();
 });
 
 void test("the service owner excludes an already-open foreign agent writer", async (t) => {

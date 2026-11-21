@@ -57,14 +57,13 @@ export function createCloudflareAccessVerifier(options: {
   issuer: string;
   audience: string;
   isAllowed: (identity: { issuer: string; subject: string }) => boolean;
-  bindVerifiedIdentity?: (identity: {
-    issuer: string;
-    subject: string;
-    email: string;
-  }) => Promise<boolean>;
+  bindVerifiedIdentity?: (
+    identity: { issuer: string; subject: string; email: string },
+    assertCurrent: () => void,
+  ) => Promise<boolean>;
   testClientId?: string;
   fetchImpl?: typeof fetch;
-}): ProtectedIdentityVerifier {
+}): ProtectedIdentityVerifier & { invalidateSubject: (subject: string) => void } {
   const issuer = new URL(options.issuer);
   if (
     issuer.protocol !== "https:" ||
@@ -74,6 +73,7 @@ export function createCloudflareAccessVerifier(options: {
   ) {
     throw new TypeError("Configure an exact Cloudflare Access issuer origin and audience.");
   }
+  const boundEmails = new Map<string, string>();
   const fetchImpl = options.fetchImpl ?? fetch;
   let keys: Array<JsonWebKey & { kid: string }> = [];
   let keysUntil = 0;
@@ -109,7 +109,7 @@ export function createCloudflareAccessVerifier(options: {
     });
     await pendingKeys;
   };
-  return async (request) => {
+  const verifyIdentity: ProtectedIdentityVerifier = async (request) => {
     try {
       const cookie = request.headers.get("cookie") ?? "";
       const matches = cookie
@@ -165,9 +165,7 @@ export function createCloudflareAccessVerifier(options: {
       const subject = testClient ? `${testSubjectPrefix}${testClient}` : claims.sub;
       const expiresAt = claims.exp * 1000;
       const assertTokenCurrent = () => {
-        if (
-          Date.now() >= expiresAt
-        ) {
+        if (Date.now() >= expiresAt) {
           denied();
         }
       };
@@ -204,14 +202,20 @@ export function createCloudflareAccessVerifier(options: {
             : typeof identity.email_address === "string"
               ? identity.email_address
               : undefined;
-        if (email && options.bindVerifiedIdentity) {
-          const bound = await options.bindVerifiedIdentity({
-            issuer: issuer.origin,
-            subject,
-            email,
-          });
-          if (!bound && !options.isAllowed({ issuer: issuer.origin, subject })) {
-            denied();
+        if (!testClient && email && options.bindVerifiedIdentity) {
+          const allowed = options.isAllowed({ issuer: issuer.origin, subject });
+          if (!allowed) {
+            boundEmails.delete(subject);
+          }
+          if (!allowed || boundEmails.get(subject) !== email) {
+            const bound = await options.bindVerifiedIdentity(
+              { issuer: issuer.origin, subject, email },
+              assertTokenCurrent,
+            );
+            if (!bound) {
+              denied();
+            }
+            boundEmails.set(subject, email);
           }
         }
         assertCurrent();
@@ -230,6 +234,11 @@ export function createCloudflareAccessVerifier(options: {
       return denied();
     }
   };
+  return Object.assign(verifyIdentity, {
+    invalidateSubject: (subject: string) => {
+      boundEmails.delete(subject);
+    },
+  });
 }
 
 export async function resolveProtectedProfile(

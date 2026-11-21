@@ -22,7 +22,7 @@ export function measureStorageLimits(stateDir: string): StorageLimits {
   const freeFloorBytes = 512 * MiB;
   const globalBytes = Math.min(256 * MiB, Number(available - BigInt(freeFloorBytes)) / 16);
   if (globalBytes < 16 * MiB) {
-    throw new Error("Insufficient free space for the Family pilot.");
+    throw new Error("Insufficient free space for Alcove.");
   }
   return {
     globalBytes: Math.floor(globalBytes),
@@ -50,18 +50,65 @@ async function fileBytes(files: AuthorizedUserFiles, directory: string): Promise
   return bytes;
 }
 
+type StorageMeasurementOptions = Pick<
+  Parameters<typeof createAuthorizedUserFiles>[0],
+  "usersRoot" | "encryption"
+> & {
+  chats: Pick<ProtectedChats, "capacityEntries" | "transcriptBytes">;
+  maxFileBytes: number;
+};
+
+export async function measureProtectedStorage(
+  options: StorageMeasurementOptions,
+  profileId: string,
+  assertCurrent: () => void,
+  includeOtherProfiles: boolean,
+) {
+  let globalBytes = 0;
+  let personalBytes = 0;
+  let chatCount = 0;
+  let lastChatActivityAt: number | null = null;
+  for (const entry of await options.chats.capacityEntries()) {
+    assertCurrent();
+    if (!includeOtherProfiles && entry.profileId !== profileId) {
+      continue;
+    }
+    const files = await createAuthorizedUserFiles({
+      usersRoot: options.usersRoot,
+      profileId: entry.profileId,
+      assertCurrent,
+      maxBytes: options.maxFileBytes,
+      encryption: options.encryption,
+    });
+    try {
+      const bytes =
+        chatBytes +
+        (await options.chats.transcriptBytes(entry.id, entry.sessionKey)) +
+        (await fileBytes(files, chatFilesDirectory(entry.id)));
+      globalBytes += bytes;
+      if (entry.profileId === profileId) {
+        personalBytes += bytes;
+        chatCount++;
+        lastChatActivityAt = Math.max(lastChatActivityAt ?? entry.updatedAt, entry.updatedAt);
+      }
+    } finally {
+      files.dispose();
+    }
+  }
+  assertCurrent();
+  return { globalBytes, personalBytes, chatCount, lastChatActivityAt };
+}
+
 export function createStorageAdmission(
-  options: Pick<Parameters<typeof createAuthorizedUserFiles>[0], "usersRoot" | "encryption"> & {
+  options: StorageMeasurementOptions & {
     stateDir: string;
     limits: StorageLimits;
-    chats: Pick<ProtectedChats, "capacityEntries" | "transcriptBytes">;
-    maxFileBytes: number;
   },
 ) {
   let held = false;
   return async (profileId: string, assertCurrent: () => void, operation: "create" | "turn") => {
     if (held) {
-      throw new ProtectedError(409, "storage_busy", "Another Family write is active. Try again.");
+      throw new ProtectedError(409, "storage_busy", "Another Alcove write is active. Try again.");
     }
     held = true;
     let active = true;
@@ -74,41 +121,23 @@ export function createStorageAdmission(
     const assertDisk = () => {
       assertCurrent();
       if (!active) {
-        throw new Error("Family storage admission closed");
+        throw new Error("Alcove storage admission closed");
       }
       if (freeBytes(options.stateDir) < BigInt(options.limits.freeFloorBytes)) {
-        throw new ProtectedError(507, "storage_full", "Family storage is low. Contact the host.");
+        throw new ProtectedError(507, "storage_full", "Alcove storage is low. Contact the host.");
       }
     };
     try {
       assertDisk();
-      let global = 0;
-      let personal = 0;
-      for (const entry of await options.chats.capacityEntries()) {
-        assertCurrent();
-        const files = await createAuthorizedUserFiles({
-          usersRoot: options.usersRoot,
-          profileId: entry.profileId,
-          assertCurrent,
-          maxBytes: options.maxFileBytes,
-          encryption: options.encryption,
-        });
-        try {
-          const bytes =
-            chatBytes +
-            (await options.chats.transcriptBytes(entry.id, entry.sessionKey)) +
-            (await fileBytes(files, chatFilesDirectory(entry.id)));
-          global += bytes;
-          if (entry.profileId === profileId) {
-            personal += bytes;
-          }
-        } finally {
-          files.dispose();
-        }
-      }
+      const { globalBytes, personalBytes } = await measureProtectedStorage(
+        options,
+        profileId,
+        assertCurrent,
+        true,
+      );
       let remaining = Math.min(
-        options.limits.userBytes - personal,
-        options.limits.globalBytes - global,
+        options.limits.userBytes - personalBytes,
+        options.limits.globalBytes - globalBytes,
         8 * MiB,
       );
       let failure: ProtectedError | undefined;
@@ -119,7 +148,7 @@ export function createStorageAdmission(
             throw new ProtectedError(
               413,
               "quota_exceeded",
-              "Family storage budget is full. Delete a chat to free space.",
+              "Alcove storage budget is full. Delete a chat to free space.",
             );
           }
           remaining -= bytes;
@@ -145,7 +174,7 @@ export function createStorageAdmission(
               failure = new ProtectedError(
                 413,
                 "file_too_large",
-                "A generated file exceeds the Family file limit.",
+                "A generated file exceeds the Alcove file limit.",
               );
               throw failure;
             }

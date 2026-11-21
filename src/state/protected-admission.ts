@@ -1,6 +1,18 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
-import { runOpenClawStateWriteTransaction, type OpenClawStateDatabase } from "./openclaw-state-db.js";
+import { randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+import {
+  executeSqliteQuerySync,
+  getNodeSqliteKysely as getTypedSqliteKysely,
+} from "../infra/kysely-sync.js";
+import {
+  deferSqliteWorkerCommitReceipt,
+  requestSqliteWorkerOperationAdmission,
+} from "../infra/sqlite-worker-operation-admission.js";
+import {
+  runOpenClawStateWriteTransaction,
+  type OpenClawStateDatabase,
+} from "./openclaw-state-db.js";
+import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -12,61 +24,78 @@ export type ProtectedAccessRequest = {
   updatedAt: number;
   subject?: string;
   profileId?: string;
+  policyState?: "pending" | "synced" | "failed" | "unknown";
 };
 
 export type ProtectedAdmission = {
-  email: string;
+  id: string;
+  email: string | null;
   issuer: string;
   subject?: string;
   profileId?: string;
   status: "approved" | "removed";
   revision: number;
+  policyState?: "pending" | "synced" | "failed" | "unknown";
 };
 
-const schemaSql = `
-CREATE TABLE IF NOT EXISTS protected_access_requests (
-  id TEXT NOT NULL PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  name TEXT NOT NULL,
-  note TEXT NOT NULL,
-  receipt_hash TEXT NOT NULL,
-  status TEXT NOT NULL,
-  edit_window_start INTEGER NOT NULL,
-  edit_count INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-) STRICT;
+export type ProtectedAdmissionDatabase = {
+  protected_access_requests: {
+    id: string;
+    email: string;
+    name: string;
+    note: string;
+    receipt_hash: string;
+    status: ProtectedAccessRequest["status"];
+    edit_window_start: number;
+    edit_count: number;
+    created_at: number;
+    updated_at: number;
+  };
+  protected_admissions: {
+    id: string;
+    email: string | null;
+    issuer: string;
+    subject: string | null;
+    profile_id: string | null;
+    status: ProtectedAdmission["status"];
+    revision: number;
+    created_at: number;
+    updated_at: number;
+  };
+  protected_admission_migrations: {
+    issuer: string;
+    completed_at: number;
+  };
+  protected_policy_sync: {
+    admission_id: string;
+    revision: number;
+    state: "pending" | "synced" | "failed" | "unknown";
+  };
+  protected_policy_barrier: { id: number; email: string; revision: number };
+};
 
-CREATE TABLE IF NOT EXISTS protected_admissions (
-  email TEXT NOT NULL PRIMARY KEY,
-  issuer TEXT NOT NULL,
-  subject TEXT,
-  profile_id TEXT,
-  status TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-) STRICT;
+const getNodeSqliteKysely = (db: DatabaseSync) =>
+  getTypedSqliteKysely<ProtectedAdmissionDatabase>(db);
 
-CREATE INDEX IF NOT EXISTS idx_protected_admissions_subject
-  ON protected_admissions(subject);
-
-CREATE TABLE IF NOT EXISTS protected_usage_daily (
-  profile_id TEXT NOT NULL,
-  day TEXT NOT NULL,
-  messages INTEGER NOT NULL,
-  tokens INTEGER NOT NULL,
-  models_json TEXT NOT NULL,
-  errors INTEGER NOT NULL,
-  PRIMARY KEY(profile_id, day)
-) STRICT;
-`;
-
+const ensureSchema = createOpenClawStateSchemaEnsurer({
+  table: "protected_access_requests",
+  additionalTables: [
+    "protected_admissions",
+    "protected_admission_migrations",
+    "protected_policy_sync",
+    "protected_policy_barrier",
+    "protected_usage_daily",
+    "protected_usage_runs",
+  ],
+  indexes: ["idx_protected_usage_daily_day", "idx_protected_usage_runs_day"],
+  endMarker: "  ON protected_usage_runs(day);\n",
+  operationLabel: "protected.admission.schema",
+});
 export function ensureProtectedAdmissionSchema(database: OpenClawStateDatabase): void {
-  database.db.exec(schemaSql);
+  ensureSchema({ database, path: database.path });
 }
 
-function normalizeEmail(value: string): string | undefined {
+export function normalizeProtectedEmail(value: string): string | undefined {
   const email = value.trim().toLowerCase();
   if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) {
     return undefined;
@@ -74,209 +103,19 @@ function normalizeEmail(value: string): string | undefined {
   return email;
 }
 
-function receiptHash(receipt: string): string {
-  return createHash("sha256").update(receipt).digest("hex");
-}
-
-export function submitProtectedAccessRequest(
-  database: OpenClawStateDatabase,
-  input: { email: string; name: string; note: string; now: number },
-): { request: ProtectedAccessRequest; receipt?: string } | undefined {
-  const email = normalizeEmail(input.email);
-  if (!email || input.name.trim().length > 80 || input.note.length > 1000) {
-    return undefined;
-  }
-  ensureProtectedAdmissionSchema(database);
-  return runOpenClawStateWriteTransaction(
-    ({ db }) => {
-      const existing = executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .selectFrom("protected_access_requests")
-          .select(["id", "email", "name", "note", "status", "created_at", "updated_at"])
-          .where("email", "=", email),
-      ).rows[0];
-      if (existing) {
-        return {
-          request: {
-            id: String(existing.id),
-            email: String(existing.email),
-            name: String(existing.name),
-            note: String(existing.note),
-            status: String(existing.status) as ProtectedAccessRequest["status"],
-            createdAt: Number(existing.created_at),
-            updatedAt: Number(existing.updated_at),
-          },
-        };
-      }
-      const openCount = executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .selectFrom("protected_access_requests")
-          .select(({ fn }) => fn.count<number>("id").as("count"))
-          .where("status", "=", "open"),
-      ).rows[0]?.count;
-      if (Number(openCount ?? 0) >= 50) {
-        return undefined;
-      }
-      const id = randomUUID();
-      const receipt = randomBytes(32).toString("base64url");
-      executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db).insertInto("protected_access_requests").values({
-          id,
-          email,
-          name: input.name.trim(),
-          note: input.note,
-          receipt_hash: receiptHash(receipt),
-          status: "open",
-          edit_window_start: input.now,
-          edit_count: 0,
-          created_at: input.now,
-          updated_at: input.now,
-        }),
-      );
-      return {
-        request: {
-          id,
-          email,
-          name: input.name.trim(),
-          note: input.note,
-          status: "open",
-          createdAt: input.now,
-          updatedAt: input.now,
-        },
-        receipt,
-      };
-    },
-    { path: database.path },
-    { operationLabel: "protected.access-request.submit" },
-  );
-}
-
-export function readProtectedAccessRequest(
-  database: OpenClawStateDatabase,
-  receipt: string,
-): ProtectedAccessRequest | undefined {
-  ensureProtectedAdmissionSchema(database);
-  const row = executeSqliteQuerySync(
-    database.db,
-    getNodeSqliteKysely(database.db)
-      .selectFrom("protected_access_requests")
-      .select(["id", "email", "name", "note", "status", "created_at", "updated_at"])
-      .where("receipt_hash", "=", receiptHash(receipt)),
-  ).rows[0];
-  if (!row) {
-    return undefined;
-  }
-  return {
-    id: String(row.id),
-    email: String(row.email),
-    name: String(row.name),
-    note: String(row.note),
-    status: String(row.status) as ProtectedAccessRequest["status"],
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
-  };
-}
-
-export function editProtectedAccessRequest(
-  database: OpenClawStateDatabase,
-  input: { receipt: string; name: string; note: string; now: number },
-): ProtectedAccessRequest | "rate_limit" | undefined {
-  if (input.name.trim().length > 80 || input.note.length > 1000) {
-    return undefined;
-  }
-  ensureProtectedAdmissionSchema(database);
-  return runOpenClawStateWriteTransaction(
-    ({ db }) => {
-      const hash = receiptHash(input.receipt);
-      const row = executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .selectFrom("protected_access_requests")
-          .select([
-            "id",
-            "email",
-            "name",
-            "note",
-            "status",
-            "edit_window_start",
-            "edit_count",
-            "created_at",
-            "updated_at",
-          ])
-          .where("receipt_hash", "=", hash),
-      ).rows[0];
-      if (!row) {
-        return undefined;
-      }
-      if (String(row.status) !== "open" && String(row.status) !== "denied") {
-        return undefined;
-      }
-      const windowStart = Number(row.edit_window_start);
-      const count = Number(row.edit_count);
-      const nextCount = input.now - windowStart < 60 * 60_000 ? count + 1 : 1;
-      if (nextCount > 10) {
-        return "rate_limit";
-      }
-      executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .updateTable("protected_access_requests")
-          .set({
-            name: input.name.trim(),
-            note: input.note,
-            status: "open",
-            edit_window_start: input.now - windowStart < 60 * 60_000 ? windowStart : input.now,
-            edit_count: nextCount,
-            updated_at: input.now,
-          })
-          .where("receipt_hash", "=", hash),
-      );
-      return {
-        id: String(row.id),
-        email: String(row.email),
-        name: input.name.trim(),
-        note: input.note,
-        status: "open" as const,
-        createdAt: Number(row.created_at),
-        updatedAt: input.now,
-      };
-    },
-    { path: database.path },
-    { operationLabel: "protected.access-request.edit" },
-  );
-}
-
-export function listProtectedAccessRequests(database: OpenClawStateDatabase): ProtectedAccessRequest[] {
-  ensureProtectedAdmissionSchema(database);
-  const rows = executeSqliteQuerySync(
-    database.db,
-    getNodeSqliteKysely(database.db)
-      .selectFrom("protected_access_requests")
-      .select(["id", "email", "name", "note", "status", "created_at", "updated_at"])
-      .orderBy("created_at", "desc")
-      .limit(50),
-  ).rows;
-  return rows.map((row) => ({
-    id: String(row.id),
-    email: String(row.email),
-    name: String(row.name),
-    note: String(row.note),
-    status: String(row.status) as ProtectedAccessRequest["status"],
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
-  }));
-}
-
 export function setProtectedRequestStatus(
   database: OpenClawStateDatabase,
-  input: { id: string; status: "approved" | "denied" | "removed" | "withdrawn"; now: number; issuer: string },
-): ProtectedAccessRequest | undefined {
+  input: {
+    id: string;
+    status: "approved" | "denied";
+    now: number;
+    issuer: string;
+  },
+): ProtectedAccessRequest | "admission_conflict" | undefined {
   ensureProtectedAdmissionSchema(database);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: input.status });
       const row = executeSqliteQuerySync(
         db,
         getNodeSqliteKysely(db)
@@ -286,6 +125,22 @@ export function setProtectedRequestStatus(
       ).rows[0];
       if (!row) {
         return undefined;
+      }
+      if (row.status !== "open") {
+        return undefined;
+      }
+      const existing =
+        input.status === "approved"
+          ? executeSqliteQuerySync(
+              db,
+              getNodeSqliteKysely(db)
+                .selectFrom("protected_admissions")
+                .select(["id", "revision", "status", "issuer"])
+                .where("email", "=", row.email),
+            ).rows[0]
+          : undefined;
+      if (existing && (existing.status === "removed" || existing.issuer !== input.issuer)) {
+        return "admission_conflict";
       }
       executeSqliteQuerySync(
         db,
@@ -296,19 +151,14 @@ export function setProtectedRequestStatus(
       );
       if (input.status === "approved") {
         const email = String(row.email);
-        const existing = executeSqliteQuerySync(
-          db,
-          getNodeSqliteKysely(db)
-            .selectFrom("protected_admissions")
-            .select(["revision"])
-            .where("email", "=", email),
-        ).rows[0];
         const revision = existing ? Number(existing.revision) + 1 : 1;
+        const admissionId = existing?.id ?? randomUUID();
         executeSqliteQuerySync(
           db,
           getNodeSqliteKysely(db)
             .insertInto("protected_admissions")
             .values({
+              id: admissionId,
               email,
               issuer: input.issuer,
               subject: null,
@@ -327,30 +177,17 @@ export function setProtectedRequestStatus(
               }),
             ),
         );
-      }
-      let subject: string | undefined;
-      let profileId: string | undefined;
-      if (input.status === "removed") {
-        const admission = executeSqliteQuerySync(
-          db,
-          getNodeSqliteKysely(db)
-            .selectFrom("protected_admissions")
-            .select(["subject", "profile_id", "revision"])
-            .where("email", "=", String(row.email)),
-        ).rows[0];
-        subject = admission?.subject === null ? undefined : admission?.subject?.toString();
-        profileId =
-          admission?.profile_id === null ? undefined : admission?.profile_id?.toString();
-        const revision = admission ? Number(admission.revision) + 1 : 1;
         executeSqliteQuerySync(
           db,
           getNodeSqliteKysely(db)
-            .updateTable("protected_admissions")
-            .set({ status: "removed", revision, updated_at: input.now })
-            .where("email", "=", String(row.email)),
+            .insertInto("protected_policy_sync")
+            .values({ admission_id: admissionId, revision, state: "pending" })
+            .onConflict((conflict) =>
+              conflict.column("admission_id").doUpdateSet({ revision, state: "pending" }),
+            ),
         );
       }
-      return {
+      const result = {
         id: String(row.id),
         email: String(row.email),
         name: String(row.name),
@@ -358,9 +195,10 @@ export function setProtectedRequestStatus(
         status: input.status,
         createdAt: Number(row.created_at),
         updatedAt: input.now,
-        subject,
-        profileId,
       };
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: input.status });
+      deferSqliteWorkerCommitReceipt(db, result);
+      return result;
     },
     { path: database.path },
     { operationLabel: "protected.access-request.status" },
@@ -375,44 +213,50 @@ export function migrateProtectedSubjects(
   let inserted = 0;
   runOpenClawStateWriteTransaction(
     ({ db }) => {
+      const completed = executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .selectFrom("protected_admission_migrations")
+          .select(["issuer"])
+          .where("issuer", "=", input.issuer),
+      ).rows[0];
+      if (completed) {
+        return;
+      }
       for (const subject of input.subjects) {
         const existing = executeSqliteQuerySync(
           db,
           getNodeSqliteKysely(db)
             .selectFrom("protected_admissions")
-            .select(["email"])
+            .select(["id"])
+            .where("issuer", "=", input.issuer)
             .where("subject", "=", subject),
         ).rows[0];
         if (existing) {
           continue;
         }
-        const email = `migrated-subject-${subject}@invalid.local`;
         executeSqliteQuerySync(
           db,
-          getNodeSqliteKysely(db)
-            .insertInto("protected_admissions")
-            .values({
-              email,
-              issuer: input.issuer,
-              subject,
-              profile_id: null,
-              status: "approved",
-              revision: 1,
-              created_at: input.now,
-              updated_at: input.now,
-            })
-            .onConflict((conflict) =>
-              conflict.column("email").doUpdateSet({
-                issuer: input.issuer,
-                subject,
-                status: "approved",
-                revision: 1,
-                updated_at: input.now,
-              }),
-            ),
+          getNodeSqliteKysely(db).insertInto("protected_admissions").values({
+            id: randomUUID(),
+            email: null,
+            issuer: input.issuer,
+            subject,
+            profile_id: null,
+            status: "approved",
+            revision: 1,
+            created_at: input.now,
+            updated_at: input.now,
+          }),
         );
         inserted++;
       }
+      executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .insertInto("protected_admission_migrations")
+          .values({ issuer: input.issuer, completed_at: input.now }),
+      );
     },
     { path: database.path },
     { operationLabel: "protected.admission.migrate" },
@@ -420,11 +264,50 @@ export function migrateProtectedSubjects(
   return inserted;
 }
 
+export function addProtectedSubject(
+  database: OpenClawStateDatabase,
+  input: { issuer: string; subject: string; now: number },
+): "added" | "existing" | "removed" {
+  ensureProtectedAdmissionSchema(database);
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      const current = executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .selectFrom("protected_admissions")
+          .select(["status"])
+          .where("issuer", "=", input.issuer)
+          .where("subject", "=", input.subject),
+      ).rows[0];
+      if (current) {
+        return current.status === "removed" ? "removed" : "existing";
+      }
+      executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db).insertInto("protected_admissions").values({
+          id: randomUUID(),
+          email: null,
+          issuer: input.issuer,
+          subject: input.subject,
+          profile_id: null,
+          status: "approved",
+          revision: 1,
+          created_at: input.now,
+          updated_at: input.now,
+        }),
+      );
+      return "added";
+    },
+    { path: database.path },
+    { operationLabel: "protected.admission.add-subject" },
+  );
+}
+
 export function bindProtectedAdmission(
   database: OpenClawStateDatabase,
   input: { issuer: string; email: string; subject: string; now: number },
 ): boolean {
-  const email = normalizeEmail(input.email);
+  const email = normalizeProtectedEmail(input.email);
   if (!email) {
     return false;
   }
@@ -432,28 +315,92 @@ export function bindProtectedAdmission(
   let allowed = false;
   runOpenClawStateWriteTransaction(
     ({ db }) => {
-      const row = executeSqliteQuerySync(
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: input.subject });
+      const byEmail = executeSqliteQuerySync(
         db,
         getNodeSqliteKysely(db)
           .selectFrom("protected_admissions")
-          .select(["issuer", "subject", "status"])
+          .select(["id", "issuer", "subject", "profile_id", "status", "revision"])
           .where("email", "=", email),
       ).rows[0];
-      if (!row || String(row.issuer) !== input.issuer || String(row.status) !== "approved") {
-        return;
-      }
-      const bound = row.subject === null ? null : String(row.subject);
-      if (bound !== null && bound !== input.subject) {
-        return;
-      }
-      executeSqliteQuerySync(
+      const bySubject = executeSqliteQuerySync(
         db,
         getNodeSqliteKysely(db)
-          .updateTable("protected_admissions")
-          .set({ subject: input.subject, updated_at: input.now })
-          .where("email", "=", email),
-      );
-      allowed = true;
+          .selectFrom("protected_admissions")
+          .select(["id", "email", "status", "revision"])
+          .where("issuer", "=", input.issuer)
+          .where("subject", "=", input.subject),
+      ).rows[0];
+      if (bySubject) {
+        if (bySubject.status !== "approved" || (bySubject.email && bySubject.email !== email)) {
+          return;
+        }
+        const mergedApproval = byEmail && byEmail.id !== bySubject.id;
+        if (mergedApproval) {
+          if (
+            byEmail.issuer !== input.issuer ||
+            byEmail.status !== "approved" ||
+            byEmail.subject !== null ||
+            byEmail.profile_id !== null
+          ) {
+            return;
+          }
+          executeSqliteQuerySync(
+            db,
+            getNodeSqliteKysely(db).deleteFrom("protected_admissions").where("id", "=", byEmail.id),
+          );
+          executeSqliteQuerySync(
+            db,
+            getNodeSqliteKysely(db)
+              .deleteFrom("protected_policy_sync")
+              .where("admission_id", "=", byEmail.id),
+          );
+        }
+        const revision =
+          Math.max(bySubject.revision, byEmail?.revision ?? 0) + (mergedApproval ? 1 : 0);
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely(db)
+            .updateTable("protected_admissions")
+            .set({
+              email,
+              revision,
+              updated_at: input.now,
+            })
+            .where("id", "=", bySubject.id),
+        );
+        if (bySubject.email === null) {
+          const state = mergedApproval ? "pending" : "synced";
+          executeSqliteQuerySync(
+            db,
+            getNodeSqliteKysely(db)
+              .insertInto("protected_policy_sync")
+              .values({ admission_id: bySubject.id, revision, state })
+              .onConflict((conflict) =>
+                conflict.column("admission_id").doUpdateSet({ revision, state }),
+              ),
+          );
+        }
+        allowed = true;
+      } else if (
+        byEmail &&
+        byEmail.issuer === input.issuer &&
+        byEmail.status === "approved" &&
+        byEmail.subject === null
+      ) {
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely(db)
+            .updateTable("protected_admissions")
+            .set({ subject: input.subject, updated_at: input.now })
+            .where("id", "=", byEmail.id),
+        );
+        allowed = true;
+      } else {
+        return;
+      }
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: input.subject });
+      deferSqliteWorkerCommitReceipt(db, { subject: input.subject });
     },
     { path: database.path },
     { operationLabel: "protected.admission.bind" },
@@ -466,19 +413,97 @@ export function listProtectedAdmissions(database: OpenClawStateDatabase): Protec
   const rows = executeSqliteQuerySync(
     database.db,
     getNodeSqliteKysely(database.db)
-      .selectFrom("protected_admissions")
-      .select(["email", "issuer", "subject", "profile_id", "status", "revision"])
-      .orderBy("updated_at", "desc")
-      .limit(50),
+      .selectFrom("protected_admissions as admission")
+      .leftJoin("protected_policy_sync as sync", "sync.admission_id", "admission.id")
+      .select([
+        "admission.id",
+        "admission.email",
+        "admission.issuer",
+        "admission.subject",
+        "admission.profile_id",
+        "admission.status",
+        "admission.revision",
+        "sync.state as policy_state",
+      ])
+      .orderBy("admission.updated_at", "desc"),
   ).rows;
   return rows.map((row) => ({
-    email: String(row.email),
+    id: String(row.id),
+    email: row.email,
     issuer: String(row.issuer),
     subject: row.subject === null ? undefined : String(row.subject),
     profileId: row.profile_id === null ? undefined : String(row.profile_id),
-    status: String(row.status) as ProtectedAdmission["status"],
+    status: row.status,
     revision: Number(row.revision),
+    policyState: row.policy_state ?? undefined,
   }));
+}
+
+export function removeProtectedAdmission(
+  database: OpenClawStateDatabase,
+  input: { id: string; issuer: string; ownerSubject: string; now: number },
+): ProtectedAdmission | "owner_protected" | undefined {
+  ensureProtectedAdmissionSchema(database);
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: "removed" });
+      const admission = executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .selectFrom("protected_admissions")
+          .select(["id", "email", "issuer", "subject", "profile_id", "status", "revision"])
+          .where("id", "=", input.id)
+          .where("issuer", "=", input.issuer),
+      ).rows[0];
+      if (!admission || admission.status !== "approved") {
+        return undefined;
+      }
+      if (admission.subject === input.ownerSubject) {
+        return "owner_protected";
+      }
+      const revision = admission.revision + 1;
+      executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .updateTable("protected_admissions")
+          .set({ status: "removed", revision, updated_at: input.now })
+          .where("id", "=", admission.id),
+      );
+      if (admission.email) {
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely(db)
+            .updateTable("protected_access_requests")
+            .set({ status: "removed", updated_at: input.now })
+            .where("email", "=", admission.email)
+            .where("status", "in", ["open", "approved"]),
+        );
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely(db)
+            .insertInto("protected_policy_sync")
+            .values({ admission_id: admission.id, revision, state: "pending" })
+            .onConflict((conflict) =>
+              conflict.column("admission_id").doUpdateSet({ revision, state: "pending" }),
+            ),
+        );
+      }
+      const result: ProtectedAdmission = {
+        id: admission.id,
+        email: admission.email,
+        issuer: admission.issuer,
+        subject: admission.subject ?? undefined,
+        profileId: admission.profile_id ?? undefined,
+        status: "removed",
+        revision,
+      };
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: "removed" });
+      deferSqliteWorkerCommitReceipt(db, result);
+      return result;
+    },
+    { path: database.path },
+    { operationLabel: "protected.admission.remove" },
+  );
 }
 
 export function bindProtectedProfile(

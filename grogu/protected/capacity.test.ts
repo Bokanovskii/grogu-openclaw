@@ -39,7 +39,7 @@ void test("Family capacity charges encrypted bytes for existing files and new wr
       limits: { userBytes, globalBytes: userBytes, freeFloorBytes: 1 },
       chats: {
         async capacityEntries() {
-          return hasChat ? [{ profileId, id: "one", sessionKey: "synthetic" }] : [];
+          return hasChat ? [{ profileId, id: "one", sessionKey: "synthetic", updatedAt: 1 }] : [];
         },
         async transcriptBytes() {
           return 0;

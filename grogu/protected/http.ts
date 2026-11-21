@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import {
   isProtectedCreateChat,
   isProtectedRenew,
@@ -12,29 +13,36 @@ import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
+import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
-import { createStorageAdmission, type StorageLimits } from "./capacity.js";
+import {
+  bindProtectedProfile,
+  editProtectedAccessRequest,
+  listPendingProtectedPolicy,
+  listProtectedAdmissions,
+  listProtectedAccessRequests,
+  readProtectedAccessRequest,
+  removeProtectedAdmission,
+  retryProtectedPolicy,
+  setProtectedRequestStatus,
+  submitProtectedAccessRequest,
+  withdrawProtectedAccessRequest,
+} from "./admission-store.js";
+import { createStorageAdmission, measureProtectedStorage, type StorageLimits } from "./capacity.js";
 import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
-import {
-  bindProtectedProfile,
-  editProtectedAccessRequest,
-  listProtectedAdmissions,
-  listProtectedAccessRequests,
-  readProtectedAccessRequest,
-  setProtectedRequestStatus,
-  submitProtectedAccessRequest,
-} from "./admission-store.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
+import { listProtectedUsage, recordProtectedUsage } from "./usage-store.js";
 
 const base = "/api/protected/v1";
 const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
 const maxBodyBytes = 48_000;
+const loadProtectedPush = createLazyRuntimeModule(() => import("./push.js"));
 type Run = {
   id: string;
   profileId: string;
@@ -100,6 +108,14 @@ function text(value: unknown, max: number) {
   }
   return value;
 }
+function accessReceipt(request: Request): string | undefined {
+  const cookie = (request.headers.get("cookie") ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("protected_access_receipt="));
+  const value = cookie?.slice("protected_access_receipt=".length);
+  return value && /^[A-Za-z0-9_-]{43}$/u.test(value) ? value : undefined;
+}
 
 export function createProtectedHttp(options: {
   origin: string;
@@ -107,6 +123,8 @@ export function createProtectedHttp(options: {
   accessIssuer: string;
   ownerSubject?: string;
   onRemoveSubject?: (subject: string) => void;
+  onPolicyChanged?: () => void;
+  isPolicyInFlight?: (id: string) => boolean;
   verifyIdentity: ProtectedIdentityVerifier;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
@@ -130,6 +148,70 @@ export function createProtectedHttp(options: {
   const creating = new Set<string>();
   const mutations = new Set<string>();
   const shutdown = new AbortController();
+  const invalidateProfile = (profileId: string) => {
+    deniedProfiles.add(profileId);
+    options.providerRelay?.invalidate({ profileId });
+    for (const run of runs.values()) {
+      if (run.profileId === profileId) {
+        run.controller.abort();
+      }
+    }
+  };
+  let publicSubmissionWindow = 0;
+  let publicSubmissionCount = 0;
+  let publicApiWindow = 0;
+  let publicApiCount = 0;
+  const rateKey = randomBytes(32);
+  const publicSources = new Map<string, { startedAt: number; count: number }>();
+  const publicApiSources = new Map<string, { startedAt: number; count: number }>();
+  const sourceKey = (request: Request) => {
+    const address = request.headers.get("cf-connecting-ip")?.trim() ?? "";
+    const version = isIP(address);
+    const normalized =
+      version === 6 ? new URL(`http://[${address}]/`).hostname : version === 4 ? address : "";
+    return normalized ? createHmac("sha256", rateKey).update(normalized).digest("hex") : "unknown";
+  };
+  const incrementSource = (
+    sources: Map<string, { startedAt: number; count: number }>,
+    request: Request,
+    now: number,
+    lifetimeMs: number,
+  ) => {
+    for (const [source, window] of sources) {
+      if (now - window.startedAt >= lifetimeMs) {
+        sources.delete(source);
+      }
+    }
+    const key = sourceKey(request);
+    const bucket = sources.has(key) || sources.size < 256 ? key : "unknown";
+    const window = sources.get(bucket) ?? { startedAt: now, count: 0 };
+    window.count += 1;
+    sources.set(bucket, window);
+    return window.count;
+  };
+  const limitPublicSubmission = (request: Request) => {
+    const now = Date.now();
+    if (now - publicSubmissionWindow >= 60_000) {
+      publicSubmissionWindow = now;
+      publicSubmissionCount = 0;
+    }
+    if (++publicSubmissionCount > 60) {
+      throw new ProtectedError(429, "request_limit", "Try again later.");
+    }
+    if (incrementSource(publicSources, request, now, 3_600_000) > 10) {
+      throw new ProtectedError(429, "request_limit", "Try again later.");
+    }
+  };
+  const limitPublicApi = (request: Request) => {
+    const now = Date.now();
+    if (now - publicApiWindow >= 60_000) {
+      publicApiWindow = now;
+      publicApiCount = 0;
+    }
+    if (++publicApiCount > 600 || incrementSource(publicApiSources, request, now, 60_000) > 60) {
+      throw new ProtectedError(429, "request_limit", "Try again later.");
+    }
+  };
 
   const track = <T>(work: Promise<T>): Promise<T> => {
     pending.add(work);
@@ -146,10 +228,15 @@ export function createProtectedHttp(options: {
       if (shutdown.signal.aborted) {
         throw new ProtectedError(503, "unavailable", "The service is stopping.");
       }
-      if (!path.startsWith(`${base}/`)) {
+      const publicBase = "/request-access/api";
+      if (
+        !path.startsWith(`${base}/`) &&
+        path !== publicBase &&
+        !path.startsWith(`${publicBase}/`)
+      ) {
         return notFound();
       }
-      const pathname = path.slice(base.length);
+      const pathname = path.startsWith(`${base}/`) ? path.slice(base.length) : "";
       const method = request.method;
       if (pathname === "/widget-sandbox" && method === "GET") {
         const doc = buildSandboxHostDocument({ profile: "protected" }, true);
@@ -167,59 +254,83 @@ export function createProtectedHttp(options: {
           "Use the protected app to make this request.",
         );
       }
-      if (path === "/api/protected/v1/request-access/status" && method === "GET") {
-        const cookie = (request.headers.get("cookie") ?? "")
-          .split(";")
-          .map((part) => part.trim())
-          .find((part) => part.startsWith("protected_access_receipt="));
-        const receipt = cookie?.slice("protected_access_receipt=".length);
+      if (path === publicBase || path.startsWith(`${publicBase}/`)) {
+        limitPublicApi(request);
+      }
+      if (path === `${publicBase}/status` && method === "GET") {
+        const receipt = accessReceipt(request);
         if (!receipt) {
           return json({ request: null }, 200);
         }
         const requestStatus = await readProtectedAccessRequest(options.stateDir, receipt);
-        return json({ request: requestStatus ?? null }, 200);
+        const {
+          policyState,
+          subject: _subject,
+          profileId: _profileId,
+          ...publicRequest
+        } = requestStatus ?? {};
+        return json({
+          request:
+            requestStatus === undefined
+              ? null
+              : requestStatus.status === "approved" && policyState !== "synced"
+                ? { ...publicRequest, status: "approving" }
+                : publicRequest,
+        });
       }
-      if (path === "/api/protected/v1/request-access" && method === "POST") {
+      if (path === publicBase && method === "POST") {
+        limitPublicSubmission(request);
         const value = await body(request);
         const email = text(value.email, 254);
         const name = text(value.name, 80);
-        const note = typeof value.note === "string" ? value.note : "";
-        if (note.length > 1000) {
+        const note = value.note;
+        if (typeof note !== "string" || note.length > 1000) {
           return invalid();
         }
-        const result = await submitProtectedAccessRequest(options.stateDir, { email, name, note });
+        const result = await submitProtectedAccessRequest(options.stateDir, {
+          email,
+          name,
+          note,
+          receipt: accessReceipt(request),
+        });
         if (!result) {
           throw new ProtectedError(429, "request_limit", "Try again later.");
         }
         const headers = new Headers(commonHeaders);
-        if (result.receipt) {
-          headers.set(
-            "set-cookie",
-            `protected_access_receipt=${result.receipt}; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=Strict`,
+        headers.set(
+          "set-cookie",
+          `protected_access_receipt=${result.receipt}; Max-Age=31536000; Path=/request-access; HttpOnly; Secure; SameSite=Strict`,
+        );
+        if (result.created) {
+          void track(
+            loadProtectedPush()
+              .then(({ notifyProtectedAccessRequest }) =>
+                notifyProtectedAccessRequest({
+                  stateDir: options.stateDir,
+                  issuer: options.accessIssuer,
+                  ownerSubject: options.ownerSubject,
+                }),
+              )
+              .catch(() => {
+                process.stderr.write("Alcove could not deliver a new-request notification.\n");
+              }),
           );
         }
-        return Response.json(
-          { request: { id: result.request.id, status: result.request.status } },
-          { status: 201, headers },
-        );
+        return Response.json({ accepted: true }, { status: 201, headers });
       }
-      if (path === "/api/protected/v1/request-access/edit" && method === "POST") {
-        const cookie = (request.headers.get("cookie") ?? "")
-          .split(";")
-          .map((part) => part.trim())
-          .find((part) => part.startsWith("protected_access_receipt="));
-        const receipt = cookie?.slice("protected_access_receipt=".length);
+      if (path === `${publicBase}/edit` && method === "POST") {
+        const receipt = accessReceipt(request);
         if (!receipt) {
           throw new ProtectedError(401, "receipt_required", "Sign in with this browser's receipt.");
         }
         const current = await readProtectedAccessRequest(options.stateDir, receipt);
-        if (!current || current.status !== "open" && current.status !== "denied") {
+        if (!current || (current.status !== "open" && current.status !== "denied")) {
           throw new ProtectedError(404, "request_not_found", "Request not found.");
         }
         const value = await body(request);
         const name = text(value.name, 80);
-        const note = typeof value.note === "string" ? value.note : "";
-        if (note.length > 1000) {
+        const note = value.note;
+        if (typeof note !== "string" || note.length > 1000) {
           return invalid();
         }
         const updated = await editProtectedAccessRequest(options.stateDir, {
@@ -235,25 +346,19 @@ export function createProtectedHttp(options: {
         }
         return json({ request: { id: updated.id, status: updated.status } });
       }
-      if (path === "/api/protected/v1/request-access/withdraw" && method === "POST") {
-        const cookie = (request.headers.get("cookie") ?? "")
-          .split(";")
-          .map((part) => part.trim())
-          .find((part) => part.startsWith("protected_access_receipt="));
-        const receipt = cookie?.slice("protected_access_receipt=".length);
+      if (path === `${publicBase}/withdraw` && method === "POST") {
+        const receipt = accessReceipt(request);
         if (!receipt) {
           throw new ProtectedError(401, "receipt_required", "Sign in with this browser's receipt.");
         }
-        const current = await readProtectedAccessRequest(options.stateDir, receipt);
-        if (!current) {
+        const withdrawn = await withdrawProtectedAccessRequest(options.stateDir, receipt);
+        if (!withdrawn) {
           throw new ProtectedError(404, "request_not_found", "Request not found.");
         }
-        await setProtectedRequestStatus(options.stateDir, {
-          id: current.id,
-          status: "withdrawn",
-          issuer: options.accessIssuer,
-        });
         return noContent();
+      }
+      if (path === publicBase || path.startsWith(`${publicBase}/`)) {
+        return notFound();
       }
       const identity = await options.verifyIdentity(request);
       const rawCurrent = () => {
@@ -267,62 +372,6 @@ export function createProtectedHttp(options: {
         identity.issuer === options.accessIssuer &&
         options.ownerSubject !== undefined &&
         identity.subject === options.ownerSubject;
-      if (pathname === "/admin/requests" && method === "GET") {
-        if (!isOwner) {
-          throw new ProtectedError(403, "owner_required", "Owner access is required.");
-        }
-        return json({ requests: await listProtectedAccessRequests(options.stateDir) });
-      }
-      if (pathname === "/admin/people" && method === "GET") {
-        if (!isOwner) {
-          throw new ProtectedError(403, "owner_required", "Owner access is required.");
-        }
-        return json({ people: await listProtectedAdmissions(options.stateDir) });
-      }
-      const adminRequest = /^\/admin\/requests\/([a-f0-9-]{36})\/(approve|deny|remove)$/u.exec(pathname);
-      if (adminRequest && (method === "POST")) {
-        if (!isOwner) {
-          throw new ProtectedError(403, "owner_required", "Owner access is required.");
-        }
-        const status =
-          adminRequest[2] === "approve"
-            ? "approved"
-            : adminRequest[2] === "deny"
-              ? "denied"
-              : "removed";
-        const requestStatus = await setProtectedRequestStatus(options.stateDir, {
-          id: adminRequest[1]!,
-          status,
-          issuer: options.accessIssuer,
-        });
-        if (!requestStatus) {
-          throw new ProtectedError(404, "request_not_found", "Request not found.");
-        }
-        if (status === "removed") {
-          if (requestStatus.subject) {
-            options.onRemoveSubject?.(requestStatus.subject);
-          }
-          if (requestStatus.profileId) {
-            deniedProfiles.add(requestStatus.profileId);
-            options.providerRelay?.invalidate({ profileId: requestStatus.profileId });
-            for (const run of runs.values()) {
-              if (run.profileId === requestStatus.profileId) {
-                run.controller.abort();
-              }
-            }
-            await updateCanonicalUserProfileAccess(
-              { action: "revoke", profileId: requestStatus.profileId },
-              { env: chats.env, assertCurrent: rawCurrent },
-            );
-          }
-          // Canonical removal is reconciled by the profile lifecycle below when a profile exists.
-          return json({ request: requestStatus, policy: "removal_pending" });
-        }
-        if (status === "approved") {
-          return json({ request: requestStatus, policy: "sync_pending" });
-        }
-        return json({ request: requestStatus });
-      }
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
@@ -370,6 +419,205 @@ export function createProtectedHttp(options: {
         await checkGrant();
         assertCurrent();
       };
+      if (pathname === "/admin/push/key" && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const { protectedPushPublicKey } = await loadProtectedPush();
+        return json({ publicKey: await protectedPushPublicKey(options.stateDir, assertCurrent) });
+      }
+      if (pathname === "/admin/push/subscribe" && method === "POST") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const data = await body(request);
+        if (!isRecord(data.keys)) {
+          return invalid();
+        }
+        await revalidate();
+        const { subscribeProtectedPush } = await loadProtectedPush();
+        const subscriptionId = await subscribeProtectedPush({
+          stateDir: options.stateDir,
+          profileId: profile.id,
+          endpoint: text(data.endpoint, 2048),
+          keys: { p256dh: text(data.keys.p256dh, 512), auth: text(data.keys.auth, 512) },
+          assertCurrent,
+        });
+        return json({ subscriptionId });
+      }
+      if (pathname === "/admin/push/unsubscribe" && method === "POST") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const data = await body(request);
+        await revalidate();
+        const { unsubscribeProtectedPush } = await loadProtectedPush();
+        const removed = await unsubscribeProtectedPush({
+          stateDir: options.stateDir,
+          profileId: profile.id,
+          endpoint: text(data.endpoint, 2048),
+          assertCurrent,
+        });
+        return json({ removed });
+      }
+      if (pathname === "/admin/requests" && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const requests = await listProtectedAccessRequests(options.stateDir);
+        const { blocked: policyBlocked, blockedPersonId } = await listPendingProtectedPolicy(
+          options.stateDir,
+        );
+        assertCurrent();
+        return json({ requests, policyBlocked, blockedPersonId });
+      }
+      if (pathname === "/admin/people" && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const people = await listProtectedAdmissions(options.stateDir);
+        assertCurrent();
+        return json({ people });
+      }
+      const usagePerson = /^\/admin\/people\/([a-f0-9-]{36})\/usage$/u.exec(pathname);
+      if (usagePerson && method === "GET") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const people = await listProtectedAdmissions(options.stateDir);
+        const person = people.find((entry) => entry.id === usagePerson[1]);
+        if (!person) {
+          throw new ProtectedError(404, "person_not_found", "Person not found.");
+        }
+        const daily = person.profileId
+          ? await listProtectedUsage(options.stateDir, person.profileId, Date.now())
+          : [];
+        const storage = person.profileId
+          ? await measureProtectedStorage(
+              {
+                usersRoot: options.usersRoot,
+                chats,
+                maxFileBytes: options.maxFileBytes,
+                encryption: options.encryption,
+              },
+              person.profileId,
+              assertCurrent,
+              false,
+            )
+          : undefined;
+        assertCurrent();
+        return json({
+          daily,
+          chatCount: storage?.chatCount ?? null,
+          approximateStorageBytes: storage?.personalBytes ?? null,
+          lastChatActivityAt: storage?.lastChatActivityAt ?? null,
+        });
+      }
+      const adminRequest = /^\/admin\/requests\/([a-f0-9-]{36})\/(approve|deny)$/u.exec(pathname);
+      if (adminRequest && method === "POST") {
+        if (!isOwner || !options.ownerSubject) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const status = adminRequest[2] === "approve" ? "approved" : "denied";
+        const requestStatus = await setProtectedRequestStatus(
+          options.stateDir,
+          {
+            id: adminRequest[1]!,
+            status,
+            issuer: options.accessIssuer,
+          },
+          assertCurrent,
+          () => options.onPolicyChanged?.(),
+        );
+        if (requestStatus === "admission_conflict") {
+          throw new ProtectedError(
+            409,
+            "admission_conflict",
+            "This person was removed or belongs to a different Access issuer.",
+          );
+        }
+        if (!requestStatus) {
+          throw new ProtectedError(404, "request_not_found", "Request not found.");
+        }
+        return json({
+          request: requestStatus,
+          ...(status === "approved" ? { policy: "sync_pending" } : {}),
+        });
+      }
+      const adminPerson = /^\/admin\/people\/([a-f0-9-]{36})\/remove$/u.exec(pathname);
+      if (adminPerson && method === "POST") {
+        if (!isOwner || !options.ownerSubject) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const person = await removeProtectedAdmission(
+          options.stateDir,
+          { id: adminPerson[1]!, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
+          assertCurrent,
+          (subject, profileId) => {
+            if (subject) {
+              options.onRemoveSubject?.(subject);
+            }
+            if (profileId) {
+              invalidateProfile(profileId);
+            }
+          },
+          () => options.onPolicyChanged?.(),
+        );
+        if (person === "owner_protected") {
+          throw new ProtectedError(403, "owner_protected", "The owner cannot be removed.");
+        }
+        if (!person) {
+          throw new ProtectedError(404, "person_not_found", "Person not found.");
+        }
+        if (person.profileId) {
+          await updateCanonicalUserProfileAccess(
+            { action: "revoke", profileId: person.profileId },
+            { env: chats.env, assertCurrent },
+          );
+        }
+        return json({
+          person,
+          policy: person.email ? "removal_pending" : "identity_unavailable",
+        });
+      }
+      const retryPolicy = /^\/admin\/people\/([a-f0-9-]{36})\/retry-policy$/u.exec(pathname);
+      if (retryPolicy && method === "POST") {
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const assertRetryCurrent = () => {
+          assertCurrent();
+          if (options.isPolicyInFlight?.(retryPolicy[1]!)) {
+            throw new ProtectedError(
+              409,
+              "policy_in_progress",
+              "The policy update is still running.",
+            );
+          }
+        };
+        assertRetryCurrent();
+        const queued = await retryProtectedPolicy(
+          options.stateDir,
+          { id: retryPolicy[1]!, issuer: options.accessIssuer },
+          assertRetryCurrent,
+          () => options.onPolicyChanged?.(),
+        );
+        if (!queued) {
+          throw new ProtectedError(
+            409,
+            "policy_not_retryable",
+            "This policy update cannot be retried.",
+          );
+        }
+        return json({ queued: true });
+      }
       const requireProfile = () => {
         if (request.headers.get("x-grogu-profile") !== profile.id) {
           throw new ProtectedError(
@@ -433,9 +681,9 @@ export function createProtectedHttp(options: {
       };
       if (pathname === "/me" && method === "GET") {
         return json({
-          user: { id: profile.id, displayName: profile.displayName ?? "Family member" },
+          user: { id: profile.id, displayName: profile.displayName ?? "Alcove member" },
           disclosure:
-            "Family keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
+            "Alcove keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The host keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Alcove can fetch known public URLs, but it does not search the web. Alcove is produced by Sparky Labs.",
           models: options.turns.models,
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
@@ -475,7 +723,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider is not enabled for Alcove connections.",
           );
         }
         const provider = connection[1] === "openai" ? "openai" : "github-copilot";
@@ -498,7 +746,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider is not enabled for Alcove connections.",
           );
         }
         const data = await body(request);
@@ -785,6 +1033,9 @@ export function createProtectedHttp(options: {
             const keepalive = setInterval(() => write("\n"), 15_000);
             keepalive.unref();
             const complete = async () => {
+              let tokens: number | null = null;
+              let messageCount: number | null = null;
+              let failed = true;
               try {
                 assertRun();
                 send({ type: "start", runId: run.id });
@@ -802,6 +1053,9 @@ export function createProtectedHttp(options: {
                         signal,
                         assertCurrent: assertRun,
                         revalidate: checkRun,
+                        usage: (value) => {
+                          tokens = value;
+                        },
                         delta: async (value) => {
                           await checkRun();
                           send({ type: "delta", text: value });
@@ -831,6 +1085,7 @@ export function createProtectedHttp(options: {
                 const chat = await chats.read(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
+                messageCount = newMessages.length;
                 if (
                   !newMessages.some(
                     (message) => message.role === "user" && message.text === input.text,
@@ -844,6 +1099,7 @@ export function createProtectedHttp(options: {
                     "The reply could not be confirmed as saved.",
                   );
                 }
+                failed = false;
                 send({ type: "done", chatVersion: chat.version });
               } catch (error) {
                 let failure = error;
@@ -857,6 +1113,21 @@ export function createProtectedHttp(options: {
                   : publicError(failure);
                 send({ type: "error", code: issue.code, message: issue.message });
               } finally {
+                try {
+                  await recordProtectedUsage(options.stateDir, {
+                    runId: run.id,
+                    profileId: profile.id,
+                    model: `${input.provider}/${input.model}`,
+                    messages: messageCount,
+                    tokens,
+                    failed,
+                    now: Date.now(),
+                  });
+                } catch {
+                  process.stderr.write(
+                    "Protected usage could not be recorded for a completed run.\n",
+                  );
+                }
                 clearInterval(keepalive);
                 storage?.release();
                 clearInterval(liveCheck);
@@ -971,13 +1242,7 @@ export function createProtectedHttp(options: {
       }
     },
     async revokeProfile(profileId: string) {
-      deniedProfiles.add(profileId);
-      options.providerRelay?.invalidate({ profileId });
-      for (const run of runs.values()) {
-        if (run.profileId === profileId) {
-          run.controller.abort();
-        }
-      }
+      invalidateProfile(profileId);
       return updateCanonicalUserProfileAccess({ action: "revoke", profileId }, { env: chats.env });
     },
   };

@@ -10,6 +10,33 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "./openclaw-state-db.js";
+import {
+  editProtectedAccessRequest,
+  listProtectedAccessRequests,
+  readProtectedAccessRequest,
+  submitProtectedAccessRequest,
+  withdrawProtectedAccessRequest,
+} from "./protected-access-requests.js";
+import {
+  migrateProtectedSubjects,
+  setProtectedRequestStatus,
+  bindProtectedAdmission,
+  listProtectedAdmissions,
+  bindProtectedProfile,
+  removeProtectedAdmission,
+  addProtectedSubject,
+} from "./protected-admission.js";
+import {
+  beginProtectedPolicy,
+  listPendingProtectedPolicy,
+  retryProtectedPolicy,
+  settleProtectedPolicy,
+} from "./protected-policy-store.js";
+import {
+  listProtectedUsage,
+  pruneProtectedUsage,
+  recordProtectedUsage,
+} from "./protected-usage.js";
 import { executeUserChannelIdentityChange } from "./user-channel-identities.worker.js";
 import {
   connectUserModelAccount,
@@ -40,17 +67,6 @@ import {
   userProfilesDb,
 } from "./user-profiles-internal.js";
 import { ensureUserProfilesSchema } from "./user-profiles-schema.js";
-import {
-  listProtectedAccessRequests,
-  migrateProtectedSubjects,
-  readProtectedAccessRequest,
-  setProtectedRequestStatus,
-  submitProtectedAccessRequest,
-  editProtectedAccessRequest,
-  bindProtectedAdmission,
-  listProtectedAdmissions,
-  bindProtectedProfile,
-} from "./protected-admission.js";
 import {
   ensureGatewayOwnerProfile,
   ensureProfileForEmail,
@@ -211,7 +227,7 @@ export const userProfileOperations = {
     return readUserProfileSnapshotSync(options, input?.githubAccountIds);
   },
   "protectedAccess.submit": (
-    input: { email: string; name: string; note: string; now: number },
+    input: { email: string; name: string; note: string; now: number; receipt?: string },
     { open },
   ) => submitProtectedAccessRequest(open(), input),
   "protectedAccess.read": (input: { receipt: string }, { open }) =>
@@ -220,6 +236,8 @@ export const userProfileOperations = {
     input: { receipt: string; name: string; note: string; now: number },
     { open },
   ) => editProtectedAccessRequest(open(), input),
+  "protectedAccess.withdraw": (input: { receipt: string; now: number }, { open }) =>
+    withdrawProtectedAccessRequest(open(), input),
   "protectedAccess.bind": (
     input: { issuer: string; email: string; subject: string; now: number },
     { open },
@@ -230,12 +248,43 @@ export const userProfileOperations = {
     input: { issuer: string; subject: string; profileId: string; now: number },
     { open },
   ) => bindProtectedProfile(open(), input),
-  "protectedAccess.list": (_input: undefined, { open }) =>
-    listProtectedAccessRequests(open()),
+  "protectedAccess.removeAdmission": (
+    input: { id: string; issuer: string; ownerSubject: string; now: number },
+    { open },
+  ) => removeProtectedAdmission(open(), input),
+  "protectedAccess.listPendingPolicy": (_input: undefined, { open }) =>
+    listPendingProtectedPolicy(open()),
+  "protectedAccess.beginPolicy": (
+    input: { id: string; email: string; revision: number },
+    { open },
+  ) => beginProtectedPolicy(open(), input),
+  "protectedAccess.settlePolicy": (
+    input: { id: string; email: string; revision: number; state: "synced" | "failed" | "unknown" },
+    { open },
+  ) => settleProtectedPolicy(open(), input),
+  "protectedAccess.retryPolicy": (input: { id: string; issuer: string }, { open }) =>
+    retryProtectedPolicy(open(), input),
+  "protectedUsage.record": (
+    input: {
+      runId: string;
+      profileId: string;
+      model: string;
+      messages: number | null;
+      tokens: number | null;
+      failed: boolean;
+      now: number;
+    },
+    { open },
+  ) => recordProtectedUsage(open(), input),
+  "protectedUsage.list": (input: { profileId: string; now: number }, { open }) =>
+    listProtectedUsage(open(), input),
+  "protectedUsage.prune": (input: { now: number }, { open }) =>
+    pruneProtectedUsage(open(), input.now),
+  "protectedAccess.list": (_input: undefined, { open }) => listProtectedAccessRequests(open()),
   "protectedAccess.setStatus": (
     input: {
       id: string;
-      status: "approved" | "denied" | "removed" | "withdrawn";
+      status: "approved" | "denied";
       now: number;
       issuer: string;
     },
@@ -245,6 +294,10 @@ export const userProfileOperations = {
     input: { subjects: readonly string[]; issuer: string; now: number },
     { open },
   ) => migrateProtectedSubjects(open(), input),
+  "protectedAccess.addSubject": (
+    input: { issuer: string; subject: string; now: number },
+    { open },
+  ) => addProtectedSubject(open(), input),
   "userProfiles.directory": ({ limit }: { limit: number }, { open, stateOptions }) => {
     const database = open();
     ensureUserProfilesSchema(stateOptions(), database);

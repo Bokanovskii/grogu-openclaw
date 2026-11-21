@@ -123,7 +123,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
       ) {
         return [];
       }
-      return [{ profileId: actor.id, id: entry.sessionId, sessionKey }];
+      return [{ profileId: actor.id, id: entry.sessionId, sessionKey, updatedAt: entry.updatedAt }];
     });
   };
   const read = async (authority: ProtectedChatAuthority, id: string): Promise<ProtectedChat> => {

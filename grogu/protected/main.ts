@@ -56,49 +56,47 @@ async function main() {
   const { createProtectedHttp } = await import("./http.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
   const admissionStore = await import("./admission-store.js");
+  const { startProtectedUsageRetention } = await import("./usage-retention.js");
+  const { createProtectedPolicySync } = await import("./policy-sync.js");
   await admissionStore.migrateProtectedSubjects(stateDir, {
     subjects: allowedSubjects,
     issuer: accessIssuer,
   });
   const admissions = await admissionStore.listProtectedAdmissions(stateDir);
-  const removedSubjects = new Set(
-    admissions
-      .filter((admission) => admission.status === "removed" && admission.subject)
-      .map((admission) => admission.subject!),
-  );
   const allowed = new Set(
     admissions
       .filter((admission) => admission.status === "approved" && admission.subject)
       .map((admission) => admission.subject!),
   );
-  for (const subject of allowedSubjects) {
-    if (!removedSubjects.has(subject)) {
-      allowed.add(subject);
-    }
-  }
+  const policySync = createProtectedPolicySync(stateDir);
+  const verifyIdentity = createCloudflareAccessVerifier({
+    issuer: accessIssuer,
+    audience: accessAudience,
+    isAllowed: ({ subject }) => allowed.has(subject),
+    bindVerifiedIdentity: async (identity, assertCurrent) => {
+      return admissionStore.bindProtectedAdmission(stateDir, identity, assertCurrent, () => {
+        allowed.add(identity.subject);
+        policySync.trigger();
+      });
+    },
+    testClientId: settings.testClientId,
+  });
   const app = createProtectedHttp({
     origin,
     stateDir,
     accessIssuer,
     ownerSubject: settings.ownerSubject,
-    onRemoveSubject: (subject) => allowed.delete(subject),
+    onRemoveSubject: (subject) => {
+      allowed.delete(subject);
+      verifyIdentity.invalidateSubject(subject);
+    },
+    onPolicyChanged: policySync.trigger,
+    isPolicyInFlight: policySync.isInFlight,
     usersRoot,
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
     storageLimits: settings.storageLimits,
-    verifyIdentity: createCloudflareAccessVerifier({
-      issuer: accessIssuer,
-      audience: accessAudience,
-      isAllowed: ({ subject }) => allowed.has(subject),
-      bindVerifiedIdentity: async (identity) => {
-        const bound = await admissionStore.bindProtectedAdmission(stateDir, identity);
-        if (bound) {
-          allowed.add(identity.subject);
-        }
-        return bound;
-      },
-      testClientId: settings.testClientId,
-    }),
+    verifyIdentity,
     providerRelay: createProviderRelay(),
     turns: createCanonicalProtectedTurns({
       config,
@@ -108,6 +106,8 @@ async function main() {
       resolveSparkyKey: () => resolveSecretRefString(sparkySecret, { config }),
     }),
   });
+  const retention = await startProtectedUsageRetention(stateDir);
+  policySync.trigger();
   const server = createProtectedServer(origin, app.fetch, staticClient);
   server.on("error", () => {
     process.stderr.write("Protected listener failed.\n");
@@ -118,7 +118,16 @@ async function main() {
       server.closeAllConnections();
       process.exit(1);
     }, 8_000);
-    void closeProtectedServer(server, app, stateDir)
+    retention.beginClose();
+    void closeProtectedServer(
+      server,
+      {
+        shutdown: async () => {
+          await Promise.all([app.shutdown(), retention.stop(), policySync.stop()]);
+        },
+      },
+      stateDir,
+    )
       .then(() => process.exit(0))
       .catch(() => {
         process.stderr.write("Protected listener could not settle cleanly.\n");

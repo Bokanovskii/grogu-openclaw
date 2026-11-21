@@ -2,6 +2,7 @@ import path from "node:path";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { writeJsonAtomic } from "../../src/infra/json-files.js";
+import { addProtectedSubject } from "./admission-store.js";
 import { measureStorageLimits } from "./capacity.js";
 import {
   parseDeploySettings,
@@ -64,7 +65,7 @@ async function main() {
       )}\n`,
       { private: true, atomic: true },
     );
-    process.stdout.write("Initialized Family config with no admitted subjects.\n");
+    process.stdout.write("Initialized Alcove config with no admitted subjects.\n");
     return;
   }
   const updateSettings = (
@@ -80,7 +81,7 @@ async function main() {
       async () => {
         const settings = parseRuntimeSettings(await readSettingsJson(runtimePath));
         if (settings.stateDir !== stateDir) {
-          throw new Error("Family config state directory mismatch.");
+          throw new Error("Alcove config state directory mismatch.");
         }
         const next = change(settings);
         if (next) {
@@ -90,12 +91,15 @@ async function main() {
     );
   if (action === "add-subject" && arg && subjectPattern.test(arg) && rest.length === 0) {
     const subject = arg.toLowerCase();
-    await updateSettings((settings) =>
-      settings.allowedSubjects.includes(subject)
-        ? undefined
-        : { ...settings, allowedSubjects: [...settings.allowedSubjects, subject] },
-    );
-    process.stdout.write("Family allowlist updated.\n");
+    const settings = parseRuntimeSettings(await readSettingsJson(runtimePath));
+    if (settings.stateDir !== stateDir) {
+      throw new Error("Alcove config state directory mismatch.");
+    }
+    const result = await addProtectedSubject(stateDir, { issuer: settings.accessIssuer, subject });
+    if (result === "removed") {
+      throw new Error("A removed subject cannot be restored by this command.");
+    }
+    process.stdout.write("Alcove admission is recorded; restart the listener to apply it.\n");
     return;
   }
   if (
@@ -107,12 +111,12 @@ async function main() {
     await updateSettings(({ testClientId: _previous, ...settings }) =>
       arg === "none" ? settings : { ...settings, testClientId: arg },
     );
-    process.stdout.write("Family test client updated.\n");
+    process.stdout.write("Alcove test client updated.\n");
     return;
   }
   if (action === "set-owner" && arg && subjectPattern.test(arg) && rest.length === 0) {
     await updateSettings((settings) => ({ ...settings, ownerSubject: arg.toLowerCase() }));
-    process.stdout.write("Family owner subject updated. Restart the listener.\n");
+    process.stdout.write("Alcove owner subject updated. Restart the listener.\n");
     return;
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
@@ -127,14 +131,14 @@ async function main() {
     { env: { OPENCLAW_STATE_DIR: stateDir } },
   );
   if (!changed) {
-    throw new Error("No matching active Family profile");
+    throw new Error("No matching active Alcove profile");
   }
-  process.stdout.write("Family profile revoked.\n");
+  process.stdout.write("Alcove profile revoked.\n");
 }
 
 void main().catch(() => {
   process.stderr.write(
-    "Family maintenance failed. Check the isolated account, config, and command arguments.\n",
+    "Alcove maintenance failed. Check the isolated account, config, and command arguments.\n",
   );
   process.exitCode = 1;
 });

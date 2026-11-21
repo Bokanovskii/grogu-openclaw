@@ -151,6 +151,7 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<
     ),
   userProfiles: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
   protectedAccess: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
+  protectedUsage: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
   agentDatabaseRegistry: () =>
     import("./openclaw-agent-db-registry.worker.js").then((m) => m.agentDatabaseRegistryOperations),
   authProfiles: () =>

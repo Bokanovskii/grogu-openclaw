@@ -13,6 +13,7 @@ import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { onAgentEventForRun } from "../../src/infra/agent-events.js";
 import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
+import { computeUsageTokenTotals } from "../../src/infra/session-cost-usage-pricing.js";
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
@@ -36,6 +37,7 @@ export type ProtectedTurn = {
   signal: AbortSignal;
   assertCurrent: () => void;
   revalidate: () => Promise<void>;
+  usage: (tokens: number | null) => void;
   delta: (text: string) => Promise<void>;
   sources: (sources: Source[]) => Promise<void>;
   widget: (widget: Widget) => Promise<void>;
@@ -209,6 +211,15 @@ export function createCanonicalProtectedTurns(options: {
             },
           }),
         );
+        const usage = result.meta.agentMeta?.usage;
+        const tokens =
+          usage &&
+          [usage.total, usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(
+            (value) => value !== undefined,
+          )
+            ? computeUsageTokenTotals(usage).totalTokens
+            : null;
+        turn.usage(tokens !== null && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : null);
         await updates;
         if (updateError !== undefined) {
           throw updateError instanceof Error

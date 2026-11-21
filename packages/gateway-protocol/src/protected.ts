@@ -113,6 +113,7 @@ export const ProtectedPeopleSchema = node({
 });
 export const ProtectedAccessRequestStatusSchema = Type.Union([
   Type.Literal("open"),
+  Type.Literal("approving"),
   Type.Literal("approved"),
   Type.Literal("denied"),
   Type.Literal("removed"),
@@ -137,6 +138,9 @@ export const ProtectedAccessRequestEditSchema = node({
   note: Type.String({ maxLength: 1000 }),
 });
 export const ProtectedAccessRequestReceiptResultSchema = node({
+  accepted: Type.Literal(true),
+});
+export const ProtectedAccessRequestEditResponseSchema = node({
   request: node({
     id,
     status: ProtectedAccessRequestStatusSchema,
@@ -145,26 +149,78 @@ export const ProtectedAccessRequestReceiptResultSchema = node({
 export const ProtectedAccessRequestStatusResponseSchema = node({
   request: Type.Union([ProtectedPublicAccessRequestSchema, Type.Null()]),
 });
-export const ProtectedAdminRequestSchema = ProtectedPublicAccessRequestSchema;
+export const ProtectedAdminRequestSchema = node({
+  ...ProtectedPublicAccessRequestSchema.properties,
+  policyState: Type.Optional(
+    Type.Union([
+      Type.Literal("pending"),
+      Type.Literal("synced"),
+      Type.Literal("failed"),
+      Type.Literal("unknown"),
+    ]),
+  ),
+});
 export const ProtectedAdminRequestsResponseSchema = node({
   requests: Type.Array(ProtectedAdminRequestSchema),
+  policyBlocked: Type.Boolean(),
+  blockedPersonId: Type.Optional(id),
 });
+export const ProtectedAdminPolicyRetryResponseSchema = node({ queued: Type.Literal(true) });
 export const ProtectedAdminPersonSchema = node({
-  email: Type.String({ minLength: 3, maxLength: 254 }),
+  id,
+  email: Type.Union([Type.String({ minLength: 3, maxLength: 254 }), Type.Null()]),
   issuer: Type.String({ minLength: 1 }),
   subject: Type.Optional(id),
   profileId: Type.Optional(id),
   status: Type.Union([Type.Literal("approved"), Type.Literal("removed")]),
   revision: Type.Integer({ minimum: 1 }),
+  policyState: Type.Optional(
+    Type.Union([
+      Type.Literal("pending"),
+      Type.Literal("synced"),
+      Type.Literal("failed"),
+      Type.Literal("unknown"),
+    ]),
+  ),
 });
 export const ProtectedAdminPeopleResponseSchema = node({
   people: Type.Array(ProtectedAdminPersonSchema),
 });
+export const ProtectedDailyUsageSchema = node({
+  day: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+  messages: Type.Integer({ minimum: 0 }),
+  tokens: Type.Integer({ minimum: 0 }),
+  models: Type.Array(Type.String()),
+  errors: Type.Integer({ minimum: 0 }),
+  missingUsage: Type.Integer({ minimum: 0 }),
+  missingMessages: Type.Integer({ minimum: 0 }),
+});
+export const ProtectedAdminUsageResponseSchema = node({
+  daily: Type.Array(ProtectedDailyUsageSchema),
+  chatCount: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  approximateStorageBytes: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  lastChatActivityAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+});
+export const ProtectedAdminPushKeySchema = node({ publicKey: Type.String() });
+export const ProtectedAdminPushSubscribeSchema = node({
+  endpoint: Type.String({ minLength: 1, maxLength: 2048 }),
+  keys: node({
+    p256dh: Type.String({ minLength: 1, maxLength: 512 }),
+    auth: Type.String({ minLength: 1, maxLength: 512 }),
+  }),
+});
+export const ProtectedAdminPushSubscribeResponseSchema = node({ subscriptionId: id });
+export const ProtectedAdminPushUnsubscribeSchema = node({
+  endpoint: Type.String({ minLength: 1, maxLength: 2048 }),
+});
+export const ProtectedAdminPushUnsubscribeResponseSchema = node({ removed: Type.Boolean() });
 export const ProtectedOwnerActionResponseSchema = node({
   request: ProtectedPublicAccessRequestSchema,
-  policy: Type.Optional(
-    Type.Union([Type.Literal("sync_pending"), Type.Literal("removal_pending")]),
-  ),
+  policy: Type.Optional(Type.Literal("sync_pending")),
+});
+export const ProtectedAdminPersonRemovalResponseSchema = node({
+  person: ProtectedAdminPersonSchema,
+  policy: Type.Union([Type.Literal("removal_pending"), Type.Literal("identity_unavailable")]),
 });
 export const ProtectedDevicePromptSchema = node({
   id,
@@ -228,14 +284,34 @@ export type ProtectedAccessRequestEdit = Static<typeof ProtectedAccessRequestEdi
 export type ProtectedAccessRequestReceiptResult = Static<
   typeof ProtectedAccessRequestReceiptResultSchema
 >;
+export type ProtectedAccessRequestEditResponse = Static<
+  typeof ProtectedAccessRequestEditResponseSchema
+>;
 export type ProtectedAccessRequestStatusResponse = Static<
   typeof ProtectedAccessRequestStatusResponseSchema
 >;
 export type ProtectedAdminRequest = Static<typeof ProtectedAdminRequestSchema>;
 export type ProtectedAdminRequestsResponse = Static<typeof ProtectedAdminRequestsResponseSchema>;
+export type ProtectedAdminPolicyRetryResponse = Static<
+  typeof ProtectedAdminPolicyRetryResponseSchema
+>;
 export type ProtectedAdminPerson = Static<typeof ProtectedAdminPersonSchema>;
 export type ProtectedAdminPeopleResponse = Static<typeof ProtectedAdminPeopleResponseSchema>;
+export type ProtectedDailyUsage = Static<typeof ProtectedDailyUsageSchema>;
+export type ProtectedAdminUsageResponse = Static<typeof ProtectedAdminUsageResponseSchema>;
+export type ProtectedAdminPushKey = Static<typeof ProtectedAdminPushKeySchema>;
+export type ProtectedAdminPushSubscribe = Static<typeof ProtectedAdminPushSubscribeSchema>;
+export type ProtectedAdminPushSubscribeResponse = Static<
+  typeof ProtectedAdminPushSubscribeResponseSchema
+>;
+export type ProtectedAdminPushUnsubscribe = Static<typeof ProtectedAdminPushUnsubscribeSchema>;
+export type ProtectedAdminPushUnsubscribeResponse = Static<
+  typeof ProtectedAdminPushUnsubscribeResponseSchema
+>;
 export type ProtectedOwnerActionResponse = Static<typeof ProtectedOwnerActionResponseSchema>;
+export type ProtectedAdminPersonRemovalResponse = Static<
+  typeof ProtectedAdminPersonRemovalResponseSchema
+>;
 export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>

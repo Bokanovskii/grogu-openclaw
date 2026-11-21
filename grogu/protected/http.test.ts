@@ -106,6 +106,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const open = async (freeFloorBytes = 1) => {
     const app = createProtectedHttp({
       origin,
+      accessIssuer: "https://synthetic.example",
       stateDir,
       usersRoot,
       verifyIdentity,
@@ -157,8 +158,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.match(asset.headers.get("content-type") ?? "", /^text\/javascript/);
   assert.equal(await asset.text(), "");
   assert.equal((await fetch(assetUrl, { method: "POST" })).status, 405);
-  const publicSubmit = await first.call("alice", "/request-access", {
+  const publicSubmit = await fetch(`${first.url}/request-access/api`, {
     method: "POST",
+    headers: { origin, "content-type": "application/json" },
     body: JSON.stringify({
       email: "requester@example.invalid",
       name: "Synthetic requester",
@@ -169,14 +171,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(publicSubmit.status, 201, publicSubmitBody);
   const receiptCookie = publicSubmit.headers.get("set-cookie");
   assert.match(receiptCookie ?? "", /^protected_access_receipt=[A-Za-z0-9_-]+;/u);
-  const statusWithoutReceipt = await first.call("alice", "/request-access/status", {
-    method: "GET",
+  const statusWithoutReceipt = await fetch(`${first.url}/request-access/api/status`, {
+    headers: { origin },
   });
   assert.equal(statusWithoutReceipt.status, 200);
   const receipt = (receiptCookie ?? "").split(";", 1)[0]!;
-  const statusWithReceipt = await first.call("alice", "/request-access/status", {
-    method: "GET",
-    headers: { cookie: receipt },
+  const statusWithReceipt = await fetch(`${first.url}/request-access/api/status`, {
+    headers: { origin, cookie: receipt },
   });
   assert.equal(statusWithReceipt.status, 200);
   for (const route of [
@@ -620,6 +621,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   t.after(() => encryption.dispose());
   const options = {
     origin,
+    accessIssuer: "https://synthetic.example",
     stateDir,
     usersRoot: await root(usersDir),
     encryption,

@@ -66,3 +66,35 @@ void test("other service tokens and unconfirmed service identities are denied", 
     { status: 401 },
   );
 });
+
+void test("verified email binding is cached only while local admission remains current", async () => {
+  const subject = "11111111-1111-1111-1111-111111111111";
+  let allowed = true;
+  let bindings = 0;
+  const verify = createCloudflareAccessVerifier({
+    issuer,
+    audience,
+    isAllowed: () => allowed,
+    bindVerifiedIdentity: async (_identity, assertCurrent) => {
+      assertCurrent();
+      bindings++;
+      return allowed;
+    },
+    fetchImpl: (async (url: string) =>
+      Response.json(
+        url.endsWith("/certs")
+          ? { keys: [jwk] }
+          : { user_uuid: subject, email: "member@example.invalid" },
+      )) as typeof fetch,
+  });
+  const identity = await verify(request(token({ sub: subject })));
+  await identity.revalidate();
+  await identity.revalidate();
+  assert.equal(bindings, 1);
+  verify.invalidateSubject(subject);
+  await identity.revalidate();
+  assert.equal(bindings, 2);
+  allowed = false;
+  await assert.rejects(identity.revalidate(), { status: 401 });
+  assert.equal(bindings, 3);
+});

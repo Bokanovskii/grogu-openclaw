@@ -17,6 +17,7 @@ const headers = {
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'",
 };
 const asset = /^assets\/(?:index-[A-Za-z0-9_-]+\.(?:js|css)|[A-Za-z0-9_-]+\.woff2)$/u;
+const publicAsset = /^request-access\/assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.(?:js|css|woff2)$/u;
 const standalone = new Set(["sw.js", "manifest.webmanifest", "notebook.svg"]);
 const readOptions = {
   symlinks: "reject",
@@ -29,12 +30,18 @@ export async function createProtectedStaticClient(root: Root) {
   return async (request: Request): Promise<Response | undefined> => {
     const pathname = new URL(request.url).pathname;
     const name =
-      pathname === "/" || pathname === "/request-access" ? "index.html" : pathname.slice(1);
+      pathname === "/" || pathname === "/settings/admin"
+        ? "index.html"
+        : pathname === "/request-access"
+          ? "request-access/index.html"
+          : pathname.slice(1);
     if (
       pathname !== "/" &&
+      pathname !== "/settings/admin" &&
       pathname !== "/request-access" &&
       !standalone.has(name) &&
-      !asset.test(name)
+      !asset.test(name) &&
+      !publicAsset.test(name)
     ) {
       return undefined;
     }

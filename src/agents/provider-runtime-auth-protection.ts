@@ -17,7 +17,7 @@ export function protectPreparedProviderRuntimeAuth(params: {
       ? value
       : mintSecretSentinel(value, { label: `model-auth:${params.provider}:${label}` });
   const request = preparedAuth.request;
-  const headers = request?.headers
+  const protectedHeaders = request?.headers
     ? Object.fromEntries(
         Object.entries(request.headers).map(([name, value]) => [
           name,
@@ -25,6 +25,10 @@ export function protectPreparedProviderRuntimeAuth(params: {
         ]),
       )
     : undefined;
+  const headers =
+    preparedAuth.publicHeaders || protectedHeaders
+      ? { ...preparedAuth.publicHeaders, ...protectedHeaders }
+      : undefined;
   const auth = request?.auth;
   const protectedAuth =
     auth?.mode === "authorization-bearer"
@@ -38,7 +42,7 @@ export function protectPreparedProviderRuntimeAuth(params: {
   return {
     ...preparedAuth,
     apiKey: protect(preparedAuth.apiKey, "runtime-api-key"),
-    ...(request
+    ...(request || headers
       ? {
           request: {
             ...request,

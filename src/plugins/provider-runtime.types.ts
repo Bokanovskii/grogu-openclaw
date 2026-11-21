@@ -99,6 +99,8 @@ export type ProviderPrepareRuntimeAuthContext = ProviderPreferRuntimeResolvedMod
   apiKey: string;
   authMode: string;
   profileId?: string;
+  /** Public headers returned by this auth hook on the preceding refresh generation. */
+  previousPublicHeaders?: Readonly<Record<string, string>>;
 };
 
 /**
@@ -112,6 +114,8 @@ export type ProviderPrepareRuntimeAuthContext = ProviderPreferRuntimeResolvedMod
 export type ProviderPreparedRuntimeAuth = {
   apiKey: string;
   baseUrl?: string;
+  /** Provider-owned public constants only. User-supplied values belong in request.headers. */
+  publicHeaders?: Record<string, string>;
   request?: ModelProviderRequestTransportOverrides;
   expiresAt?: number;
 };

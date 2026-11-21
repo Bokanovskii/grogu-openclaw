@@ -12,7 +12,11 @@ import {
 } from "./model-request-telemetry-metadata.js";
 import { createRequestTelemetryClient } from "./model-request-telemetry-store.js";
 import { createWireTelemetryObserver } from "./model-request-telemetry-wire.js";
-import { createRequestTracker, measureHostGap } from "./model-request-telemetry.js";
+import {
+  createRequestTracker,
+  measureHostGap,
+  withoutModelRequestTelemetry,
+} from "./model-request-telemetry.js";
 
 const fixtures: ReturnType<typeof createGroguRuntimeFixture>[] = [];
 afterEach(() => {
@@ -22,6 +26,34 @@ afterEach(() => {
 });
 
 describe("metadata-only request telemetry", () => {
+  it.each([
+    { type: "thinking_delta", delta: "private reasoning" },
+    { type: "toolcall_start", partial: { content: [{ type: "toolCall", name: "show_widget" }] } },
+  ])(
+    "reports first $type without exposing event data or treating bytes as output",
+    async (event) => {
+      const firstOutput = vi.fn();
+      await withoutModelRequestTelemetry(async () => {
+        const tracker = createRequestTracker({
+          provider: "synthetic",
+          sessionId: "private-session",
+        });
+        tracker.bytes(10);
+        createRequestTracker({ kind: "http_attempt" }).output("text");
+        expect(firstOutput).not.toHaveBeenCalled();
+        await Promise.resolve();
+        tracker.observe(event);
+        expect(firstOutput.mock.calls).toEqual([[]]);
+        tracker.observe({ type: "text_delta", delta: "private reply" });
+        tracker.finish();
+        tracker.output("tool");
+      }, firstOutput);
+      expect(firstOutput.mock.calls).toEqual([[]]);
+      createRequestTracker({}).output("text");
+      expect(firstOutput).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("rejects incomplete persisted metadata records", () => {
     expect(() =>
       modelRequestMetadataSnapshot({

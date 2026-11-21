@@ -91,6 +91,30 @@ turn using them ends, unless another owner registered them. Stop, logout,
 revoked access, session expiry, the turn timeout, and listener shutdown still
 interrupt work.
 
+One run-owned authority gates every published text, source, widget, and widget
+draft with synchronous expiry, local revocation, logout, and cancellation checks.
+Remote Access validation and its canonical SQLite access-record check run at the
+existing five-second lifecycle interval and explicit run boundaries, not once
+per chunk. Overlapping validations share one pending operation. A failed remote
+validation aborts the run; completion still requires a remote validation. Remote
+revocation is detected at the next lifecycle check, including its bounded network
+request, while locally published invalidation takes effect immediately.
+
+Each admitted turn writes one `[protected-turn-timing]` console record on
+completion. It contains only elapsed milliseconds from request handling start:
+`admissionMs`, `providerRequestStartMs`, `firstProviderOutputMs`,
+`firstClientVisibleOutputMs`, and `completionMs`, plus `accessChecks`,
+`accessValidationMs`, and the fixed `complete`, `failed`, or `interrupted`
+outcome. Missing phases are `null`. Provider start is model lifecycle dispatch,
+not a wire-level fetch timestamp; provider output is the first SDK tool-call start
+or nonempty text, reasoning, or tool delta, not headers or a keepalive. Client-visible output marks
+the first content event successfully enqueued for an attached reader, not browser
+receipt or paint. Detached completion therefore may have no client-output time.
+The record has no content, credentials, provider/model names, or user/session/run
+identifiers. Protected model-request telemetry remains disabled. Reasoning and
+provider startup are separate from publication overhead; these timings do not
+change the model or its reasoning defaults.
+
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read
 the chat again to find the saved reply. This does not replay the stream or start
@@ -135,6 +159,14 @@ before the fixture runs.
 
 This proves neither a real provider nor the Access identity response. The
 authoritative client DTOs are exported from `@openclaw/gateway-protocol/protected`.
+
+`grogu/protected/http-streaming.test.ts` is a network-free owning-boundary proof
+with real isolated profile/chat storage and deterministic stub output. Run it
+with the same isolated Node environment above instead of the full provider
+fixture. It proves chunk publication and durable completion, immediate local
+invalidation, coalesced validation, five-second remote revocation, and the timing
+record's privacy boundary. Its synthetic identity-latency accounting is a model
+of delivery overhead, not a measured Cloudflare or Copilot response time.
 
 The isolated listener may be installed and checked with an empty
 `allowedSubjects` list. Keep admission deny-all until the Cloudflare

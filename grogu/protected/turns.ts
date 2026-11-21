@@ -36,6 +36,7 @@ export type ProtectedTurn = {
   signal: AbortSignal;
   assertCurrent: () => void;
   revalidate: () => Promise<void>;
+  markTiming: (phase: "providerRequestStartMs" | "firstProviderOutputMs") => void;
   delta: (text: string) => Promise<void>;
   sources: (sources: Source[]) => Promise<void>;
   widget: (widget: Widget) => Promise<void>;
@@ -164,52 +165,59 @@ export function createCanonicalProtectedTurns(options: {
           assertCurrent: turn.assertCurrent,
         });
         credential = requestCredential;
-        const result = await withoutModelRequestTelemetry(() =>
-          runEmbeddedAgent({
-            ...turn.target,
-            sessionId: turn.id,
-            sessionTarget: { ...turn.target, sessionId: turn.id },
-            sessionFile: formatSqliteSessionFileMarker({
+        const result = await withoutModelRequestTelemetry(
+          () =>
+            runEmbeddedAgent({
               ...turn.target,
               sessionId: turn.id,
+              sessionTarget: { ...turn.target, sessionId: turn.id },
+              sessionFile: formatSqliteSessionFileMarker({
+                ...turn.target,
+                sessionId: turn.id,
+              }),
+              runId: turn.runId,
+              timeoutMs: protectedTurnTimeoutMs,
+              abortSignal: turn.signal,
+              config: options.config,
+              workspaceDir: options.workspaceDir,
+              agentDir: options.agentDir,
+              prompt: turn.input.text,
+              transcriptPrompt: turn.input.text,
+              trigger: "user",
+              provider,
+              model,
+              thinkLevel: provider === "sparky" ? "ultra" : undefined,
+              agentHarnessRuntimeOverride: "openclaw",
+              preparedRunAdmission: admission,
+              requestModelCredential: requestCredential.handle,
+              onExecutionPhase: ({ phase }) => {
+                if (phase === "model_call_started") {
+                  turn.markTiming("providerRequestStartMs");
+                }
+              },
+              bootstrapContextMode: "lightweight",
+              disableMessageTool: true,
+              disableToolSearch: true,
+              disableTrajectory: true,
+              codeModeOverride: false,
+              toolsAllow: ["web_search", "web_fetch", "show_widget"],
+              toolExecutionAllow: ["web_search", "web_fetch", "show_widget"],
+              clientCaps: ["inline-widgets"],
+              userFileScope: {
+                files: turn.files,
+                directory: chatFilesDirectory(turn.id),
+                cacheKey: createHash("sha256")
+                  .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
+                  .digest("hex"),
+              },
+              onAgentToolResult,
+              onPartialReply: async ({ delta }) => {
+                if (delta) {
+                  await turn.delta(delta);
+                }
+              },
             }),
-            runId: turn.runId,
-            timeoutMs: protectedTurnTimeoutMs,
-            abortSignal: turn.signal,
-            config: options.config,
-            workspaceDir: options.workspaceDir,
-            agentDir: options.agentDir,
-            prompt: turn.input.text,
-            transcriptPrompt: turn.input.text,
-            trigger: "user",
-            provider,
-            model,
-            thinkLevel: provider === "sparky" ? "ultra" : undefined,
-            agentHarnessRuntimeOverride: "openclaw",
-            preparedRunAdmission: admission,
-            requestModelCredential: requestCredential.handle,
-            bootstrapContextMode: "lightweight",
-            disableMessageTool: true,
-            disableToolSearch: true,
-            disableTrajectory: true,
-            codeModeOverride: false,
-            toolsAllow: ["web_search", "web_fetch", "show_widget"],
-            toolExecutionAllow: ["web_search", "web_fetch", "show_widget"],
-            clientCaps: ["inline-widgets"],
-            userFileScope: {
-              files: turn.files,
-              directory: chatFilesDirectory(turn.id),
-              cacheKey: createHash("sha256")
-                .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
-                .digest("hex"),
-            },
-            onAgentToolResult,
-            onPartialReply: async ({ delta }) => {
-              if (delta) {
-                await turn.delta(delta);
-              }
-            },
-          }),
+          () => turn.markTiming("firstProviderOutputMs"),
         );
         await updates;
         if (updateError !== undefined) {

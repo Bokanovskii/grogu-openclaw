@@ -33,6 +33,7 @@ export type ProtectedAdmission = {
   issuer: string;
   subject?: string;
   profileId?: string;
+  lastActiveAt?: number;
   status: "approved" | "removed";
   revision: number;
   policyState?: "pending" | "synced" | "failed" | "unknown";
@@ -57,6 +58,7 @@ export type ProtectedAdmissionDatabase = {
     issuer: string;
     subject: string | null;
     profile_id: string | null;
+    last_active_at: number | null;
     status: ProtectedAdmission["status"];
     revision: number;
     created_at: number;
@@ -163,6 +165,7 @@ export function setProtectedRequestStatus(
               issuer: input.issuer,
               subject: null,
               profile_id: null,
+              last_active_at: null,
               status: "approved",
               revision,
               created_at: input.now,
@@ -243,6 +246,7 @@ export function migrateProtectedSubjects(
             issuer: input.issuer,
             subject,
             profile_id: null,
+            last_active_at: null,
             status: "approved",
             revision: 1,
             created_at: input.now,
@@ -290,6 +294,7 @@ export function addProtectedSubject(
           issuer: input.issuer,
           subject: input.subject,
           profile_id: null,
+          last_active_at: null,
           status: "approved",
           revision: 1,
           created_at: input.now,
@@ -421,6 +426,7 @@ export function listProtectedAdmissions(database: OpenClawStateDatabase): Protec
         "admission.issuer",
         "admission.subject",
         "admission.profile_id",
+        "admission.last_active_at",
         "admission.status",
         "admission.revision",
         "sync.state as policy_state",
@@ -433,6 +439,7 @@ export function listProtectedAdmissions(database: OpenClawStateDatabase): Protec
     issuer: String(row.issuer),
     subject: row.subject === null ? undefined : String(row.subject),
     profileId: row.profile_id === null ? undefined : String(row.profile_id),
+    lastActiveAt: row.last_active_at ?? undefined,
     status: row.status,
     revision: Number(row.revision),
     policyState: row.policy_state ?? undefined,
@@ -518,7 +525,7 @@ export function bindProtectedProfile(
         db,
         getNodeSqliteKysely(db)
           .selectFrom("protected_admissions")
-          .select(["status"])
+          .select(["status", "last_active_at"])
           .where("issuer", "=", input.issuer)
           .where("subject", "=", input.subject),
       ).rows[0];
@@ -529,7 +536,11 @@ export function bindProtectedProfile(
         db,
         getNodeSqliteKysely(db)
           .updateTable("protected_admissions")
-          .set({ profile_id: input.profileId, updated_at: input.now })
+          .set({
+            profile_id: input.profileId,
+            updated_at: input.now,
+            last_active_at: Math.max(row.last_active_at ?? 0, input.now),
+          })
           .where("issuer", "=", input.issuer)
           .where("subject", "=", input.subject),
       );

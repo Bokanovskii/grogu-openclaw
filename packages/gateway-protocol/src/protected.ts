@@ -172,6 +172,7 @@ export const ProtectedAdminPersonSchema = node({
   issuer: Type.String({ minLength: 1 }),
   subject: Type.Optional(id),
   profileId: Type.Optional(id),
+  lastActiveAt: Type.Optional(Type.Integer({ minimum: 0 })),
   status: Type.Union([Type.Literal("approved"), Type.Literal("removed")]),
   revision: Type.Integer({ minimum: 1 }),
   policyState: Type.Optional(
@@ -199,6 +200,7 @@ export const ProtectedAdminUsageResponseSchema = node({
   daily: Type.Array(ProtectedDailyUsageSchema),
   chatCount: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
   approximateStorageBytes: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  lastActiveAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
   lastChatActivityAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
 });
 export const ProtectedAdminPushKeySchema = node({ publicKey: Type.String() });

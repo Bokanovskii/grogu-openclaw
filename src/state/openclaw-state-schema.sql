@@ -2704,6 +2704,7 @@ CREATE TABLE IF NOT EXISTS protected_admissions (
   issuer TEXT NOT NULL,
   subject TEXT,
   profile_id TEXT,
+  last_active_at INTEGER,
   status TEXT NOT NULL CHECK (status IN ('approved', 'removed')),
   revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,

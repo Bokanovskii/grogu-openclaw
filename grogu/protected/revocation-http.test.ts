@@ -89,7 +89,15 @@ void test("removal immediately denies the person and interrupts their active tur
         ...(data ? { body: JSON.stringify(data) } : {}),
       }),
     );
+  const activeSince = Date.now();
   const me = await (await call("/me", "GET", memberSubject)).json();
+  const initialPeople = await (await call("/admin/people", "GET", ownerSubject)).json();
+  const initialMember = initialPeople.people.find(
+    (person: { subject?: string }) => person.subject === memberSubject,
+  );
+  assert.ok(initialMember);
+  assert.ok(initialMember.lastActiveAt >= activeSince);
+  assert.ok(initialMember.lastActiveAt <= Date.now());
   const created = await (await call("/chats", "POST", memberSubject, {})).json();
   const stream = await call(
     `/chats/${created.chat.id}/turns`,
@@ -103,6 +111,7 @@ void test("removal immediately denies the person and interrupts their active tur
   const { people } = await (await call("/admin/people", "GET", ownerSubject)).json();
   const member = people.find((person: { subject?: string }) => person.subject === memberSubject);
   assert.ok(member);
+  const lastActiveAt = member.lastActiveAt;
   const removal = await call(`/admin/people/${member.id}/remove`, "POST", ownerSubject, {});
   assert.equal(removal.status, 200);
   assert.equal((await removal.json()).policy, "identity_unavailable");
@@ -112,6 +121,7 @@ void test("removal immediately denies the person and interrupts their active tur
   assert.equal(usageResponse.status, 200);
   const usage = await usageResponse.json();
   assert.equal(usage.chatCount, 1);
+  assert.equal(usage.lastActiveAt, lastActiveAt);
   assert.equal(usage.daily[0]?.errors, 1);
   assert.equal(usage.daily[0]?.missingUsage, 1);
   assert.equal(usage.daily[0]?.missingMessages, 1);

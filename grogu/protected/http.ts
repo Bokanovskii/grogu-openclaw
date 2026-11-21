@@ -376,11 +376,6 @@ export function createProtectedHttp(options: {
         env: chats.env,
         assertCurrent: rawCurrent,
       });
-      await bindProtectedProfile(options.stateDir, {
-        issuer: identity.issuer,
-        subject: identity.subject,
-        profileId: profile.id,
-      });
       const assertGrant = () => {
         shutdown.signal.throwIfAborted();
         rawCurrent();
@@ -405,6 +400,12 @@ export function createProtectedHttp(options: {
       if (!(await touch("admit"))) {
         return unauthorized();
       }
+      assertCurrent();
+      await bindProtectedProfile(options.stateDir, {
+        issuer: identity.issuer,
+        subject: identity.subject,
+        profileId: profile.id,
+      });
       assertCurrent();
       const checkGrant = async () => {
         assertGrant();
@@ -514,6 +515,7 @@ export function createProtectedHttp(options: {
           daily,
           chatCount: storage?.chatCount ?? null,
           approximateStorageBytes: storage?.personalBytes ?? null,
+          lastActiveAt: person.lastActiveAt ?? null,
           lastChatActivityAt: storage?.lastChatActivityAt ?? null,
         });
       }

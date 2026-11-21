@@ -14,6 +14,10 @@ this header for external traffic. A local process or a same-zone Worker can
 spoof it, so it is not authorization. Missing or invalid values share a
 conservative limit. Global submission and stored-request limits also apply.
 
+The owner can see when each person last made an admitted app request. Automatic
+app refreshes also count as activity. The timestamp remains with the admission
+record and contains no message or file content.
+
 ## Fixed policy helper
 
 The policy helper is a separate, root-owned installation. In a private

@@ -149,8 +149,22 @@ Run `maintain.ts` under the isolated service account and environment.
 adds an exact subject, which takes effect after a protected listener restart.
 `test-client CLIENT_ID` admits one Access service token as a hidden
 development user, and `test-client none` removes it. Both take effect after a
-protected listener restart. The runtime accepts that token only when the Access
-token names the exact client ID and the live identity response confirms it. The
+protected listener restart. Strict Access gives a service token no cookie,
+strips its `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers, and
+refuses its assertion at `get-identity`. The test harness therefore sends those
+headers to the exact protected origin together with test-only copies,
+`X-Grogu-Test-Client-Id` and `X-Grogu-Test-Client-Secret`. The copies never
+authenticate alone. The runtime accepts the request only when a valid Access
+assertion names the configured client ID and the copied ID matches it. To check
+that Access still accepts the credential, the runtime sends a new request to
+`/api/protected/v1/access-proof` on that origin, with a random challenge and only
+the standard credential headers. That route checks the newly issued assertion
+locally and echoes the challenge with `no-store`. A redirect, a cacheable reply,
+a different challenge, or a missing or different assertion denies the request.
+The test session ID is a hash of the client ID and secret, so it stays the same
+across assertions and changes when the secret is rotated. Signing out lasts
+until the secret is rotated. The raw secret is
+kept only in memory for the request. The
 user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
 That subject gets its own profile and storage, like any other user. The future
 sharing feature must exclude it. To revoke the test user, delete

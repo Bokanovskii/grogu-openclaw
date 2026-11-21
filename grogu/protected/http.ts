@@ -28,7 +28,11 @@ import { createStorageAdmission, type StorageLimits } from "./capacity.js";
 import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
-import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
+import {
+  protectedAccessProofPath,
+  resolveProtectedProfile,
+  type ProtectedIdentityVerifier,
+} from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
@@ -109,6 +113,7 @@ export function createProtectedHttp(options: {
   stateDir: string;
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
+  answerAccessProof?: (request: Request) => Promise<Response>;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
@@ -155,6 +160,9 @@ export function createProtectedHttp(options: {
       if (pathname === "/widget-sandbox" && method === "GET") {
         const doc = buildSandboxHostDocument({ profile: "protected" }, true);
         return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
+      }
+      if (path === protectedAccessProofPath && options.answerAccessProof) {
+        return await options.answerAccessProof(request);
       }
       const origin = request.headers.get("origin");
       if (

@@ -56,6 +56,13 @@ async function main() {
   const { createProtectedHttp } = await import("./http.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
   const allowed = new Set(allowedSubjects);
+  const verifyIdentity = createCloudflareAccessVerifier({
+    issuer: accessIssuer,
+    audience: accessAudience,
+    isAllowed: ({ subject }) => allowed.has(subject),
+    testClientId: settings.testClientId,
+    origin,
+  });
   const app = createProtectedHttp({
     origin,
     stateDir,
@@ -64,12 +71,8 @@ async function main() {
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
     storageLimits: settings.storageLimits,
-    verifyIdentity: createCloudflareAccessVerifier({
-      issuer: accessIssuer,
-      audience: accessAudience,
-      isAllowed: ({ subject }) => allowed.has(subject),
-      testClientId: settings.testClientId,
-    }),
+    verifyIdentity,
+    answerAccessProof: verifyIdentity.answerProof,
     providerRelay: createProviderRelay(),
     turns: createCanonicalProtectedTurns({
       config,

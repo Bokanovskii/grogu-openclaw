@@ -74,9 +74,7 @@ export function mergeUserProfiles(
     kysely
       .updateTable("user_profile_identities")
       .set({ profile_id: targetProfileId })
-      .where("profile_id", "in", sourceProfileIds)
-      // Independently verified identities must not grant access to the merge target.
-      .where("provider", "not like", "verified:%"),
+      .where("profile_id", "in", sourceProfileIds),
   );
   executeSqliteQuerySync(
     db,

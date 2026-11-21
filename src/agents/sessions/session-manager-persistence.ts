@@ -59,7 +59,6 @@ import {
   withSessionManagerWrite,
   type SessionManagerWriteAdmission,
 } from "./session-manager-write-admission.js";
-import { chargeTranscriptWrite } from "./transcript-write-budget.js";
 
 export class SessionManagerPersistence extends SessionManagerCore {
   #initialWriter: InitialSessionTranscriptWriter | undefined;
@@ -138,7 +137,6 @@ export class SessionManagerPersistence extends SessionManagerCore {
     assertNavigation?: () => void,
   ): Promise<PersistWorkerRecordResult> {
     this.assertTranscriptWriteActive();
-    chargeTranscriptWrite(entry);
     const target = this.persistenceTarget;
     if (!target) {
       throw new Error("Session writer worker requires a persistent session");
@@ -639,10 +637,11 @@ export class SessionManagerPersistence extends SessionManagerCore {
       );
       this.persistenceHeaderPending = false;
     }
-    const expectedMutationAt =
-      persistedHeader || options?.expectedMutationAt === undefined
-        ? this.transcriptMutationAt
-        : options.expectedMutationAt;
+    const expectedMutationAt = persistedHeader
+      ? this.transcriptMutationAt
+      : options?.expectedMutationAt !== undefined
+        ? options.expectedMutationAt
+        : this.transcriptMutationAt;
     const leafEntry = parseOpaqueLeafEntry(entry);
     if (leafEntry) {
       appendEvent(

@@ -29,10 +29,6 @@ import { providerModelRouteAcceptsAuthMode } from "../../provider-model-route-au
 import { applyPreparedRuntimeAuthToModel } from "../../provider-request-config.js";
 import { protectPreparedProviderRuntimeAuth } from "../../provider-runtime-auth-protection.js";
 import { unwrapSecretSentinelsForProviderEgress } from "../../provider-secret-egress.js";
-import {
-  resolveRequestModelCredential,
-  type RequestModelCredential,
-} from "../../request-model-credential.js";
 import { clampRuntimeAuthRefreshDelayMs } from "../../runtime-auth-refresh.js";
 import { resolveAuthProfileFailureReason } from "./auth-profile-failure-policy.js";
 import type { AuthProfileFailurePolicy } from "./auth-profile-failure-policy.types.js";
@@ -144,7 +140,6 @@ export function createEmbeddedAuthProfileAdmission(
  * share this state so profile rotation cannot leave either with stale credentials.
  */
 export function createEmbeddedRunAuthController(params: {
-  requestModelCredential?: RequestModelCredential;
   config: RunEmbeddedAgentParams["config"];
   agentDir: string;
   workspaceDir: string;
@@ -199,16 +194,6 @@ export function createEmbeddedRunAuthController(params: {
     authMode: string;
     profileId?: string;
   }) => {
-    const assertRequestCredential = () => {
-      if (params.requestModelCredential) {
-        resolveRequestModelCredential(
-          params.requestModelCredential,
-          params.provider,
-          params.modelId,
-        );
-      }
-    };
-    assertRequestCredential();
     const preparedAuth = await prepareProviderRuntimeAuth({
       provider: prepareParams.runtimeModel.provider,
       config: params.config,
@@ -230,7 +215,6 @@ export function createEmbeddedRunAuthController(params: {
         profileId: prepareParams.profileId,
       },
     });
-    assertRequestCredential();
     return protectPreparedProviderRuntimeAuth({
       provider: prepareParams.runtimeModel.provider,
       preparedAuth,
@@ -494,23 +478,17 @@ export function createEmbeddedRunAuthController(params: {
 
   const applyApiKeyInfo = async (candidate?: string, attemptIndex?: number): Promise<void> => {
     const preparedModel = await params.prepareModelForAuthProfile?.(candidate, attemptIndex);
-    const apiKeyInfo = params.requestModelCredential
-      ? resolveRequestModelCredential(
-          params.requestModelCredential,
-          params.provider,
-          params.modelId,
-        )
-      : await getApiKeyForModelCore({
-          model: preparedModel?.runtimeModel ?? state.models.runtime,
-          cfg: params.config,
-          profileId: candidate,
-          store: params.authStore,
-          agentDir: params.agentDir,
-          workspaceDir: params.workspaceDir,
-          lockedProfile: candidate != null && candidate === params.lockedProfileId,
-          allowAuthProfileFallback: preparedModel?.allowAuthProfileFallback,
-          secretSentinels: true,
-        });
+    const apiKeyInfo = await getApiKeyForModelCore({
+      model: preparedModel?.runtimeModel ?? state.models.runtime,
+      cfg: params.config,
+      profileId: candidate,
+      store: params.authStore,
+      agentDir: params.agentDir,
+      workspaceDir: params.workspaceDir,
+      lockedProfile: candidate != null && candidate === params.lockedProfileId,
+      allowAuthProfileFallback: preparedModel?.allowAuthProfileFallback,
+      secretSentinels: true,
+    });
     if (
       preparedModel?.authRequirement &&
       !providerModelRouteAcceptsAuthMode({

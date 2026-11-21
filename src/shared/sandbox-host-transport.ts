@@ -1,4 +1,4 @@
-export type SandboxHostTransportOptions = {
+type SandboxHostTransportOptions = {
   frame: {
     readonly contentWindow: {
       postMessage(message: unknown, targetOrigin: string, transfer?: MessagePort[]): void;

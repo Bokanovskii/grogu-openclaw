@@ -107,8 +107,6 @@ export type OpenClawSharedToolsOptions = {
 };
 
 export type OpenClawToolsOptions = {
-  /** Required by protected run admission. Ordinary Gateway runs leave it absent. */
-  userFileScope?: import("../infra/authorized-user-files.js").UserFileScope;
   /** Host-projected default sandbox surface; cannot execute other session actions. */
   sandboxSessionRenameOnly?: boolean;
   /** Host-issued source for session-control schema projection; execution rechecks the caller. */

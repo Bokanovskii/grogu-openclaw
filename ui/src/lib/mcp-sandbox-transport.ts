@@ -1,7 +1,7 @@
 import type { Transport } from "@modelcontextprotocol/client";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/core";
 import { PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
-import { createSandboxHostTransport } from "../../../packages/widget-host/src/transport.ts";
+import { createSandboxHostTransport } from "../../../src/shared/sandbox-host-transport.ts";
 import { t } from "../i18n/index.ts";
 
 export async function prepareMcpSandboxTransport(options: {

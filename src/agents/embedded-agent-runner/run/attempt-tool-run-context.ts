@@ -15,7 +15,6 @@ type AttemptToolRunFacts = Pick<
   | "gatewayUiCommandTarget"
   | "inlineWidgetAuthoring"
   | "toolBindings"
-  | "userFileScope"
   | "chatType"
   | "agentAccountId"
   | "messageTo"
@@ -78,7 +77,6 @@ export function buildEmbeddedAttemptToolRunContext(
     gatewayUiCommandTarget: params.gatewayUiCommandTarget,
     inlineWidgetAuthoring: params.inlineWidgetAuthoring,
     toolBindings: params.toolBindings,
-    userFileScope: params.userFileScope,
     chatType: params.chatType,
     agentAccountId: params.agentAccountId,
     messageTo: params.messageTo,

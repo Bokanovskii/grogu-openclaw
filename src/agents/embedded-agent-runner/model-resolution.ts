@@ -25,7 +25,6 @@ export async function resolveTieredModel(params: {
   authProfileMode?: AuthProfileCredential["type"] | "aws-sdk";
   preparedModelRuntime?: PreparedModelRuntimeSnapshot;
   staticCatalogOwnsTransport?: boolean;
-  localMetadataOnly?: boolean;
 }): Promise<{ provider: string; resolution: ModelResolution }> {
   const result = await withSqliteReadOnlyWorkerScope(async () => {
     const providers =
@@ -60,17 +59,11 @@ export async function resolveTieredModel(params: {
     };
     const firstTier = await resolveCandidates({
       skipAgentDiscovery: true,
-      allowBundledStaticCatalogFallback:
-        params.staticCatalogOwnsTransport || params.localMetadataOnly,
+      allowBundledStaticCatalogFallback: params.staticCatalogOwnsTransport,
       preferBundledStaticCatalogTransport: params.staticCatalogOwnsTransport,
       preparedModelRuntime: params.preparedModelRuntime,
-      deferProviderDynamicModelPreparation: params.localMetadataOnly,
     });
-    if (
-      firstTier.resolution.model ||
-      params.staticCatalogOwnsTransport ||
-      params.localMetadataOnly
-    ) {
+    if (firstTier.resolution.model || params.staticCatalogOwnsTransport) {
       return firstTier;
     }
     const config = params.config ?? {};

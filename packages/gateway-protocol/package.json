@@ -52,11 +52,6 @@
       "import": "./dist/frame-guards.mjs",
       "default": "./dist/frame-guards.mjs"
     },
-    "./protected": {
-      "types": "./dist/protected.d.mts",
-      "import": "./dist/protected.mjs",
-      "default": "./dist/protected.mjs"
-    },
     "./gateway-error-details": {
       "types": "./dist/gateway-error-details.d.mts",
       "import": "./dist/gateway-error-details.mjs",

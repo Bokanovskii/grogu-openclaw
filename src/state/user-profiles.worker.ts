@@ -18,7 +18,6 @@ import {
   listUserModelAccounts,
   readSelectedUserModelAccount,
 } from "./user-model-accounts.js";
-import { updateUserProfileAccess } from "./user-profile-access.worker.js";
 import {
   selectProfileAccessEntries,
   selectStoredGitHubIdentities,
@@ -41,21 +40,9 @@ import {
 } from "./user-profiles-internal.js";
 import { ensureUserProfilesSchema } from "./user-profiles-schema.js";
 import {
-  listProtectedAccessRequests,
-  migrateProtectedSubjects,
-  readProtectedAccessRequest,
-  setProtectedRequestStatus,
-  submitProtectedAccessRequest,
-  editProtectedAccessRequest,
-  bindProtectedAdmission,
-  listProtectedAdmissions,
-  bindProtectedProfile,
-} from "./protected-admission.js";
-import {
   ensureGatewayOwnerProfile,
   ensureProfileForEmail,
   ensureProfileForTailscaleIdentity,
-  ensureProfileForVerifiedIdentity,
 } from "./user-profiles.js";
 import type { ProfileDisplayRow, UserProfileAvatarMime } from "./user-profiles.types.js";
 import type {
@@ -128,11 +115,6 @@ const userProfileWriteOperations = {
     (input: Parameters<typeof ensureProfileForTailscaleIdentity>[0], owned) =>
       ensureProfileForTailscaleIdentity(input, owned),
   ),
-  "userProfiles.ensureVerifiedIdentity": createUserProfileWriteOperation(
-    "userProfiles.ensureVerifiedIdentity",
-    (input: Parameters<typeof ensureProfileForVerifiedIdentity>[0], owned) =>
-      ensureProfileForVerifiedIdentity(input, owned),
-  ),
   "userProfiles.syncGitHub": createUserProfileWriteOperation(
     "userProfiles.syncGitHub",
     (input: Parameters<typeof syncGitHubIdentity>[0], owned) => syncGitHubIdentity(input, owned),
@@ -166,7 +148,6 @@ export type UserProfileWriteOperations = WorkerOperations<typeof userProfileWrit
 
 export const userProfileOperations = {
   ...userProfileWriteOperations,
-  "userProfiles.access": updateUserProfileAccess,
   "userProfiles.modelAccount.connect": accountWrite(
     (
       input: Omit<
@@ -210,41 +191,6 @@ export const userProfileOperations = {
     const options = { ...stateOptions(), database: open() };
     return readUserProfileSnapshotSync(options, input?.githubAccountIds);
   },
-  "protectedAccess.submit": (
-    input: { email: string; name: string; note: string; now: number },
-    { open },
-  ) => submitProtectedAccessRequest(open(), input),
-  "protectedAccess.read": (input: { receipt: string }, { open }) =>
-    readProtectedAccessRequest(open(), input.receipt),
-  "protectedAccess.edit": (
-    input: { receipt: string; name: string; note: string; now: number },
-    { open },
-  ) => editProtectedAccessRequest(open(), input),
-  "protectedAccess.bind": (
-    input: { issuer: string; email: string; subject: string; now: number },
-    { open },
-  ) => bindProtectedAdmission(open(), input),
-  "protectedAccess.listAdmissions": (_input: undefined, { open }) =>
-    listProtectedAdmissions(open()),
-  "protectedAccess.bindProfile": (
-    input: { issuer: string; subject: string; profileId: string; now: number },
-    { open },
-  ) => bindProtectedProfile(open(), input),
-  "protectedAccess.list": (_input: undefined, { open }) =>
-    listProtectedAccessRequests(open()),
-  "protectedAccess.setStatus": (
-    input: {
-      id: string;
-      status: "approved" | "denied" | "removed" | "withdrawn";
-      now: number;
-      issuer: string;
-    },
-    { open },
-  ) => setProtectedRequestStatus(open(), input),
-  "protectedAccess.migrate": (
-    input: { subjects: readonly string[]; issuer: string; now: number },
-    { open },
-  ) => migrateProtectedSubjects(open(), input),
   "userProfiles.directory": ({ limit }: { limit: number }, { open, stateOptions }) => {
     const database = open();
     ensureUserProfilesSchema(stateOptions(), database);

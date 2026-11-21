@@ -176,6 +176,7 @@ export function createProtectedHttp(options: {
   const automationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,
+    calendarDraftValidationAvailable: true,
   });
   const chats = createProtectedChats({ ...options, agentCatalog });
   const admitStorage = options.storageLimits

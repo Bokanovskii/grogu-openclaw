@@ -110,6 +110,7 @@ export function createProtectedHttp(options: {
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
+  encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
   providerRelay?: ReturnType<typeof createProviderRelay>;
   maxChatsPerUser: number;
@@ -576,7 +577,13 @@ export function createProtectedHttp(options: {
       if (!rest && method === "GET") {
         const chat = await readChat(id);
         await revalidate();
-        return json({ chat });
+        const active = runs.get(id);
+        return json({
+          chat,
+          ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
+            ? { activeRun: { id: active.id } }
+            : {}),
+        });
       }
       if (!rest && method === "DELETE") {
         const version = request.headers.get("if-match");
@@ -668,10 +675,15 @@ export function createProtectedHttp(options: {
         if (runs.has(id) || mutations.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
         }
-        const storage = await admitStorage?.(profile.id, assertCurrent, "turn");
+        // Storage charges continue after the client disconnects, so they check only the grant.
+        const storage = await admitStorage?.(profile.id, assertGrant, "turn");
         if (shutdown.signal.aborted || runs.has(id) || mutations.has(id)) {
           storage?.release();
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+        }
+        if (request.signal.aborted) {
+          storage?.release();
+          request.signal.throwIfAborted();
         }
         const run: Run = {
           id: randomUUID(),
@@ -680,20 +692,23 @@ export function createProtectedHttp(options: {
           steering: new Map(),
         };
         runs.set(id, run);
+        // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
+        // detaches from the stream, and the reply still finishes and saves.
         const signal = AbortSignal.any([
           shutdown.signal,
-          request.signal,
           run.controller.signal,
           AbortSignal.timeout(protectedTurnTimeoutMs + 5000),
         ]);
         const assertRun = () => {
-          assertCurrent();
+          assertGrant();
           signal.throwIfAborted();
         };
         const checkRun = async () => {
-          await revalidate();
+          assertRun();
+          await checkGrant();
           assertRun();
         };
+        const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
         let checking = false;
         const liveCheck = setInterval(() => {
           if (!checking) {
@@ -706,26 +721,29 @@ export function createProtectedHttp(options: {
           }
         }, 5000);
         liveCheck.unref();
+        let attached = true;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             const encoder = new TextEncoder();
-            const send = (event: ProtectedTurnEvent) =>
-              controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+            const write = (line: string) => {
+              if (attached) {
+                try {
+                  controller.enqueue(encoder.encode(line));
+                } catch {
+                  attached = false;
+                }
+              }
+            };
+            const send = (event: ProtectedTurnEvent) => write(`${JSON.stringify(event)}\n`);
             // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
             // from closing an idle response; clients skip blank lines.
-            const keepalive = setInterval(() => {
-              try {
-                controller.enqueue(encoder.encode("\n"));
-              } catch {
-                // Client disconnected.
-              }
-            }, 15_000);
+            const keepalive = setInterval(() => write("\n"), 15_000);
             keepalive.unref();
             const complete = async () => {
               try {
                 assertRun();
                 send({ type: "start", runId: run.id });
-                const before = await chats.read(authority, id);
+                const before = await chats.read(runAuthority, id);
                 await files(
                   async (owned) => {
                     const execute = () =>
@@ -733,7 +751,7 @@ export function createProtectedHttp(options: {
                         id,
                         runId: run.id,
                         profileId: profile.id,
-                        target: chats.scope(authority, id),
+                        target: chats.scope(runAuthority, id),
                         input,
                         files: storage?.files(owned) ?? owned,
                         signal,
@@ -765,7 +783,7 @@ export function createProtectedHttp(options: {
                   signal,
                 );
                 storage?.assertResult();
-                const chat = await chats.read(authority, id);
+                const chat = await chats.read(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 if (
@@ -792,11 +810,7 @@ export function createProtectedHttp(options: {
                 const issue = signal.aborted
                   ? new ProtectedError(409, "interrupted", "The turn was interrupted.")
                   : publicError(failure);
-                try {
-                  send({ type: "error", code: issue.code, message: issue.message });
-                } catch {
-                  // Client disconnected.
-                }
+                send({ type: "error", code: issue.code, message: issue.message });
               } finally {
                 clearInterval(keepalive);
                 storage?.release();
@@ -805,7 +819,8 @@ export function createProtectedHttp(options: {
                 for (const queued of run.steering.values()) {
                   queued.abort();
                 }
-                if (controller.desiredSize !== null) {
+                if (attached) {
+                  attached = false;
                   controller.close();
                 }
               }
@@ -813,7 +828,8 @@ export function createProtectedHttp(options: {
             void track(complete());
           },
           cancel() {
-            run.controller.abort();
+            // Stop is an explicit route. A closed connection only detaches the reader.
+            attached = false;
           },
         });
         return new Response(stream, {

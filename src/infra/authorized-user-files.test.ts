@@ -1,14 +1,18 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import {
+  createStorageValueEncryption,
+  type StorageValueEncryption,
+} from "../storage/encryption.js";
 import { createAuthorizedUserFiles } from "./authorized-user-files.js";
 import { root } from "./fs-safe.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-async function fixture() {
+async function fixture(options: { encryption?: StorageValueEncryption } = {}) {
   const directory = tempDirs.make("protected-user-files-");
   const usersRoot = await root(directory);
   let active = true;
@@ -17,8 +21,8 @@ async function fixture() {
       throw new Error("grant revoked");
     }
   };
-  const admit = (profileId: string) =>
-    createAuthorizedUserFiles({ usersRoot, profileId, assertCurrent, maxBytes: 1024 });
+  const admit = (profileId: string, encryption = options.encryption) =>
+    createAuthorizedUserFiles({ encryption, usersRoot, profileId, assertCurrent, maxBytes: 1024 });
   const alice = await admit("alice");
   const bob = await admit("bob");
   const userPath = (profileId: string) =>
@@ -38,6 +42,73 @@ async function fixture() {
 }
 
 describe("authorized user files", () => {
+  it("keeps encrypted file contents usable across writes, moves, and readmission", async () => {
+    const key = randomBytes(32);
+    const encryption = createStorageValueEncryption(key);
+    const reloadedEncryption = createStorageValueEncryption(key);
+    const wrongEncryption = createStorageValueEncryption(randomBytes(32));
+    try {
+      const { alice, admit, userPath } = await fixture({ encryption });
+      const first = "Private itinerary stored only as ciphertext";
+      await alice.create("draft/report.txt", first);
+      const stored = await fs.readFile(path.join(userPath("alice"), "draft/report.txt"));
+      expect(stored.includes(Buffer.from(first))).toBe(false);
+      expect(stored.length).toBeGreaterThan(Buffer.byteLength(first));
+      expect(await alice.readText("draft/report.txt")).toBe(first);
+      await alice.write("draft/report.txt", "revised");
+      await alice.move("draft/report.txt", "draft/final.txt");
+      expect(await alice.stat("draft/final.txt")).toMatchObject({ isFile: true, size: 7 });
+      expect((await alice.stat("draft/final.txt")).storedSize).toBe(
+        (await fs.stat(path.join(userPath("alice"), "draft/final.txt"))).size,
+      );
+      encryption.dispose();
+      const reloaded = await admit("alice", reloadedEncryption);
+      expect(await reloaded.readText("draft/final.txt")).toBe("revised");
+      await expect(
+        (await admit("alice", wrongEncryption)).read("draft/final.txt"),
+      ).rejects.toThrow();
+      await expect(alice.write("closed.txt", "not saved")).rejects.toThrow("encryption is closed");
+      await reloaded.create("draft/empty.txt", "");
+      expect(await reloaded.read("draft/empty.txt")).toEqual(Buffer.alloc(0));
+      await reloaded.remove("draft");
+      expect(await reloaded.list()).toEqual([]);
+    } finally {
+      encryption.dispose();
+      reloadedEncryption.dispose();
+      wrongEncryption.dispose();
+    }
+  });
+
+  it("rejects copied or corrupt ciphertext and enforces the plaintext byte limit", async () => {
+    const encryption = createStorageValueEncryption(randomBytes(32));
+    try {
+      const { alice, bob, userPath, revoke } = await fixture({ encryption });
+      const data = Buffer.alloc(1024, 0x61);
+      await alice.create("private.bin", data);
+      expect(await alice.read("private.bin")).toEqual(data);
+      await expect(alice.write("oversized.bin", Buffer.alloc(1025))).rejects.toMatchObject({
+        code: "too-large",
+      });
+      const filename = path.join(userPath("alice"), "private.bin");
+      const stored = await fs.readFile(filename);
+      expect(alice.storedSize(data.length)).toBe(stored.length);
+      await fs.writeFile(path.join(userPath("bob"), "copied.bin"), stored);
+      await expect(bob.read("copied.bin")).rejects.toThrow();
+      const corrupted = Buffer.from(stored);
+      corrupted.writeUInt8(corrupted.readUInt8(corrupted.length - 1) ^ 1, corrupted.length - 1);
+      await fs.writeFile(filename, corrupted);
+      await expect(alice.read("private.bin")).rejects.toThrow();
+      await fs.writeFile(filename, data);
+      await expect(alice.read("private.bin")).rejects.toThrow("Invalid encrypted storage value");
+      await fs.writeFile(filename, stored);
+      const pending = alice.read("private.bin");
+      revoke();
+      await expect(pending).rejects.toThrow("grant revoked");
+    } finally {
+      encryption.dispose();
+    }
+  });
+
   it("keeps the complete file lifecycle under the canonical user across readmission", async () => {
     const { alice, bob, admit } = await fixture();
     await alice.create("draft/report.txt", "first");

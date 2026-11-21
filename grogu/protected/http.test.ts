@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -17,6 +17,7 @@ import {
   mergeCanonicalUserProfiles,
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
+import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -622,7 +623,7 @@ void test("Family directory respects account visibility and isolates the develop
   );
 });
 
-void test("Family canonical turn streams sources and widgets, then drains an active run on close", async (t) => {
+void test("Family canonical turns save sources, widgets, and offline replies, then drain on shutdown", async (t) => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
     stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
@@ -640,6 +641,12 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   }> = [];
   const activeProvider = Promise.withResolvers<void>();
   const providerDisconnected = Promise.withResolvers<void>();
+  const offlineProvider = Promise.withResolvers<void>();
+  const offlineRelease = Promise.withResolvers<void>();
+  const offlineSettled = Promise.withResolvers<void>();
+  const offlineDisconnected = Promise.withResolvers<void>();
+  const offlinePrompt = "Finish this reply after the connection closes";
+  t.after(() => offlineRelease.resolve());
   const sourceUrl = "https://example.com/family-source";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
@@ -758,11 +765,16 @@ void test("Family canonical turn streams sources and widgets, then drains an act
       }
       seen.push({ auth: request.headers.authorization, body });
       response.writeHead(200, { "content-type": "text/event-stream" });
-      if (seen.length === 3) {
+      if (JSON.stringify(body.messages).includes("Hold the provider response open")) {
         response.once("close", () => providerDisconnected.resolve());
         response.flushHeaders();
         activeProvider.resolve();
         return;
+      }
+      if (JSON.stringify(body.messages).includes(offlinePrompt)) {
+        response.flushHeaders();
+        offlineProvider.resolve();
+        await offlineRelease.promise;
       }
       const widgetArguments = JSON.stringify({
         title: "Synthetic widget",
@@ -819,10 +831,13 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
   const serviceConfig = protectedOpenClawConfig(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
   const options = {
     origin,
     stateDir,
     usersRoot: await root(usersDir),
+    encryption,
     maxChatsPerUser: 3,
     maxFileBytes: 64_000,
     storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
@@ -880,6 +895,11 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const open = async () => {
     const app = createProtectedHttp(options);
     const server = createProtectedServer(origin, app.fetch);
+    server.on("request", (incoming, outgoing) => {
+      if (incoming.headers["x-proof-disconnect"] === "yes") {
+        outgoing.once("close", () => offlineDisconnected.resolve());
+      }
+    });
     const url = await listen(server);
     t.after(() => close(server));
     const call = (route: string, init?: RequestInit) => {
@@ -902,8 +922,8 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const stream = await response.text();
   assert.match(stream, /"type":"done"/);
   const events = stream
-    .trim()
     .split("\n")
+    .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
   assert.ok(
     events.some(
@@ -936,6 +956,16 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const widgetResponse = await reopened(`/chats/${chat.id}/widgets/${widget.id}`);
   assert.equal(widgetResponse.status, 200);
   assert.match((await widgetResponse.json()).html, /Scoped widget body/);
+  const profileDirectory = path.join(usersDir, createHash("sha256").update(user.id).digest("hex"));
+  const storedFiles = (
+    await readdir(profileDirectory, { recursive: true, withFileTypes: true })
+  ).filter((entry) => entry.isFile());
+  assert.ok(storedFiles.length > 0);
+  for (const entry of storedFiles) {
+    const bytes = await readFile(path.join(entry.parentPath, entry.name));
+    assert.ok(!bytes.includes("Scoped widget body"));
+    assert.ok(!bytes.includes("Synthetic widget"));
+  }
   const deleted = await reopened(`/chats/${chat.id}`, {
     method: "DELETE",
     headers: { "if-match": read.chat.version },
@@ -1063,7 +1093,49 @@ void test("Family canonical turn streams sources and widgets, then drains an act
   const rejectedStream = await rejected.text();
   assert.match(rejectedStream, /"code":"provider_rejected"/, rejectedStream);
   assert.doesNotMatch(rejectedStream, /operation_failed|Invalid API key/);
-  await restart.shutdown();
+  const canonicalRun = options.turns.run.bind(options.turns);
+  options.turns.run = async (turn) => {
+    try {
+      await canonicalRun(turn);
+    } finally {
+      if (turn.input.text === offlinePrompt) {
+        offlineSettled.resolve();
+      }
+    }
+  };
+  const { chat: offline } = await (
+    await restart.call("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const offlineRoute = `/chats/${offline.id}`;
+  const offlineResponse = await restart.call(`${offlineRoute}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: offlinePrompt }),
+    headers: { "x-grogu-profile": user.id, "x-proof-disconnect": "yes" },
+  });
+  assert.equal(offlineResponse.status, 200);
+  const offlineReader = offlineResponse.body!.getReader();
+  const offlineStart = JSON.parse(new TextDecoder().decode((await offlineReader.read()).value));
+  assert.equal(offlineStart.type, "start");
+  await offlineProvider.promise;
+  await offlineReader.cancel();
+  await offlineDisconnected.promise;
+  const detached = await (await restart.call(offlineRoute)).json();
+  offlineRelease.resolve();
+  await offlineSettled.promise;
+  try {
+    const savedOffline = await (await reopened(offlineRoute)).json();
+    assert.ok(
+      savedOffline.chat.messages.some(
+        (message: { role: string; text: string }) =>
+          message.role === "user" && message.text === offlinePrompt,
+      ),
+    );
+    assert.equal(savedOffline.chat.messages.at(-1)?.status, "complete");
+    assert.match(savedOffline.chat.messages.at(-1)?.text, /Committed synthetic answer\./);
+    assert.deepEqual(detached.activeRun, { id: offlineStart.runId });
+  } finally {
+    await restart.shutdown();
+  }
   for (const dir of [stateDir, process.env.HOME!]) {
     for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) {

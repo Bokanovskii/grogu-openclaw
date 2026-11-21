@@ -22,6 +22,7 @@ import {
   withHostSessionAccess,
   type HostSessionAccess,
 } from "../../src/agents/tools/scoped-session-access.js";
+import type { NormalizedUsage } from "../../src/agents/usage.js";
 import { createDefaultDeps } from "../../src/cli/deps.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
@@ -35,6 +36,7 @@ import {
 import { onAgentEventForRun } from "../../src/infra/agent-events.js";
 import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { GatewayScheduler } from "../../src/infra/gateway-scheduler.js";
+import { computeUsageTokenTotals } from "../../src/infra/session-cost-usage-pricing.js";
 import { LegacyPluginSdkResourceHost } from "../../src/plugins/legacy-sdk-resource-host.js";
 import {
   getPluginRuntimeGatewayRequestScope,
@@ -88,6 +90,7 @@ export type ProtectedTurn = {
   chargeChildCreation: () => void;
   registerChildSession: (sessionKey: string) => () => void;
   childResult: (result: { runId: string; agentId: string; text: string }) => void;
+  usage: (tokens: number | null) => void;
   delta: (text: string) => Promise<void>;
   reasoning: (text: string) => Promise<void>;
   activity: (item: ProtectedActivity) => Promise<void>;
@@ -101,6 +104,7 @@ async function runMentionedAgent(
   turn: ProtectedTurn,
   agent: Readonly<ProtectedAgentDefinition>,
   credential: ReturnType<typeof createRequestModelCredential>,
+  recordUsage: (usage: NormalizedUsage | undefined) => void,
 ) {
   const children = new Map<
     string,
@@ -113,6 +117,7 @@ async function runMentionedAgent(
     }
   >();
   let savedResult = false;
+  let usageReported = false;
   let settle!: (outcome: "deleted" | "changed") => void;
   const settled = new Promise<"deleted" | "changed">((resolve) => {
     settle = resolve;
@@ -146,6 +151,10 @@ async function runMentionedAgent(
         return undefined;
       }
       return {
+        onResultUsage: (usage: NormalizedUsage | undefined) => {
+          usageReported = true;
+          recordUsage(usage);
+        },
         requestModelCredential: credential.handle,
         userFileScope: {
           files: turn.files,
@@ -293,6 +302,9 @@ async function runMentionedAgent(
     for (const child of children.values()) {
       child.releaseSessionAccess();
       child.releaseExecution();
+    }
+    if (spawnedRunId && !usageReported) {
+      recordUsage(undefined);
     }
   });
 }
@@ -518,6 +530,24 @@ export function createCanonicalProtectedTurns(options: {
         }
       };
       let credential: ReturnType<typeof createRequestModelCredential> | undefined;
+      let tokenTotal: number | null = 0;
+      const recordUsage = (usage: NormalizedUsage | undefined) => {
+        const tokens =
+          usage &&
+          [usage.total, usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(
+            (value) => value !== undefined,
+          )
+            ? computeUsageTokenTotals(usage).totalTokens
+            : null;
+        tokenTotal =
+          tokenTotal !== null && tokens !== null && Number.isSafeInteger(tokens) && tokens >= 0
+            ? tokenTotal + tokens
+            : null;
+        if (tokenTotal !== null && (!Number.isSafeInteger(tokenTotal) || tokenTotal < 0)) {
+          tokenTotal = null;
+        }
+        turn.usage(tokenTotal);
+      };
       try {
         const requestCredential = createRequestModelCredential({
           provider,
@@ -604,6 +634,7 @@ export function createCanonicalProtectedTurns(options: {
             () => turn.markTiming("firstProviderOutputMs"),
           ),
         );
+        recordUsage(result.meta.agentMeta?.usage);
         await updates;
         if (updateError !== undefined) {
           throw updateError instanceof Error
@@ -622,7 +653,7 @@ export function createCanonicalProtectedTurns(options: {
             withHostSessionAccess(turn.sessionAccess, async () => {
               for (const agent of turn.mentionedAgents) {
                 turn.assertCurrent();
-                await runMentionedAgent(config, turn, agent, requestCredential);
+                await runMentionedAgent(config, turn, agent, requestCredential, recordUsage);
               }
             }),
           );

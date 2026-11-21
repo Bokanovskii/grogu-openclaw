@@ -2685,6 +2685,70 @@ CREATE TABLE IF NOT EXISTS user_profile_access_denials (
   profile_id TEXT NOT NULL PRIMARY KEY
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS protected_access_requests (
+  id TEXT NOT NULL PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  note TEXT NOT NULL,
+  receipt_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open', 'approved', 'denied', 'removed', 'withdrawn')),
+  edit_window_start INTEGER NOT NULL,
+  edit_count INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_admissions (
+  id TEXT NOT NULL PRIMARY KEY,
+  email TEXT UNIQUE,
+  issuer TEXT NOT NULL,
+  subject TEXT,
+  profile_id TEXT,
+  last_active_at INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('approved', 'removed')),
+  revision INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (issuer, subject)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_admission_migrations (
+  issuer TEXT NOT NULL PRIMARY KEY,
+  completed_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_policy_sync (
+  admission_id TEXT NOT NULL PRIMARY KEY,
+  revision INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'synced', 'failed', 'unknown'))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_policy_barrier (
+  id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+  email TEXT NOT NULL,
+  revision INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_usage_daily (
+  profile_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  messages INTEGER NOT NULL,
+  tokens INTEGER NOT NULL,
+  models_json TEXT NOT NULL,
+  errors INTEGER NOT NULL,
+  missing_usage INTEGER NOT NULL,
+  missing_messages INTEGER NOT NULL,
+  PRIMARY KEY(profile_id, day)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_usage_runs (
+  run_id TEXT NOT NULL PRIMARY KEY,
+  day TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_usage_daily_day ON protected_usage_daily(day);
+CREATE INDEX IF NOT EXISTS idx_protected_usage_runs_day
+  ON protected_usage_runs(day);
+
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,

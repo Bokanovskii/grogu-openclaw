@@ -81,11 +81,30 @@ async function main() {
   const { createCloudflareAccessVerifier } = await import("./identity.js");
   const { createProtectedHttp } = await import("./http.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
-  const allowed = new Set(allowedSubjects);
+  const admissionStore = await import("./admission-store.js");
+  const { startProtectedUsageRetention } = await import("./usage-retention.js");
+  const { createProtectedPolicySync } = await import("./policy-sync.js");
+  await admissionStore.migrateProtectedSubjects(stateDir, {
+    subjects: allowedSubjects,
+    issuer: accessIssuer,
+  });
+  const admissions = await admissionStore.listProtectedAdmissions(stateDir);
+  const allowed = new Set(
+    admissions
+      .filter((admission) => admission.status === "approved" && admission.subject)
+      .map((admission) => admission.subject!),
+  );
+  const policySync = createProtectedPolicySync(stateDir);
   const verifyIdentity = createCloudflareAccessVerifier({
     issuer: accessIssuer,
     audience: accessAudience,
     isAllowed: ({ subject }) => allowed.has(subject),
+    bindVerifiedIdentity: async (identity, assertCurrent) => {
+      return admissionStore.bindProtectedAdmission(stateDir, identity, assertCurrent, () => {
+        allowed.add(identity.subject);
+        policySync.trigger();
+      });
+    },
     testClientId: settings.testClientId,
     origin,
   });
@@ -112,8 +131,21 @@ async function main() {
   const app = createProtectedHttp({
     origin,
     stateDir,
+    accessIssuer,
+    ownerSubject: settings.ownerSubject,
+    onRemoveSubject: (subject) => {
+      allowed.delete(subject);
+      verifyIdentity.invalidateSubject(subject);
+    },
+    onPolicyChanged: policySync.trigger,
+    isPolicyInFlight: policySync.isInFlight,
     usersRoot,
-    directory: { issuer: accessIssuer, allowedSubjects },
+    directory: {
+      issuer: accessIssuer,
+      get allowedSubjects() {
+        return [...allowed];
+      },
+    },
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
     storageLimits: settings.storageLimits,
@@ -135,6 +167,8 @@ async function main() {
       "Child ownership is ambiguous. Inspect the isolated state before starting.",
     );
   }
+  const retention = await startProtectedUsageRetention(stateDir);
+  policySync.trigger();
   const server = createProtectedServer(origin, app.fetch, staticClient);
   server.on("error", () => {
     process.stderr.write("Protected listener failed.\n");
@@ -145,7 +179,16 @@ async function main() {
       server.closeAllConnections();
       process.exit(1);
     }, 8_000);
-    void closeProtectedServer(server, app, stateDir)
+    retention.beginClose();
+    void closeProtectedServer(
+      server,
+      {
+        shutdown: async () => {
+          await Promise.all([app.shutdown(), retention.stop(), policySync.stop()]);
+        },
+      },
+      stateDir,
+    )
       .then(() => {
         releaseStateOwner();
         process.exit(0);

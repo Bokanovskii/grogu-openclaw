@@ -1,17 +1,60 @@
-# Protected Family runtime
+# Protected Alcove runtime
 
-The Family API listens on loopback. It is not a Gateway or an administrator
+The Alcove API listens on loopback. It is not a Gateway or an administrator
 endpoint. Run it under the dedicated unprivileged `groguProtected` account,
 with a private `HOME` and state directory. Forward the hostname's traffic to
-loopback port 19789. Cloudflare Access protects both the app and API; Cloudflare
-owns `/cdn-cgi/access/*`. The listener serves the app and its compiled assets
-without routing API, Access, or unknown paths to the app shell.
+loopback port 19789. Cloudflare Access protects the private app and API; Cloudflare
+owns `/cdn-cgi/access/*`. When the approved public policy is activated, only
+`/request-access` and its necessary descendants bypass Access. The listener serves
+the public entry and its assets separately from the private app shell.
+
+For the public request route, the loopback listener uses a single valid
+`CF-Connecting-IP` value for rate limiting only. Cloudflare Tunnel supplies
+this header for external traffic. A local process or a same-zone Worker can
+spoof it, so it is not authorization. Missing or invalid values share a
+conservative limit. Global submission and stored-request limits also apply.
+
+The owner can see when each person last made an admitted app request. Automatic
+app refreshes also count as activity. The timestamp remains with the admission
+record and contains no message or file content.
+
+## Fixed policy helper
+
+The policy helper is a separate, root-owned installation. In a private
+operator-owned staging directory (mode 0700), place the reviewed
+`protected-policy-helper.py` and `protected-policy-config.json` as regular,
+operator-owned files with mode 0600. The JSON configuration contains exactly
+`accountId`, `appId`, `policyId`, `policyName`, `ownerEmail`, and `token`.
+Choose an application-specific allow policy dedicated to this app; the token
+needs Cloudflare's `Access: Policies Write` permission. The token's Cloudflare
+scope is not restricted to one application: the fixed helper supplies that
+restriction. Never put the token in command arguments or logs.
+
+On the protected Mac, with the reviewed system Python and Command Line Tools
+installed, the administrator provisions the helper with:
+
+```sh
+sudo /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
+  --operator USER --staging-dir /absolute/private/staging --install-policy-helper
+```
+
+The installer checks the helper's pinned digest, installs root-owned code and
+root-only configuration, and removes the staged configuration after verifying
+the copy. It makes no Cloudflare request. Existing helper paths require
+inspection instead of being overwritten. Before each policy write, the app
+records a recovery barrier in its state database. A crash or an unknown outcome
+blocks later policy writes until the owner requests reconciliation. The helper
+reads the policy before it applies the current admission. Cloudflare does not
+provide an atomic cross-system commit here. Its policy can temporarily disagree
+with the app during repair. The app denies a removed person throughout.
 
 ## Entrypoint
 
 Place the reviewed client build output in `protected-client/` at the installed
 service root, alongside `grogu/` and `scripts/`. Install only the compiled
-`dist` contents there, not the separate client checkout. The listener requires
+`dist` contents there, not the separate client checkout. Keep the build's hashed
+entry and shared asset names unchanged; they do not have to start with `index-`.
+The listener requires
 `protected-client/index.html` before it starts. Then use Node 26.12.1:
 
 ```sh
@@ -38,17 +81,18 @@ stops the next update until someone inspects it.
 
 The configuration is a non-writable-by-group/others JSON file with these keys:
 
-| Key               | Value                                                                         |
-| ----------------- | ----------------------------------------------------------------------------- |
-| `stateDir`        | Existing absolute private state directory; identical to `OPENCLAW_STATE_DIR`. |
-| `origin`          | Exact HTTPS client origin, without a trailing slash.                          |
-| `port`            | Unprivileged loopback listener port.                                          |
-| `accessIssuer`    | Exact `https://<team>.cloudflareaccess.com` issuer origin.                    |
-| `accessAudience`  | Access application audience.                                                  |
-| `allowedSubjects` | Explicit subject strings from that issuer; `[]` denies all.                   |
-| `testClientId`    | Optional Access service-token client ID for the hidden test user.             |
-| `sparkySecret`    | `{"source":"env","provider":"default","id":"SPARKY_API_KEY"}`.                |
-| `storageLimits`   | Integer byte limits: `userBytes`, `globalBytes`, and `freeFloorBytes`.        |
+| Key               | Value                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `stateDir`        | Existing absolute private state directory; identical to `OPENCLAW_STATE_DIR`.                     |
+| `origin`          | Exact HTTPS client origin, without a trailing slash.                                              |
+| `port`            | Unprivileged loopback listener port.                                                              |
+| `accessIssuer`    | Exact `https://<team>.cloudflareaccess.com` issuer origin.                                        |
+| `accessAudience`  | Access application audience.                                                                      |
+| `allowedSubjects` | Legacy subjects imported once into admission storage; not a runtime allowlist.                    |
+| `ownerSubject`    | Optional verified Access subject permitted to administer access. Admin is unavailable without it. |
+| `testClientId`    | Optional Access service-token client ID for the hidden test user.                                 |
+| `sparkySecret`    | `{"source":"env","provider":"default","id":"SPARKY_API_KEY"}`.                                    |
+| `storageLimits`   | Integer byte limits: `userBytes`, `globalBytes`, and `freeFloorBytes`.                            |
 
 Provision the Sparky key from the isolated service secret source. Never put a
 key, token, or refresh credential in this JSON file. Do not copy personal Grogu
@@ -57,7 +101,7 @@ stores inside this isolated state directory.
 
 Initialization measures free space on the state volume. It reserves a 512 MiB
 free-space floor and takes at most one-sixteenth of the remaining space, capped
-at 256 MiB, for the Family budget. Each profile is limited to one-quarter of
+at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
 that budget. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts, and conservatively
 limits growth per turn. The pilot allows one storage-growing request at a time.
@@ -69,7 +113,7 @@ The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
 and display the resulting sources. It does not have a search provider;
 `web_search` is disabled. Managed search would require a separately approved
 search plugin and isolated credential or endpoint (for example, Brave with its
-own `BRAVE_API_KEY`). The Sparky key is not a search credential, and Family does
+own `BRAVE_API_KEY`). The Sparky key is not a search credential, and Alcove does
 not inherit provider keys or configuration from personal Grogu.
 
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
@@ -97,9 +141,9 @@ closing a quiet response, and clients skip it. A provider failure reaches the
 client as a code and a fixed message, without provider text: `provider_busy`,
 `rate_limit`, `provider_timeout`, `provider_rejected`, `plan_limit`,
 `chat_too_long`, `model_unavailable`, `thinking_unavailable`, or `provider_failed`. Sparky limits
-concurrent requests for each key. If Family uses the same Sparky key as personal
-Grogu, the two services share that limit, and Family reports `provider_busy`
-while personal Grogu is busy. Give Family its own Sparky key.
+concurrent requests for each key. If Alcove uses the same Sparky key as personal
+Grogu, the two services share that limit, and Alcove reports `provider_busy`
+while personal Grogu is busy. Give Alcove its own Sparky key.
 
 After admission, a turn continues if the browser disconnects or the phone sleeps.
 The runtime saves the reply without an attached reader. Request credentials stay
@@ -194,7 +238,8 @@ up to four distinct, available agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
 provider credential, file boundary, and deadline. Child work is not detached:
 child transcript and file bytes count against the initiating profile while
-present. The turn saves each completed result as an assistant message with its
+present. These temporary children do not count as retained chats or change
+the reported last retained chat activity. The turn saves each completed result as an assistant message with its
 agent ID, removes the child's exact file directory, then lets native cleanup
 delete the child without archiving it. Stopping, revoking access, timing out, or
 shutting down also cancels the child. A listener restart does not resume
@@ -210,13 +255,33 @@ real profile and chat storage. On macOS, run it from the checkout with Node
 26.12.1:
 
 ```sh
-~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh
+PATH="$HOME/.local/share/fnm/node-versions/v26.12.1/installation/bin:$PATH" \
+  caffeinate -ims "$HOME/.local/bin/heavy" -- bash grogu/protected/test-http-isolated.sh
 ```
 
 The launcher denies non-loopback network traffic for the entire test process,
 including work that outlives a test. Direct and unsupported invocations fail
 before the fixture runs.
 
+Run the administration boundaries with separate isolated state:
+
+```sh
+proof="$PWD/.artifacts/protected-proof-$$"
+node26="$HOME/.local/share/fnm/node-versions/v26.12.1/installation/bin"
+mkdir -m 700 -p "$proof/home" "$proof/state"
+trap 'rm -rf "$proof"' EXIT
+caffeinate -ims "$HOME/.local/bin/heavy" -- env -i \
+  PATH="$node26:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$proof/home" TMPDIR="$proof" \
+  OPENCLAW_STATE_DIR="$proof/state" OPENCLAW_CONFIG_PATH="$proof/state/openclaw.json" \
+  /usr/bin/sandbox-exec -p \
+  '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))' \
+  node --import ./scripts/tsx.mjs --test --test-concurrency=1 --test-timeout=90000 \
+  grogu/protected/access-http.test.ts grogu/protected/policy-sync.test.ts \
+  grogu/protected/usage-retention.test.ts
+```
+
+This example uses macOS network isolation; elsewhere, use an equivalent
+network sandbox. Use a task-owned isolated HOME and state.
 This proves neither a real provider nor the Access identity response. The
 authoritative client DTOs are exported from `@openclaw/gateway-protocol/protected`.
 
@@ -228,8 +293,8 @@ invalidation, coalesced validation, five-second remote revocation, and the timin
 record's privacy boundary. Its synthetic identity-latency accounting is a model
 of delivery overhead, not a measured Cloudflare or Copilot response time.
 
-The isolated listener may be installed and checked with an empty
-`allowedSubjects` list. Keep admission deny-all until the Cloudflare
+The isolated listener may be installed and checked with an empty admission
+store. Keep admission deny-all until the Cloudflare
 issuer/audience, live identity response, and reverse proxy have been verified.
 Personal provider use additionally requires the user's consent and entitlement;
 synthetic fixtures do not prove either. The GitHub Copilot and OpenAI
@@ -242,7 +307,11 @@ account is allowed.
 
 Run `maintain.ts` under the isolated service account and environment.
 `init --deploy-json FILE` creates the deny-all configuration; `add-subject UUID`
-adds an exact subject, which takes effect after a protected listener restart.
+adds an exact subject to canonical admission storage. Stop the protected listener
+before this maintenance and restart it afterward; active turns can be interrupted.
+The deployment wrapper performs this stop and restart for `--add-subject`.
+The command holds the native state-owner lock while it changes admission.
+It refuses the change if the listener or another process owns that state.
 `test-client CLIENT_ID` admits one Access service token as a hidden
 development user, and `test-client none` removes it. Both take effect after a
 protected listener restart. Strict Access gives a service token no cookie,
@@ -285,7 +354,8 @@ listed by default. Hide me removes a person from the directory. It does not
 revoke a share. The development identity is always hidden and receives an
 empty directory, even if its stored settings say otherwise.
 
-Names use the canonical profile store. Directory settings use the existing
+Directory membership follows current canonical admissions, not later edits to
+the legacy `allowedSubjects` configuration. Names use the canonical profile store. Directory settings use the existing
 profile preferences store. They remain after logout or access revocation and
 follow the existing profile merge and deletion rules. A revoked or no longer
 allowed identity is not listed. Older versions ignore the directory settings

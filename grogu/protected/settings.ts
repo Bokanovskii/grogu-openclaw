@@ -57,7 +57,7 @@ export function parseRuntimeSettings(value: unknown) {
   if (!isRecord(value)) {
     throw new Error("Invalid protected runtime settings");
   }
-  const { stateDir, allowedSubjects, sparkySecret } = value;
+  const { stateDir, allowedSubjects, sparkySecret, ownerSubject } = value;
   const testClientId =
     value.testClientId === undefined ||
     (typeof value.testClientId === "string" && testClientIdPattern.test(value.testClientId))
@@ -69,6 +69,8 @@ export function parseRuntimeSettings(value: unknown) {
   if (
     typeof stateDir !== "string" ||
     !path.isAbsolute(stateDir) ||
+    (ownerSubject !== undefined &&
+      (typeof ownerSubject !== "string" || !subjectPattern.test(ownerSubject))) ||
     !Array.isArray(allowedSubjects) ||
     !allowedSubjects.every(
       (subject): subject is string => typeof subject === "string" && subjectPattern.test(subject),
@@ -90,6 +92,7 @@ export function parseRuntimeSettings(value: unknown) {
     ...deploy,
     stateDir,
     allowedSubjects,
+    ...(ownerSubject === undefined ? {} : { ownerSubject }),
     ...(testClientId === undefined ? {} : { testClientId }),
     sparkySecret: sparkyRef,
     storageLimits: {

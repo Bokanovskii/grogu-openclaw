@@ -33,6 +33,7 @@ import { protectedOpenClawConfig } from "./settings.js";
 import { createProtectedStaticClient } from "./static-client.js";
 import { installFixtureFetch } from "./test-fetch-guard.js";
 import { createCanonicalProtectedTurns } from "./turns.js";
+import { listProtectedUsage } from "./usage-store.js";
 
 const protectedCleanupAgent: ProtectedAgentExtension = {
   id: "cleanup",
@@ -126,6 +127,7 @@ void test("protected responses use neutral service wording", async (t) => {
   const app = createProtectedHttp({
     origin,
     stateDir,
+    accessIssuer: "https://identity.example",
     directory: { issuer: "https://identity.example", allowedSubjects: ["synthetic-copy-user"] },
     usersRoot: await root(stateDir),
     verifyIdentity: async () => ({
@@ -154,7 +156,7 @@ void test("protected responses use neutral service wording", async (t) => {
   assert.equal(user.displayName, "User");
   assert.equal(
     disclosure,
-    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
   );
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
@@ -261,6 +263,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     }> = [];
     const app = createProtectedHttp({
       origin,
+      accessIssuer: "https://synthetic.example",
       stateDir,
       usersRoot,
       verifyIdentity,
@@ -330,6 +333,28 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.match(asset.headers.get("content-type") ?? "", /^text\/javascript/);
   assert.equal(await asset.text(), "");
   assert.equal((await fetch(assetUrl, { method: "POST" })).status, 405);
+  const publicSubmit = await fetch(`${first.url}/request-access/api`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({
+      email: "requester@example.invalid",
+      name: "Synthetic requester",
+      note: "Synthetic access request",
+    }),
+  });
+  const publicSubmitBody = await publicSubmit.text();
+  assert.equal(publicSubmit.status, 201, publicSubmitBody);
+  const receiptCookie = publicSubmit.headers.get("set-cookie");
+  assert.match(receiptCookie ?? "", /^protected_access_receipt=[A-Za-z0-9_-]+;/u);
+  const statusWithoutReceipt = await fetch(`${first.url}/request-access/api/status`, {
+    headers: { origin },
+  });
+  assert.equal(statusWithoutReceipt.status, 200);
+  const receipt = (receiptCookie ?? "").split(";", 1)[0]!;
+  const statusWithReceipt = await fetch(`${first.url}/request-access/api/status`, {
+    headers: { origin, cookie: receipt },
+  });
+  assert.equal(statusWithReceipt.status, 200);
   for (const route of [
     "/assets/index-Symlink.js",
     "/assets/notebook.Ab12.woff2",
@@ -348,7 +373,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const me = await first.call("alice", "/me");
   assert.equal(me.status, 200);
   const { user, capabilities } = await me.json();
-  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true });
+  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true, admin: false });
   const catalogResponse = await first.call("alice", "/agents");
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
@@ -661,6 +686,7 @@ void test("Family directory respects account visibility and isolates the develop
   const open = async () => {
     const app = createProtectedHttp({
       origin,
+      accessIssuer: issuer,
       stateDir,
       usersRoot,
       verifyIdentity,
@@ -1286,6 +1312,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     });
   const options = {
     origin,
+    accessIssuer: "https://synthetic.example",
     stateDir,
     usersRoot: await root(usersDir),
     encryption,
@@ -1489,6 +1516,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         message.agentId === "cleanup" && message.text === "Committed synthetic answer.",
     ),
     "the attributed result is committed to the parent transcript before cleanup",
+  );
+  const usage = await listProtectedUsage(stateDir, user.id, Date.now());
+  assert.equal(
+    usage.reduce((total, day) => total + day.tokens, 0),
+    25,
+    "usage includes both parent turns and both native child provider requests",
+  );
+  assert.equal(
+    usage.reduce((total, day) => total + day.missingUsage, 0),
+    0,
   );
   assert.deepEqual(
     seen.slice(firstMentionedRequest).map(({ body }) => [body.model, body.reasoning_effort]),
@@ -2009,6 +2046,7 @@ void test("An in-flight session capability stops when its profile is merged", as
   let staleAuthorityAccepted = false;
   const app = createProtectedHttp({
     origin,
+    accessIssuer: "https://synthetic.example",
     directory: { issuer: "https://synthetic.example", allowedSubjects: [] },
     stateDir,
     usersRoot: await root(usersDir),

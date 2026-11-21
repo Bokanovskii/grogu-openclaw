@@ -17,7 +17,7 @@ import { withOpenClawAgentDatabaseReadOnly } from "../../src/state/openclaw-agen
 import { withOpenClawStateDatabaseReadOnly } from "../../src/state/openclaw-state-db-readonly.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { createProtectedAgentCatalog } from "./agents.js";
-import { createStorageAdmission } from "./capacity.js";
+import { createStorageAdmission, measureProtectedStorage } from "./capacity.js";
 import { createProtectedChats } from "./chats.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
 
@@ -53,7 +53,7 @@ void test("Family capacity charges encrypted bytes for existing files and new wr
       chats: {
         async capacityEntries() {
           return hasChat
-            ? [{ profileId, id: "one", sessionKey: "synthetic", chargeFiles: true }]
+            ? [{ profileId, id: "one", sessionKey: "synthetic", updatedAt: 1, transient: false }]
             : [];
         },
         async transcriptBytes() {
@@ -259,6 +259,14 @@ void test("transient children are charged and recovered across registration cras
   } finally {
     childFiles.dispose();
   }
+  const measurement = await measureProtectedStorage(
+    { usersRoot, chats, maxFileBytes: 100_000 },
+    profileId,
+    authority.assertCurrent,
+    false,
+  );
+  assert.equal(measurement.chatCount, 1);
+  assert.equal(measurement.lastChatActivityAt, parent.updatedAt);
   await assert.rejects(admit(profileId, authority.assertCurrent, "turn"), {
     code: "quota_exceeded",
   });

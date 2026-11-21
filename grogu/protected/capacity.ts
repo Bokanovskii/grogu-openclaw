@@ -61,7 +61,7 @@ export function createStorageAdmission(
   let held = false;
   return async (profileId: string, assertCurrent: () => void, operation: "create" | "turn") => {
     if (held) {
-      throw new ProtectedError(409, "storage_busy", "Another Family write is active. Try again.");
+      throw new ProtectedError(409, "storage_busy", "Another write is active. Try again.");
     }
     held = true;
     let active = true;
@@ -77,7 +77,11 @@ export function createStorageAdmission(
         throw new Error("Family storage admission closed");
       }
       if (freeBytes(options.stateDir) < BigInt(options.limits.freeFloorBytes)) {
-        throw new ProtectedError(507, "storage_full", "Family storage is low. Contact the host.");
+        throw new ProtectedError(
+          507,
+          "storage_full",
+          "The server is low on storage. Contact the server operator.",
+        );
       }
     };
     try {
@@ -119,7 +123,7 @@ export function createStorageAdmission(
             throw new ProtectedError(
               413,
               "quota_exceeded",
-              "Family storage budget is full. Delete a chat to free space.",
+              "Storage limit reached. Delete a chat to free space.",
             );
           }
           remaining -= bytes;
@@ -145,7 +149,7 @@ export function createStorageAdmission(
               failure = new ProtectedError(
                 413,
                 "file_too_large",
-                "A generated file exceeds the Family file limit.",
+                "A generated file exceeds the file size limit.",
               );
               throw failure;
             }

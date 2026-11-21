@@ -6,7 +6,10 @@ import { test } from "node:test";
 import { root } from "../../src/infra/fs-safe.js";
 import { requireNodeSqlite } from "../../src/infra/node-sqlite.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
-import { openOpenClawStateDatabase } from "../../src/state/openclaw-state-db.js";
+import {
+  openOpenClawStateDatabase,
+  repairOpenClawStateDatabaseSchema,
+} from "../../src/state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
@@ -41,8 +44,8 @@ void test("startup migrates subjects through the worker on pre-access-workflow s
   const { DatabaseSync } = requireNodeSqlite();
   const prior = new DatabaseSync(databasePath);
   try {
-    // The prior release has the same schema version and differs only by this
-    // feature's seven tables (aab78bf7194b0abc4bbe5fb64f6c14cb97543279).
+    // Older personal Gateways predate both protected admission and Access sessions,
+    // but already use the current shared-state schema version.
     prior.exec(`
       DROP TABLE IF EXISTS protected_access_requests;
       DROP TABLE IF EXISTS protected_admissions;
@@ -51,6 +54,8 @@ void test("startup migrates subjects through the worker on pre-access-workflow s
       DROP TABLE IF EXISTS protected_policy_barrier;
       DROP TABLE IF EXISTS protected_usage_daily;
       DROP TABLE IF EXISTS protected_usage_runs;
+      DROP TABLE IF EXISTS user_profile_access_sessions;
+      DROP TABLE IF EXISTS user_profile_access_denials;
       INSERT INTO diagnostic_events (scope, event_key, payload_json, created_at)
       VALUES ('upgrade-test', 'retained', '{"synthetic":true}', 1);
     `);
@@ -58,8 +63,22 @@ void test("startup migrates subjects through the worker on pre-access-workflow s
     prior.close();
   }
 
+  assert.deepEqual(repairOpenClawStateDatabaseSchema({ env }).warnings, []);
   const issuer = "https://access.example";
   const subject = "synthetic-upgrade-subject";
+  assert.deepEqual(
+    await executeOpenClawStateWorker(captureOpenClawStateWorkerContext({ env }), {
+      type: "userProfiles.verifiedDirectory",
+      input: {
+        issuer,
+        subjects: [subject],
+        preferenceKey: "grogu.protected.directory",
+        after: null,
+        limit: 10,
+      },
+    }),
+    { people: [], nextCursor: null },
+  );
   assert.equal(await migrateProtectedSubjects(stateDir, { issuer, subjects: [subject] }), 1);
   assert.equal(await migrateProtectedSubjects(stateDir, { issuer, subjects: [subject] }), 0);
   assert.deepEqual(

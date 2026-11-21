@@ -9,7 +9,6 @@ import { WIDGET_THEME_MESSAGE_TYPE } from "../shared/widget-theme.js";
 import { buildSandboxWidgetScrollBridgeHtml } from "./sandbox-widget-scroll-bridge.js";
 
 export type SandboxHostCsp = {
-  profile?: "protected";
   connectDomains?: string[];
   resourceDomains?: string[];
   mediaDomains?: string[];
@@ -17,26 +16,6 @@ export type SandboxHostCsp = {
   baseUriDomains?: string[];
   blockDescendantFrames?: boolean;
 };
-
-function buildProtectedWidgetBridgeHtml(): string {
-  return `<script>(()=>{
-  const post=window.parent.postMessage.bind(window.parent);
-  const channel=new MessageChannel();
-  const send=channel.port1.postMessage.bind(channel.port1);
-  const activation=navigator.userActivation;
-  const descriptor=globalThis.UserActivation&&Object.getOwnPropertyDescriptor(UserActivation.prototype,"isActive");
-  const active=descriptor?.get?.bind(activation);
-  const resolve=Promise.resolve.bind(Promise);
-  const prompt=text=>{
-    if(!active||!active()||typeof text!=="string"||!text.trim()||text.length>8000)return resolve(false);
-    send({type:"openclaw:widget-prompt",prompt:text});
-    return resolve(true);
-  };
-  Object.defineProperty(window,"openclaw",{value:Object.freeze({prompt:Object.freeze({send:prompt})}),writable:false,configurable:false});
-  Object.defineProperty(window,"sendPrompt",{value:prompt,writable:false,configurable:false});
-  post({type:"openclaw:widget-prompt-offer"},"*",[channel.port2]);
-})();</script>`;
-}
 
 export const SANDBOX_HOST_PATH = "/mcp-app-sandbox";
 const SANDBOX_HOST_PORT_OFFSET = 1;
@@ -213,9 +192,6 @@ export function normalizeSandboxHostCsp(value: unknown): SandboxHostCsp | undefi
   if (!record) {
     return undefined;
   }
-  if (record.profile === "protected") {
-    return { profile: "protected", blockDescendantFrames: true };
-  }
   const csp: SandboxHostCsp = {
     connectDomains: normalizeDomains(record.connectDomains, { allowWebSocket: true }),
     resourceDomains: normalizeDomains(record.resourceDomains),
@@ -258,13 +234,7 @@ export function buildSandboxHostDocument(csp?: SandboxHostCsp, sameOriginSandbox
     "Content-Type": "text/html; charset=utf-8",
     "Content-Security-Policy": [
       buildSandboxHostContentSecurityPolicy(csp, sameOriginSandbox),
-      ...(sameOriginSandbox
-        ? [
-            csp?.profile === "protected"
-              ? "sandbox allow-scripts"
-              : "sandbox allow-scripts allow-forms",
-          ]
-        : []),
+      ...(sameOriginSandbox ? ["sandbox allow-scripts allow-forms"] : []),
     ].join("; "),
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), clipboard-write=()",
     "Cross-Origin-Resource-Policy": "cross-origin",
@@ -317,17 +287,14 @@ export function decodeSandboxHostCsp(value: string | null): SandboxHostCsp | und
 
 /** Trusted outer document. Untrusted content is written only into its inner iframe. */
 function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = false): string {
-  const protectedProfile = csp?.profile === "protected";
   const blockDescendantFrames = csp?.blockDescendantFrames === true;
   // Runtime insertion reaches existing saved widgets without changing their
   // approved bytes. Capture listeners consume private host state before stored
   // scripts, including older wrappers whose scroll bridge must stay nonce-less.
   const serializedDocumentGuard = JSON.stringify(
-    (protectedProfile ? buildProtectedWidgetBridgeHtml() : "") +
-      buildSandboxDocumentGuardHtml(blockDescendantFrames) +
-      (protectedProfile
-        ? ""
-        : buildSandboxShortcutBridgeHtml() + buildSandboxWidgetScrollBridgeHtml()),
+    buildSandboxDocumentGuardHtml(blockDescendantFrames) +
+      buildSandboxShortcutBridgeHtml() +
+      buildSandboxWidgetScrollBridgeHtml(),
   ).replaceAll("<", "\\u003c");
   return `<!doctype html>
 <meta charset="utf-8" />
@@ -350,7 +317,7 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
   const createInner = (allowScripts = true) => {
     const frame = document.createElement("iframe");
     // Block native popups here without reserving widget globals such as open.
-    frame.setAttribute("sandbox", allowScripts ? ${JSON.stringify(protectedProfile ? "allow-scripts" : "allow-scripts allow-forms")} : "");
+    frame.setAttribute("sandbox", allowScripts ? "allow-scripts allow-forms" : "");
     return frame;
   };
   let inner = createInner();
@@ -465,23 +432,6 @@ function buildSandboxHostContentSecurityPolicy(
   csp?: SandboxHostCsp,
   sameOriginSandbox = false,
 ): string {
-  if (csp?.profile === "protected") {
-    return [
-      "default-src 'none'",
-      "script-src 'unsafe-inline'",
-      "style-src 'unsafe-inline'",
-      "img-src data:",
-      "font-src data:",
-      "media-src 'none'",
-      "connect-src 'none'",
-      "webrtc 'block'",
-      "frame-src 'none'",
-      "base-uri 'none'",
-      "object-src 'none'",
-      "form-action 'none'",
-      "frame-ancestors 'self'",
-    ].join("; ");
-  }
   const resources = csp?.resourceDomains ?? [];
   const media = csp?.mediaDomains ?? resources;
   const connections = csp?.connectDomains ?? [];

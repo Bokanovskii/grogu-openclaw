@@ -6,7 +6,7 @@ import { raceWithTimeout } from "@openclaw/retry";
 import { LitElement, html, nothing, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
-import { sandboxHostFramePermissions } from "../../../packages/widget-host/src/transport.ts";
+import { sandboxHostFramePermissions } from "../../../src/shared/sandbox-host-transport.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
 import { navigateMcpAppLink } from "../app/mcp-app-routing.ts";
 import { I18nController, t } from "../i18n/index.ts";

@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createSandboxHostTransport } from "../../packages/widget-host/src/transport.js";
 import { peekSessionMcpRuntime } from "../agents/agent-bundle-mcp-manager-api.js";
 import { runWithSessionMcpRequestSignal } from "../agents/agent-bundle-mcp-request-context.js";
 import { buildMcpAppSandboxPath, resolveMcpAppSandboxPort } from "../agents/mcp-app-sandbox.js";
@@ -8,6 +7,7 @@ import { getMcpAppViewLease, type McpAppViewLease } from "../agents/mcp-ui-resou
 import { formatErrorMessage } from "../infra/errors.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
+import { createSandboxHostTransport } from "../shared/sandbox-host-transport.js";
 import { respondPlainText } from "./control-ui-http-utils.js";
 import {
   classifyMcpAppStandalonePath,

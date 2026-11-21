@@ -9,8 +9,6 @@ import { retainLegacyDefaultAgentId } from "../config/legacy.default-agent-owner
 import type { OpenClawConfig } from "../config/types.js";
 import { createBoardHandlers } from "../gateway/server-methods/board.js";
 import type { GatewayRequestContext, RespondFn } from "../gateway/server-methods/types.js";
-import { createAuthorizedUserFiles } from "../infra/authorized-user-files.js";
-import { root } from "../infra/fs-safe.js";
 import type { WidgetPresenter } from "../plugins/plugin-registration.types.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
@@ -169,45 +167,6 @@ async function executeWidget(params: {
 }
 
 describe("show_widget", () => {
-  it("publishes protected widgets through the admitted user root without board or public routes", async () => {
-    const stateDir = await createStateDir();
-    const usersRoot = await root(stateDir);
-    let active = true;
-    const files = await createAuthorizedUserFiles({
-      usersRoot,
-      profileId: "alice",
-      maxBytes: 1024 * 1024,
-      assertCurrent() {
-        if (!active) {
-          throw new Error("grant revoked");
-        }
-      },
-    });
-    const { callGateway, mock } = createBoardPutCaller();
-    const scope = { files, directory: "chats/chat", cacheKey: "alice/chat/grant" };
-    const tool = createShowWidgetTool({ stateDir, userFileScope: scope, callGateway });
-    const input = { title: "Private chart", widget_code: "<p>retained chart</p>" };
-    await expect(tool.execute("no-board", { ...input, pin: true })).rejects.toThrow(
-      /private inline/,
-    );
-    const result = await tool.execute("private", input);
-    const text = result.content.find((item) => item.type === "text")?.text;
-    if (!text) {
-      throw new Error("Expected widget result.");
-    }
-    const response = JSON.parse(text) as { view: { id: string; url?: string } };
-    expect(response.view.id).toMatch(/^cv_/);
-    expect(response.view.url).toBeUndefined();
-    expect(mock).not.toHaveBeenCalled();
-    const retained = await readCanvasDocumentHtmlSource(response.view.id, {
-      storage: { files, directory: `${scope.directory}/widgets` },
-    });
-    expect(retained.html).toContain("<p>retained chart</p>");
-    await expect(access(resolveCanvasDocumentsDir(stateDir))).rejects.toThrow();
-    active = false;
-    await expect(tool.execute("revoked", input)).rejects.toThrow("grant revoked");
-  });
-
   it("builds a sorted kind enum and routes registered source through board put", async () => {
     registerDiagramContentKind();
     const stateDir = await createStateDir();

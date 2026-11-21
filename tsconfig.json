@@ -106,7 +106,6 @@
         "./packages/gateway-protocol/src/frame-guards.ts"
       ],
       "@openclaw/gateway-protocol/schema": ["./packages/gateway-protocol/src/schema.ts"],
-      "@openclaw/gateway-protocol/protected": ["./packages/gateway-protocol/src/protected.ts"],
       "@openclaw/gateway-protocol/restart-unavailable": [
         "./packages/gateway-protocol/src/restart-unavailable.ts"
       ],

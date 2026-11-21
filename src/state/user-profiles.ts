@@ -135,7 +135,6 @@ function ensureProfileForProviderIdentity(params: {
   provider: string;
   subject: string;
   initialDisplayName: string | null;
-  rejectMerged?: boolean;
   options: UserProfileMutationOptions;
 }): UserProfile {
   const options = params.options;
@@ -163,19 +162,13 @@ function ensureProfileForProviderIdentity(params: {
   };
   const existing = runSqliteDeferredTransactionSync(reader, () => {
     const identity = selectExistingIdentity(reader);
-    if (identity?.subject !== subject) {
-      return undefined;
-    }
-    const profile = requireResolvedUserProfileMetadataById(reader, identity.profile_id);
-    if (params.rejectMerged && profile.id !== identity.profile_id) {
-      throw new UserProfileNotFoundError(identity.profile_id);
-    }
-    return toUserProfile(profile);
+    return identity?.subject === subject
+      ? toUserProfile(requireResolvedUserProfileMetadataById(reader, identity.profile_id))
+      : undefined;
   });
   if (existing) {
     return existing;
   }
-
   const now = Date.now();
   return runUserProfileWriteTransaction(
     ({ db }) => {
@@ -183,9 +176,6 @@ function ensureProfileForProviderIdentity(params: {
       const existingIdentity = selectExistingIdentity(db);
       if (existingIdentity) {
         const profile = requireResolvedUserProfileMetadataById(db, existingIdentity.profile_id);
-        if (params.rejectMerged && profile.id !== existingIdentity.profile_id) {
-          throw new UserProfileNotFoundError(existingIdentity.profile_id);
-        }
         if (existingIdentity.subject !== subject) {
           options.mutation?.before(db, existingIdentity.profile_id);
           executeSqliteQuerySync(
@@ -222,31 +212,6 @@ function ensureProfileForProviderIdentity(params: {
     params.options,
     { operationLabel: "user-profiles.ensure-identity" },
   );
-}
-
-/** Verified external subjects never inherit an account through matching email text. */
-export function ensureProfileForVerifiedIdentity(
-  identity: { issuer: string; subject: string; displayName?: string },
-  options: UserProfileMutationOptions = {},
-): UserProfile {
-  const issuer = new URL(identity.issuer);
-  if (
-    issuer.protocol !== "https:" ||
-    issuer.username ||
-    issuer.password ||
-    issuer.search ||
-    issuer.hash ||
-    !identity.subject.trim()
-  ) {
-    throw new TypeError("Verified identity requires an HTTPS issuer and nonempty subject");
-  }
-  return ensureProfileForProviderIdentity({
-    provider: `verified:${issuer.href.replace(/\/$/, "")}`,
-    subject: identity.subject,
-    initialDisplayName: normalizeInitialDisplayName(identity.displayName),
-    rejectMerged: true,
-    options,
-  });
 }
 
 function adoptDisplayNameIfEmpty(

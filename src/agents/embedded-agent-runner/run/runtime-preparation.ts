@@ -307,7 +307,6 @@ export async function prepareEmbeddedRunRuntime(input: {
         }
       : undefined;
   const authController = createEmbeddedRunAuthController({
-    requestModelCredential: params.requestModelCredential,
     config: params.config,
     agentDir: input.agentDir,
     workspaceDir: input.workspaceDir,
@@ -320,7 +319,7 @@ export async function prepareEmbeddedRunRuntime(input: {
     fallbackConfigured: input.fallbackConfigured,
     allowTransientCooldownProbe: params.allowTransientCooldownProbe === true,
     authProfileFailurePolicy: params.authProfileFailurePolicy,
-    authProfileStateMode: params.requestModelCredential ? "read-only" : params.authProfileStateMode,
+    authProfileStateMode: params.authProfileStateMode,
     runId: params.runId,
     provider,
     modelId,

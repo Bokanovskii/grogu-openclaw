@@ -1,6 +1,6 @@
 import { DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS } from "@openclaw/gateway-client/browser";
 import { racePromiseWithAbortSignal } from "@openclaw/retry";
-import { createSandboxHostTransport } from "../../../packages/widget-host/src/transport.ts";
+import { createSandboxHostTransport } from "../../../src/shared/sandbox-host-transport.ts";
 import { generateUUID } from "./uuid.ts";
 
 // A slow resource gets a notice without throwing away its in-flight work. The

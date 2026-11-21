@@ -24,9 +24,9 @@ import type { EmbeddedRunTrigger } from "./run-trigger.js";
 
 const callContext = new AsyncLocalStorage<RequestTracker>();
 const httpContext = new AsyncLocalStorage<RequestTracker>();
-const suppressRequestTelemetry = new AsyncLocalStorage<boolean>();
-export function withoutModelRequestTelemetry<T>(run: () => T): T {
-  return suppressRequestTelemetry.run(true, run);
+const suppressRequestTelemetry = new AsyncLocalStorage<{ onFirstOutput?: () => void }>();
+export function withoutModelRequestTelemetry<T>(run: () => T, onFirstOutput?: () => void): T {
+  return suppressRequestTelemetry.run({ onFirstOutput }, run);
 }
 const clock = { wall: () => Date.now(), monotonic: () => performance.now() };
 let store: ReturnType<typeof createRequestTelemetryClient> | undefined;
@@ -158,6 +158,10 @@ export function createRequestTracker(
   } = {},
 ) {
   const { write = persist, time = clock, gaps = hostGaps } = options;
+  const onFirstOutput =
+    fields.kind === "http_attempt" || fields.kind === "host_gap"
+      ? undefined
+      : suppressRequestTelemetry.getStore()?.onFirstOutput;
   const start = time.wall();
   const monoStart = time.monotonic();
   const jobId =
@@ -334,6 +338,7 @@ export function createRequestTracker(
         record.toolDeltas++;
       }
       if (first) {
+        onFirstOutput?.();
         save();
       }
     },
@@ -345,7 +350,9 @@ export function createRequestTracker(
       record.responseId =
         telemetryIdentifier(isRecord(message) ? message.responseId : undefined) ??
         record.responseId;
-      if (typeof event.delta === "string" && event.delta.length) {
+      if (event.type === "toolcall_start") {
+        tracker.output("tool");
+      } else if (typeof event.delta === "string" && event.delta.length) {
         if (event.type === "text_delta") {
           tracker.output("text");
         } else if (event.type === "thinking_delta") {

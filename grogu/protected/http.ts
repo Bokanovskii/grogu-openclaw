@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import {
   isProtectedCreateChat,
   isProtectedRenew,
@@ -21,6 +22,7 @@ import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./ident
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
+import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
 
 const base = "/api/protected/v1";
@@ -126,6 +128,7 @@ export function createProtectedHttp(options: {
     return work;
   };
   const handle = async (request: Request): Promise<Response> => {
+    const startedAt = performance.now();
     try {
       const path = new URL(request.url).pathname;
       if (path === "/healthz" && request.method === "GET") {
@@ -192,13 +195,14 @@ export function createProtectedHttp(options: {
         return unauthorized();
       }
       assertCurrent();
-      const checkGrant = async () => {
-        assertGrant();
+      const checkGrant = async (assert = assertGrant) => {
+        assert();
         await identity.revalidate();
-        if (!(await touch("validate", assertGrant))) {
+        assert();
+        if (!(await touch("validate", assert))) {
           unauthorized();
         }
-        assertGrant();
+        assert();
       };
       const revalidate = async () => {
         assertCurrent();
@@ -571,6 +575,8 @@ export function createProtectedHttp(options: {
           steering: new Map(),
         };
         runs.set(id, run);
+        const timing = createProtectedTurnTiming(startedAt);
+        timing.mark("admissionMs");
         // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
         // detaches from the stream, and the reply still finishes and saves.
         const signal = AbortSignal.any([
@@ -581,23 +587,31 @@ export function createProtectedHttp(options: {
         const assertRun = () => {
           assertGrant();
           signal.throwIfAborted();
+          if (runs.get(id) !== run) {
+            unauthorized();
+          }
         };
+        let validation: Promise<void> | undefined;
         const checkRun = async () => {
           assertRun();
-          await checkGrant();
+          if (!validation) {
+            const finishTiming = timing.accessValidation();
+            validation = track(checkGrant(assertRun))
+              .catch((error: unknown) => {
+                run.controller.abort();
+                throw error;
+              })
+              .finally(() => {
+                finishTiming();
+                validation = undefined;
+              });
+          }
+          await validation;
           assertRun();
         };
         const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
-        let checking = false;
         const liveCheck = setInterval(() => {
-          if (!checking) {
-            checking = true;
-            void checkRun()
-              .catch(() => run.controller.abort())
-              .finally(() => {
-                checking = false;
-              });
-          }
+          void checkRun().catch(() => run.controller.abort());
         }, 5000);
         liveCheck.unref();
         let attached = true;
@@ -608,17 +622,34 @@ export function createProtectedHttp(options: {
               if (attached) {
                 try {
                   controller.enqueue(encoder.encode(line));
+                  return true;
                 } catch {
                   attached = false;
                 }
               }
+              return false;
             };
-            const send = (event: ProtectedTurnEvent) => write(`${JSON.stringify(event)}\n`);
+            const send = (event: ProtectedTurnEvent) => {
+              // Only a fixed terminal error may cross the boundary after authority is lost.
+              if (event.type !== "error") {
+                assertRun();
+              }
+              const published = write(`${JSON.stringify(event)}\n`);
+              if (
+                published &&
+                event.type !== "start" &&
+                event.type !== "done" &&
+                event.type !== "error"
+              ) {
+                timing.mark("firstClientVisibleOutputMs");
+              }
+            };
             // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
             // from closing an idle response; clients skip blank lines.
             const keepalive = setInterval(() => write("\n"), 15_000);
             keepalive.unref();
             const complete = async () => {
+              let outcome: "complete" | "failed" | "interrupted" = "failed";
               try {
                 assertRun();
                 send({ type: "start", runId: run.id });
@@ -636,23 +667,20 @@ export function createProtectedHttp(options: {
                         signal,
                         assertCurrent: assertRun,
                         revalidate: checkRun,
+                        markTiming: timing.mark,
                         delta: async (value) => {
-                          await checkRun();
                           send({ type: "delta", text: value });
                         },
                         sources: async (sources) => {
-                          await checkRun();
                           send({ type: "sources", sources });
                         },
                         widget: async (widget) => {
                           await owned.stat(
                             `${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`,
                           );
-                          await checkRun();
                           send({ type: "widget", ...widget });
                         },
                         widgetDraft: async (draft) => {
-                          await checkRun();
                           send(draft);
                         },
                       });
@@ -679,7 +707,9 @@ export function createProtectedHttp(options: {
                   );
                 }
                 send({ type: "done", chatVersion: chat.version });
+                outcome = "complete";
               } catch (error) {
+                outcome = signal.aborted ? "interrupted" : "failed";
                 let failure = error;
                 try {
                   storage?.assertResult();
@@ -698,6 +728,7 @@ export function createProtectedHttp(options: {
                 for (const queued of run.steering.values()) {
                   queued.abort();
                 }
+                timing.finish(outcome);
                 if (attached) {
                   attached = false;
                   controller.close();

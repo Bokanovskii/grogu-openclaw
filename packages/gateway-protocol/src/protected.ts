@@ -10,6 +10,17 @@ export const ProtectedProviderSchema = Type.Union([
   Type.Literal("anthropic"),
   Type.Literal("openai"),
 ]);
+export const ProtectedThinkLevelSchema = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("minimal"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("xhigh"),
+  Type.Literal("adaptive"),
+  Type.Literal("max"),
+  Type.Literal("ultra"),
+]);
 export const ProtectedCredentialSchema = node({
   accessToken: Type.String({ minLength: 1, maxLength: 16000 }),
   refreshToken: Type.Optional(Type.String({ minLength: 1, maxLength: 16000 })),
@@ -22,14 +33,29 @@ export const ProtectedTurnRequestSchema = node({
   model: Type.Optional(id),
   provider: ProtectedProviderSchema,
   credential: Type.Optional(ProtectedCredentialSchema),
+  thinking: Type.Optional(ProtectedThinkLevelSchema),
 });
 export const ProtectedSourceSchema = node({ title: Type.String(), url: Type.String() });
 export const ProtectedWidgetSchema = node({ id, title: Type.String() });
+export const ProtectedActivitySchema = node({
+  id,
+  kind: Type.Union([
+    Type.Literal("search"),
+    Type.Literal("fetch"),
+    Type.Literal("widget"),
+    Type.Literal("tool"),
+  ]),
+  label: Type.String({ maxLength: 200 }),
+  status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed")]),
+});
 export const ProtectedTurnEventSchema = Type.Union([
   node({ type: Type.Literal("start"), runId: id }),
   node({ type: Type.Literal("delta"), text: Type.String() }),
+  node({ type: Type.Literal("reasoning"), text: Type.String() }),
+  node({ type: Type.Literal("activity"), ...ProtectedActivitySchema.properties }),
   node({ type: Type.Literal("sources"), sources: Type.Array(ProtectedSourceSchema) }),
   node({ type: Type.Literal("widget"), ...ProtectedWidgetSchema.properties }),
+  node({ type: Type.Literal("usage"), contextTokens: Type.Integer({ minimum: 0 }) }),
   node({
     type: Type.Literal("widget-draft"),
     id,
@@ -53,6 +79,9 @@ export const ProtectedMessageSchema = node({
   id,
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
+  reasoning: Type.Optional(Type.String()),
+  activity: Type.Optional(Type.Array(ProtectedActivitySchema)),
+  durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
   sources: Type.Optional(Type.Array(ProtectedSourceSchema)),
   widgets: Type.Optional(Type.Array(ProtectedWidgetSchema)),
   status: Type.Optional(
@@ -64,6 +93,7 @@ export const ProtectedChatSummarySchema = node({
   title: Type.String(),
   version: Type.String(),
   updatedAt: Type.Number(),
+  activeRun: Type.Optional(node({ id })),
 });
 export const ProtectedChatSchema = node({
   ...ProtectedChatSummarySchema.properties,
@@ -73,7 +103,15 @@ export const ProtectedModelSchema = node({
   provider: ProtectedProviderSchema,
   id,
   label: Type.String(),
+  contextWindow: Type.Optional(Type.Integer({ minimum: 1 })),
+  thinking: Type.Optional(
+    node({
+      levels: Type.Array(ProtectedThinkLevelSchema),
+      default: ProtectedThinkLevelSchema,
+    }),
+  ),
 });
+export const ProtectedModelsSchema = node({ models: Type.Array(ProtectedModelSchema) });
 export const ProtectedMeSchema = node({
   user: node({ id, displayName: Type.String() }),
   disclosure: Type.String(),
@@ -126,6 +164,13 @@ export const ProtectedChatsSchema = node({ chats: Type.Array(ProtectedChatSummar
 export const ProtectedExportSchema = node({ chats: Type.Array(ProtectedChatSchema) });
 export const ProtectedChatResponseSchema = node({
   chat: ProtectedChatSchema,
+  usage: Type.Optional(
+    node({
+      contextTokens: Type.Integer({ minimum: 0 }),
+      provider: ProtectedProviderSchema,
+      model: id,
+    }),
+  ),
   // A reply that this signed-in session started and that is still running on the server.
   activeRun: Type.Optional(node({ id })),
 });
@@ -152,6 +197,7 @@ export type ProtectedTurnRequest = Static<typeof ProtectedTurnRequestSchema>;
 export type ProtectedChat = Static<typeof ProtectedChatSchema>;
 export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
+export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedAccount = Static<typeof ProtectedAccountSchema>;

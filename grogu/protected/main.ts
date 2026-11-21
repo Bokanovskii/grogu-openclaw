@@ -52,6 +52,9 @@ async function main() {
   const { createProviderRelay } = await import("./provider-relay.js");
   const { resolveSecretRefString } = await import("../../src/secrets/resolve.js");
   const { createCanonicalProtectedTurns } = await import("./turns.js");
+  const { withThinking } = await import("./models.js");
+  const { resolveBundledProviderStaticCatalogModel } =
+    await import("../../src/agents/embedded-agent-runner/model.static-catalog.js");
   const { createCloudflareAccessVerifier } = await import("./identity.js");
   const { createProtectedHttp } = await import("./http.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
@@ -63,6 +66,26 @@ async function main() {
     testClientId: settings.testClientId,
     origin,
   });
+  const models = await Promise.all(
+    [sparky, anthropic, copilot, openai].map(async (model) => {
+      if (model.provider === "sparky") {
+        return withThinking(model, { ...model, reasoning: true });
+      }
+      const catalog = await resolveBundledProviderStaticCatalogModel({
+        provider: model.provider,
+        modelId: model.id,
+        cfg: config,
+        workspaceDir,
+      });
+      return withThinking(
+        {
+          ...model,
+          ...(catalog?.contextWindow ? { contextWindow: catalog.contextWindow } : {}),
+        },
+        catalog,
+      );
+    }),
+  );
   const app = createProtectedHttp({
     origin,
     stateDir,
@@ -78,7 +101,7 @@ async function main() {
       config,
       workspaceDir,
       agentDir,
-      models: [sparky, anthropic, copilot, openai],
+      models,
       resolveSparkyKey: () => resolveSecretRefString(sparkySecret, { config }),
     }),
   });

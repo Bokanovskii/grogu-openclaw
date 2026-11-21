@@ -1,8 +1,28 @@
+import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 
 export type Source = { url: string; title: string };
 export type Widget = { id: string; title: string };
 export const widgetIdPattern = /^cv_[a-f0-9]{32}$/u;
+
+export function projectActivity(
+  name: unknown,
+  id: unknown,
+  status: ProtectedActivity["status"],
+): ProtectedActivity | undefined {
+  if (typeof id !== "string" || !id || id.length > 256 || typeof name !== "string") {
+    return undefined;
+  }
+  const [kind, label] =
+    name === "web_search"
+      ? (["search", "Searching the web"] as const)
+      : name === "web_fetch"
+        ? (["fetch", "Fetching a source"] as const)
+        : name === "show_widget"
+          ? (["widget", "Creating a widget"] as const)
+          : (["tool", "Using a tool"] as const);
+  return { id, kind, label, status };
+}
 
 function source(value: unknown): Source[] {
   if (!isRecord(value) || typeof value.url !== "string" || value.url.length > 2048) {

@@ -67,7 +67,7 @@ void test("protected chunks publish without remote access work and stop at local
       };
     },
     turns: {
-      models: [{ provider: "github-copilot", id: "synthetic", label: "Synthetic" }],
+      models: [{ provider: "sparky", id: "synthetic", label: "Synthetic" }],
       run: (turn) => run(turn),
       async steer() {
         assert.fail("No steering is needed.");
@@ -102,7 +102,7 @@ void test("protected chunks publish without remote access work and stop at local
     call(subject, `${route}/turns`, {
       method: "POST",
       headers: { "x-grogu-profile": profileId },
-      body: '{"provider":"github-copilot","model":"synthetic","text":"synthetic prompt"}',
+      body: '{"provider":"sparky","model":"synthetic","text":"synthetic prompt"}',
     });
 
   const smooth = await setup("smooth");
@@ -118,6 +118,13 @@ void test("protected chunks publish without remote access work and stop at local
     const beforeTime = performance.now();
     for (let i = 0; i < 12; i++) {
       await turn.delta(`chunk-${i}`);
+      await turn.reasoning(`reason-${i}`);
+      await turn.activity({
+        id: `activity-${i}`,
+        kind: "fetch",
+        label: `Synthetic source ${i}`,
+        status: "done",
+      });
       await turn.widgetDraft({
         type: "widget-draft",
         id: "draft",
@@ -147,6 +154,8 @@ void test("protected chunks publish without remote access work and stop at local
   assert.equal(response.status, 200);
   const stream = await response.text();
   assert.equal(stream.match(/"type":"delta"/gu)?.length, 12);
+  assert.equal(stream.match(/"type":"reasoning"/gu)?.length, 12);
+  assert.equal(stream.match(/"type":"activity"/gu)?.length, 12);
   assert.equal(stream.match(/"type":"widget-draft"/gu)?.length, 12);
   assert.match(stream, /"type":"done"/u);
   assert.doesNotMatch(stream, /"type":"error"/u);
@@ -187,7 +196,7 @@ void test("protected chunks publish without remote access work and stop at local
       streamingChecks,
       streamingAccessMs,
       streamingWallMs: Math.round(streamingWallMs * 100) / 100,
-      chunks: 24,
+      chunks: 48,
       remoteFixtureMs: 100,
     }),
   );
@@ -201,6 +210,16 @@ void test("protected chunks publish without remote access work and stop at local
       await turn.delta("before-invalidation");
       started.resolve(turn);
       await release.promise;
+      if (kind === "expiry") {
+        await turn.reasoning("forbidden-after-invalidation");
+      } else if (kind === "logout") {
+        await turn.activity({
+          id: "forbidden",
+          kind: "fetch",
+          label: "forbidden-after-invalidation",
+          status: "done",
+        });
+      }
       await turn.delta("forbidden-after-invalidation");
       await turn.widgetDraft({
         type: "widget-draft",

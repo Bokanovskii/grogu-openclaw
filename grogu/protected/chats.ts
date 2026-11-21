@@ -3,7 +3,9 @@ import path from "node:path";
 import type {
   ProtectedChat,
   ProtectedChatSummary,
+  ProtectedActivity,
   ProtectedMessage,
+  ProtectedModel,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
@@ -19,10 +21,12 @@ import {
 } from "../../src/config/sessions/session-entry-read-runtime.js";
 import { readTranscriptStatsAsync } from "../../src/config/sessions/session-transcript-stats.js";
 import type { SessionEntry } from "../../src/config/sessions/types.js";
+import { aggregateSessionTranscriptUsage } from "../../src/gateway/session-transcript-derived-readers.js";
 import { ProtectedError, publicError } from "./errors.js";
-import { projectToolResult } from "./tool-events.js";
+import { projectActivity, projectToolResult } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
+type ProtectedMessageProvider = ProtectedModel["provider"];
 
 function missing(): never {
   throw new ProtectedError(404, "not_found", "Chat not found.");
@@ -128,7 +132,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
       return [{ profileId: actor.id, id: entry.sessionId, sessionKey }];
     });
   };
-  const read = async (authority: ProtectedChatAuthority, id: string): Promise<ProtectedChat> => {
+  const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {
     const entry = await readEntry(authority, id);
     const events = await loadTranscriptEvents({
       ...scope(authority, id),
@@ -139,18 +143,30 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     const messages: ProtectedMessage[] = [];
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
+    let reasoning: string[] = [];
+    let activity = new Map<string, ProtectedActivity>();
+    let turnStartedAt: number | undefined;
+    let usage:
+      | { contextTokens: number; provider: ProtectedMessageProvider; model: string }
+      | undefined;
     for (const event of events) {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
       }
       const message = event.message;
-      if (message.role === "toolResult" && !message.isError) {
-        const projected = projectToolResult(message.toolName, message.details);
-        projections.sources = [...projections.sources, ...projected.sources].slice(0, 20);
-        projections.widgets = [...projections.widgets, ...projected.widgets].slice(0, 20);
-        if (reply) {
-          reply.sources = projections.sources;
-          reply.widgets = projections.widgets;
+      if (message.role === "toolResult") {
+        const prior = typeof message.toolCallId === "string" && activity.get(message.toolCallId);
+        if (prior) {
+          activity.set(prior.id, { ...prior, status: message.isError ? "failed" : "done" });
+        }
+        if (!message.isError) {
+          const projected = projectToolResult(message.toolName, message.details);
+          projections.sources = [...projections.sources, ...projected.sources].slice(0, 20);
+          projections.widgets = [...projections.widgets, ...projected.widgets].slice(0, 20);
+          if (reply) {
+            reply.sources = projections.sources;
+            reply.widgets = projections.widgets;
+          }
         }
         continue;
       }
@@ -185,16 +201,68 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
               ? "failed"
               : "complete"
           : undefined;
+      if (message.role === "assistant" && status === "complete") {
+        const snapshot = aggregateSessionTranscriptUsage([message]);
+        const usageProvider = snapshot?.modelProvider;
+        usage =
+          typeof snapshot?.totalTokens === "number" &&
+          typeof snapshot.model === "string" &&
+          (usageProvider === "sparky" ||
+            usageProvider === "github-copilot" ||
+            usageProvider === "anthropic" ||
+            usageProvider === "openai")
+            ? {
+                contextTokens: snapshot.totalTokens,
+                provider: usageProvider,
+                model: snapshot.model,
+              }
+            : undefined;
+      }
       if (message.role === "user") {
         projections = projectToolResult(undefined, undefined);
         reply = undefined;
+        reasoning = [];
+        activity = new Map();
+        const timestamp =
+          typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
+        turnStartedAt = Number.isFinite(timestamp) ? timestamp : undefined;
+      } else if (Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (!isRecord(block)) {
+            continue;
+          }
+          if (block.type === "thinking" && typeof block.thinking === "string") {
+            reasoning.push(block.thinking.trim());
+          }
+          if (block.type === "toolCall") {
+            const item = projectActivity(block.name, block.id, "running");
+            if (item) {
+              activity.set(item.id, item);
+            }
+          }
+        }
       }
+      const completedAt =
+        typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
       const projected: ProtectedMessage = {
         id: typeof event.id === "string" ? event.id : `${id}:${messages.length}`,
         role: message.role,
         text,
         ...(status ? { status } : {}),
         ...(message.role === "assistant" ? projections : {}),
+        ...(message.role === "assistant" && status !== "failed" && reasoning.length
+          ? { reasoning: reasoning.join("\n") }
+          : {}),
+        ...(message.role === "assistant" && status !== "failed" && activity.size
+          ? { activity: [...activity.values()] }
+          : {}),
+        ...(message.role === "assistant" &&
+        status === "complete" &&
+        turnStartedAt !== undefined &&
+        Number.isFinite(completedAt) &&
+        completedAt >= turnStartedAt
+          ? { durationMs: completedAt - turnStartedAt }
+          : {}),
       };
       messages.push(projected);
       if (message.role === "assistant") {
@@ -205,7 +273,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
         reply = projected;
       }
     }
-    return {
+    const chat: ProtectedChat = {
       ...summary(entry),
       messages: messages.filter(
         (message) =>
@@ -215,6 +283,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
           message.status !== "failed",
       ),
     };
+    return { chat, usage };
   };
   return {
     env,
@@ -223,7 +292,9 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     scope,
     readEntry,
     list,
-    read,
+    read: async (authority: ProtectedChatAuthority, id: string) =>
+      (await readWithUsage(authority, id)).chat,
+    readWithUsage,
     capacityEntries,
     async transcriptBytes(sessionId: string, sessionKey: string) {
       const stats = await readTranscriptStatsAsync({

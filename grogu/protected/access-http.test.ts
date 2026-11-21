@@ -6,14 +6,19 @@ import { test } from "node:test";
 import { root } from "../../src/infra/fs-safe.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
+import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
+import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
 import {
   addProtectedSubject,
   bindProtectedAdmission,
+  editProtectedAccessRequest,
   listProtectedAccessRequests,
   listProtectedAdmissions,
   migrateProtectedSubjects,
+  readProtectedAccessRequest,
   submitProtectedAccessRequest,
   setProtectedRequestStatus,
+  withdrawProtectedAccessRequest,
 } from "./admission-store.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
@@ -366,5 +371,59 @@ void test("the open-request bound rejects new and duplicate submissions alike", 
   );
   assert.ok(
     (await listProtectedAccessRequests(stateDir)).some((request) => request.id === firstId),
+  );
+});
+
+void test("expired receipts cannot change access or hide an approval from the owner", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-access-test-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(async () => {
+    await closeOpenClawStateDatabaseByPathAsync(
+      resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
+    );
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  const issuer = "https://access.example";
+  const email = "expired@example.invalid";
+  const submitted = await executeOpenClawStateWorker(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    {
+      type: "protectedAccess.submit",
+      input: {
+        email,
+        name: "Synthetic",
+        note: "",
+        now: Date.now() - 365 * 24 * 60 * 60_000 - 1000,
+      },
+    },
+  );
+  assert.ok(submitted);
+  assert.equal(await readProtectedAccessRequest(stateDir, submitted.receipt), undefined);
+  assert.equal(
+    await editProtectedAccessRequest(stateDir, {
+      receipt: submitted.receipt,
+      name: "Changed",
+      note: "",
+    }),
+    undefined,
+  );
+  assert.equal(await withdrawProtectedAccessRequest(stateDir, submitted.receipt), false);
+  assert.ok(
+    await setProtectedRequestStatus(
+      stateDir,
+      { id: submitted.request.id, status: "approved", issuer },
+      () => {},
+      () => {},
+    ),
+  );
+  assert.equal((await listProtectedAccessRequests(stateDir))[0]?.status, "approved");
+  assert.equal(
+    await bindProtectedAdmission(
+      stateDir,
+      { issuer, email, subject: "synthetic-approved-subject" },
+      () => {},
+      () => {},
+    ),
+    true,
   );
 });

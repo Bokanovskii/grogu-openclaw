@@ -41,16 +41,11 @@ export function createSparkyAdmission(
     agingMs?: number;
   } = {},
 ) {
-  const {
-    maxWaiting = 32,
-    // Sparky's lowest announced account limit; the private profile can raise it to four.
-    maxActive = 2,
-    now = Date.now,
-    agingMs = 120_000,
-  } = options;
-  if (!Number.isSafeInteger(maxActive) || maxActive < 1) {
+  const { maxWaiting = 32, maxActive, now = Date.now, agingMs = 120_000 } = options;
+  if (maxActive !== undefined && (!Number.isSafeInteger(maxActive) || maxActive < 1)) {
     throw new RangeError("Invalid Sparky admission capacity");
   }
+  const capacity = maxActive ?? Number.POSITIVE_INFINITY;
   let active = 0;
   const activeByWorkClass: Record<SparkyWorkClass, number> = {
     interactive: 0,
@@ -65,10 +60,10 @@ export function createSparkyAdmission(
   // pump() serves them before queued automation, which yields at its next request boundary.
   const canAdmit = (workClass: SparkyWorkClass) =>
     allPauses === 0 &&
-    active < maxActive &&
+    active < capacity &&
     (workClass === "interactive" || nonInteractivePauses === 0);
   function pump() {
-    while (active < maxActive && waiting.length) {
+    while (active < capacity && waiting.length) {
       const eligible = waiting
         .map((entry, index) => ({ entry, index }))
         .filter(({ entry }) => canAdmit(entry.workClass));
@@ -107,7 +102,7 @@ export function createSparkyAdmission(
     }
   }
   const telemetrySnapshot = () => ({
-    queuedAhead: waiting.length + (active >= maxActive ? active : 0),
+    queuedAhead: waiting.length + (active >= capacity ? active : 0),
     queueActiveInteractive: activeByWorkClass.interactive,
     queueActiveUtility: activeByWorkClass.utility,
     queueActiveScheduled: activeByWorkClass.scheduled,

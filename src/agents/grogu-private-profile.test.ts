@@ -83,12 +83,20 @@ describe("private runtime profile admission", () => {
     ).toThrow(/Invalid Grogu/);
   });
 
-  it("admits a Sparky queue limit from two to four and rejects other values", () => {
-    expect(
-      parseGroguPrivateProfile({ schemaVersion: 1, bindings: { sparkyQueue: { maxActive: 4 } } })
-        .bindings.sparkyQueue,
-    ).toEqual({ maxActive: 4 });
-    for (const sparkyQueue of [{ maxActive: 1 }, { maxActive: 5 }, { maxActive: 2.5 }, 3]) {
+  it("admits positive safe integer Sparky limits without a provider-specific ceiling", () => {
+    for (const maxActive of [1, 2, 4, 8]) {
+      expect(
+        parseGroguPrivateProfile({ schemaVersion: 1, bindings: { sparkyQueue: { maxActive } } })
+          .bindings.sparkyQueue,
+      ).toEqual({ maxActive });
+    }
+    for (const sparkyQueue of [
+      { maxActive: 0 },
+      { maxActive: -1 },
+      { maxActive: 2.5 },
+      { maxActive: Number.MAX_SAFE_INTEGER + 1 },
+      3,
+    ]) {
       expect(() =>
         parseGroguPrivateProfile({ schemaVersion: 1, bindings: { sparkyQueue } }),
       ).toThrow(/Invalid Grogu/);

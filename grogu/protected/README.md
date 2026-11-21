@@ -140,10 +140,11 @@ a blank line every 15 seconds. The blank line keeps the Cloudflare tunnel from
 closing a quiet response, and clients skip it. A provider failure reaches the
 client as a code and a fixed message, without provider text: `provider_busy`,
 `rate_limit`, `provider_timeout`, `provider_rejected`, `plan_limit`,
-`chat_too_long`, `model_unavailable`, `thinking_unavailable`, or `provider_failed`. Sparky limits
-concurrent requests for each key. If Alcove uses the same Sparky key as personal
-Grogu, the two services share that limit, and Alcove reports `provider_busy`
-while personal Grogu is busy. Give Alcove its own Sparky key.
+`chat_too_long`, `model_unavailable`, `thinking_unavailable`, or `provider_failed`.
+Sparky schedules concurrent requests and can queue them or reject them when busy.
+If Alcove and personal Grogu share a Sparky key, they also share its provider-side
+scheduling and quotas. A busy Grogu does not by itself mean that Alcove requests
+will fail. Alcove reports `provider_busy` when the provider rejects admission.
 
 After admission, a turn continues if the browser disconnects or the phone sleeps.
 The runtime saves the reply without an attached reader. Request credentials stay

@@ -51,14 +51,8 @@ export function parseGroguPrivateProfile(value: unknown): GroguPrivateProfile {
   const queue = value.bindings.sparkyQueue;
   let sparkyQueue: SparkyQueueBinding | undefined;
   if (queue !== undefined) {
-    // The operator mirrors the provider's announced account limit; Grogu does not probe it.
     const maxActive = isRecord(queue) ? queue.maxActive : undefined;
-    if (
-      typeof maxActive !== "number" ||
-      !Number.isInteger(maxActive) ||
-      maxActive < 2 ||
-      maxActive > 4
-    ) {
+    if (typeof maxActive !== "number" || !Number.isSafeInteger(maxActive) || maxActive < 1) {
       invalid();
     }
     sparkyQueue = Object.freeze({ maxActive });

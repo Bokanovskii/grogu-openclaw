@@ -1,6 +1,12 @@
 import type { SessionSourceAssertion } from "../../../config/sessions/session-source-authority.js";
+import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import type { GatewayContextResolver } from "../../../gateway/server-methods/types.js";
 import type { FastMode } from "../../../shared/fast-mode.js";
 import type { SpawnedToolContext } from "../../spawned-context.js";
+import type {
+  SubagentBeforeDeleteCleanupHook,
+  SubagentDeleteCleanupSettledHook,
+} from "../registry/subagent-registry-child-result-hook.js";
 import type {
   SpawnSubagentContextMode,
   SpawnSubagentMode,
@@ -51,6 +57,28 @@ export type SpawnSubagentContext = SpawnedToolContext & {
   /** Trusted parent tool construction facts; never read from model arguments. */
   senderIsOwner?: boolean;
   expectedParentSessionId?: string;
+  /** Trusted host-owned config for this spawn; never a model-facing parameter. */
+  config?: OpenClawConfig;
+  /** Explicit request owner for in-process dispatch, when a host establishes one. */
+  gatewayContextResolver?: GatewayContextResolver;
+  /**
+   * Trusted request-scoped opt-in; never read from model arguments. The child commits with a
+   * cleanup-only transient classification bound to this parent generation and profile.
+   */
+  transientLifetime?: { parentSessionKey: string; parentSessionId: string; profileId: string };
+  /** Trusted host hook: persist the child result before delete cleanup removes the transcript. */
+  beforeChildDeleteCleanup?: SubagentBeforeDeleteCleanupHook;
+  childDeleteCleanupSettled?: SubagentDeleteCleanupSettledHook;
+  /**
+   * Trusted host fence run after child creation and immediately before each native launch dispatch.
+   * Throwing prevents dispatch; the spawn pipeline then cleans up the provisional child.
+   */
+  beforeChildDispatch?: (child: {
+    sessionKey: string;
+    sessionId: string;
+    lifecycleRevision: string;
+    runId: string;
+  }) => void | Promise<void>;
   requesterTurnRunId?: string;
   /** Separate key used only for completion routing, not sandbox policy. */
   completionOwnerKey?: string;

@@ -152,7 +152,13 @@ const LockPayloadSchema = z.object({
   configPath: z.string(),
   port: z.number().int().min(1).max(65_535).optional(),
   role: z
-    .enum(["gateway", "agent-embedded", "skill-workshop-apply", "sqlite-maintenance"])
+    .enum([
+      "gateway",
+      "agent-embedded",
+      "skill-workshop-apply",
+      "sqlite-maintenance",
+      "exclusive-service",
+    ])
     .optional(),
   stateDir: z.string().optional(),
   startTime: z.number().optional(),

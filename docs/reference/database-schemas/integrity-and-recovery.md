@@ -1005,3 +1005,20 @@ Follow [Downgrade](/install/updating#downgrade) for the managed rollback path,
 retained-originals limits, and restoring a verified pre-update backup. A complete
 recovery point includes the matching package, config, shared state, and every
 agent database. Keep writers stopped while activating restored state.
+
+### Request-scoped transient children
+
+A request-scoped caller may create a child session whose entry carries the internal
+`transientLifetime` field. It records the parent session key, parent session id, and
+profile id as a cleanup fact only. It grants no execution authority and is never
+exposed to clients, models, or plugin slots. Schema versions do not change.
+
+Its owner deletes these children without archiving, rereading the exact session id,
+lifecycle revision, parent, and profile under the lifecycle fence. It first retires a
+matching native run; an unreadable or mismatched run leaves the child untouched. If a
+crash occurs before run registration or after retirement, the remaining child can be
+recovered on the next start. Older versions do not
+recognize the field, so they would treat leftover children as ordinary sessions and
+keep their transcripts. Before rolling back, run the owner's startup recovery (for the
+protected service, start the new version and let it finish before admitting turns) so no
+classified children remain.

@@ -9,6 +9,7 @@ import { isGatewayClientRequestError } from "../../gateway/call.js";
 import {
   createSessionVisibilityDecisionChecker,
   logSessionOwnershipLookupFailure,
+  resolveIncognitoSessionAccessDecision,
   renderSessionVisibilityDenial,
   sessionOwnershipLookupDenied,
   type SessionVisibilityDecision,
@@ -35,6 +36,7 @@ import {
   callAgentToolGatewayRequest,
   type AgentToolGatewayRequestCaller,
 } from "./in-process-gateway.js";
+import { getHostSessionAccess, resolveHostSessionAccess } from "./scoped-session-access.js";
 import {
   lookupRequesterSessionOwnership,
   resolveInternalSessionKey,
@@ -242,6 +244,37 @@ export async function resolveSessionToolAccess(params: {
     if (!capped.allowed) {
       return deny(capped);
     }
+  }
+  const hostScope = getHostSessionAccess();
+  if (hostScope) {
+    const incognito = resolveIncognitoSessionAccessDecision(authorizationTargetSessionKey);
+    if (incognito && !incognito.allowed) {
+      return deny(incognito);
+    }
+    const grant = await resolveHostSessionAccess(hostScope, {
+      action: params.action,
+      requesterSessionKey: params.requesterSessionKey,
+      reference: authorizationTargetSessionKey,
+    });
+    if (
+      !grant ||
+      grant.sessionKey !== authorizationTargetSessionKey ||
+      grant.agentId !== params.targetAgentId
+    ) {
+      return deny({
+        allowed: false,
+        status: "forbidden",
+        reasonCode: "self_visibility_restricted",
+        policyRefs: ["session.host-scope"],
+        contextFieldsUsed: ["requesterSessionKey", "targetSessionKey"],
+        missingEvidence: [],
+      });
+    }
+    return {
+      allowed: true,
+      expectedSessionId: grant.sessionId,
+      assertCurrent: hostScope.assertCurrent,
+    };
   }
   const scoped = await createSessionVisibilityChecker.resolveScopedAccessAsync({
     action: params.action,

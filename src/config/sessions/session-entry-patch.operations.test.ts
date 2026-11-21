@@ -63,6 +63,64 @@ it("reduces a fixed patch against the current row in one worker request without 
   });
 });
 
+it("rejects fixed selection patches when their version or profile owner changed before commit", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async () => {
+    const f = fixture();
+    const initial = f.read()!;
+    const owned = {
+      ...initial,
+      createdVia: "plugin" as const,
+      createdActor: { type: "human" as const, source: "profile" as const, id: "profile-a" },
+    };
+    replaceSessionEntrySync(f.scope, owned);
+    const published: SessionEntry[] = [];
+    delivery.beforeCommit = () => {
+      delivery.beforeCommit = undefined;
+      replaceSessionEntrySync(f.scope, {
+        ...owned,
+        updatedAt: owned.updatedAt + 1,
+        label: "concurrent edit",
+      });
+    };
+    const stale = await applySessionEntryOperation(
+      f.scope,
+      {
+        kind: "fields",
+        expected: {
+          sessionId: owned.sessionId,
+          createdVia: "plugin",
+          createdActorProfileId: "profile-a",
+          updatedAt: owned.updatedAt,
+        },
+        patch: { protectedAgentId: "research", updatedAt: owned.updatedAt + 2 },
+      },
+      { skipMaintenance: true, onCommitted: (entry) => published.push(entry) },
+    );
+    expect(stale).toEqual(f.read());
+    expect(stale).toMatchObject({ updatedAt: owned.updatedAt + 1, label: "concurrent edit" });
+    expect(stale?.protectedAgentId).not.toBe("research");
+    expect(published).toEqual([]);
+
+    const foreignOwner = await applySessionEntryOperation(
+      f.scope,
+      {
+        kind: "fields",
+        expected: {
+          sessionId: owned.sessionId,
+          createdVia: "plugin",
+          createdActorProfileId: "profile-b",
+          updatedAt: owned.updatedAt + 1,
+        },
+        patch: { protectedAgentId: "research", updatedAt: owned.updatedAt + 2 },
+      },
+      { skipMaintenance: true, onCommitted: (entry) => published.push(entry) },
+    );
+    expect(foreignOwner).toEqual(f.read());
+    expect(foreignOwner?.protectedAgentId).not.toBe("research");
+    expect(published).toEqual([]);
+  });
+});
+
 it("rechecks conversation authority before a fixed patch commits", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const f = fixture();

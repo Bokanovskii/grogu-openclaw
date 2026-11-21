@@ -53,6 +53,8 @@ export async function deleteSubagentSessionForCleanup(params: {
   expectedSessionId?: string;
   expectedLifecycleRevision?: string;
   timeoutMs?: number;
+  /** Host-owned step that must succeed before any deletion is dispatched. */
+  beforeDelete?: () => Promise<void>;
   onError?: (error: unknown) => void;
 }): Promise<SubagentSessionCleanupOutcome> {
   if (!params.expectedSessionId || !params.expectedLifecycleRevision) {
@@ -82,6 +84,13 @@ export async function deleteSubagentSessionForCleanup(params: {
       }
     : undefined;
   try {
+    if (params.beforeDelete) {
+      assertCurrent();
+      await prepareDispatchCurrent?.();
+      assertCurrent();
+      await params.beforeDelete();
+      assertCurrent();
+    }
     const run = async () => {
       const resolver = params.gatewayBinding?.resolveGatewayContext;
       if (resolver && isCurrent) {
@@ -90,32 +99,30 @@ export async function deleteSubagentSessionForCleanup(params: {
         if (!owner || !context) {
           throw new Error("subagent cleanup Gateway owner is no longer current");
         }
-        if (!context.localEmbedded) {
-          const lifetime = getGatewayContextLifetime(owner).signal;
-          const assertOwner = () => {
-            lifetime.throwIfAborted();
-            if (owner() !== context) {
-              throw new Error("subagent cleanup Gateway owner is no longer current");
-            }
-            assertCurrent();
-          };
-          // Join the captured Gateway before yielding; its closed ingress is not this cleanup's owner.
-          return context.trackExecution(async () => {
-            assertOwner();
-            await prepareDispatchCurrent?.();
-            const { deleteGatewaySession } = await loadSubagentSessionCleanupRuntime();
-            assertOwner();
-            const result = await deleteGatewaySession({
-              params: cleanupParams,
-              client: null,
-              context,
-              assertCurrent: assertOwner,
-            });
-            if (!result.ok) {
-              throw new GatewayClientRequestError(result.error);
-            }
+        const lifetime = getGatewayContextLifetime(owner).signal;
+        const assertOwner = () => {
+          lifetime.throwIfAborted();
+          if (owner() !== context) {
+            throw new Error("subagent cleanup Gateway owner is no longer current");
+          }
+          assertCurrent();
+        };
+        // Join the captured Gateway before yielding; its closed ingress is not this cleanup's owner.
+        return context.trackExecution(async () => {
+          assertOwner();
+          await prepareDispatchCurrent?.();
+          const { deleteGatewaySession } = await loadSubagentSessionCleanupRuntime();
+          assertOwner();
+          const result = await deleteGatewaySession({
+            params: cleanupParams,
+            client: null,
+            context,
+            assertCurrent: assertOwner,
           });
-        }
+          if (!result.ok) {
+            throw new GatewayClientRequestError(result.error);
+          }
+        });
       }
       return params.callGateway({
         method: "sessions.delete",

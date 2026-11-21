@@ -11,7 +11,11 @@ import {
   composeSessionSourceAssertion,
   type SessionSourceAssertion,
 } from "../../../config/sessions/session-source-authority.js";
-import type { InternalSessionEntry, SessionEntry } from "../../../config/sessions/types.js";
+import type {
+  InternalSessionEntry,
+  SessionEntry,
+  TransientSessionLifetime,
+} from "../../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { buildDashboardSessionTitleSource } from "../../../gateway/dashboard-session-title.js";
 import type { PreparedGatewaySessionLifecycle } from "../../../gateway/session-create-service.types.js";
@@ -47,6 +51,8 @@ export async function createInitialSubagentSession(params: {
   requesterInternalKey: string;
   senderIsOwner?: boolean;
   expectedParentSessionId?: string;
+  /** Trusted request-scoped caller opt-in; committed with the child and checked against the parent. */
+  transientLifetime?: Omit<TransientSessionLifetime, "kind">;
   assertActive?: SessionSourceAssertion;
   creationPolicy: Pick<Parameters<typeof buildSessionCreationStamp>[0], "actor" | "sandbox">;
   completionOwnerSessionKey: string;
@@ -115,6 +121,16 @@ export async function createInitialSubagentSession(params: {
       storePath: parentStorePath,
     });
     params.assertActive?.();
+    const transient = params.transientLifetime;
+    if (
+      transient &&
+      (transient.parentSessionKey !== parentTarget.canonicalKey ||
+        !transient.profileId.trim() ||
+        !transient.parentSessionId.trim() ||
+        params.incognito)
+    ) {
+      throw new Error("Transient child lifetime does not match its parent session.");
+    }
     // Parent rows are read on the session read worker, never on the Gateway thread.
     const readParentEntry = () =>
       readSessionEntryReadOnlyInWorker(
@@ -127,6 +143,16 @@ export async function createInitialSubagentSession(params: {
       );
     const parentEntry = await readParentEntry();
     params.assertActive?.();
+    if (
+      transient &&
+      (parentEntry?.sessionId !== transient.parentSessionId ||
+        parentEntry.createdVia !== "plugin" ||
+        parentEntry.createdActor?.type !== "human" ||
+        parentEntry.createdActor.source !== "profile" ||
+        parentEntry.createdActor.id !== transient.profileId)
+    ) {
+      throw new Error("Transient child lifetime does not match its parent session.");
+    }
     const parentLineage = captureSpawnParentLineage({
       parentEntry,
       expectedParentSessionId: params.expectedParentSessionId,
@@ -203,20 +229,22 @@ export async function createInitialSubagentSession(params: {
     }
     const commit = async (assertSourceCurrent?: SessionSourceAssertion) => {
       await parentLineage.assertParentUnchanged();
-      const fields = ["sessionId", "lifecycleRevision", "skillLibrarySelections"] as const;
-      const expected = parentEntry?.skillLibrarySelections
-        ? {
-            sessionId: parentEntry.sessionId,
-            lifecycleRevision: parentEntry.lifecycleRevision,
-            skillLibrarySelections: parentEntry.skillLibrarySelections,
-          }
-        : undefined;
+      const fields: (keyof SessionEntry)[] = [
+        "sessionId",
+        "lifecycleRevision",
+        "skillLibrarySelections",
+        ...(transient ? (["createdVia", "createdActor"] as const) : []),
+      ];
+      const expected =
+        parentEntry && (transient || parentEntry.skillLibrarySelections) ? parentEntry : undefined;
       const refuse = (): never => {
         throw new Error(
-          "Parent skill selection changed before spawn; retry from the current turn.",
+          transient
+            ? "Transient child parent ownership changed before spawn."
+            : "Parent skill selection changed before spawn; retry from the current turn.",
         );
       };
-      const assertParentSkills = () => {
+      const assertParentFields = () => {
         if (!expected) {
           return;
         }
@@ -238,7 +266,7 @@ export async function createInitialSubagentSession(params: {
             readSource: parentTarget.capturedReadSource,
             expected,
             fields,
-            assertCurrent: assertParentSkills,
+            assertCurrent: assertParentFields,
             refuse,
           })
         : undefined;
@@ -266,6 +294,7 @@ export async function createInitialSubagentSession(params: {
               }
             : {}),
           ...childSessionIdentity,
+          ...(transient ? { transientLifetime: { kind: "request" as const, ...transient } } : {}),
           // Stamp after all request patches so model input cannot create a grant.
           ...parentLineage.receipt,
           ...(parentEntry?.skillLibrarySelections
@@ -278,6 +307,15 @@ export async function createInitialSubagentSession(params: {
           ...buildSessionCreationStamp({
             via: "spawn",
             ...params.creationPolicy,
+            ...(transient
+              ? {
+                  actor: {
+                    type: "human" as const,
+                    source: "profile" as const,
+                    id: transient.profileId,
+                  },
+                }
+              : {}),
             ...(!params.incognito
               ? {
                   inheritedGitContributorProfileIds:

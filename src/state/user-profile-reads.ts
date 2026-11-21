@@ -30,7 +30,11 @@ export async function prepareCurrentUserProfileAliases(
     }
   };
   assertCurrent();
-  return { aliases: new Set(reply?.aliases ?? [profileId]), assertCurrent };
+  return {
+    profileId: reply?.profileId ?? profileId,
+    aliases: new Set(reply?.aliases ?? [profileId]),
+    assertCurrent,
+  };
 }
 
 export async function resolveCanonicalCachedGitHubIdentity(

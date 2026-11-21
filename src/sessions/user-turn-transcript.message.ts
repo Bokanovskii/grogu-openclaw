@@ -84,6 +84,23 @@ function normalizeStructuredMediaEntryForTranscript(
   };
 }
 
+export function replacePersistedUserTurnText(
+  candidate: PersistedUserTurnMessage | undefined,
+  replacement: string | undefined,
+): PersistedUserTurnMessage | undefined {
+  if (!candidate || replacement === undefined) {
+    return candidate;
+  }
+  const metadata = { ...candidate["__openclaw"] };
+  if (candidate.content !== replacement) {
+    delete metadata.humanMentions;
+    delete metadata.workContext;
+  }
+  const next = { ...candidate, content: replacement };
+  delete next["__openclaw"];
+  return Object.keys(metadata).length > 0 ? { ...next, __openclaw: metadata } : next;
+}
+
 export function resolvePersistedUserTurnText(value: string | null | undefined): string | undefined {
   return normalizeOptionalString(value);
 }

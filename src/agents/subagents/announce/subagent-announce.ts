@@ -159,7 +159,10 @@ type SubagentAnnounceFlowParams = {
   signal?: AbortSignal;
   onExecutionStarted?: () => void;
   onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void | Promise<void>;
-  onBeforeDeleteChildSession?: () => boolean | Promise<boolean>;
+  onBeforeDeleteChildSession?: (identity?: {
+    sessionId: string;
+    lifecycleRevision: string;
+  }) => boolean | Promise<boolean>;
   resolveGatewayContext?: import("../../../gateway/server-methods/types.js").GatewayContextResolver;
 };
 
@@ -631,7 +634,12 @@ async function runSubagentAnnounceFlowBound(
       shouldDeleteChildSession &&
       (await prepareChildSessionEffects()) &&
       childSessionEffectsAllowed() &&
-      ((await params.onBeforeDeleteChildSession?.()) ?? true) &&
+      ((await params.onBeforeDeleteChildSession?.(
+        childSessionId && childSessionLifecycleRevision
+          ? { sessionId: childSessionId, lifecycleRevision: childSessionLifecycleRevision }
+          : undefined,
+      )) ??
+        true) &&
       childSessionEffectsAllowed()
     ) {
       await deleteSubagentSessionForCleanup({

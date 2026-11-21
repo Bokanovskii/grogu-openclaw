@@ -70,10 +70,12 @@ export async function closeProtectedServer(
     await import("../../src/config/sessions/session-transcript-reconcile-pool.js");
   const { closeOpenClawAgentDatabasesAsync } =
     await import("../../src/state/openclaw-agent-db-lifecycle.js");
+  const { closeSkillsWatchers } = await import("../../src/skills/runtime/refresh.js");
   const { closeOpenClawStateDatabaseByPathAsync } =
     await import("../../src/state/openclaw-state-db-cache.js");
   const { resolveOpenClawStateSqlitePath } =
     await import("../../src/state/openclaw-state-db.paths.js");
+  await closeSkillsWatchers();
   // Shared state still owns the lease releases from the agent database workers.
   await closePreparedModelRuntimeSnapshots();
   await closeSessionTranscriptReconcileWorkerPool();

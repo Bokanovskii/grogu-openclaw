@@ -7,6 +7,10 @@ import {
 import { getGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import {
+  runSubagentBeforeDeleteCleanupHook,
+  settleSubagentDeleteCleanup,
+} from "./subagent-registry-child-result-hook.js";
+import {
   assertSubagentRegistryWriteSourceCurrent,
   mutateSubagentRuns,
 } from "./subagent-registry-persistence.js";
@@ -138,10 +142,12 @@ export async function deleteSweptSession(
     childAgentId: entry.childAgentId,
     expectedSessionId: identity.sessionId,
     expectedLifecycleRevision: identity.lifecycleRevision,
+    beforeDelete: () => runSubagentBeforeDeleteCleanupHook(entry, identity),
     onError: (error) => {
       failure = error;
     },
   });
+  settleSubagentDeleteCleanup(entry, outcome, failure);
   if (outcome === "failed") {
     throw failure;
   }

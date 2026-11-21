@@ -3,6 +3,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { SessionStateNotice } from "../../../sessions/session-state-events.kernel.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import { normalizeSubagentRunState } from "./subagent-delivery-state.js";
+import { projectRequestOwnedSubagentRun } from "./subagent-registry-transient-content.js";
 import type {
   SubagentRegistryWrite,
   SubagentRegistryWriteReceipt,
@@ -79,7 +80,9 @@ export function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRe
 
 /** Canonically serializes a run before an outer transaction acquires the write lock. */
 export function bindSubagentRunRecord(entry: SubagentRunRecord): SubagentRunSqliteRow {
-  const normalized = normalizeSubagentRunState(structuredClone(entry));
+  const normalized = normalizeSubagentRunState(
+    structuredClone(projectRequestOwnedSubagentRun(entry)),
+  );
   if (!isCanonicalSubagentRunRecord(normalized)) {
     throw new Error("subagent run is missing canonical nested state");
   }

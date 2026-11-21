@@ -1,6 +1,10 @@
 import type { GatewayContextResolver } from "../../../gateway/server-methods/types.js";
 import { normalizeSubagentRunState } from "./subagent-delivery-state.js";
 import { SUBAGENT_ENDED_REASON_ERROR } from "./subagent-lifecycle-events.js";
+import type {
+  SubagentBeforeDeleteCleanupHook,
+  SubagentDeleteCleanupSettledHook,
+} from "./subagent-registry-child-result-hook.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 export function createFailedQueuedRun(
@@ -63,6 +67,11 @@ export type RegisterSubagentRunParams = {
   queuedLaunch?: SubagentRunRecord["queuedLaunch"];
   queued?: boolean;
   gatewayContextResolver?: GatewayContextResolver;
+  /** Host-only; runs before a delete-cleanup child transcript is removed. */
+  beforeDeleteCleanup?: SubagentBeforeDeleteCleanupHook;
+  deleteCleanupSettled?: SubagentDeleteCleanupSettledHook;
+  /** Host-only request lifetime; task and result content remain in process memory. */
+  requestScopedTransient?: true;
 };
 
 export function createSubagentRegistrationRecord(

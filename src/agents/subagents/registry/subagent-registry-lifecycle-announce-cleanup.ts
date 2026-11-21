@@ -15,6 +15,10 @@ import {
   loadPendingFinalDeliveryPayload,
 } from "./subagent-delivery-state.js";
 import {
+  runSubagentBeforeDeleteCleanupHook,
+  settleSubagentDeleteCleanup,
+} from "./subagent-registry-child-result-hook.js";
+import {
   resolveAnnounceDeliveryDeadline,
   shouldSuspendPendingFinalDelivery,
 } from "./subagent-registry-cleanup.js";
@@ -266,9 +270,15 @@ export const startSubagentAnnounceCleanupFlow = (
               }
             : undefined;
         const canDelete = await prepareChildSessionEffects();
-        if (canDelete && !cleanupSessionIdentity) {
-          // Without both lifecycle identities, key-only deletion could remove
-          // a successor that reused this child session after cleanup yielded.
+        if (
+          canDelete &&
+          (!cleanupSessionIdentity ||
+            (entry.childSessionIdentity &&
+              (entry.childSessionIdentity.sessionId !== cleanupSessionIdentity.sessionId ||
+                entry.childSessionIdentity.lifecycleRevision !==
+                  cleanupSessionIdentity.lifecycleRevision)))
+        ) {
+          // A missing or replaced generation cannot authorize key-only deletion.
           await suppressChildSessionEffects();
         } else if (canDelete && cleanupSessionIdentity) {
           // This durable boundary prevents a late yield from reviving a run
@@ -276,6 +286,7 @@ export const startSubagentAnnounceCleanupFlow = (
           await commit((draft) => {
             draft.deleteCleanupDispatchedAt ??= Date.now();
           });
+          let cleanupError: unknown;
           const sessionCleanup = await deleteSubagentSessionForCleanup({
             callGateway: params.callGateway,
             gatewayBinding: { resolveGatewayContext: getGatewayContextResolver(entry) },
@@ -286,13 +297,17 @@ export const startSubagentAnnounceCleanupFlow = (
             spawnMode: entry.spawnMode,
             expectedSessionId: cleanupSessionIdentity.sessionId,
             expectedLifecycleRevision: cleanupSessionIdentity.lifecycleRevision,
-            onError: (error) =>
+            beforeDelete: () => runSubagentBeforeDeleteCleanupHook(entry, cleanupSessionIdentity),
+            onError: (error) => {
+              cleanupError = error;
               params.warn("sessions.delete failed during subagent cleanup", {
                 error: buildSafeLifecycleErrorMeta(error),
                 runId: maskLifecycleIdentifier(runId, "run"),
                 childSessionKey: maskLifecycleIdentifier(entry.childSessionKey, "session"),
-              }),
+              });
+            },
           });
+          settleSubagentDeleteCleanup(entry, sessionCleanup, cleanupError);
           if (sessionCleanup === "failed") {
             throw new Error("subagent session cleanup did not complete");
           }
@@ -305,6 +320,9 @@ export const startSubagentAnnounceCleanupFlow = (
       if (!context.isCleanupAttemptCurrent(entry, cleanupGeneration)) {
         await retireSupersededCleanupIfNeeded(context, entry, cleanupGeneration);
         return;
+      }
+      if (cleanup === "delete" && suppressSessionEffects) {
+        settleSubagentDeleteCleanup(entry, "changed");
       }
       await finalizeDelivered({ skipRequesterDelivery });
     });
@@ -414,8 +432,17 @@ export const startSubagentAnnounceCleanupFlow = (
     isCompletionOwnedByRequesterYield: requesterOwnsCompletion,
     onBeforeDeleteChildSession:
       cleanup === "delete"
-        ? async () => {
+        ? async (cleanupIdentity) => {
             if (!childSessionEffectsAllowed()) {
+              return false;
+            }
+            try {
+              await runSubagentBeforeDeleteCleanupHook(entry, cleanupIdentity);
+            } catch (error) {
+              params.warn("subagent pre-delete hook failed; keeping child session", {
+                error: buildSafeLifecycleErrorMeta(error),
+                runId: maskLifecycleIdentifier(runId, "run"),
+              });
               return false;
             }
             await commit((draft) => {

@@ -198,6 +198,7 @@ type PendingInputStageOptions = PendingInputRequest & {
   assertCurrent: () => void;
   assertAdmittedCurrent?: () => void;
   assertCompletionCurrent?: () => void;
+  chargeFreshInput?: (message: PersistedUserTurnMessage) => void;
 };
 
 /** Accept durable input without changing the active transcript or scheduling execution. */
@@ -504,6 +505,9 @@ async function stagePreparedPendingInput(
       JSON.stringify(redactTranscriptMessageForStorage(prepared, { config: options.config }));
     if (Buffer.byteLength(messageJson, "utf8") > MAX_PAYLOAD_BYTES) {
       throw new Error("Approved pending input exceeds the Gateway payload limit");
+    }
+    if (!existing) {
+      options.chargeFreshInput?.(prepared);
     }
     const inputId = existing?.input_id ?? randomUUID();
     const assertAdmittedCurrent = options.assertAdmittedCurrent ?? options.assertCurrent;

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
+  ProtectedAgentMention,
   ProtectedModel,
   ProtectedActivity,
   ProtectedTurnEvent,
@@ -14,11 +15,33 @@ import { runEmbeddedAgent } from "../../src/agents/embedded-agent-runner/run.js"
 import { queueGuardedEmbeddedAgentMessageWithOutcomeAsync } from "../../src/agents/embedded-agent-runner/runs.js";
 import { withoutModelRequestTelemetry } from "../../src/agents/model-request-telemetry.js";
 import { createRequestModelCredential } from "../../src/agents/request-model-credential.js";
+import { withRequestScopedChildExecution } from "../../src/agents/request-scoped-child-execution.js";
+import { bindRequestOwnedSubagentExecution } from "../../src/agents/subagents/registry/subagent-registry-transient-content.js";
+import { spawnSubagentDirect } from "../../src/agents/subagents/spawn/subagent-spawn.js";
+import {
+  withHostSessionAccess,
+  type HostSessionAccess,
+} from "../../src/agents/tools/scoped-session-access.js";
+import { createDefaultDeps } from "../../src/cli/deps.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
+import { withLocalGatewayRequestScope } from "../../src/gateway/local-request-context.js";
+import { captureGatewayOperatorRunAuthority } from "../../src/gateway/operator-run-authority.js";
+import { SESSION_WRITE_SCOPE } from "../../src/gateway/operator-scopes.js";
+import {
+  createSyntheticPluginRuntimeClient,
+  mergePluginRuntimeClientInternal,
+} from "../../src/gateway/server-plugin-runtime-client.js";
 import { onAgentEventForRun } from "../../src/infra/agent-events.js";
 import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
+import { GatewayScheduler } from "../../src/infra/gateway-scheduler.js";
+import { LegacyPluginSdkResourceHost } from "../../src/plugins/legacy-sdk-resource-host.js";
+import {
+  getPluginRuntimeGatewayRequestScope,
+  withPluginRuntimeGatewayRequestScope,
+} from "../../src/plugins/runtime/gateway-request-scope.js";
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
+import type { ProtectedAgentDefinition } from "./agents.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
@@ -28,6 +51,7 @@ import { projectActivity, projectToolResult, type Source, type Widget } from "./
 export type { ProtectedModel };
 export type TurnInput = {
   text: string;
+  mentions?: ProtectedAgentMention[];
   provider: ProtectedModel["provider"];
   model: string;
   credential?: { accessToken: string; expiresAt?: number };
@@ -38,13 +62,32 @@ export type ProtectedTurn = {
   id: string;
   runId: string;
   profileId: string;
-  target: { agentId: string; sessionKey: string; storePath: string };
+  target: {
+    agentId: string;
+    sessionKey: string;
+    storePath: string;
+    nativeSessionId: string;
+    lifecycleRevision: string | null;
+  };
   input: TurnInput;
+  mentionedAgents: readonly Readonly<ProtectedAgentDefinition>[];
+  agent: Readonly<ProtectedAgentDefinition>;
+  sessionAccess: HostSessionAccess;
   files: AuthorizedUserFiles;
   signal: AbortSignal;
   assertCurrent: () => void;
   revalidate: () => Promise<void>;
   markTiming: (phase: "providerRequestStartMs" | "firstProviderOutputMs") => void;
+  saveChildResult: (result: {
+    runId: string;
+    agentId: string;
+    text: string;
+    timestamp: number;
+  }) => Promise<void>;
+  cleanupChildFiles: (sessionId: string) => Promise<void>;
+  chargeChildCreation: () => void;
+  registerChildSession: (sessionKey: string) => () => void;
+  childResult: (result: { runId: string; agentId: string; text: string }) => void;
   delta: (text: string) => Promise<void>;
   reasoning: (text: string) => Promise<void>;
   activity: (item: ProtectedActivity) => Promise<void>;
@@ -52,6 +95,285 @@ export type ProtectedTurn = {
   widget: (widget: Widget) => Promise<void>;
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
 };
+
+async function runMentionedAgent(
+  config: OpenClawConfig,
+  turn: ProtectedTurn,
+  agent: Readonly<ProtectedAgentDefinition>,
+  credential: ReturnType<typeof createRequestModelCredential>,
+) {
+  const children = new Map<
+    string,
+    {
+      sessionKey: string;
+      sessionId: string;
+      lifecycleRevision: string;
+      releaseSessionAccess: () => void;
+      releaseExecution: () => void;
+    }
+  >();
+  let savedResult = false;
+  let settle!: (outcome: "deleted" | "changed") => void;
+  const settled = new Promise<"deleted" | "changed">((resolve) => {
+    settle = resolve;
+  });
+  let spawnedRunId: string | undefined;
+  const scope = {
+    provider: turn.input.provider,
+    model: turn.input.model,
+    signal: turn.signal,
+    assertCurrent: turn.assertCurrent,
+    revalidate: turn.revalidate,
+    resolveChild: ({
+      runId,
+      sessionKey,
+      sessionId,
+      lifecycleRevision,
+    }: {
+      runId: string;
+      sessionKey?: string;
+      sessionId: string;
+      lifecycleRevision: string;
+    }) => {
+      const child = children.get(runId);
+      if (
+        !child ||
+        child.sessionId !== sessionId ||
+        child.sessionKey !== sessionKey ||
+        child.lifecycleRevision !== lifecycleRevision ||
+        turn.signal.aborted
+      ) {
+        return undefined;
+      }
+      return {
+        requestModelCredential: credential.handle,
+        userFileScope: {
+          files: turn.files,
+          directory: chatFilesDirectory(sessionId),
+          cacheKey: createHash("sha256")
+            .update(`${turn.profileId}:${sessionId}:${runId}`)
+            .digest("hex"),
+        },
+        toolsAllow: [...agent.tools],
+        toolExecutionAllow: agent.tools,
+        extraSystemPrompt: agent.instructions,
+        clientCaps: ["inline-widgets"],
+      };
+    },
+  };
+  await withProtectedGatewayAuthority(config, turn, async () => {
+    const gatewayContextResolver = getPluginRuntimeGatewayRequestScope()?.resolveGatewayContext;
+    if (!gatewayContextResolver) {
+      throw new Error("Protected child requires its isolated local Gateway context.");
+    }
+    turn.chargeChildCreation();
+    const result = await withRequestScopedChildExecution(scope, () =>
+      spawnSubagentDirect(
+        {
+          task: turn.input.text,
+          label: `protected-${agent.id}`,
+          agentId: turn.target.agentId,
+          mode: "run",
+          cleanup: "delete",
+          expectsCompletionMessage: false,
+          context: "isolated",
+          lightContext: true,
+          thinking: turn.input.thinking,
+        },
+        {
+          config,
+          gatewayContextResolver,
+          agentSessionKey: turn.target.sessionKey,
+          requesterAgentIdOverride: turn.target.agentId,
+          requesterRunId: turn.runId,
+          expectedParentSessionId: turn.target.nativeSessionId,
+          transientLifetime: {
+            parentSessionKey: turn.target.sessionKey,
+            parentSessionId: turn.target.nativeSessionId,
+            profileId: turn.profileId,
+          },
+          assertActive: turn.assertCurrent,
+          beforeChildDispatch: (child) => {
+            turn.assertCurrent();
+            if (
+              !child.lifecycleRevision ||
+              child.sessionKey === turn.target.sessionKey ||
+              children.has(child.runId)
+            ) {
+              throw new Error("Protected child identity is ambiguous.");
+            }
+            const releaseSessionAccess = turn.registerChildSession(child.sessionKey);
+            let releaseExecution: (() => void) | undefined;
+            try {
+              releaseExecution = bindRequestOwnedSubagentExecution({
+                runId: child.runId,
+                scope,
+              });
+            } catch (error) {
+              releaseSessionAccess();
+              throw error;
+            }
+            children.set(child.runId, {
+              ...child,
+              releaseSessionAccess,
+              releaseExecution,
+            });
+            spawnedRunId = child.runId;
+          },
+          beforeChildDeleteCleanup: async (child) => {
+            const owned = children.get(child.runId);
+            if (
+              !owned ||
+              owned.sessionKey !== child.sessionKey ||
+              owned.sessionId !== child.sessionId ||
+              owned.lifecycleRevision !== child.lifecycleRevision
+            ) {
+              throw new Error("Protected child generation changed before cleanup.");
+            }
+            try {
+              if (child.outcome?.status === "ok" && child.resultText?.trim()) {
+                try {
+                  turn.assertCurrent();
+                  await turn.saveChildResult({
+                    runId: child.runId,
+                    agentId: agent.id,
+                    text: child.resultText,
+                    timestamp: Date.now(),
+                  });
+                  savedResult = true;
+                  turn.childResult({
+                    runId: child.runId,
+                    agentId: agent.id,
+                    text: child.resultText,
+                  });
+                } catch (error) {
+                  try {
+                    turn.assertCurrent();
+                  } catch {
+                    return;
+                  }
+                  throw error;
+                }
+              }
+            } finally {
+              await turn.cleanupChildFiles(child.sessionId);
+            }
+          },
+          childDeleteCleanupSettled: (outcome) => {
+            const child = spawnedRunId ? children.get(spawnedRunId) : undefined;
+            if (outcome === "failed") {
+              return;
+            }
+            child?.releaseSessionAccess();
+            child?.releaseExecution();
+            settle(outcome);
+          },
+          requesterThinkingLevel: turn.input.provider === "sparky" ? "ultra" : undefined,
+        },
+      ),
+    );
+    if (result.status !== "accepted" || !result.runId || result.runId !== spawnedRunId) {
+      throw new ProtectedError(
+        502,
+        "agent_failed",
+        "The mentioned agent could not complete its work.",
+      );
+    }
+    turn.assertCurrent();
+    const outcome = await settled;
+    turn.assertCurrent();
+    if (outcome !== "deleted" || !savedResult) {
+      throw new ProtectedError(
+        502,
+        "agent_failed",
+        "The mentioned agent could not complete its work.",
+      );
+    }
+  }).finally(() => {
+    for (const child of children.values()) {
+      child.releaseSessionAccess();
+      child.releaseExecution();
+    }
+  });
+}
+
+async function withProtectedGatewayAuthority<T>(
+  config: OpenClawConfig,
+  turn: ProtectedTurn,
+  run: () => Promise<T>,
+): Promise<T> {
+  const resources = new LegacyPluginSdkResourceHost();
+  const scheduler = new GatewayScheduler();
+  resources.bindScheduler(scheduler);
+  const closeScheduler = () => scheduler.beginClose();
+  turn.signal.addEventListener("abort", closeScheduler, { once: true });
+  if (turn.signal.aborted) {
+    closeScheduler();
+  }
+  return await resources
+    .run(() =>
+      withLocalGatewayRequestScope(
+        {
+          deps: createDefaultDeps(),
+          getRuntimeConfig: () => config,
+          requireNewContext: true,
+        },
+        async () => {
+          const scope = getPluginRuntimeGatewayRequestScope();
+          const context = scope?.context;
+          if (!scope || !context) {
+            throw new Error("Protected child requires its local Gateway owner.");
+          }
+          const client = createSyntheticPluginRuntimeClient({
+            operatorRoleActor: { kind: "operator", profileId: turn.profileId },
+            scopes: [SESSION_WRITE_SCOPE],
+          });
+          const captured = await captureGatewayOperatorRunAuthority({
+            client,
+            context,
+            invocationAuthority: {
+              assertCurrent: turn.assertCurrent,
+              signal: turn.signal,
+            },
+          });
+          if (!captured) {
+            throw new Error("Protected profile could not admit a local child run.");
+          }
+          try {
+            const scopedClient = mergePluginRuntimeClientInternal(client, {
+              operatorRunAuthority: captured.authority,
+            });
+            return await withPluginRuntimeGatewayRequestScope(
+              { ...scope, client: scopedClient },
+              run,
+            );
+          } finally {
+            captured.release();
+          }
+        },
+      ),
+    )
+    .finally(async () => {
+      turn.signal.removeEventListener("abort", closeScheduler);
+      const failures: unknown[] = [];
+      try {
+        await resources.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await scheduler.stop();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) {
+        throw failures[0];
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Protected Gateway resources could not be closed.");
+      }
+    });
+}
 
 export function createCanonicalProtectedTurns(options: {
   config: OpenClawConfig;
@@ -76,8 +398,23 @@ export function createCanonicalProtectedTurns(options: {
           "Connect this provider first.",
         );
       }
+      const config = turn.input.copilotModel
+        ? {
+            ...options.config,
+            models: {
+              ...options.config.models,
+              providers: {
+                ...options.config.models?.providers,
+                "github-copilot": {
+                  baseUrl: turn.input.copilotModel.baseUrl,
+                  models: [turn.input.copilotModel.definition],
+                },
+              },
+            },
+          }
+        : options.config;
       const admission = prepareAgentRunAdmission({
-        cfg: options.config,
+        cfg: config,
         operationalRunInstance: createOperationalRunInstanceRef(turn.runId),
         assertSourceCurrent: turn.assertCurrent,
         facts: {
@@ -190,91 +527,82 @@ export function createCanonicalProtectedTurns(options: {
           assertCurrent: turn.assertCurrent,
         });
         credential = requestCredential;
-        const result = await withoutModelRequestTelemetry(
-          () =>
-            runEmbeddedAgent({
-              ...turn.target,
-              sessionId: turn.id,
-              sessionTarget: { ...turn.target, sessionId: turn.id },
-              sessionFile: formatSqliteSessionFileMarker({
-                ...turn.target,
-                sessionId: turn.id,
-              }),
-              runId: turn.runId,
-              timeoutMs: protectedTurnTimeoutMs,
-              abortSignal: turn.signal,
-              config: turn.input.copilotModel
-                ? {
-                    ...options.config,
-                    models: {
-                      ...options.config.models,
-                      providers: {
-                        ...options.config.models?.providers,
-                        "github-copilot": {
-                          baseUrl: turn.input.copilotModel.baseUrl,
-                          models: [turn.input.copilotModel.definition],
-                        },
-                      },
-                    },
-                  }
-                : options.config,
-              workspaceDir: options.workspaceDir,
-              agentDir: options.agentDir,
-              prompt: turn.input.text,
-              transcriptPrompt: turn.input.text,
-              trigger: "user",
-              provider,
-              model,
-              thinkLevel: turn.input.thinking,
-              reasoningLevel: "stream",
-              agentHarnessRuntimeOverride: "openclaw",
-              preparedRunAdmission: admission,
-              requestModelCredential: requestCredential.handle,
-              onExecutionPhase: ({ phase }) => {
-                if (phase === "model_call_started") {
-                  turn.markTiming("providerRequestStartMs");
-                }
-              },
-              bootstrapContextMode: "lightweight",
-              disableMessageTool: true,
-              disableToolSearch: true,
-              disableTrajectory: true,
-              codeModeOverride: false,
-              toolsAllow: ["web_search", "web_fetch", "show_widget"],
-              toolExecutionAllow: ["web_search", "web_fetch", "show_widget"],
-              clientCaps: ["inline-widgets"],
-              userFileScope: {
-                files: turn.files,
-                directory: chatFilesDirectory(turn.id),
-                cacheKey: createHash("sha256")
-                  .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
-                  .digest("hex"),
-              },
-              onAgentToolResult,
-              onAssistantMessageStart: () => {
-                lastReasoning = "";
-              },
-              onReasoningStream: ({ text }) => {
-                if (!text || text === lastReasoning) {
-                  return;
-                }
-                const delta = text.startsWith(lastReasoning)
-                  ? text.slice(lastReasoning.length)
-                  : text;
-                lastReasoning = text;
-                updates = updates
-                  .then(() => turn.reasoning(delta))
-                  .catch((error: unknown) => {
-                    updateError ??= error;
-                  });
-              },
-              onPartialReply: async ({ delta }) => {
-                if (delta) {
-                  await turn.delta(delta);
-                }
-              },
-            }),
-          () => turn.markTiming("firstProviderOutputMs"),
+        const result = await withProtectedGatewayAuthority(config, turn, () =>
+          withoutModelRequestTelemetry(
+            () =>
+              withHostSessionAccess(turn.sessionAccess, () =>
+                runEmbeddedAgent({
+                  ...turn.target,
+                  sessionId: turn.id,
+                  sessionTarget: { ...turn.target, sessionId: turn.id },
+                  sessionFile: formatSqliteSessionFileMarker({
+                    ...turn.target,
+                    sessionId: turn.id,
+                  }),
+                  runId: turn.runId,
+                  timeoutMs: protectedTurnTimeoutMs,
+                  abortSignal: turn.signal,
+                  config,
+                  workspaceDir: options.workspaceDir,
+                  agentDir: options.agentDir,
+                  prompt: turn.input.text,
+                  transcriptPrompt: turn.input.text,
+                  extraSystemPrompt: turn.agent.instructions,
+                  trigger: "user",
+                  provider,
+                  model,
+                  thinkLevel: turn.input.thinking,
+                  reasoningLevel: "stream",
+                  agentHarnessRuntimeOverride: "openclaw",
+                  preparedRunAdmission: admission,
+                  requestModelCredential: requestCredential.handle,
+                  onExecutionPhase: ({ phase }) => {
+                    if (phase === "model_call_started") {
+                      turn.markTiming("providerRequestStartMs");
+                    }
+                  },
+                  bootstrapContextMode: "lightweight",
+                  disableMessageTool: true,
+                  disableToolSearch: true,
+                  disableTrajectory: true,
+                  codeModeOverride: false,
+                  toolsAllow: [...turn.agent.tools],
+                  toolExecutionAllow: turn.agent.tools,
+                  clientCaps: ["inline-widgets"],
+                  userFileScope: {
+                    files: turn.files,
+                    directory: chatFilesDirectory(turn.id),
+                    cacheKey: createHash("sha256")
+                      .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
+                      .digest("hex"),
+                  },
+                  onAgentToolResult,
+                  onAssistantMessageStart: () => {
+                    lastReasoning = "";
+                  },
+                  onReasoningStream: ({ text }) => {
+                    if (!text || text === lastReasoning) {
+                      return;
+                    }
+                    const delta = text.startsWith(lastReasoning)
+                      ? text.slice(lastReasoning.length)
+                      : text;
+                    lastReasoning = text;
+                    updates = updates
+                      .then(() => turn.reasoning(delta))
+                      .catch((error: unknown) => {
+                        updateError ??= error;
+                      });
+                  },
+                  onPartialReply: async ({ delta }) => {
+                    if (delta) {
+                      await turn.delta(delta);
+                    }
+                  },
+                }),
+              ),
+            () => turn.markTiming("firstProviderOutputMs"),
+          ),
         );
         await updates;
         if (updateError !== undefined) {
@@ -288,6 +616,16 @@ export function createCanonicalProtectedTurns(options: {
         }
         if (result.payloads?.some((payload) => payload.isError) || result.meta.aborted) {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
+        }
+        if (turn.mentionedAgents.length) {
+          await withoutModelRequestTelemetry(() =>
+            withHostSessionAccess(turn.sessionAccess, async () => {
+              for (const agent of turn.mentionedAgents) {
+                turn.assertCurrent();
+                await runMentionedAgent(config, turn, agent, requestCredential);
+              }
+            }),
+          );
         }
       } finally {
         try {

@@ -1,6 +1,7 @@
 import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import type { AgentMessage } from "../../agents/runtime/index.js";
 import type { SessionManager } from "../../agents/sessions/session-manager.js";
+import { hasTranscriptWriteBudget } from "../../agents/sessions/transcript-write-budget.js";
 import { redactTranscriptMessage } from "../../agents/transcript-redact.js";
 import { makeZeroUsageSnapshot } from "../../agents/usage.js";
 import { formatErrorMessage } from "../../infra/errors.js";
@@ -539,6 +540,7 @@ async function appendExactAssistantMessageWithSource(
     sessionKey: resolved.normalizedKey,
     storePath,
   };
+  const chargeWrite = hasTranscriptWriteBudget();
   if (isRedundantDeliveryMirror(params.message) && !explicitIdempotencyKey) {
     // Reconciliation needs the writer queue. Wait before entering it, then
     // read the current projected tail again inside the guarded append.
@@ -551,12 +553,8 @@ async function appendExactAssistantMessageWithSource(
     assertCurrent: params.assertCurrent,
     cwd: entry.spawnedCwd,
     ...(params.expectedSessionId ? { expectedSessionId: params.expectedSessionId } : {}),
-    ...(params.expectedLifecycleRevision !== undefined
-      ? { expectedLifecycleRevision: params.expectedLifecycleRevision }
-      : {}),
-    ...(params.expectedWriterRunId !== undefined
-      ? { expectedWriterRunId: params.expectedWriterRunId }
-      : {}),
+    expectedLifecycleRevision: params.expectedLifecycleRevision,
+    expectedWriterRunId: params.expectedWriterRunId,
     ...(params.expectedSessionState ? { expectedSessionState: params.expectedSessionState } : {}),
     ...(params.sessionLifecyclePatch
       ? { sessionLifecyclePatch: params.sessionLifecyclePatch }
@@ -571,16 +569,19 @@ async function appendExactAssistantMessageWithSource(
         message: preparedUnkeyedMessage,
         ...(params.eventId ? { eventId: params.eventId } : {}),
         ...(explicitIdempotencyKey ? { idempotencyLookup: "scan" } : {}),
-        ...(explicitIdempotencyKey && params.beforeMessageWrite
+        ...((explicitIdempotencyKey && params.beforeMessageWrite) || chargeWrite
           ? {
               workerPreparation: {
                 prepareMessageAfterIdempotencyCheck: (candidate: unknown) =>
                   applyBeforeMessageWriteToAssistant({
                     message: candidate as Parameters<SessionManager["appendMessage"]>[0],
-                    beforeMessageWrite: params.beforeMessageWrite,
+                    beforeMessageWrite: explicitIdempotencyKey
+                      ? params.beforeMessageWrite
+                      : undefined,
                     explicitIdempotencyKey,
                     agentId: transcriptAgentId,
                     sessionKey: resolved.normalizedKey,
+                    chargeWrite,
                   }),
               },
             }

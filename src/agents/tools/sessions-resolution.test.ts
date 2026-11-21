@@ -15,6 +15,7 @@ let resolveInternalSessionKey: typeof import("./sessions-resolution.js").resolve
 let resolveMainSessionAlias: typeof import("./sessions-resolution.js").resolveMainSessionAlias;
 let resolveSessionReference: typeof import("./sessions-resolution.js").resolveSessionReference;
 let resolveVisibleSessionReference: typeof import("./sessions-resolution.js").resolveVisibleSessionReference;
+let withHostSessionAccess: typeof import("./scoped-session-access.js").withHostSessionAccess;
 
 beforeAll(async () => {
   ({
@@ -24,6 +25,7 @@ beforeAll(async () => {
     resolveSessionReference,
     resolveVisibleSessionReference,
   } = await import("./sessions-resolution.js"));
+  ({ withHostSessionAccess } = await import("./scoped-session-access.js"));
 });
 
 beforeEach(() => {
@@ -112,6 +114,46 @@ describe("resolved session visibility checks", () => {
 });
 
 describe("resolveSessionReference", () => {
+  it("resolves host-scoped sessions before querying the Gateway", async () => {
+    const requester = "agent:protected:family:alice:one";
+    const permitted = "agent:protected:family:alice:two";
+    const foreign = "agent:protected:family:bob:three";
+    let active = true;
+    const scope = {
+      creatorProfileId: "alice",
+      assertCurrent: () => {
+        if (!active) {
+          throw new Error("request closed");
+        }
+      },
+      revalidate: async () => {
+        if (!active) {
+          throw new Error("request closed");
+        }
+      },
+      resolve: async ({ reference }: { reference: string }) =>
+        reference === permitted
+          ? { sessionKey: permitted, sessionId: "two", agentId: "protected" }
+          : undefined,
+    };
+    const resolve = (sessionKey: string) =>
+      resolveSessionReference({
+        action: "history",
+        sessionKey,
+        alias: "main",
+        mainKey: "main",
+        requesterInternalKey: requester,
+        restrictToSpawned: false,
+      });
+    await withHostSessionAccess(scope, async () => {
+      await expect(resolve(permitted)).resolves.toMatchObject({ ok: true, key: permitted });
+      await expect(resolve(foreign)).resolves.toMatchObject({ ok: false, status: "forbidden" });
+      active = false;
+      await expect(resolve(permitted)).rejects.toThrow("request closed");
+    });
+    expect(callGatewayMock).not.toHaveBeenCalled();
+  });
+
   it("uses a scoped key's encoded owner before visibility policy", async () => {
     callGatewayMock.mockImplementation(
       async (request: { method?: string; params?: { key?: string; agentId?: string } }) => {

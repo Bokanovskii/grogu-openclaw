@@ -12,7 +12,7 @@ const ensureSessions = createOpenClawStateSchemaEnsurer({
   table: "user_profile_access_sessions",
   operationLabel: "userProfiles.access.sessions.schema",
 });
-const ensureDenials = createOpenClawStateSchemaEnsurer({
+export const ensureUserProfileAccessDenialsSchema = createOpenClawStateSchemaEnsurer({
   table: "user_profile_access_denials",
   operationLabel: "userProfiles.access.denials.schema",
 });
@@ -26,7 +26,7 @@ export function updateUserProfileAccess(
   const database = open();
   const options = { ...stateOptions(), database };
   ensureSessions(options);
-  ensureDenials(options);
+  ensureUserProfileAccessDenialsSchema(options);
   const queries = getNodeSqliteKysely<DB>(database.db);
   const currentProfile = () =>
     selectResolvedUserProfileMetadataById(database.db, input.profileId)?.id === input.profileId;

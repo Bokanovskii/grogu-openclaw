@@ -48,7 +48,10 @@ import {
   readSelectedUserModelAccount,
 } from "./user-model-accounts.js";
 import { ensureUserPreferencesSchema } from "./user-preferences.store.js";
-import { updateUserProfileAccess } from "./user-profile-access.worker.js";
+import {
+  ensureUserProfileAccessDenialsSchema,
+  updateUserProfileAccess,
+} from "./user-profile-access.worker.js";
 import {
   selectProfileAccessEntries,
   selectStoredGitHubIdentities,
@@ -361,6 +364,7 @@ export const userProfileOperations = {
     if (input.subjects.length === 0) {
       return { people: [], nextCursor: null };
     }
+    ensureUserProfileAccessDenialsSchema(options);
     return runSqliteDeferredTransactionSync(database.db, () => {
       const db = getNodeSqliteKysely<UserProfilesDatabase & DB>(database.db);
       let query = db

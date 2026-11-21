@@ -6,7 +6,13 @@ import { createServer, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
 import { before as beforeTests, test } from "node:test";
-import type { ProtectedPeople } from "@openclaw/gateway-protocol/protected";
+import {
+  ProtectedAutomationCatalogSchema,
+  ProtectedAutomationDraftValidationSchema,
+  type ProtectedModel,
+  type ProtectedPeople,
+} from "@openclaw/gateway-protocol/protected";
+import { Value } from "typebox/value";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
@@ -253,7 +259,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   t.after(() => release.resolve());
   const origin = "https://family.example";
   const catalogExtensions = [protectedResearchAgent];
-  const open = async (freeFloorBytes = 1, agentExtensions: ProtectedAgentExtension[] = []) => {
+  const open = async (
+    freeFloorBytes = 1,
+    agentExtensions: ProtectedAgentExtension[] = [],
+    models: ProtectedModel[] = [
+      { provider: "anthropic", id: "synthetic", label: "Synthetic only" },
+    ],
+  ) => {
     const observedAgents: Array<{
       id: string;
       name: string;
@@ -278,7 +290,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       storageLimits: { globalBytes: 95_000, userBytes: 58_000, freeFloorBytes },
       providerRelay: createProviderRelay(),
       turns: {
-        models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+        models,
         async run(turn) {
           observedAgents.push(turn.agent);
           if (turn.input.text === "Write an oversized file") {
@@ -311,7 +323,15 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       revokeProfile: (id: string) => app.revokeProfile(id),
     };
   };
-  const first = await open(1, catalogExtensions);
+  const first = await open(1, catalogExtensions, [
+    { provider: "anthropic", id: "synthetic", label: "Synthetic only" },
+    {
+      provider: "sparky",
+      id: "synthetic-sparky",
+      label: "Synthetic Sparky",
+      thinking: { levels: ["low", "medium", "ultra"], default: "ultra" },
+    },
+  ]);
   t.after(() => close(first.server));
   // The proof route answers from its own assertion; entering the verifier here would recurse.
   const proof = await fetch(`${first.url}/api/protected/v1/access-proof?challenge=c`);
@@ -374,6 +394,138 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(me.status, 200);
   const { user, capabilities } = await me.json();
   assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true, admin: false });
+  const automationCatalogResponse = await first.call("alice", "/automations/catalog");
+  assert.equal(automationCatalogResponse.status, 200);
+  const automationCatalog = await automationCatalogResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogSchema, automationCatalog), true);
+  assert.deepEqual(automationCatalog.capabilities.automations, {
+    catalog: true,
+    draftValidation: true,
+    list: false,
+    create: false,
+    run: false,
+    sharing: false,
+    notifications: false,
+  });
+  assert.equal(automationCatalog.defaultAgentId, "travel");
+  assert.ok(automationCatalog.agents.some((agent: { id: string }) => agent.id === "travel"));
+  assert.deepEqual(automationCatalog.schedule.everyMs, {
+    minimum: 1,
+    maximum: 8_640_000_000_000_000,
+  });
+  assert.equal(automationCatalog.models.length, 1);
+  assert.equal(automationCatalog.models[0].provider, "sparky");
+  assert.deepEqual(automationCatalog.models[0].thinking.levels, ["low", "medium", "ultra"]);
+  assert.equal(automationCatalog.models[0].thinking.default, "ultra");
+  const automationDraft = {
+    name: "Synthetic morning summary",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    doneWhen: "The summary is complete.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const validationResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify(automationDraft),
+  });
+  assert.equal(validationResponse.status, 200);
+  const validation = await validationResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationDraftValidationSchema, validation), true);
+  assert.deepEqual(validation, {
+    valid: true,
+    draft: { ...automationDraft, thinking: "ultra" },
+  });
+  const maximumName = "😀".repeat(40);
+  const maximumNameResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, name: maximumName }),
+  });
+  assert.equal((await maximumNameResponse.json()).valid, true);
+  const longNameResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, name: "😀".repeat(41) }),
+  });
+  const longName = await longNameResponse.json();
+  assert.equal(longName.valid, false);
+  assert.ok(
+    longName.errors.some(
+      (entry: { field: string; code: string }) =>
+        entry.field === "name" && entry.code === "too_long",
+    ),
+  );
+  const longInstructionsResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, instructions: "😀".repeat(4_097) }),
+  });
+  const longInstructions = await longInstructionsResponse.json();
+  assert.equal(longInstructions.valid, false);
+  assert.ok(
+    longInstructions.errors.some(
+      (entry: { field: string; code: string }) =>
+        entry.field === "instructions" && entry.code === "too_long",
+    ),
+  );
+  const longNotificationRuleResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, whenToNotify: "😀".repeat(1_025) }),
+  });
+  const longNotificationRule = await longNotificationRuleResponse.json();
+  assert.equal(longNotificationRule.valid, false);
+  assert.ok(
+    longNotificationRule.errors.some(
+      (entry: { field: string; code: string }) =>
+        entry.field === "whenToNotify" && entry.code === "too_long",
+    ),
+  );
+  const longDoneWhenResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, doneWhen: " ".repeat(2_001) }),
+  });
+  const longDoneWhen = await longDoneWhenResponse.json();
+  assert.equal(longDoneWhen.valid, false);
+  assert.ok(
+    longDoneWhen.errors.some(
+      (entry: { field: string; code: string }) =>
+        entry.field === "doneWhen" && entry.code === "too_long",
+    ),
+  );
+  const oversizedDefinitionResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, instructions: "\u0000".repeat(6_000) }),
+  });
+  const oversizedDefinition = await oversizedDefinitionResponse.json();
+  assert.equal(oversizedDefinition.valid, false);
+  assert.ok(oversizedDefinition.errors.some((entry: { field: string }) => entry.field === "draft"));
+  const unsupportedAgentResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, agentId: "unlisted-agent" }),
+  });
+  assert.equal(unsupportedAgentResponse.status, 200);
+  const unsupportedAgent = await unsupportedAgentResponse.json();
+  assert.equal(unsupportedAgent.valid, false);
+  assert.ok(unsupportedAgent.errors.some((entry: { field: string }) => entry.field === "agentId"));
+  const unsupportedThinkingResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, thinking: "high" }),
+  });
+  const unsupportedThinking = await unsupportedThinkingResponse.json();
+  assert.equal(unsupportedThinking.valid, false);
+  assert.ok(
+    unsupportedThinking.errors.some((entry: { field: string }) => entry.field === "thinking"),
+  );
+  const invalidIntervalResponse = await first.call("alice", "/automations/drafts/validate", {
+    method: "POST",
+    body: JSON.stringify({
+      ...automationDraft,
+      schedule: { kind: "every", everyMs: 8_640_000_000_000_001 },
+    }),
+  });
+  assert.equal(invalidIntervalResponse.status, 200);
+  assert.equal((await invalidIntervalResponse.json()).valid, false);
+  assert.equal(first.observedAgents.length, 0);
+  assert.equal((await (await first.call("alice", "/storage/chats")).json()).usedBytes, 0);
   const catalogResponse = await first.call("alice", "/agents");
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
@@ -404,6 +556,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(selectedChat.selectedAgentId, "general");
   const reloadedRuntime = await open(1, catalogExtensions);
   t.after(() => close(reloadedRuntime.server));
+  assert.equal((await reloadedRuntime.call("alice", "/automations/catalog")).status, 404);
   const reloadedChat = await reloadedRuntime.call("alice", route);
   assert.equal(reloadedChat.status, 200);
   assert.equal((await reloadedChat.json()).chat.selectedAgentId, "general");

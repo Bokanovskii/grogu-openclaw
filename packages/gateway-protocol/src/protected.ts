@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
+import { MAX_DATE_TIMESTAMP_MS } from "./schema/cron-shared.js";
 
 const id = Type.String({ minLength: 1, maxLength: 256 });
 const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
@@ -165,6 +166,70 @@ export const ProtectedMeSchema = node({
     admin: Type.Boolean(),
   }),
 });
+export const ProtectedAutomationCapabilitiesSchema = node({
+  catalog: Type.Boolean(),
+  draftValidation: Type.Boolean(),
+  list: Type.Boolean(),
+  create: Type.Boolean(),
+  run: Type.Boolean(),
+  sharing: Type.Boolean(),
+  notifications: Type.Boolean(),
+});
+export const ProtectedAutomationCatalogSchema = node({
+  capabilities: node({
+    automations: ProtectedAutomationCapabilitiesSchema,
+  }),
+  defaultAgentId: protectedAgentId,
+  agents: Type.Array(ProtectedAgentSchema),
+  models: Type.Array(ProtectedModelSchema, { minItems: 1, maxItems: 1 }),
+  schedule: node({
+    kinds: Type.Array(Type.Literal("every"), { minItems: 1, maxItems: 1 }),
+    everyMs: node({
+      minimum: Type.Integer(),
+      maximum: Type.Integer(),
+    }),
+  }),
+  limits: node({
+    definitionBytes: Type.Integer({ minimum: 1 }),
+    nameCodeUnits: Type.Integer({ minimum: 1 }),
+    instructionsBytes: Type.Integer({ minimum: 1 }),
+    whenToNotifyBytes: Type.Integer({ minimum: 1 }),
+    doneWhenCodeUnits: Type.Integer({ minimum: 1 }),
+  }),
+});
+export const ProtectedAutomationDraftSchema = node({
+  name: Type.String({ minLength: 1, maxLength: 80, pattern: "\\S" }),
+  instructions: Type.String({ minLength: 1, maxLength: 16_384, pattern: "\\S" }),
+  whenToNotify: Type.String({ minLength: 1, maxLength: 4_096, pattern: "\\S" }),
+  doneWhen: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, pattern: "\\S" })),
+  agentId: protectedAgentId,
+  model: node({
+    provider: Type.Literal("sparky"),
+    id,
+  }),
+  thinking: Type.Optional(ProtectedThinkLevelSchema),
+  schedule: node({
+    kind: Type.Literal("every"),
+    everyMs: Type.Integer({ minimum: 1, maximum: MAX_DATE_TIMESTAMP_MS }),
+  }),
+});
+export const ProtectedAutomationDraftValidationSchema = Type.Union([
+  node({
+    valid: Type.Literal(true),
+    draft: ProtectedAutomationDraftSchema,
+  }),
+  node({
+    valid: Type.Literal(false),
+    errors: Type.Array(
+      node({
+        field: Type.String({ minLength: 1, maxLength: 32 }),
+        code: Type.String({ minLength: 1, maxLength: 48 }),
+        message: Type.String({ minLength: 1, maxLength: 160 }),
+      }),
+      { minItems: 1 },
+    ),
+  }),
+]);
 export const ProtectedAccountNameSchema = node({
   displayName: Type.String({ minLength: 1, maxLength: 40 }),
 });
@@ -381,6 +446,12 @@ export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
+export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
+export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
+export type ProtectedAutomationDraft = Static<typeof ProtectedAutomationDraftSchema>;
+export type ProtectedAutomationDraftValidation = Static<
+  typeof ProtectedAutomationDraftValidationSchema
+>;
 export type ProtectedAccount = Static<typeof ProtectedAccountSchema>;
 export type ProtectedAccountName = Static<typeof ProtectedAccountNameSchema>;
 export type ProtectedAccountNameResponse = Static<typeof ProtectedAccountNameResponseSchema>;

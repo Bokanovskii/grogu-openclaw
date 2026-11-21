@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assertDirectoryIdentitySync } from "@openclaw/fs-safe/advanced";
 import type { Root as FsRoot } from "@openclaw/fs-safe/root";
+import type { StorageValueEncryption } from "../storage/encryption.js";
 import { FsSafeError, root as openRoot } from "./fs-safe.js";
 import { retainMutationAuthority } from "./mutation-authority.js";
 
@@ -11,7 +12,8 @@ export type AuthorizedUserFiles = {
   read(name: string): Promise<Buffer>;
   readText(name: string): Promise<string>;
   list(name?: string): Promise<string[]>;
-  stat(name: string): ReturnType<FsRoot["stat"]>;
+  stat(name: string): Promise<Awaited<ReturnType<FsRoot["stat"]>> & { storedSize: number }>;
+  storedSize(plaintextBytes: number): number;
   mkdir(name: string): Promise<void>;
   create(name: string, data: string | Buffer): Promise<void>;
   write(name: string, data: string | Buffer): Promise<void>;
@@ -54,11 +56,14 @@ export async function createAuthorizedUserFiles(options: {
   assertCurrent: () => void;
   signal?: AbortSignal;
   maxBytes: number;
+  encryption?: StorageValueEncryption;
 }): Promise<AuthorizedUserFiles> {
   if (!options.profileId || !Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0) {
     throw new TypeError("User file admission requires a profile and a positive byte limit.");
   }
   let disposed = false;
+  const encryption = options.encryption;
+  const storedSize = (bytes: number) => encryption?.storedSize(bytes) ?? bytes;
   const assertCurrent = retainMutationAuthority(() => {
     if (disposed) {
       throw new Error("User file authority is closed.");
@@ -68,6 +73,7 @@ export async function createAuthorizedUserFiles(options: {
   });
   assertCurrent();
   const userDirectory = createHash("sha256").update(options.profileId).digest("hex");
+  const encryptionContext = `openclaw:user-file:${userDirectory}`;
   await options.usersRoot.mkdir(userDirectory, {
     private: true,
     mutationSymlinks: "reject",
@@ -102,7 +108,7 @@ export async function createAuthorizedUserFiles(options: {
         realPath: expectedPath,
       });
     },
-    maxBytes: options.maxBytes,
+    maxBytes: storedSize(options.maxBytes),
     mode: 0o600,
   });
   if (root.rootReal !== expectedPath) {
@@ -126,12 +132,17 @@ export async function createAuthorizedUserFiles(options: {
     if (Buffer.byteLength(data) > options.maxBytes) {
       throw new FsSafeError("too-large", "File exceeds the allowed size.");
     }
-    return data;
+    return encryption ? encryption.encrypt(Buffer.from(data), encryptionContext) : data;
+  };
+  const read = async (name: string) => {
+    const data = await root.readBytes(relativeName(name));
+    assertDirectory();
+    return encryption ? encryption.decrypt(data, encryptionContext) : data;
   };
   const files: AuthorizedUserFiles = {
     assertCurrent,
-    read: (name) => run(() => root.readBytes(relativeName(name))),
-    readText: (name) => run(() => root.readText(relativeName(name))),
+    read: (name) => run(() => read(name)),
+    readText: (name) => run(async () => (await read(name)).toString("utf8")),
     list: (name = "") => run(() => root.list(relativeName(name, true))),
     stat: (name) =>
       run(async () => {
@@ -139,8 +150,13 @@ export async function createAuthorizedUserFiles(options: {
         if (result.isSymbolicLink || (result.isFile && result.nlink !== 1)) {
           throw new FsSafeError("path-alias", "File links are not available.");
         }
-        return result;
+        return {
+          ...result,
+          size: result.isFile && encryption ? encryption.plaintextSize(result.size) : result.size,
+          storedSize: result.size,
+        };
       }),
+    storedSize,
     mkdir: (name) => run(() => root.mkdir(relativeName(name), { private: true })),
     create: (name, data) =>
       run(() =>

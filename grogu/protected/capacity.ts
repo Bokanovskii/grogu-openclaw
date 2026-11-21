@@ -45,16 +45,16 @@ async function fileBytes(files: AuthorizedUserFiles, directory: string): Promise
   for (const name of names) {
     const relative = `${directory}/${name}`;
     const info = await files.stat(relative);
-    bytes += info.isDirectory ? await fileBytes(files, relative) : info.size + 4096;
+    bytes += info.isDirectory ? await fileBytes(files, relative) : info.storedSize + 4096;
   }
   return bytes;
 }
 
 export function createStorageAdmission(
-  options: Pick<Parameters<typeof createAuthorizedUserFiles>[0], "usersRoot"> & {
+  options: Pick<Parameters<typeof createAuthorizedUserFiles>[0], "usersRoot" | "encryption"> & {
     stateDir: string;
     limits: StorageLimits;
-    chats: ProtectedChats;
+    chats: Pick<ProtectedChats, "capacityEntries" | "transcriptBytes">;
     maxFileBytes: number;
   },
 ) {
@@ -91,6 +91,7 @@ export function createStorageAdmission(
           profileId: entry.profileId,
           assertCurrent,
           maxBytes: options.maxFileBytes,
+          encryption: options.encryption,
         });
         try {
           const bytes =
@@ -148,7 +149,7 @@ export function createStorageAdmission(
               );
               throw failure;
             }
-            charge(Buffer.byteLength(data) + 4096);
+            charge(files.storedSize(Buffer.byteLength(data)) + 4096);
           };
           return {
             ...files,

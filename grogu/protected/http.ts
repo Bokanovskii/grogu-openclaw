@@ -97,6 +97,7 @@ export function createProtectedHttp(options: {
   stateDir: string;
   verifyIdentity: ProtectedIdentityVerifier;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
+  encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
   providerRelay?: ReturnType<typeof createProviderRelay>;
   maxChatsPerUser: number;

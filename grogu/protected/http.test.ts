@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
+import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -593,10 +594,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
   const serviceConfig = protectedOpenClawConfig(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
   const options = {
     origin,
     stateDir,
     usersRoot: await root(usersDir),
+    encryption,
     maxChatsPerUser: 3,
     maxFileBytes: 64_000,
     storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
@@ -713,6 +717,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const widgetResponse = await reopened(`/chats/${chat.id}/widgets/${widget.id}`);
   assert.equal(widgetResponse.status, 200);
   assert.match((await widgetResponse.json()).html, /Scoped widget body/);
+  const profileDirectory = path.join(usersDir, createHash("sha256").update(user.id).digest("hex"));
+  const storedFiles = (
+    await readdir(profileDirectory, { recursive: true, withFileTypes: true })
+  ).filter((entry) => entry.isFile());
+  assert.ok(storedFiles.length > 0);
+  for (const entry of storedFiles) {
+    const bytes = await readFile(path.join(entry.parentPath, entry.name));
+    assert.ok(!bytes.includes("Scoped widget body"));
+    assert.ok(!bytes.includes("Synthetic widget"));
+  }
   const deleted = await reopened(`/chats/${chat.id}`, {
     method: "DELETE",
     headers: { "if-match": read.chat.version },

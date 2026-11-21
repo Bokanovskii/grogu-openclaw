@@ -17,6 +17,7 @@ export type RuntimeAuthState = {
   sourceApiKey: string;
   authMode: string;
   profileId?: string;
+  publicHeaders?: Readonly<Record<string, string>>;
   expiresAt?: number;
   refreshTimer?: ReturnType<typeof setTimeout>;
   refreshInFlight?: Promise<void>;

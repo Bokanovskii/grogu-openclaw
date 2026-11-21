@@ -80,6 +80,33 @@ export const ProtectedMeSchema = node({
   models: Type.Array(ProtectedModelSchema),
   capabilities: node({ copilotConnect: Type.Boolean(), openaiConnect: Type.Boolean() }),
 });
+export const ProtectedAccountNameSchema = node({
+  displayName: Type.String({ minLength: 1, maxLength: 40 }),
+});
+export const ProtectedDirectorySettingsSchema = node({
+  description: Type.String({ maxLength: 140 }),
+  hidden: Type.Boolean(),
+});
+export const ProtectedAccountSchema = node({
+  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+  directory: ProtectedDirectorySettingsSchema,
+});
+export const ProtectedAccountNameResponseSchema = node({
+  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+});
+export const ProtectedDirectorySettingsResponseSchema = node({
+  directory: ProtectedDirectorySettingsSchema,
+});
+export const ProtectedPeopleSchema = node({
+  people: Type.Array(
+    node({
+      id,
+      ...ProtectedAccountNameSchema.properties,
+      description: Type.String({ maxLength: 140 }),
+    }),
+  ),
+  nextCursor: Type.Union([id, Type.Null()]),
+});
 export const ProtectedDevicePromptSchema = node({
   id,
   verificationUrl: Type.String(),
@@ -127,6 +154,14 @@ export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
+export type ProtectedAccount = Static<typeof ProtectedAccountSchema>;
+export type ProtectedAccountName = Static<typeof ProtectedAccountNameSchema>;
+export type ProtectedAccountNameResponse = Static<typeof ProtectedAccountNameResponseSchema>;
+export type ProtectedDirectorySettings = Static<typeof ProtectedDirectorySettingsSchema>;
+export type ProtectedDirectorySettingsResponse = Static<
+  typeof ProtectedDirectorySettingsResponseSchema
+>;
+export type ProtectedPeople = Static<typeof ProtectedPeopleSchema>;
 export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>
@@ -139,3 +174,11 @@ export const isProtectedSteer = (value: unknown): value is Static<typeof Protect
   Value.Check(ProtectedSteerSchema, value);
 export const isProtectedRenew = (value: unknown): value is Static<typeof ProtectedRenewSchema> =>
   Value.Check(ProtectedRenewSchema, value);
+export const isProtectedAccountName = (
+  value: unknown,
+): value is Static<typeof ProtectedAccountNameSchema> =>
+  Value.Check(ProtectedAccountNameSchema, value);
+export const isProtectedDirectorySettings = (
+  value: unknown,
+): value is Static<typeof ProtectedDirectorySettingsSchema> =>
+  Value.Check(ProtectedDirectorySettingsSchema, value);

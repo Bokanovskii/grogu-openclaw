@@ -1,6 +1,7 @@
 import { executeExistingOpenClawStateRead } from "./openclaw-state-db-readonly.js";
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
+import { captureUserPreferenceRead } from "./user-preferences-publication.js";
 import { captureUserProfileAuthorityRead } from "./user-profile-events.js";
 import type { CachedGitHubIdentity, CachedGitHubIdentityBinding } from "./user-profiles.types.js";
 
@@ -73,4 +74,33 @@ export async function readUserProfileDirectory(limit: number, options: ProfileRe
     type: "userProfiles.directory",
     input: { limit },
   });
+}
+
+export async function readVerifiedUserProfileDirectory(
+  input: {
+    issuer: string;
+    subjects: readonly string[];
+    preferenceKey: string;
+    after: string | null;
+    limit: number;
+  },
+  options: ProfileReadOptions = {},
+) {
+  const context = captureOpenClawStateWorkerContext(options);
+  const preferencesCurrent = await captureUserPreferenceRead(context.admission);
+  const identities = await captureUserProfileAuthorityRead(
+    context.admission,
+    undefined,
+    "identity",
+  );
+  const { executeOpenClawStateWorker } = await import("./openclaw-state-worker-store.js");
+  const result = await executeOpenClawStateWorker(context, {
+    type: "userProfiles.verifiedDirectory",
+    input,
+  });
+  const identitiesCurrent = identities.bind(result.people.map(({ id }) => id));
+  return {
+    ...result,
+    isCurrent: () => preferencesCurrent() && identitiesCurrent?.() === true,
+  };
 }

@@ -50,6 +50,7 @@ void test("Family capacity charges encrypted bytes for existing files and new wr
   try {
     await assert.rejects(async () => tooSmall.files(files).create("chats/one/file.bin", data), {
       code: "quota_exceeded",
+      message: "Storage limit reached. Delete a chat to free space.",
     });
     await assert.rejects(files.stat("chats/one/file.bin"), { code: "not-found" });
   } finally {

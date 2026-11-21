@@ -85,8 +85,11 @@ while personal Grogu is busy. Give Family its own Sparky key.
 
 After admission, a turn continues if the browser disconnects or the phone sleeps.
 The runtime saves the reply without an attached reader. Request credentials stay
-in memory for that turn, never in the saved chat. Stop, logout, revoked access,
-session expiry, the turn timeout, and listener shutdown still interrupt work.
+in memory for that turn, never in the saved chat. Redaction protects request
+credentials while a turn is active and releases their entries when the last
+turn using them ends, unless another owner registered them. Stop, logout,
+revoked access, session expiry, the turn timeout, and listener shutdown still
+interrupt work.
 
 One run-owned authority gates every published text, source, widget, and widget
 draft with synchronous expiry, local revocation, logout, and cancellation checks.
@@ -118,6 +121,8 @@ the chat again to find the saved reply. This does not replay the stream or start
 another model request. Another Access session can read its user's chat, but it
 does not receive the run ID. Active runs do not survive a listener restart.
 Updates drain or interrupt them before the new listener starts.
+Saved terminal model failures appear in the chat as a failed assistant message
+with fixed, classified guidance. Provider error text is never returned.
 
 ## File encryption API
 
@@ -141,17 +146,16 @@ encrypted file scope at existing plaintext files.
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
-real profile and chat storage. Run it from the checkout with Node 26.12.1:
+real profile and chat storage. On macOS, run it from the checkout with Node
+26.12.1:
 
 ```sh
-proof="$PWD/.artifacts/protected-proof-$$"
-mkdir -m 700 -p "$proof/home" "$proof/state"
-trap 'rm -rf "$proof"' EXIT
-env -i PATH="$PATH" HOME="$proof/home" TMPDIR="$proof" \
-  OPENCLAW_STATE_DIR="$proof/state" OPENCLAW_CONFIG_PATH="$proof/state/openclaw.json" \
-  "$HOME/.local/bin/heavy" -- node --import ./scripts/tsx.mjs \
-  --test --test-timeout=90000 grogu/protected/http.test.ts
+~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh
 ```
+
+The launcher denies non-loopback network traffic for the entire test process,
+including work that outlives a test. Direct and unsupported invocations fail
+before the fixture runs.
 
 This proves neither a real provider nor the Access identity response. The
 authoritative client DTOs are exported from `@openclaw/gateway-protocol/protected`.
@@ -181,12 +185,49 @@ Run `maintain.ts` under the isolated service account and environment.
 adds an exact subject, which takes effect after a protected listener restart.
 `test-client CLIENT_ID` admits one Access service token as a hidden
 development user, and `test-client none` removes it. Both take effect after a
-protected listener restart. The runtime accepts that token only when the Access
-token names the exact client ID and the live identity response confirms it. The
+protected listener restart. Strict Access gives a service token no cookie,
+strips its `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers, and
+refuses its assertion at `get-identity`. The test harness therefore sends those
+headers to the exact protected origin together with test-only copies,
+`X-Grogu-Test-Client-Id` and `X-Grogu-Test-Client-Secret`. The copies never
+authenticate alone. The runtime accepts the request only when a valid Access
+assertion names the configured client ID and the copied ID matches it. To check
+that Access still accepts the credential, the runtime sends a new request to
+`/api/protected/v1/access-proof` on that origin, with a random challenge and only
+the standard credential headers. That route checks the newly issued assertion
+locally and echoes the challenge with `no-store`. A redirect, a cacheable reply,
+a different challenge, or a missing or different assertion denies the request.
+The test session ID is a hash of the client ID and secret, so it stays the same
+across assertions and changes when the secret is rotated. Signing out lasts
+until the secret is rotated. The raw secret is
+kept only in memory for the request. The
 user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
 That subject gets its own profile and storage, like any other user. The future
-account directory and sharing must exclude it. To revoke the test user, delete
+sharing feature must exclude it. To revoke the test user, delete
 the service token or its Access policy, or run `test-client none` and restart.
 For owner-driven revocation, stop the listener before invoking
 `revoke-profile PROFILE_ID` and restart after it succeeds; the canonical denial
 survives the restart. `GET /healthz` reports listener readiness without user data.
+
+## Accounts and people
+
+`GET /api/protected/v1/account` returns the signed-in person's profile and
+directory settings. `PUT /api/protected/v1/account/name` saves a `displayName`
+of 1 to 40 characters. `PUT /api/protected/v1/account/directory-settings`
+saves a `description` of up to 140 characters and a Boolean `hidden` value.
+These are separate saves. Neither endpoint accepts another person's ID.
+
+`GET /api/protected/v1/people` returns eligible people with their ID, display
+name, and description. It returns up to 100 people and a `nextCursor`. If the
+cursor is not null, pass it as the `cursor` query parameter for the next page.
+The directory does not include email addresses or identity claims. People are
+listed by default. Hide me removes a person from the directory. It does not
+revoke a share. The development identity is always hidden and receives an
+empty directory, even if its stored settings say otherwise.
+
+Names use the canonical profile store. Directory settings use the existing
+profile preferences store. They remain after logout or access revocation and
+follow the existing profile merge and deletion rules. A revoked or no longer
+allowed identity is not listed. Older versions ignore the directory settings
+and do not provide this API. They cannot enforce Hide me for a separate
+directory implementation.

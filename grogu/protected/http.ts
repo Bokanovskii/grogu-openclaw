@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   isProtectedCreateChat,
+  isProtectedAccountName,
+  isProtectedDirectorySettings,
   isProtectedRenew,
   isProtectedSteer,
   isProtectedTurnRequest,
@@ -13,14 +15,27 @@ import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
+import {
+  getCanonicalUserPreferences,
+  setCanonicalUserPreferences,
+} from "../../src/state/user-preferences.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
+import {
+  prepareCurrentUserProfileAliases,
+  readVerifiedUserProfileDirectory,
+} from "../../src/state/user-profile-reads.js";
+import { setCanonicalUserProfileDisplayName } from "../../src/state/user-profile-writes.js";
 import { createStorageAdmission, type StorageLimits } from "./capacity.js";
 import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
-import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
+import {
+  protectedAccessProofPath,
+  resolveProtectedProfile,
+  type ProtectedIdentityVerifier,
+} from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
-import { protectedTurnTimeoutMs } from "./settings.js";
+import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
 import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurns, TurnInput } from "./turns.js";
@@ -28,6 +43,7 @@ import type { ProtectedTurns, TurnInput } from "./turns.js";
 const base = "/api/protected/v1";
 const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
 const maxBodyBytes = 48_000;
+const directoryPreference = "grogu.protected.directory";
 type Run = {
   id: string;
   profileId: string;
@@ -98,6 +114,8 @@ export function createProtectedHttp(options: {
   origin: string;
   stateDir: string;
   verifyIdentity: ProtectedIdentityVerifier;
+  directory: { issuer: string; allowedSubjects: readonly string[] };
+  answerAccessProof?: (request: Request) => Promise<Response>;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
@@ -146,6 +164,9 @@ export function createProtectedHttp(options: {
         const doc = buildSandboxHostDocument({ profile: "protected" }, true);
         return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
       }
+      if (path === protectedAccessProofPath && options.answerAccessProof) {
+        return await options.answerAccessProof(request);
+      }
       const origin = request.headers.get("origin");
       if (
         (origin !== null && origin !== options.origin) ||
@@ -159,6 +180,9 @@ export function createProtectedHttp(options: {
         );
       }
       const identity = await options.verifyIdentity(request);
+      if (identity.issuer !== options.directory.issuer) {
+        return unauthorized();
+      }
       const rawCurrent = () => {
         identity.assertCurrent();
         if (revokedSessions.has(identity.sessionId)) {
@@ -272,15 +296,120 @@ export function createProtectedHttp(options: {
       };
       if (pathname === "/me" && method === "GET") {
         return json({
-          user: { id: profile.id, displayName: profile.displayName ?? "Family member" },
+          user: { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure:
-            "Family keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
+            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
           models: options.turns.models,
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
             openaiConnect: options.providerRelay !== undefined,
           },
         });
+      }
+      if (pathname === "/account" && method === "GET") {
+        const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+          env: chats.env,
+        });
+        const preferences = await getCanonicalUserPreferences(profile.id, [directoryPreference], {
+          env: chats.env,
+          requireExactProfile: true,
+        });
+        await revalidate();
+        profileAuthority.assertCurrent();
+        if (!preferences) {
+          return unauthorized();
+        }
+        const saved = preferences.entries[directoryPreference];
+        if (saved !== undefined && !isProtectedDirectorySettings(saved)) {
+          throw new ProtectedError(
+            409,
+            "account_settings_invalid",
+            "Save your directory settings again.",
+          );
+        }
+        return json({
+          user: {
+            id: profile.id,
+            displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
+          },
+          directory: {
+            description: saved?.description ?? "",
+            hidden: identity.kind === "development" || saved?.hidden === true,
+          },
+        });
+      }
+      if (pathname === "/account/name" && method === "PUT") {
+        const input = await body(request);
+        if (!isProtectedAccountName(input) || !input.displayName.trim()) {
+          return invalid();
+        }
+        await revalidate();
+        const updated = await setCanonicalUserProfileDisplayName(
+          profile.id,
+          input.displayName.trim(),
+          {
+            env: chats.env,
+            assertCurrent,
+            requireExactProfile: true,
+          },
+        );
+        assertCurrent();
+        return json({ user: { id: updated.profile.id, displayName: updated.profile.displayName } });
+      }
+      if (pathname === "/account/directory-settings" && method === "PUT") {
+        const input = await body(request);
+        if (!isProtectedDirectorySettings(input)) {
+          return invalid();
+        }
+        if (identity.kind === "development" && !input.hidden) {
+          throw new ProtectedError(
+            403,
+            "development_hidden",
+            "The development account is always hidden.",
+          );
+        }
+        await revalidate();
+        const saved = await setCanonicalUserPreferences(
+          profile.id,
+          { [directoryPreference]: input },
+          { env: chats.env, assertCurrent, requireExactProfile: true },
+        );
+        if (!saved?.ok) {
+          throw new ProtectedError(
+            409,
+            "account_settings_not_saved",
+            "Could not save your directory settings.",
+          );
+        }
+        assertCurrent();
+        return json({ directory: input });
+      }
+      if (pathname === "/people" && method === "GET") {
+        if (identity.kind === "development") {
+          await revalidate();
+          return json({ people: [], nextCursor: null });
+        }
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        if (cursor !== null && !subjectPattern.test(cursor)) {
+          return invalid();
+        }
+        const result = await readVerifiedUserProfileDirectory(
+          {
+            issuer: options.directory.issuer,
+            subjects: options.directory.allowedSubjects.filter((subject) =>
+              subjectPattern.test(subject),
+            ),
+            preferenceKey: directoryPreference,
+            after: cursor,
+            limit: 100,
+          },
+          { env: chats.env },
+        );
+        await revalidate();
+        if (!result.isCurrent() || result.people.some((person) => deniedProfiles.has(person.id))) {
+          throw new ProtectedError(409, "directory_changed", "The directory changed. Try again.");
+        }
+        return json({ people: result.people, nextCursor: result.nextCursor });
       }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);
@@ -313,7 +442,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider connection is not enabled.",
           );
         }
         const provider = connection[1] === "openai" ? "openai" : "github-copilot";
@@ -336,7 +465,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider connection is not enabled.",
           );
         }
         const data = await body(request);

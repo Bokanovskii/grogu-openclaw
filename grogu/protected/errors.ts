@@ -50,7 +50,7 @@ function providerFailure({ reason, provider }: FailoverError): ProtectedError {
         502,
         "provider_rejected",
         sparky
-          ? "Sparky did not accept the Family service key. Choose another model, or ask the owner to check Sparky."
+          ? "Sparky did not accept the service key. Choose another model, or ask the server operator to check Sparky."
           : "The model account did not accept this request. Reconnect this provider.",
       );
     case "billing":
@@ -91,11 +91,11 @@ export function publicError(error: unknown): ProtectedError {
       return new ProtectedError(
         507,
         "storage_full",
-        "Family could not save because storage is full.",
+        "The service could not save because storage is full.",
       );
     }
     if ("code" in cause && cause.code === "too-large") {
-      return new ProtectedError(413, "file_too_large", "A file exceeds the Family file limit.");
+      return new ProtectedError(413, "file_too_large", "A file exceeds the file size limit.");
     }
     cause = "cause" in cause ? cause.cause : undefined;
   }

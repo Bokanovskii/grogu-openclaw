@@ -244,16 +244,15 @@ describe("github-copilot plugin", () => {
     expect(prepared).toEqual({
       apiKey: "github-source-token",
       baseUrl: "https://api.individual.githubcopilot.com",
-      request: {
-        headers: {
-          "Accept-Encoding": "identity",
-          "Copilot-Integration-Id": "copilot-developer-cli",
-          "Editor-Plugin-Version": "copilot-chat/0.35.0",
-          "Editor-Version": "vscode/1.107.0",
-          "Openai-Organization": "github-copilot",
-          "User-Agent": "GitHubCopilotChat/0.35.0",
-        },
+      publicHeaders: {
+        "Accept-Encoding": "identity",
+        "Copilot-Integration-Id": "copilot-developer-cli",
+        "Editor-Plugin-Version": "copilot-chat/0.35.0",
+        "Editor-Version": "vscode/1.107.0",
+        "Openai-Organization": "github-copilot",
+        "User-Agent": "GitHubCopilotChat/0.35.0",
       },
+      request: { headers: {} },
     });
   });
 
@@ -289,9 +288,45 @@ describe("github-copilot plugin", () => {
     });
   });
 
+  it("keeps prior public identity public on runtime auth refresh", async () => {
+    mocks.resolveCopilotRuntimeAuth.mockResolvedValue({
+      apiKey: "github-source-token",
+      baseUrl: "https://api.individual.githubcopilot.com",
+    });
+    const provider = registerProviderWithPluginConfig({});
+    const publicHeaders = {
+      "Openai-Organization": "github-copilot",
+      "Copilot-Integration-Id": "copilot-developer-cli",
+    };
+    const prepared = await provider.prepareRuntimeAuth({
+      config: {},
+      env: {},
+      provider: "github-copilot",
+      modelId: "gpt-5-mini",
+      model: {
+        id: "gpt-5-mini",
+        provider: "github-copilot",
+        headers: { ...publicHeaders, "x-api-key": "configured-header-secret" },
+      },
+      previousPublicHeaders: publicHeaders,
+      apiKey: "github-source-token",
+      authMode: "oauth",
+    } as never);
+
+    expect(prepared?.publicHeaders).toMatchObject(publicHeaders);
+    expect(prepared?.request?.headers).toEqual({ "x-api-key": "configured-header-secret" });
+  });
+
   it.each([
     { headers: undefined, expected: "vscode-chat" },
-    { headers: { "COPILOT-INTEGRATION-ID": "model-identity" }, expected: "model-identity" },
+    {
+      headers: {
+        "COPILOT-INTEGRATION-ID": "model-identity",
+        "Openai-Organization": "configured-organization",
+        "x-api-key": "configured-header-secret",
+      },
+      expected: "model-identity",
+    },
   ])(
     "honors the existing provider integration header during runtime authentication: $expected",
     async ({ headers, expected }) => {
@@ -320,6 +355,14 @@ describe("github-copilot plugin", () => {
       } as never);
 
       expect(new Headers(prepared?.request?.headers).get("copilot-integration-id")).toBe(expected);
+      expect(prepared?.publicHeaders).not.toHaveProperty("Copilot-Integration-Id");
+      if (headers) {
+        expect(prepared?.publicHeaders).not.toHaveProperty("Openai-Organization");
+        expect(prepared?.request?.headers).toMatchObject({
+          "Openai-Organization": "configured-organization",
+          "x-api-key": "configured-header-secret",
+        });
+      }
     },
   );
 

@@ -268,9 +268,9 @@ export function createProtectedHttp(options: {
       };
       if (pathname === "/me" && method === "GET") {
         return json({
-          user: { id: profile.id, displayName: profile.displayName ?? "Family member" },
+          user: { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure:
-            "Family keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
+            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
           models: options.turns.models,
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
@@ -309,7 +309,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider connection is not enabled.",
           );
         }
         const provider = connection[1] === "openai" ? "openai" : "github-copilot";
@@ -332,7 +332,7 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(
             503,
             "provider_connect_unavailable",
-            "This provider is not enabled for Family connections.",
+            "This provider connection is not enabled.",
           );
         }
         const data = await body(request);

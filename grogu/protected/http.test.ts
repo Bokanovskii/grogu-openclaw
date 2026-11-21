@@ -67,6 +67,68 @@ function close(server: Server) {
   });
 }
 
+void test("protected responses use neutral service wording", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-copy-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://client.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    stateDir,
+    usersRoot: await root(stateDir),
+    verifyIdentity: async () => ({
+      issuer: "https://identity.example",
+      subject: "synthetic-copy-user",
+      sessionId: "synthetic-copy-session",
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 1,
+    maxFileBytes: 1024,
+    turns: {
+      models: [],
+      async run() {},
+      async steer() {
+        assert.fail("Steering is not used by this fixture.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const response = await app.fetch(new Request(`${origin}/api/protected/v1/me`));
+  assert.equal(response.status, 200);
+  const { user, disclosure } = await response.json();
+  assert.equal(user.displayName, "User");
+  assert.equal(
+    disclosure,
+    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+  );
+  for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
+    const result = await app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        method: "POST",
+        headers: { origin, "x-grogu-profile": user.id },
+      }),
+    );
+    assert.equal(result.status, 503);
+    assert.equal((await result.json()).error.message, "This provider connection is not enabled.");
+  }
+  const failures = [
+    new FailoverError("synthetic", { reason: "auth", provider: "sparky" }),
+    Object.assign(new Error("synthetic"), { code: "ENOSPC" }),
+    Object.assign(new Error("synthetic"), { code: "too-large" }),
+  ];
+  assert.deepEqual(
+    failures.map((failure) => publicError(failure).message),
+    [
+      "Sparky did not accept the service key. Choose another model, or ask the server operator to check Sparky.",
+      "The service could not save because storage is full.",
+      "A file exceeds the file size limit.",
+    ],
+  );
+});
+
 void test("Family HTTP isolates chats, relays device authorization, and durably revokes sessions", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");

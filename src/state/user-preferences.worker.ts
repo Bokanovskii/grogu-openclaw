@@ -39,14 +39,20 @@ export function executeUserPreferenceCommand(
         openOpenClawStateDatabase(options).db,
         command.input.profileId,
       );
-      return profile ? ok({ profileId: profile.id }) : undefined;
+      return profile &&
+        (!command.input.requireExactProfile || profile.id === command.input.profileId)
+        ? ok({ profileId: profile.id })
+        : undefined;
     }
     ensureUserPreferencesSchema(options);
     return runOpenClawStateWriteTransaction(
       ({ db }) => {
         requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
         const profile = selectResolvedUserProfileMetadataById(db, command.input.profileId);
-        if (!profile) {
+        if (
+          !profile ||
+          (command.input.requireExactProfile && profile.id !== command.input.profileId)
+        ) {
           return undefined;
         }
         const result = writeUserPreferences(db, profile.id, command.input.update);
@@ -70,7 +76,7 @@ export function executeUserPreferenceCommand(
   const { db } = openOpenClawStateDatabase(options);
   return runSqliteDeferredTransactionSync(db, () => {
     const profile = selectResolvedUserProfileMetadataById(db, command.input.profileId);
-    return profile
+    return profile && (!command.input.requireExactProfile || profile.id === command.input.profileId)
       ? { profileId: profile.id, entries: readUserPreferences(db, profile.id, command.input.keys) }
       : undefined;
   });

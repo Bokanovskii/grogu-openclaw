@@ -60,6 +60,7 @@ async function main() {
     origin,
     stateDir,
     usersRoot,
+    directory: { issuer: accessIssuer, allowedSubjects },
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
     storageLimits: settings.storageLimits,

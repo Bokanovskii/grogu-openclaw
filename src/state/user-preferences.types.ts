@@ -28,11 +28,15 @@ export type UserPreferenceCoauthorMutation = {
 
 export type UserPreferenceWorkerOperations = {
   "userPreferences.read": {
-    input: { profileId: string; keys?: readonly string[] };
+    input: { profileId: string; keys?: readonly string[]; requireExactProfile?: boolean };
     output: CanonicalUserPreferences | undefined;
   };
   "userPreferences.write": {
-    input: { profileId: string; update: PreparedUserPreferenceUpdate };
+    input: {
+      profileId: string;
+      update: PreparedUserPreferenceUpdate;
+      requireExactProfile?: boolean;
+    };
     output: Result<{ profileId: string }, UserPreferenceError> | undefined;
   };
 };

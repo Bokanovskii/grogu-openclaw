@@ -44,7 +44,17 @@ void test("the configured service token maps to one separate test subject", asyn
     testClientId,
   )(request(token({ sub: "", common_name: testClientId })));
   assert.equal(identity.subject, `service-token:${testClientId}`);
+  assert.equal(identity.kind, "development");
   assert.doesNotThrow(identity.assertCurrent);
+});
+
+void test("a verified human is not classified as the development identity", async () => {
+  const subject = "11111111-1111-1111-1111-111111111111";
+  const identity = await verifier(
+    { user_uuid: subject },
+    testClientId,
+  )(request(token({ sub: subject })));
+  assert.equal(identity.kind, "human");
 });
 
 void test("other service tokens and unconfirmed service identities are denied", async () => {

@@ -153,8 +153,31 @@ protected listener restart. The runtime accepts that token only when the Access
 token names the exact client ID and the live identity response confirms it. The
 user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
 That subject gets its own profile and storage, like any other user. The future
-account directory and sharing must exclude it. To revoke the test user, delete
+sharing feature must exclude it. To revoke the test user, delete
 the service token or its Access policy, or run `test-client none` and restart.
 For owner-driven revocation, stop the listener before invoking
 `revoke-profile PROFILE_ID` and restart after it succeeds; the canonical denial
 survives the restart. `GET /healthz` reports listener readiness without user data.
+
+## Accounts and people
+
+`GET /api/protected/v1/account` returns the signed-in person's profile and
+directory settings. `PUT /api/protected/v1/account/name` saves a `displayName`
+of 1 to 40 characters. `PUT /api/protected/v1/account/directory-settings`
+saves a `description` of up to 140 characters and a Boolean `hidden` value.
+These are separate saves. Neither endpoint accepts another person's ID.
+
+`GET /api/protected/v1/people` returns eligible people with their ID, display
+name, and description. It returns up to 100 people and a `nextCursor`. If the
+cursor is not null, pass it as the `cursor` query parameter for the next page.
+The directory does not include email addresses or identity claims. People are
+listed by default. Hide me removes a person from the directory. It does not
+revoke a share. The development identity is always hidden and receives an
+empty directory, even if its stored settings say otherwise.
+
+Names use the canonical profile store. Directory settings use the existing
+profile preferences store. They remain after logout or access revocation and
+follow the existing profile merge and deletion rules. A revoked or no longer
+allowed identity is not listed. Older versions ignore the directory settings
+and do not provide this API. They cannot enforce Hide me for a separate
+directory implementation.

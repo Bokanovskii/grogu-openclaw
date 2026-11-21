@@ -2674,6 +2674,17 @@ CREATE INDEX IF NOT EXISTS idx_user_profile_identities_profile_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_identities_authorization
   ON user_profile_identities(authorization_id);
 
+CREATE TABLE IF NOT EXISTS user_profile_access_sessions (
+  session_hash TEXT NOT NULL PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked INTEGER NOT NULL CHECK (revoked IN (0, 1))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS user_profile_access_denials (
+  profile_id TEXT NOT NULL PRIMARY KEY
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,

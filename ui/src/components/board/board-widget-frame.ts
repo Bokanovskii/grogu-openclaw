@@ -1,5 +1,5 @@
 import { html, nothing, type TemplateResult } from "lit";
-import { sandboxHostFramePermissions } from "../../../../src/shared/sandbox-host-transport.ts";
+import { sandboxHostFramePermissions } from "../../../../packages/widget-host/src/transport.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
 import type { BoardWidget } from "../../lib/board/types.ts";

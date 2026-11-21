@@ -1,4 +1,4 @@
-import { createSandboxHostTransport } from "../shared/sandbox-host-transport.js";
+import { createSandboxHostTransport } from "../../packages/widget-host/src/transport.js";
 
 // The shell serializes this function and injects its shared transport factory.
 export function runStandaloneMcpAppHost(

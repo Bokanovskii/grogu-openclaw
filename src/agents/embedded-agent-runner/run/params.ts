@@ -55,6 +55,9 @@ export type ResolvedToolPromptFinalizer = (params: {
 }) => string;
 
 export type RunEmbeddedAgentParams = {
+  /** Host-owned, exact-route credential; never a durable account or fallback source. */
+  requestModelCredential?: import("../../request-model-credential.js").RequestModelCredential;
+  userFileScope?: import("../../openclaw-tools.types.js").OpenClawToolsOptions["userFileScope"];
   /** Host-minted parent audience inherited by a trusted internal child run. */
   memoryAudience?: import("../../../plugins/memory-provider-types.js").MemoryAudience;
   /** Detached runs may read session identity but never write its durable transcript or metadata. */

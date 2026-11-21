@@ -476,15 +476,18 @@ export function createOpenClawTools(
         })
       : []),
     includeMessageTool ? messageTool : null,
+    !options?.userFileScope &&
     !isCoreCanvasHostEnabled(resolvedConfig) &&
     !hasRegisteredShowWidgetKinds() &&
     !widgetPresentation.currentChannelPresenter
       ? null
       : createShowWidgetTool({
+          userFileScope: options?.userFileScope,
           sessionId: options?.sessionId,
           agentId: sessionAgentId,
           agentSessionKey: sessionKey,
-          inlineHostEnabled: isCoreCanvasHostEnabled(resolvedConfig),
+          inlineHostEnabled:
+            Boolean(options?.userFileScope) || isCoreCanvasHostEnabled(resolvedConfig),
           inlineClientAvailable: inlineWidgetClientAvailable,
           publicationMode: sourceWidgetPublication
             ? "source-reply"

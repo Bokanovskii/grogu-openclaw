@@ -105,8 +105,20 @@ import {
 const EMPTY_EMBEDDED_AGENT_CONFIG: OpenClawConfig = Object.freeze({});
 
 export function runEmbeddedAgent(
-  internalParamsInput: RunEmbeddedAgentInternalParams,
+  input: RunEmbeddedAgentInternalParams,
 ): Promise<EmbeddedAgentRunResult> {
+  if (input.requestModelCredential && !input.userFileScope) {
+    throw new Error("Request-credential runs require an admitted user-file scope.");
+  }
+  const internalParamsInput: RunEmbeddedAgentInternalParams = input.requestModelCredential
+    ? {
+        ...input,
+        allowAuthProfileFallback: false,
+        authProfileStateMode: "read-only",
+        modelFallbacksOverride: [],
+        modelSelectionLocked: true,
+      }
+    : input;
   const config = resolveEmbeddedRunConfig(internalParamsInput);
   const lifecycleGeneration =
     internalParamsInput.lifecycleGeneration ??
@@ -685,13 +697,11 @@ async function runEmbeddedAgentForSession(
           });
         }
         const error = result.meta.error?.message ?? terminal?.getDeferredError();
+        const receipt = result.meta.agentMeta?.terminalReceipt;
         terminal?.emit(error ? "error" : "end", error ? new Error(error) : result, {
           ...resolveAgentLifecycleTerminalMetadata(result.meta),
-          ...(result.meta.agentMeta?.terminalReceipt
-            ? {
-                assistantTranscriptIdempotencyKey:
-                  result.meta.agentMeta.terminalReceipt.assistantTranscriptIdempotencyKey,
-              }
+          ...(receipt
+            ? { assistantTranscriptIdempotencyKey: receipt.assistantTranscriptIdempotencyKey }
             : {}),
         });
         return result;

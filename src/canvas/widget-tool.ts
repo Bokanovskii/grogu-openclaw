@@ -18,6 +18,7 @@ import {
   BOARD_REPORT_WIDGET_KIND,
   parseBoardReport,
 } from "../boards/board-report.js";
+import type { UserFileScope } from "../infra/authorized-user-files.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import {
   assertWidgetHtmlSize,
@@ -168,6 +169,7 @@ function createShowWidgetToolSchema(
 }
 
 type ShowWidgetToolOptions = {
+  userFileScope?: UserFileScope;
   sessionId?: string;
   agentId?: string;
   agentSessionKey?: string;
@@ -301,9 +303,11 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
     !pinnedOnly &&
     inlineHostEnabled &&
     (sourcePublication || options.inlineClientAvailable !== false);
-  const registeredKinds = listBoardWidgetContentKinds(currentPluginRegistry());
+  const registeredKinds = options.userFileScope
+    ? []
+    : listBoardWidgetContentKinds(currentPluginRegistry());
   const allKinds = ["html", ...registeredKinds];
-  const presenters = options.presenters ?? [];
+  const presenters = options.userFileScope ? [] : (options.presenters ?? []);
   const presenterContext =
     options.presenterContext ??
     (options.agentSessionKey ? { sessionKey: options.agentSessionKey } : {});
@@ -316,7 +320,7 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
       ? allKinds.filter((kind) => currentChannelPresenter.capabilities.sourceKinds.includes(kind))
       : allKinds;
   const advertisedRegisteredKinds = kinds.filter((kind) => kind !== "html");
-  const reportAvailable = Boolean(options.agentSessionKey?.trim());
+  const reportAvailable = !options.userFileScope && Boolean(options.agentSessionKey?.trim());
   const reportGuidance = reportAvailable
     ? " Use report with pin=true only for an explicitly requested dashboard report. For comparisons, charts, and other results in chat, use HTML in widget_code. Reports are dashboard-only; omit widget_code, kind, capabilities, and presentation.target."
     : "";
@@ -340,14 +344,23 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
   return {
     label: "Show Widget",
     name: "show_widget",
-    description: `Visual helps? Make widget. Do not wait for ask. ${usageGuidance} Publish follow-up HTML versions inline in the new chat turn; past documents remain unchanged. Update pinned HTML by name only for an explicitly saved dashboard. Use for code architecture, execution traces, performance comparisons, interactive explanations, UI mockups, and dashboards. Text clearer? Skip. Load the visualize skill when available for composition and dashboard authoring. The source kind defaults to html${advertisedRegisteredKinds.length ? ` and registered kinds are ${advertisedRegisteredKinds.join(", ")}` : ""}. Send markup directly in widget_code. Scripts, stylesheets, and fonts may load from ${WIDGET_CDN_ORIGINS.join(", ")}; pin library versions. Use direct HTTPS URLs for audio/video, or data/blob URLs for embedded/generated clips. Default videos to controls playsinline preload="auto" so a first frame can appear before playback; do not autoplay. Images and video posters must be data URLs; media playback does not grant fetch access. Inline widgets cannot fetch APIs. Pinned data access needs declared and granted capabilities.netOrigins or capabilities.tools; inline previews never inherit those grants. Keep filters and controls local; user-clicked openclaw.prompt.send(text) requests an agent follow-up in the Control UI. Data, action, state, and cron host APIs are dashboard-only. openclaw.host.controlUiBaseUrl is the Control UI origin plus base path after dashboard initialization, otherwise null; read it at click time. Dashboard HTML links support HTTP(S) destinations only; open them with target="_blank" and rel="noopener noreferrer". Put local workspace file links in chat Markdown, not widget HTML; file:// links cannot open the Files panel. \`title\` is host metadata. Start directly with content; do not repeat the title or recreate dashboard chrome. Use host theme variables such as --text, --muted, --card, --border, --accent, --font-body, and --font-mono. Inline script syntax errors return line and column; fix and retry. Check library loading and rendered interactions; hosting success alone is not visual proof.${reportGuidance}${presenterPrompt}`,
-    parameters: createShowWidgetToolSchema(
-      kinds,
-      explicitPresenters,
-      describeDashboardCapabilities(currentPluginRegistry()),
-      pinnedOnly,
-      reportAvailable,
-    ),
+    description: options.userFileScope
+      ? "Show a private inline HTML widget in this chat. Send a title and markup in widget_code. Keep data and controls local. Scripts and inline styles work, but external loads, navigation, RPC, files, credentials, dashboards, and host actions are unavailable. A user-clicked openclaw.prompt.send(text) only fills the composer for review. Use data images and host theme variables. Follow-up widgets create new retained versions. Use final=true only when this completes the answer. Inline script errors must be fixed before retry."
+      : `Visual helps? Make widget. Do not wait for ask. ${usageGuidance} Publish follow-up HTML versions inline in the new chat turn; past documents remain unchanged. Update pinned HTML by name only for an explicitly saved dashboard. Use for code architecture, execution traces, performance comparisons, interactive explanations, UI mockups, and dashboards. Text clearer? Skip. Load the visualize skill when available for composition and dashboard authoring. The source kind defaults to html${advertisedRegisteredKinds.length ? ` and registered kinds are ${advertisedRegisteredKinds.join(", ")}` : ""}. Send markup directly in widget_code. Scripts, stylesheets, and fonts may load from ${WIDGET_CDN_ORIGINS.join(", ")}; pin library versions. Use direct HTTPS URLs for audio/video, or data/blob URLs for embedded/generated clips. Default videos to controls playsinline preload="auto" so a first frame can appear before playback; do not autoplay. Images and video posters must be data URLs; media playback does not grant fetch access. Inline widgets cannot fetch APIs. Pinned data access needs declared and granted capabilities.netOrigins or capabilities.tools; inline previews never inherit those grants. Keep filters and controls local; user-clicked openclaw.prompt.send(text) requests an agent follow-up in the Control UI. Data, action, state, and cron host APIs are dashboard-only. openclaw.host.controlUiBaseUrl is the Control UI origin plus base path after dashboard initialization, otherwise null; read it at click time. Dashboard HTML links support HTTP(S) destinations only; open them with target="_blank" and rel="noopener noreferrer". Put local workspace file links in chat Markdown, not widget HTML; file:// links cannot open the Files panel. \`title\` is host metadata. Start directly with content; do not repeat the title or recreate dashboard chrome. Use host theme variables such as --text, --muted, --card, --border, --accent, --font-body, and --font-mono. Inline script syntax errors return line and column; fix and retry. Check library loading and rendered interactions; hosting success alone is not visual proof.${reportGuidance}${presenterPrompt}`,
+    parameters: options.userFileScope
+      ? Type.Pick(createShowWidgetToolSchema(["html"], [], "", false, false), [
+          "title",
+          "widget_code",
+          "final",
+          "closing_text",
+        ])
+      : createShowWidgetToolSchema(
+          kinds,
+          explicitPresenters,
+          describeDashboardCapabilities(currentPluginRegistry()),
+          pinnedOnly,
+          reportAvailable,
+        ),
     ...(currentChannelPresenter || pinnedOnly || sourcePublication
       ? {}
       : { requiredClientCaps: SHOW_WIDGET_REQUIRED_CLIENT_CAPS }),
@@ -355,12 +368,21 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
     canDeliverSourceReply: true,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
+      options.userFileScope?.files.assertCurrent();
+      if (
+        options.userFileScope &&
+        (params.pin === true ||
+          (params.kind !== undefined && params.kind !== "html") ||
+          params.report != null ||
+          params.capabilities != null ||
+          (asOptionalRecord(params.presentation)?.target !== undefined &&
+            asOptionalRecord(params.presentation)?.target !== "assistant_message"))
+      ) {
+        throw new WidgetHtmlInputError("This chat supports private inline HTML widgets only.");
+      }
       const requestedKind = readToolStringParam(params, "kind");
       const kind = requestedKind ?? "html";
-      const rawWidgetCode =
-        readToolStringParam(params, "widget_code", {
-          trim: false,
-        }) ?? "";
+      const rawWidgetCode = readToolStringParam(params, "widget_code", { trim: false }) ?? "";
       const rawReport = asOptionalRecord(params.report);
       const closingText = readToolStringParam(params, "closing_text");
       if (closingText && params.final !== true) {
@@ -604,7 +626,13 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
           },
           {
             stateDir: options.stateDir,
-            maxDocumentsPerScope: WIDGET_MAX_PER_SCOPE,
+            storage: options.userFileScope
+              ? {
+                  files: options.userFileScope.files,
+                  directory: `${options.userFileScope.directory}/widgets`,
+                }
+              : undefined,
+            maxDocumentsPerScope: options.userFileScope ? undefined : WIDGET_MAX_PER_SCOPE,
           },
         ));
 
@@ -686,10 +714,12 @@ export function createShowWidgetTool(options: ShowWidgetToolOptions = {}): AnyAg
         },
         view: {
           id: hosted.id,
-          url: hosted.entryUrl,
+          ...(options.userFileScope ? {} : { url: hosted.entryUrl }),
           ...(pinnedWidgetName ? { boardWidgetName: pinnedWidgetName } : {}),
         },
-        text: `Widget hosted at ${hosted.entryUrl}${pinnedText ? `; ${pinnedText}` : ""}${presentationText}`,
+        text: options.userFileScope
+          ? "Widget saved. It will appear in this chat."
+          : `Widget hosted at ${hosted.entryUrl}${pinnedText ? `; ${pinnedText}` : ""}${presentationText}`,
       });
       // A failed requested destination falls back inline; the model must still report that.
       return presentationAttempt && !presentationAttempt.ok

@@ -3,6 +3,8 @@ import fs, { link, mkdir, readFile, rename, symlink, writeFile } from "node:fs/p
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { createAuthorizedUserFiles } from "../infra/authorized-user-files.js";
+import { root } from "../infra/fs-safe.js";
 import {
   createCanvasDocument,
   readCanvasDocumentHtmlSource,
@@ -25,6 +27,30 @@ function createHtmlDocument(
 }
 
 describe("canvas documents", () => {
+  it("owns protected widgets through the same user file boundary without a shared-root fallback", async () => {
+    const stateDir = tempDirs.make("protected-canvas-");
+    const usersRoot = await root(stateDir);
+    const admit = (profileId: string) =>
+      createAuthorizedUserFiles({
+        usersRoot,
+        profileId,
+        assertCurrent() {},
+        maxBytes: 4 * 1024 * 1024,
+      });
+    const alice = { files: await admit("alice"), directory: "widgets/chat-one" };
+    const bob = { files: await admit("bob"), directory: "widgets/chat-one" };
+    const document = await createCanvasDocument({ html: "<p>retained</p>" }, { storage: alice });
+    expect(document.entryUrl).toBe("");
+    await expect(readCanvasDocumentHtmlSource(document.id, { storage: alice })).resolves.toEqual({
+      html: "<p>retained</p>",
+      cspSandbox: "scripts",
+    });
+    await expect(readCanvasDocumentHtmlSource(document.id, { storage: bob })).rejects.toThrow();
+    await expect(readCanvasDocumentHtmlSource(document.id, { stateDir })).rejects.toThrow();
+    await alice.files.remove(`${alice.directory}/${document.id}`);
+    await expect(readCanvasDocumentHtmlSource(document.id, { storage: alice })).rejects.toThrow();
+  });
+
   it.skipIf(process.platform === "win32").each(["document", "manifest.json", "index.html"])(
     "rejects a symlinked %s when reading widget HTML",
     async (target) => {

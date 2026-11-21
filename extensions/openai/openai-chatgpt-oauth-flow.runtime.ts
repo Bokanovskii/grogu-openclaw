@@ -232,6 +232,9 @@ export async function loginOpenAICodex(options: {
   }
 }
 
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
-  return resolveOpenAICredentials(await refreshOpenAIAccessToken(refreshToken));
+export async function refreshOpenAICodexToken(
+  refreshToken: string,
+  options?: Parameters<typeof refreshOpenAIAccessToken>[1],
+): Promise<OAuthCredentials> {
+  return resolveOpenAICredentials(await refreshOpenAIAccessToken(refreshToken, options));
 }

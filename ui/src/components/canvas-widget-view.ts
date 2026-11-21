@@ -10,7 +10,7 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { html, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import { keyed } from "lit/directives/keyed.js";
-import { sandboxHostFramePermissions } from "../../../src/shared/sandbox-host-transport.ts";
+import { sandboxHostFramePermissions } from "../../../packages/widget-host/src/transport.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
 import { hasOperatorReadAccess } from "../app/operator-access.ts";
 import { t } from "../i18n/index.ts";

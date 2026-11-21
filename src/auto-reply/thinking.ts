@@ -209,7 +209,10 @@ function appendCatalogAdvancedThinkingLevels(
 }
 
 /** Resolve only provider-owned effort choices, before adding harness modes. */
-function resolveModelThinkingProfile(params: ThinkingProfileParams): ResolvedThinkingProfile {
+function resolveModelThinkingProfile(params: ThinkingProfileParams): {
+  profile: ResolvedThinkingProfile;
+  hasProviderProfile: boolean;
+} {
   const providerRaw = normalizeOptionalString(params.provider);
   const candidate = resolveThinkingCatalogEntry(params);
   // Prepared catalogs retain the logical model identity and name its runtime policy owner.
@@ -217,7 +220,7 @@ function resolveModelThinkingProfile(params: ThinkingProfileParams): ResolvedThi
     ? normalizeProviderId(normalizeOptionalString(candidate?.thinkingPolicyProvider) ?? providerRaw)
     : "";
   if (!provider) {
-    return buildBaseThinkingProfile();
+    return { profile: buildBaseThinkingProfile(), hasProviderProfile: false };
   }
   const context = {
     provider,
@@ -268,23 +271,32 @@ function resolveModelThinkingProfile(params: ThinkingProfileParams): ResolvedThi
     pluginProfile &&
     (context.reasoning !== false || pluginProfile.preserveWhenCatalogReasoningFalse === true)
   ) {
-    return normalizeThinkingProfile(pluginProfile, context.thinkingLevelMap, mappedLevels);
+    return {
+      profile: normalizeThinkingProfile(pluginProfile, context.thinkingLevelMap, mappedLevels),
+      hasProviderProfile: true,
+    };
   }
   if (context.reasoning === false) {
     return {
-      levels: [{ id: "off", label: "off", rank: THINKING_LEVEL_RANKS.off }],
-      defaultLevel: "off",
+      profile: {
+        levels: [{ id: "off", label: "off", rank: THINKING_LEVEL_RANKS.off }],
+        defaultLevel: "off",
+      },
+      hasProviderProfile: false,
     };
   }
 
   const profile = buildBaseThinkingProfile();
   appendCatalogAdvancedThinkingLevels(profile, context.compat, context.thinkingLevelMap);
-  return normalizeThinkingProfile(profile, context.thinkingLevelMap, mappedLevels);
+  return {
+    profile: normalizeThinkingProfile(profile, context.thinkingLevelMap, mappedLevels),
+    hasProviderProfile: false,
+  };
 }
 
 /** Ultra is a harness mode, independent of a model's native reasoning controls. */
 export function resolveThinkingProfile(params: ThinkingProfileParams): ResolvedThinkingProfile {
-  const profile = resolveModelThinkingProfile(params);
+  const { profile } = resolveModelThinkingProfile(params);
   const runtime = normalizeOptionalLowercaseString(params.agentRuntime);
   const hostUltra = runtime === "openclaw" || runtime === "auto" || runtime === "claude-cli";
   // Codex owns Ultra inference and cannot omit effort for an empty native ladder.
@@ -319,7 +331,7 @@ export function resolveProviderThinkingLevel(
         ? compat
         : undefined,
   }));
-  const profile = resolveModelThinkingProfile({ ...params, catalog });
+  const { profile } = resolveModelThinkingProfile({ ...params, catalog });
   return profile.levels
     .filter(
       (entry): entry is RankedThinkingLevelOption & { id: Exclude<ThinkLevel, "ultra"> } =>
@@ -348,6 +360,59 @@ export function listThinkingLevelOptions(
 ): ThinkingLevelOption[] {
   const profile = resolveThinkingProfile({ provider, model, catalog, agentRuntime });
   return profile.levels.map(({ id, label }) => ({ id, label }));
+}
+
+/** Group accepted model choices that map to the same provider effort. */
+export function resolveNativeThinkingChoices(
+  params: ThinkingProfileParams & {
+    levels: readonly ThinkLevel[];
+    mapLevel: (level: Exclude<ThinkLevel, "ultra">) => Exclude<ThinkLevel, "ultra" | "adaptive">;
+    mapEffort?: (level: Exclude<ThinkLevel, "ultra" | "adaptive">) => string;
+  },
+): Array<{ level: ThinkLevel; aliases: ThinkLevel[] }> | undefined {
+  const candidate = resolveThinkingCatalogEntry(params);
+  const reasoning =
+    params.configuredReasoning ?? candidate?.configuredReasoning ?? candidate?.reasoning;
+  if (reasoning === undefined) {
+    return undefined;
+  }
+  if (!reasoning) {
+    return [];
+  }
+  const efforts = candidate?.compat?.supportedReasoningEfforts;
+  const effortMap = candidate?.compat?.reasoningEffortMap;
+  const { profile, hasProviderProfile } = resolveModelThinkingProfile(params);
+  if (!efforts && !hasProviderProfile) {
+    return undefined;
+  }
+  const groups = new Map<string, { level: ThinkLevel; aliases: ThinkLevel[] }>();
+  for (const { id } of profile.levels) {
+    if (id === "off" || id === "ultra" || !params.levels.includes(id)) {
+      continue;
+    }
+    const executionLevel = params.mapLevel(id);
+    const mapped = candidate?.thinkingLevelMap?.[executionLevel];
+    if (mapped === null) {
+      continue;
+    }
+    const compatMapped = Object.entries(effortMap ?? {}).find(
+      ([key]) => key.toLowerCase() === executionLevel,
+    )?.[1];
+    const effort = params.mapEffort?.(executionLevel) ?? compatMapped ?? mapped ?? executionLevel;
+    if (efforts && !efforts.includes(effort)) {
+      continue;
+    }
+    const group = groups.get(effort);
+    if (!group) {
+      groups.set(effort, { level: id, aliases: [] });
+    } else if (id === effort && group.level !== effort) {
+      group.aliases.unshift(group.level);
+      group.level = id;
+    } else {
+      group.aliases.push(id);
+    }
+  }
+  return [...groups.values()];
 }
 
 /** List display labels for thinking levels supported by provider/model. */

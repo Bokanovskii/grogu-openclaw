@@ -13,6 +13,7 @@ import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
+import { withThinking } from "./models.js";
 import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
 import { protectedOpenClawConfig } from "./settings.js";
@@ -554,6 +555,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   },
                 },
                 {
+                  id: "no-reasoning",
+                  name: "No reasoning",
+                  object: "model",
+                  model_picker_enabled: true,
+                  capabilities: { type: "chat", supports: { reasoning_effort: [] } },
+                },
+                {
                   id: "hidden",
                   object: "model",
                   model_picker_enabled: false,
@@ -756,10 +764,21 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       workspaceDir,
       agentDir,
       models: [
-        { provider: "sparky", id: "synthetic", label: "Synthetic" },
+        withThinking(
+          { provider: "sparky", id: "synthetic", label: "Synthetic" },
+          { provider: "sparky", id: "synthetic", reasoning: true },
+        ),
         { provider: "github-copilot", id: "gpt-5.3-codex", label: "Copilot" },
         { provider: "openai", id: "gpt-5.6-luna", label: "OpenAI" },
-        { provider: "anthropic", id: "claude-sonnet-4-6", label: "Anthropic" },
+        withThinking(
+          { provider: "anthropic", id: "claude-sonnet-4-6", label: "Anthropic" },
+          {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+            api: "anthropic-messages",
+            reasoning: true,
+          },
+        ),
       ],
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
@@ -783,7 +802,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     return { call, shutdown: () => closeProtectedServer(server, app, stateDir) };
   };
   const { call, shutdown } = await open();
-  const { user } = await (await call("/me")).json();
+  const { user, models: fixedModels } = await (await call("/me")).json();
+  const sparkyModel = fixedModels.find(
+    (model: { provider: string }) => model.provider === "sparky",
+  );
+  assert.equal(sparkyModel.thinking.default, "ultra");
+  assert.deepEqual(sparkyModel.thinking.orchestrationLevels, ["ultra"]);
+  assert.equal(sparkyModel.thinking.nativeChoices, undefined);
+  const claudeModel = fixedModels.find(
+    (model: { provider: string }) => model.provider === "anthropic",
+  );
+  assert.equal(claudeModel.thinking.default, "adaptive");
+  assert.deepEqual(
+    claudeModel.thinking.nativeChoices.find((choice: { level: string }) => choice.level === "low")
+      .aliases,
+    ["minimal"],
+  );
+  assert.deepEqual(
+    claudeModel.thinking.nativeChoices.find((choice: { level: string }) => choice.level === "high")
+      .aliases,
+    ["adaptive"],
+  );
   const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
   const response = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
@@ -907,11 +946,20 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     const { models } = await listing.json();
     assert.deepEqual(
       models.map((model: { id: string }) => model.id),
-      ["gpt-5.3-codex", "gpt-5.4"],
+      ["gpt-5.3-codex", "gpt-5.4", "no-reasoning"],
     );
     assert.equal(models[1].contextWindow, 64000);
     assert.ok(models[1].thinking.levels.includes("high"));
     assert.ok(!models[1].thinking.levels.includes("max"));
+    assert.deepEqual(models[1].thinking.nativeChoices, [
+      { level: "low", aliases: ["minimal"] },
+      { level: "high", aliases: [] },
+    ]);
+    assert.deepEqual(models[1].thinking.orchestrationLevels, ["ultra"]);
+    assert.equal(models[1].thinking.default, "off");
+    assert.deepEqual(models[2].thinking.nativeChoices, []);
+    assert.deepEqual(models[2].thinking.orchestrationLevels, ["ultra"]);
+    assert.equal(models[2].thinking.default, "off");
   });
   await t.test("rejects unavailable Copilot thinking levels", async () => {
     const rejected = await copilotTurn("max");

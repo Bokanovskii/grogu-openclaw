@@ -12,6 +12,11 @@ import {
 import { resolveOpenAIModelReasoningEfforts } from "./providers/openai-reasoning-effort.js";
 import type { Api, Model, ModelThinkingLevel, Usage } from "./types.js";
 
+export type ThinkingModel<TApi extends Api = Api> = Pick<
+  Model<TApi>,
+  "id" | "provider" | "api" | "reasoning" | "thinkingLevelMap" | "params" | "compat"
+>;
+
 /** Calculates and stores model cost fields from token usage and per-million pricing. */
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
   Object.assign(usage.cost, calculateUsageCost(usage, model.cost));
@@ -27,7 +32,7 @@ export function applyProviderReportedUsageCost(usage: Usage, reportedCost: unkno
   usage.cost.totalOrigin = "provider-billed";
 }
 
-function resolveThinkingLevelMap<TApi extends Api>(model: Model<TApi>) {
+function resolveThinkingLevelMap<TApi extends Api>(model: ThinkingModel<TApi>) {
   return model.api === "anthropic-messages"
     ? (resolveClaudeNativeThinkingLevelMap(model) ?? model.thinkingLevelMap)
     : model.thinkingLevelMap;
@@ -35,7 +40,7 @@ function resolveThinkingLevelMap<TApi extends Api>(model: Model<TApi>) {
 
 /** Returns thinking levels exposed by a reasoning-capable model. */
 export function getSupportedThinkingLevels<TApi extends Api>(
-  model: Model<TApi>,
+  model: ThinkingModel<TApi>,
 ): ModelThinkingLevel[] {
   const mandatoryAdaptiveContract =
     model.api === "anthropic-messages" && requiresClaudeMandatoryAdaptiveThinking(model);
@@ -67,7 +72,7 @@ export function getSupportedThinkingLevels<TApi extends Api>(
 
 /** Clamps a requested thinking level to the closest supported level for a model. */
 export function clampThinkingLevel<TApi extends Api>(
-  model: Model<TApi>,
+  model: ThinkingModel<TApi>,
   level: ModelThinkingLevel,
 ): ModelThinkingLevel {
   const availableLevels = getSupportedThinkingLevels(model);

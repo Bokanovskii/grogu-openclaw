@@ -207,18 +207,21 @@ export async function waitForAgentRun(params: {
   timeoutMs: number;
   callGateway?: GatewayCaller;
   signal?: AbortSignal;
+  observe?: (timeoutMs: number) => Promise<RawAgentWaitResponse>;
 }): Promise<AgentWaitResult> {
   const timeoutMs = resolveRunWaitTimeoutMs(params.timeoutMs);
   try {
-    const wait = await (params.callGateway ?? bindAgentToolGatewayRequest({ hostedOnly: true }))({
-      method: "agent.wait",
-      params: {
-        runId: params.runId,
-        timeoutMs,
-      },
-      timeoutMs: addTimerTimeoutGraceMs(timeoutMs, 2_000),
-      ...(params.signal ? { signal: params.signal } : {}),
-    });
+    const wait = params.observe
+      ? await params.observe(timeoutMs)
+      : await (params.callGateway ?? bindAgentToolGatewayRequest({ hostedOnly: true }))({
+          method: "agent.wait",
+          params: {
+            runId: params.runId,
+            timeoutMs,
+          },
+          timeoutMs: addTimerTimeoutGraceMs(timeoutMs, 2_000),
+          ...(params.signal ? { signal: params.signal } : {}),
+        });
     const status = wait?.status;
     return normalizeAgentWaitResult(
       status === "timeout" || status === "pending" || status === "error" ? status : "ok",

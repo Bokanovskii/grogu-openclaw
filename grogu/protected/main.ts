@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { protectedResearchAgent } from "./agents.js";
 import {
   parseRuntimeSettings,
   protectedOpenClawConfig,
@@ -20,6 +21,10 @@ const copilot: ProtectedModel = {
 };
 const openai: ProtectedModel = { provider: "openai", id: "gpt-5.6-luna", label: "ChatGPT" };
 
+let releaseStateOwner = () => {};
+
+class ProtectedStartupError extends Error {}
+
 async function main() {
   const configPath = process.argv[2];
   if (!configPath || !path.isAbsolute(configPath)) {
@@ -36,6 +41,12 @@ async function main() {
   ) {
     throw new Error("Protected runtime requires isolated process state and an unprivileged user");
   }
+  const { acquireProtectedStateOwner } = await import("./state-owner.js");
+  const stateOwner = await acquireProtectedStateOwner(stateDir);
+  if (!stateOwner) {
+    throw new ProtectedStartupError("Another process owns Family state. Stop it before starting.");
+  }
+  releaseStateOwner = () => stateOwner.release();
   const { root } = await import("../../src/infra/fs-safe.js");
   const { createProtectedStaticClient } = await import("./static-client.js");
   const bundleDir = fileURLToPath(new URL("../../protected-client/", import.meta.url));
@@ -49,6 +60,16 @@ async function main() {
   const workspaceDir = path.join(stateRoot.rootReal, "workspace");
   const agentDir = path.join(stateRoot.rootReal, "agents", "protected", "agent");
   const config = protectedOpenClawConfig(stateRoot.rootReal);
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  await publishConfiguredModelRuntimeSnapshots({
+    cfg: config,
+    isCurrent: () => {
+      stateOwner.assertCurrent();
+      return true;
+    },
+    workspaceDir,
+  });
   const { createProviderRelay } = await import("./provider-relay.js");
   const { resolveSecretRefString } = await import("../../src/secrets/resolve.js");
   const { createCanonicalProtectedTurns } = await import("./turns.js");
@@ -63,6 +84,7 @@ async function main() {
     maxChatsPerUser: 100,
     maxFileBytes: 2 * 1024 * 1024,
     storageLimits: settings.storageLimits,
+    agentExtensions: [protectedResearchAgent],
     verifyIdentity: createCloudflareAccessVerifier({
       issuer: accessIssuer,
       audience: accessAudience,
@@ -78,6 +100,12 @@ async function main() {
       resolveSparkyKey: () => resolveSecretRefString(sparkySecret, { config }),
     }),
   });
+  const recovered = await app.recoverTransient(stateOwner.assertCurrent);
+  if (recovered.skipped) {
+    throw new ProtectedStartupError(
+      "Family child ownership is ambiguous. Inspect the isolated state before starting.",
+    );
+  }
   const server = createProtectedServer(origin, app.fetch, staticClient);
   server.on("error", () => {
     process.stderr.write("Protected listener failed.\n");
@@ -89,7 +117,10 @@ async function main() {
       process.exit(1);
     }, 8_000);
     void closeProtectedServer(server, app, stateDir)
-      .then(() => process.exit(0))
+      .then(() => {
+        releaseStateOwner();
+        process.exit(0);
+      })
       .catch(() => {
         process.stderr.write("Protected listener could not settle cleanly.\n");
         process.exit(1);
@@ -99,9 +130,10 @@ async function main() {
   server.listen(port, "127.0.0.1");
 }
 
-void main().catch(() => {
+void main().catch((error: unknown) => {
+  releaseStateOwner();
   process.stderr.write(
-    "Protected runtime initialization failed. Check isolated runtime configuration.\n",
+    `${error instanceof ProtectedStartupError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
   );
   process.exitCode = 1;
 });

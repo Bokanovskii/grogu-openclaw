@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  isProtectedAgentSelection,
   isProtectedCreateChat,
   isProtectedRenew,
   isProtectedSteer,
   isProtectedTurnRequest,
+  type ProtectedAgentCatalogDto,
+  type ProtectedAgentSelectionResponse,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -13,15 +16,21 @@ import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
+import { prepareCurrentUserProfileAliases } from "../../src/state/user-profile-reads.js";
+import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
 import { createStorageAdmission, type StorageLimits } from "./capacity.js";
-import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
+import {
+  chatArtifactsDirectory,
+  chatWidgetsDirectory,
+  removeChatFilesDirectory,
+} from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
-import type { ProtectedTurns, TurnInput } from "./turns.js";
+import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
 
 const base = "/api/protected/v1";
 const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -98,6 +107,7 @@ export function createProtectedHttp(options: {
   verifyIdentity: ProtectedIdentityVerifier;
   usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
   turns: ProtectedTurns;
+  agentExtensions?: readonly ProtectedAgentExtension[];
   providerRelay?: ReturnType<typeof createProviderRelay>;
   maxChatsPerUser: number;
   maxFileBytes: number;
@@ -106,7 +116,8 @@ export function createProtectedHttp(options: {
   if (new URL(options.origin).origin !== options.origin) {
     throw new TypeError("Configure the exact protected client origin.");
   }
-  const chats = createProtectedChats(options);
+  const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const chats = createProtectedChats({ ...options, agentCatalog });
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...options, chats, limits: options.storageLimits })
     : undefined;
@@ -277,6 +288,14 @@ export function createProtectedHttp(options: {
           },
         });
       }
+      if (pathname === "/agents" && method === "GET") {
+        await revalidate();
+        const catalog: ProtectedAgentCatalogDto = {
+          defaultAgentId: agentCatalog.defaultAgentId,
+          agents: agentCatalog.list(),
+        };
+        return json(catalog);
+      }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);
         options.providerRelay?.invalidate({ sessionHash: identity.sessionId });
@@ -376,11 +395,16 @@ export function createProtectedHttp(options: {
         creating.add(profile.id);
         let storage;
         try {
+          const selectedAgentId = data.selectedAgentId ?? agentCatalog.defaultAgentId;
+          if (!agentCatalog.get(selectedAgentId)) {
+            throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
+          }
           await revalidate();
           storage = await admitStorage?.(profile.id, assertCurrent, "create");
           const chat = await chats.create(
             authority,
             data.title === undefined ? undefined : text(data.title, 160),
+            selectedAgentId,
           );
           await revalidate();
           return json({ chat });
@@ -474,19 +498,42 @@ export function createProtectedHttp(options: {
         mutations.add(id);
         try {
           await chats.delete(authority, id, version, async () => {
-            await files(async (owned) => {
-              try {
-                await owned.remove(chatFilesDirectory(id));
-              } catch (error) {
-                if (!(error instanceof FsSafeError && error.code === "not-found")) {
-                  throw error;
-                }
-              }
-            });
+            await files((owned) => removeChatFilesDirectory(owned, id));
             await revalidate();
           });
           await revalidate();
           return noContent();
+        } finally {
+          mutations.delete(id);
+        }
+      }
+      if (rest === "agent" && method === "PATCH") {
+        const data = await body(request);
+        if (!isProtectedAgentSelection(data)) {
+          return invalid();
+        }
+        if (!agentCatalog.get(data.selectedAgentId)) {
+          throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
+        }
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(
+            428,
+            "version_required",
+            "Reload the chat before changing its agent.",
+          );
+        }
+        if (runs.has(id) || mutations.has(id)) {
+          throw new ProtectedError(409, "busy", "Stop the current work before changing its agent.");
+        }
+        mutations.add(id);
+        try {
+          await revalidate();
+          await chats.selectAgent(authority, id, version, data.selectedAgentId);
+          const chat = await readChat(id);
+          await revalidate();
+          const result: ProtectedAgentSelectionResponse = { chat };
+          return json(result);
         } finally {
           mutations.delete(id);
         }
@@ -540,6 +587,7 @@ export function createProtectedHttp(options: {
           provider: model.provider,
           model: model.id,
           text: text(data.text, 16_000),
+          ...(data.mentions ? { mentions: data.mentions } : {}),
           ...(isRecord(credential)
             ? {
                 credential: {
@@ -553,23 +601,91 @@ export function createProtectedHttp(options: {
         if (runs.has(id) || mutations.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
         }
-        // Storage charges continue after the client disconnects, so they check only the grant.
-        const storage = await admitStorage?.(profile.id, assertGrant, "turn");
-        if (shutdown.signal.aborted || runs.has(id) || mutations.has(id)) {
-          storage?.release();
-          throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
-        }
-        if (request.signal.aborted) {
-          storage?.release();
-          request.signal.throwIfAborted();
-        }
-        const run: Run = {
-          id: randomUUID(),
-          ...session,
-          controller: new AbortController(),
-          steering: new Map(),
-        };
-        runs.set(id, run);
+        // Reserve the chat while its persisted selection and turn storage are admitted.
+        mutations.add(id);
+        const admission = await (async () => {
+          let storage: Awaited<ReturnType<NonNullable<typeof admitStorage>>> | undefined;
+          try {
+            const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+              env: chats.env,
+            });
+            if (profileAuthority.profileId !== profile.id) {
+              unauthorized();
+            }
+            profileAuthority.assertCurrent();
+            // Storage charges continue after the client disconnects, so they check only the grant.
+            storage = await admitStorage?.(profile.id, assertGrant, "turn");
+            if (shutdown.signal.aborted || runs.has(id)) {
+              throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+            }
+            if (request.signal.aborted) {
+              request.signal.throwIfAborted();
+            }
+            const currentEntry = await chats.readEntry(authority, id);
+            const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.defaultAgentId;
+            const selectedAgent = agentCatalog.get(selectedAgentId);
+            if (!selectedAgent) {
+              throw new ProtectedError(
+                422,
+                "agent_unavailable",
+                "This chat's agent is unavailable.",
+              );
+            }
+            const mentionedAgents = (data.mentions ?? []).map((mention) => {
+              const agent = agentCatalog.get(mention.agentId);
+              if (!agent || agent.id === selectedAgentId) {
+                throw new ProtectedError(
+                  422,
+                  "agent_unavailable",
+                  "One or more mentioned agents are unavailable.",
+                );
+              }
+              return agent;
+            });
+            if (!currentEntry.sessionId) {
+              throw new ProtectedError(
+                409,
+                "session_unavailable",
+                "This chat cannot start a request-scoped agent.",
+              );
+            }
+            await revalidate();
+            profileAuthority.assertCurrent();
+            if (shutdown.signal.aborted || runs.has(id)) {
+              throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+            }
+            const run: Run = {
+              id: randomUUID(),
+              ...session,
+              controller: new AbortController(),
+              steering: new Map(),
+            };
+            runs.set(id, run);
+            return {
+              run,
+              selectedAgent,
+              mentionedAgents,
+              storage,
+              profileAuthority,
+              parentLifecycleRevision: currentEntry.lifecycleRevision ?? null,
+              parentSessionId: currentEntry.sessionId,
+            };
+          } catch (error) {
+            storage?.release();
+            throw error;
+          } finally {
+            mutations.delete(id);
+          }
+        })();
+        const {
+          run,
+          selectedAgent,
+          mentionedAgents,
+          storage,
+          profileAuthority,
+          parentLifecycleRevision,
+          parentSessionId,
+        } = admission;
         // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
         // detaches from the stream, and the reply still finishes and saves.
         const signal = AbortSignal.any([
@@ -579,6 +695,7 @@ export function createProtectedHttp(options: {
         ]);
         const assertRun = () => {
           assertGrant();
+          profileAuthority.assertCurrent();
           signal.throwIfAborted();
         };
         const checkRun = async () => {
@@ -587,6 +704,58 @@ export function createProtectedHttp(options: {
           assertRun();
         };
         const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
+        const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
+        const profileSessionPrefix = chats.scope(runAuthority, "").sessionKey;
+        const ownedChildSessionKeys = new Set<string>();
+        const saveChildResult: ProtectedTurn["saveChildResult"] = async (result) => {
+          await checkRun();
+          const save = () =>
+            chats.saveChildResult(runAuthority, id, {
+              ...result,
+              parentLifecycleRevision,
+            });
+          await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
+          await checkRun();
+        };
+        const sessionAccess = {
+          creatorProfileId: profile.id,
+          assertCurrent: assertRun,
+          revalidate: checkRun,
+          signal,
+          resolve: async ({
+            requesterSessionKey,
+            reference,
+          }: {
+            requesterSessionKey: string;
+            reference: string;
+          }) => {
+            await checkRun();
+            if (
+              requesterSessionKey !== parentSessionKey &&
+              !ownedChildSessionKeys.has(requesterSessionKey)
+            ) {
+              return undefined;
+            }
+            const targetId = reference.startsWith(profileSessionPrefix)
+              ? reference.slice(profileSessionPrefix.length)
+              : reference;
+            try {
+              const entry = await chats.readEntry(runAuthority, targetId);
+              await checkRun();
+              return {
+                sessionKey: chats.scope(runAuthority, targetId).sessionKey,
+                sessionId: entry.sessionId,
+                agentId: chats.agentId,
+              };
+            } catch (error) {
+              if (error instanceof ProtectedError && error.status === 404) {
+                await checkRun();
+                return undefined;
+              }
+              throw error;
+            }
+          },
+        };
         let checking = false;
         const liveCheck = setInterval(() => {
           if (!checking) {
@@ -629,12 +798,41 @@ export function createProtectedHttp(options: {
                         id,
                         runId: run.id,
                         profileId: profile.id,
-                        target: chats.scope(runAuthority, id),
+                        target: {
+                          ...chats.scope(runAuthority, id),
+                          nativeSessionId: parentSessionId,
+                          lifecycleRevision: parentLifecycleRevision,
+                        },
                         input,
+                        mentionedAgents,
+                        agent: selectedAgent,
+                        sessionAccess,
                         files: storage?.files(owned) ?? owned,
                         signal,
                         assertCurrent: assertRun,
                         revalidate: checkRun,
+                        saveChildResult,
+                        cleanupChildFiles: (sessionId) =>
+                          chats.removeTransientFiles(
+                            {
+                              profileId: profile.id,
+                              assertCurrent: () => profileAuthority.assertCurrent(),
+                            },
+                            sessionId,
+                          ),
+                        chargeChildCreation: () => storage?.chargeChatCreation(),
+                        registerChildSession: (sessionKey) => {
+                          ownedChildSessionKeys.add(sessionKey);
+                          return () => ownedChildSessionKeys.delete(sessionKey);
+                        },
+                        childResult: (result) => {
+                          send({
+                            type: "child-result",
+                            runId: result.runId,
+                            agentId: result.agentId,
+                            text: result.text,
+                          });
+                        },
                         delta: async (value) => {
                           await checkRun();
                           send({ type: "delta", text: value });
@@ -792,6 +990,9 @@ export function createProtectedHttp(options: {
   return {
     fetch(this: void, request: Request) {
       return track(handle(request));
+    },
+    recoverTransient(assertCurrent: () => void) {
+      return chats.recoverTransient(assertCurrent);
     },
     async shutdown() {
       shutdown.abort();

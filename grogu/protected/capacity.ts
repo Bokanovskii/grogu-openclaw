@@ -96,7 +96,7 @@ export function createStorageAdmission(
           const bytes =
             chatBytes +
             (await options.chats.transcriptBytes(entry.id, entry.sessionKey)) +
-            (await fileBytes(files, chatFilesDirectory(entry.id)));
+            (entry.chargeFiles ? await fileBytes(files, chatFilesDirectory(entry.id)) : 0);
           global += bytes;
           if (entry.profileId === profileId) {
             personal += bytes;
@@ -133,6 +133,9 @@ export function createStorageAdmission(
       return {
         release,
         charge,
+        chargeChatCreation() {
+          charge(chatBytes);
+        },
         assertResult() {
           if (failure) {
             throw failure;

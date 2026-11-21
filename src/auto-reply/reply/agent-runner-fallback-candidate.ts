@@ -4,8 +4,15 @@ import { resolveCliBackendConfig } from "../../agents/cli-backends.js";
 import { resolveRunEntryCliRuntime } from "../../agents/embedded-agent-runner/run-entry-runtime.js";
 import { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
+import {
+  getRequestScopedChildExecution,
+  resolveRequestScopedChild,
+  withRequestScopedChildExecution,
+} from "../../agents/request-scoped-child-execution.js";
 import { resolveSessionRuntimeOverrideForProvider } from "../../agents/session-runtime-compat.js";
+import { readRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
 import { resolveCandidateAgentRuntime } from "../../agents/thinking-runtime.js";
+import { readSessionTransientLifetime } from "../../config/sessions/session-transient-lifetime.js";
 import { buildGenericCliContextEngineHostSupport } from "../../context-engine/host-compat.js";
 import { revokeMessageActionTurnCapability } from "../../gateway/message-action-turn-capability.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
@@ -47,6 +54,26 @@ import {
 /** Runs the provider/model fallback candidates while preserving cross-candidate delivery state. */
 export async function runAgentFallbackCandidates(params: AgentFallbackCycleParams) {
   const turn = params.turn;
+  const activeEntry = turn.getActiveSessionEntry();
+  const requestChild =
+    getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(params.runId);
+  if (
+    readSessionTransientLifetime(activeEntry) &&
+    (!requestChild || !activeEntry?.lifecycleRevision)
+  ) {
+    throw new Error("Request-scoped child execution is no longer authorized.");
+  }
+  if (requestChild) {
+    if (!activeEntry?.lifecycleRevision) {
+      throw new Error("Request-scoped child session generation is unavailable.");
+    }
+    await resolveRequestScopedChild(requestChild, {
+      runId: params.runId,
+      sessionKey: turn.sessionKey,
+      sessionId: turn.followupRun.run.sessionId,
+      lifecycleRevision: activeEntry.lifecycleRevision,
+    });
+  }
   const sourceReplyDeliveryRuntimeOptions = turn.opts as
     | SourceReplyDeliveryRuntimeOptions
     | undefined;
@@ -103,7 +130,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
     sessionRuntimeOverride: string | undefined,
   ) => {
     const candidateRun = resolveFallbackCandidateRun(params.effectiveRun, provider, model);
-    const activeEntry = params.liveModelSwitchRuntimeEntry ?? turn.getActiveSessionEntry();
+    const candidateEntry = params.liveModelSwitchRuntimeEntry ?? turn.getActiveSessionEntry();
     const selectedAuthProfile = resolveRunAuthProfile(candidateRun, provider, {
       config: params.runtimeConfig,
     });
@@ -116,14 +143,23 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         agentId: turn.followupRun.run.agentId,
         authProfileId: selectedAuthProfile.authProfileId,
         sessionRuntimeOverride,
-        pinnedHarnessId: resolveSessionPinnedHarnessId(activeEntry),
+        pinnedHarnessId: resolveSessionPinnedHarnessId(candidateEntry),
       }),
     };
   };
   return params.timing.measure("model_fallback", () =>
     runEmbeddedAgentEntry<EmbeddedAgentRunResult>({
       preparedRunAdmission: params.preparedRunAdmission,
-      selection: buildRunEntrySelection(selection, turn.followupRun.run),
+      selection: requestChild
+        ? {
+            ...buildRunEntrySelection(selection, turn.followupRun.run),
+            provider: requestChild.provider,
+            model: requestChild.model,
+            requestedRouteResolution: undefined,
+            fallbacksOverride: [],
+            userLockedAuthProfileId: undefined,
+          }
+        : buildRunEntrySelection(selection, turn.followupRun.run),
       identity: {
         runId: params.runId,
         agentId: turn.followupRun.run.agentId,
@@ -139,11 +175,13 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           run: (prepare) => params.timing.measure("fallback_prepare_harness", prepare),
         },
         resolveRuntimeOverride: (provider) =>
-          resolveSessionRuntimeOverrideForProvider({
-            provider,
-            entry: params.liveModelSwitchRuntimeEntry ?? turn.getActiveSessionEntry(),
-            cfg: params.runtimeConfig,
-          }),
+          requestChild
+            ? "openclaw"
+            : resolveSessionRuntimeOverrideForProvider({
+                provider,
+                entry: params.liveModelSwitchRuntimeEntry ?? turn.getActiveSessionEntry(),
+                cfg: params.runtimeConfig,
+              }),
         resolveContextEngineHost: (provider, model, runtimeOverride) => {
           const runtime = resolveCandidateRuntime(provider, model, runtimeOverride);
           if (!runtime.useCliExecution) {
@@ -196,6 +234,21 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         });
       },
       runCandidate: async (provider, model, runOptions) => {
+        if (requestChild) {
+          const childEntry = turn.getActiveSessionEntry();
+          if (!childEntry?.lifecycleRevision) {
+            throw new Error("Request-scoped child session generation is unavailable.");
+          }
+          await resolveRequestScopedChild(requestChild, {
+            runId: params.runId,
+            sessionKey: turn.sessionKey,
+            sessionId: turn.followupRun.run.sessionId,
+            lifecycleRevision: childEntry.lifecycleRevision,
+          });
+          if (provider !== requestChild.provider || model !== requestChild.model) {
+            throw new Error("Request-scoped child cannot use another model route.");
+          }
+        }
         bindReplyFallbackSteeringRoute({
           operation: turn.replyOperation,
           provenance: runOptions.modelRoutingProvenance,
@@ -212,6 +265,9 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         const runtime = params.timing.measureSync("fallback_resolve_runtime", () =>
           resolveCandidateRuntime(provider, model, runOptions.agentHarnessRuntimeOverride),
         );
+        if (requestChild && runtime.useCliExecution) {
+          throw new Error("Request-scoped child cannot use a CLI runtime.");
+        }
         const candidateRun = runtime.candidateRun;
         bindSourceReplyDeliveryRuntime(candidateRun, sourceReplyDeliveryRuntime);
         // CLI prompts are fixed to their session binding, so dispatch must publish that
@@ -306,6 +362,9 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           } satisfies AgentFallbackCandidateCommonParams;
           let result: EmbeddedAgentRunResult;
           if (runtime.useCliExecution) {
+            if (requestChild) {
+              throw new Error("Request-scoped child cannot use a CLI runtime.");
+            }
             result = await runCliFallbackCandidate({
               ...common,
               cliExecutionProvider: runtime.cliExecutionProvider,
@@ -315,21 +374,25 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
               },
             });
           } else {
-            const candidate = await runEmbeddedFallbackCandidate({
-              ...common,
-              candidateAgentRuntime,
-              getLifecycleGeneration: () => params.state.lifecycleGeneration,
-              onLifecycleGeneration: (generation) => {
-                params.state.lifecycleGeneration = generation;
-              },
-              messageToolDeliveryState,
-              onCompactionFacts: ({ accounting, postCompactionModelAttempted }) => {
-                if (accounting) {
-                  recordTurnCompaction(params.state.compaction, accounting);
-                }
-                params.state.postCompactionModelAttempted ||= postCompactionModelAttempted;
-              },
-            });
+            const runCandidate = () =>
+              runEmbeddedFallbackCandidate({
+                ...common,
+                candidateAgentRuntime,
+                getLifecycleGeneration: () => params.state.lifecycleGeneration,
+                onLifecycleGeneration: (generation) => {
+                  params.state.lifecycleGeneration = generation;
+                },
+                messageToolDeliveryState,
+                onCompactionFacts: ({ accounting, postCompactionModelAttempted }) => {
+                  if (accounting) {
+                    recordTurnCompaction(params.state.compaction, accounting);
+                  }
+                  params.state.postCompactionModelAttempted ||= postCompactionModelAttempted;
+                },
+              });
+            const candidate = requestChild
+              ? await withRequestScopedChildExecution(requestChild, runCandidate)
+              : await runCandidate();
             params.state.maintenanceAuthProfile = candidate.maintenanceAuthProfile;
             params.state.compactionRequestBudget = candidate.compactionRequestBudget;
             result = candidate.result;

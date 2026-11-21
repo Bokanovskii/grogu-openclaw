@@ -15,6 +15,7 @@ import {
 } from "../completion/subagent-completion-admission.store.js";
 import { SUBAGENT_ENDED_REASON_ERROR } from "./subagent-lifecycle-events.js";
 import { shouldSuppressSubagentRecoverySessionEffects } from "./subagent-recovery-state.js";
+import { publishSubagentDeleteCleanupSettlement } from "./subagent-registry-child-result-hook.js";
 import type { createSubagentRegistryCompletionRuntime } from "./subagent-registry-completion-runtime.js";
 import { safeRemoveAttachmentsDir } from "./subagent-registry-helpers.js";
 import type {
@@ -535,6 +536,7 @@ export function createSubagentRegistrySweeper(params: {
               (await deleteSweptSession(entry, sessionIdentity, runs, params.callGateway)) ===
                 "changed";
           } catch (error) {
+            publishSubagentDeleteCleanupSettlement(entry, error);
             params.warn("sessions.delete failed during subagent sweep; keeping run for retry", {
               runId,
               childSessionKey: entry.childSessionKey,
@@ -562,6 +564,7 @@ export function createSubagentRegistrySweeper(params: {
             params.notifyContextEngineSubagentEnded(sweptContext(entry)),
           );
         }
+        publishSubagentDeleteCleanupSettlement(entry);
       }
       collectorGroups: for (const {
         requesterSessionKey,

@@ -41,6 +41,7 @@ import "../test-helpers/fast-openclaw-tools-sessions.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import * as inProcessGateway from "./in-process-gateway.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
+import { withHostSessionAccess } from "./scoped-session-access.js";
 import * as sessionsSendFollowup from "./sessions-send-followup-custody.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import * as sessionsSendDelivery from "./sessions-send-tool.delivery.js";
@@ -104,6 +105,36 @@ describe("sessions_send dispatch admission", () => {
   });
 
   const callerKeys = [requesterSessionKey, "agent:main:telegram:direct:peer-1"];
+  it.each([
+    { sessionKey: targetSessionKey, mode: "followup" },
+    { label: "private-label", mode: "steer" },
+  ])("rejects host-scoped sends before unscoped dispatch", async (target) => {
+    const callGateway = vi.fn(async () => {
+      throw new Error("Unexpected unscoped Gateway dispatch");
+    });
+    const result = await withHostSessionAccess(
+      {
+        creatorProfileId: "alice",
+        signal: new AbortController().signal,
+        assertCurrent: () => {},
+        revalidate: async () => {},
+        resolve: async () => ({
+          sessionKey: targetSessionKey,
+          sessionId: "target-session",
+          agentId: "main",
+        }),
+      },
+      () =>
+        createSessionsSendTool({
+          agentSessionKey: requesterSessionKey,
+          config,
+          callGateway,
+        }).execute("host-send", { ...target, message: "hello" }),
+    );
+    expect(result.details).toMatchObject({ status: "forbidden" });
+    expect(callGateway).not.toHaveBeenCalled();
+  });
+
   it.each(callerKeys)("retains accepted reply source (%s)", async (sourceKey) => {
     if (sourceKey !== requesterSessionKey) {
       await replaceSessionEntry(

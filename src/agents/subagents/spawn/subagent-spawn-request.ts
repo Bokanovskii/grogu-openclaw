@@ -81,8 +81,17 @@ export async function resolveSubagentSpawnRequest(
   const cleanup: "delete" | "keep" =
     spawnMode !== "session" && params.cleanup === "delete" ? "delete" : "keep";
   const expectsCompletionMessage = !params.collect && params.expectsCompletionMessage !== false;
+  if (
+    ctx.transientLifetime &&
+    (cleanup !== "delete" || expectsCompletionMessage || params.collect || spawnMode !== "run")
+  ) {
+    return rejectSubagentSpawnRequest(
+      "error",
+      "Request-scoped children require quiet run-mode delete cleanup.",
+    );
+  }
   const hookRunner: SubagentLifecycleHookRunner | null = getGlobalHookRunner();
-  const cfg = getRuntimeConfig();
+  const cfg = ctx.config ?? getRuntimeConfig();
 
   const runTimeoutSeconds = resolveConfiguredSubagentRunTimeoutSeconds({
     cfg,

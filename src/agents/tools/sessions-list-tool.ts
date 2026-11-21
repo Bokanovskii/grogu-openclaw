@@ -38,7 +38,11 @@ import {
   hasGatewayToolRoutingContext,
   type AgentToolGatewayRequestCaller as GatewayCaller,
 } from "./in-process-gateway.js";
-import { resolveSessionToolTargetAgentId } from "./scoped-session-access.js";
+import {
+  getHostSessionAccess,
+  resolveHostSessionAccess,
+  resolveSessionToolTargetAgentId,
+} from "./scoped-session-access.js";
 import {
   createSessionVisibilityRowChecker,
   classifySessionListKind,
@@ -198,6 +202,10 @@ export function createSessionsListTool(opts?: {
       const creatorId = readToolStringParam(params, "creatorId", {
         required: params.creatorId !== undefined,
       });
+      const hostScope = getHostSessionAccess();
+      if (hostScope && creatorId && creatorId !== hostScope.creatorProfileId) {
+        throw new Error("The requested creator is outside the current session scope.");
+      }
       const projectId = readToolStringParam(params, "projectId", {
         required: params.projectId !== undefined,
       });
@@ -206,6 +214,9 @@ export function createSessionsListTool(opts?: {
       });
       const includeDerivedTitles = params.includeDerivedTitles === true;
       const includeLastMessage = params.includeLastMessage === true;
+      if (hostScope && (messageLimit > 0 || includeDerivedTitles || includeLastMessage)) {
+        throw new Error("Read session messages with sessions_history in this session scope.");
+      }
       const gatewayCall = opts?.callGateway ?? callAgentToolGatewayRequest;
       const requireSessionReadOwner =
         opts?.requireSessionReadOwner === true ||
@@ -221,6 +232,9 @@ export function createSessionsListTool(opts?: {
         a2aPolicy,
       });
       const visibleReference = (key: string, parentSessionKey?: string) => {
+        if (hostScope) {
+          return undefined;
+        }
         if (isIncognitoSessionKey(key)) {
           return undefined;
         }
@@ -264,7 +278,7 @@ export function createSessionsListTool(opts?: {
             activeOnly: params.activeOnly === true,
             excludeSubagents: params.excludeSubagents === true,
             ownerId,
-            creatorId,
+            creatorId: hostScope?.creatorProfileId ?? creatorId,
             profileRelation: relationship && profileId ? { profileId, relationship } : undefined,
             projectId,
             workspaceDir,
@@ -277,6 +291,7 @@ export function createSessionsListTool(opts?: {
             spawnedBy: restrictToSpawned ? effectiveRequesterKey : undefined,
           },
         });
+        hostScope?.assertCurrent();
         const pageSessions = Array.isArray(page?.sessions) ? page.sessions : [];
         if (pageSessions.length > 200) {
           throw new Error("sessions.list returned more than the requested 200-row page");
@@ -338,9 +353,20 @@ export function createSessionsListTool(opts?: {
             spawnedBy: readStringValue(entry.spawnedBy),
             parentSessionKey: readStringValue(entry.parentSessionKey),
           });
+          const hostGrant = hostScope
+            ? await resolveHostSessionAccess(hostScope, {
+                action: "list",
+                requesterSessionKey: effectiveRequesterKey,
+                reference: key,
+              })
+            : undefined;
           const kind = classifySessionListKind(entry);
           if (
-            access.allowed &&
+            (hostScope
+              ? hostGrant?.sessionKey === key &&
+                hostGrant.agentId === resolvedAgentId &&
+                hostGrant.sessionId === entry.sessionId
+              : access.allowed) &&
             key !== "unknown" &&
             (key !== "global" || alias === "global") &&
             (!allowedKinds || allowedKinds.has(kind))
@@ -376,6 +402,7 @@ export function createSessionsListTool(opts?: {
           agentId: stateAgentId,
         })),
       );
+      hostScope?.assertCurrent();
       const rows: SessionListRow[] = [];
       const historyTargets: Array<{ row: SessionListRow; resolvedKey: string }> = [];
       const titleTargets: Array<{
@@ -599,6 +626,7 @@ export function createSessionsListTool(opts?: {
 
       const finalize = (visible: readonly boolean[]) => {
         signal?.throwIfAborted();
+        hostScope?.assertCurrent();
         assertCallerCurrent?.("sessions.list");
         if (gatewayContext && getInProcessGatewayToolContext() !== gatewayContext) {
           throw new Error("Gateway instance unavailable for sessions.list");

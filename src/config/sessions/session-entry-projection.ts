@@ -29,6 +29,7 @@ const PRIVATE_SESSION_ENTRY_KEYS = [
   "profileInvolvement",
   "cliHistoryBoundary",
   "publicShare",
+  "transientLifetime",
   "activeWriterRunId",
   "lastRunId",
   "lifecycleRunId",

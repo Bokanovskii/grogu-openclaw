@@ -5,8 +5,12 @@ import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { test } from "node:test";
 import { FailoverError } from "../../src/agents/failover/error.js";
+import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
+import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
+import { mergeCanonicalUserProfiles } from "../../src/state/user-profile-writes.js";
+import { protectedResearchAgent, type ProtectedAgentExtension } from "./agents.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -15,6 +19,14 @@ import { closeProtectedServer, createProtectedServer } from "./server.js";
 import { protectedOpenClawConfig } from "./settings.js";
 import { createProtectedStaticClient } from "./static-client.js";
 import { createCanonicalProtectedTurns } from "./turns.js";
+
+const protectedCleanupAgent: ProtectedAgentExtension = {
+  id: "cleanup",
+  name: "Cleanup proof",
+  description: "Creates a widget to verify transient file cleanup.",
+  instructions: "Create a widget so transient files are cleaned.",
+  tools: ["show_widget"],
+};
 
 function providerSse(events: Array<{ type: string; [field: string]: unknown }>, named = false) {
   return new Response(
@@ -102,12 +114,21 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const release = Promise.withResolvers<void>();
   t.after(() => release.resolve());
   const origin = "https://family.example";
-  const open = async (freeFloorBytes = 1) => {
+  const catalogExtensions = [protectedResearchAgent];
+  const open = async (freeFloorBytes = 1, agentExtensions: ProtectedAgentExtension[] = []) => {
+    const observedAgents: Array<{
+      id: string;
+      name: string;
+      description: string;
+      instructions: string;
+      tools: readonly string[];
+    }> = [];
     const app = createProtectedHttp({
       origin,
       stateDir,
       usersRoot,
       verifyIdentity,
+      agentExtensions,
       maxChatsPerUser: 3,
       maxFileBytes: 64_000,
       storageLimits: { globalBytes: 95_000, userBytes: 58_000, freeFloorBytes },
@@ -115,6 +136,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       turns: {
         models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
         async run(turn) {
+          observedAgents.push(turn.agent);
           if (turn.input.text === "Write an oversized file") {
             await turn.files.write(`chats/${turn.id}/oversized.txt`, "x".repeat(64_001));
             return;
@@ -137,9 +159,15 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       headers.set("content-type", headers.get("content-type") ?? "application/json");
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
-    return { server, url, call, revokeProfile: (id: string) => app.revokeProfile(id) };
+    return {
+      server,
+      url,
+      call,
+      observedAgents,
+      revokeProfile: (id: string) => app.revokeProfile(id),
+    };
   };
-  const first = await open();
+  const first = await open(1, catalogExtensions);
   t.after(() => close(first.server));
   const shell = await fetch(first.url);
   assert.equal(shell.status, 200);
@@ -175,13 +203,59 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(me.status, 200);
   const { user, capabilities } = await me.json();
   assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true });
+  const catalogResponse = await first.call("alice", "/agents");
+  assert.equal(catalogResponse.status, 200);
+  const catalog = await catalogResponse.json();
+  assert.equal(catalog.defaultAgentId, "travel");
+  assert.deepEqual(catalog.agents.find((agent: { id: string }) => agent.id === "travel")?.tools, [
+    "web_fetch",
+    "show_widget",
+    "sessions_list",
+    "sessions_history",
+    "sessions_send",
+  ]);
+  assert.doesNotMatch(JSON.stringify(catalog), /Use concise, evidence-based summaries/);
   const created = await first.call("alice", "/chats", {
     method: "POST",
     body: '{"title":"Alice private"}',
   });
   assert.equal(created.status, 200);
   const { chat } = await created.json();
+  assert.equal(chat.selectedAgentId, "travel");
   const route = `/chats/${chat.id}`;
+  const selected = await first.call("alice", `${route}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": chat.version },
+    body: '{"selectedAgentId":"general"}',
+  });
+  assert.equal(selected.status, 200);
+  const selectedChat = (await selected.json()).chat;
+  assert.equal(selectedChat.selectedAgentId, "general");
+  const reloadedRuntime = await open(1, catalogExtensions);
+  t.after(() => close(reloadedRuntime.server));
+  const reloadedChat = await reloadedRuntime.call("alice", route);
+  assert.equal(reloadedChat.status, 200);
+  assert.equal((await reloadedChat.json()).chat.selectedAgentId, "general");
+  assert.equal(
+    (
+      await first.call("alice", `${route}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": chat.version },
+        body: '{"selectedAgentId":"travel"}',
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await first.call("alice", `${route}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": selectedChat.version },
+        body: '{"selectedAgentId":"missing"}',
+      })
+    ).status,
+    422,
+  );
   const secondAlice = await first.call("alice", "/chats", { method: "POST", body: "{}" });
   assert.equal(secondAlice.status, 413);
   assert.equal((await secondAlice.json()).error.code, "quota_exceeded");
@@ -197,6 +271,16 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     method: "POST",
     body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
   };
+  assert.equal(
+    (
+      await first.call("alice", `${route}/turns`, {
+        method: "POST",
+        headers: { "x-grogu-profile": user.id },
+        body: '{"provider":"anthropic","text":"@missing Hello","credential":{"accessToken":"synthetic-only"},"mentions":[{"agentId":"missing"}]}',
+      })
+    ).status,
+    422,
+  );
   assert.equal((await first.call("alice", `${route}/turns`, turn)).status, 403);
   const running = await first.call("alice", `${route}/turns`, {
     ...turn,
@@ -204,6 +288,18 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   });
   assert.equal(running.status, 200);
   await submitted.promise;
+  assert.equal(first.observedAgents[0]?.id, "general");
+  assert.match(first.observedAgents[0]?.instructions ?? "", /general questions/);
+  assert.equal(
+    (
+      await first.call("alice", `${route}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": selectedChat.version },
+        body: '{"selectedAgentId":"travel"}',
+      })
+    ).status,
+    409,
+  );
   const reader = running.body!.getReader();
   const start = await reader.read();
   const { runId } = JSON.parse(new TextDecoder().decode(start.value));
@@ -399,7 +495,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   );
   const seen: Array<{
     auth: string | undefined;
-    body: { tools?: Array<{ function: { name: string } }> };
+    body: {
+      messages?: unknown[];
+      tools?: Array<{ function: { name: string } }>;
+    };
   }> = [];
   const activeProvider = Promise.withResolvers<void>();
   const providerDisconnected = Promise.withResolvers<void>();
@@ -542,8 +641,20 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         title: "Synthetic widget",
         widget_code: "<p>Scoped widget body</p>",
       });
+      const researchTurn = JSON.stringify(body.messages).includes(
+        "Use concise, evidence-based summaries.",
+      );
+      const cleanupTurn = JSON.stringify(body.messages).includes(
+        "Create a widget so transient files are cleaned.",
+      );
+      const hasToolResponse = body.messages.some(
+        (message: { role?: string }) => message.role === "tool",
+      );
+      const sessionListTurn = JSON.stringify(body.messages).includes(
+        "Inspect my permitted sessions.",
+      );
       const frames =
-        seen.length === 1
+        cleanupTurn && !hasToolResponse
           ? [
               [
                 {
@@ -551,18 +662,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   tool_calls: [
                     {
                       index: 0,
-                      id: "call_widget_1",
+                      id: "call_widget_cleanup",
                       type: "function",
                       function: { name: "show_widget", arguments: widgetArguments },
-                    },
-                    {
-                      index: 1,
-                      id: "call_fetch_1",
-                      type: "function",
-                      function: {
-                        name: "web_fetch",
-                        arguments: JSON.stringify({ url: sourceUrl }),
-                      },
                     },
                   ],
                 },
@@ -570,10 +672,101 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
               ],
               [{}, "tool_calls"],
             ]
-          : [
-              [{ role: "assistant", content: "Committed synthetic answer." }, null],
-              [{}, "stop"],
-            ];
+          : sessionListTurn && !hasToolResponse && sessionHistoryTargets
+            ? [
+                [
+                  {
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_sessions_list",
+                        type: "function",
+                        function: {
+                          name: "sessions_list",
+                          arguments: JSON.stringify({ limit: 25 }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: "call_sessions_history_owned",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.permitted,
+                          }),
+                        },
+                      },
+                      {
+                        index: 2,
+                        id: "call_sessions_history_foreign",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.foreign,
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  null,
+                ],
+                [{}, "tool_calls"],
+              ]
+            : researchTurn && !hasToolResponse
+              ? [
+                  [
+                    {
+                      role: "assistant",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_fetch_research",
+                          type: "function",
+                          function: {
+                            name: "web_fetch",
+                            arguments: JSON.stringify({ url: sourceUrl }),
+                          },
+                        },
+                      ],
+                    },
+                    null,
+                  ],
+                  [{}, "tool_calls"],
+                ]
+              : !researchTurn && seen.length === 1
+                ? [
+                    [
+                      {
+                        role: "assistant",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            id: "call_widget_1",
+                            type: "function",
+                            function: { name: "show_widget", arguments: widgetArguments },
+                          },
+                          {
+                            index: 1,
+                            id: "call_fetch_1",
+                            type: "function",
+                            function: {
+                              name: "web_fetch",
+                              arguments: JSON.stringify({ url: sourceUrl }),
+                            },
+                          },
+                        ],
+                      },
+                      null,
+                    ],
+                    [{}, "tool_calls"],
+                  ]
+                : [
+                    [{ role: "assistant", content: "Committed synthetic answer." }, null],
+                    [{}, "stop"],
+                  ];
       for (const [delta, finish_reason] of frames) {
         response.write(
           `data: ${JSON.stringify({
@@ -593,51 +786,58 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
   const serviceConfig = protectedOpenClawConfig(stateDir);
+  const protectedConfig: OpenClawConfig = {
+    ...serviceConfig,
+    agents: {
+      ...serviceConfig.agents,
+      defaults: { models: { "openai/gpt-5.6-luna": { params: { transport: "sse" } } } },
+      entries: { protected: { workspace: workspaceDir, agentDir } },
+    },
+    models: {
+      mode: "replace" as const,
+      providers: {
+        sparky: {
+          baseUrl: `${providerOrigin}/v1`,
+          api: "openai-completions",
+          request: { allowPrivateNetwork: true },
+          models: [
+            {
+              id: "synthetic",
+              name: "Synthetic",
+              reasoning: true,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 32_000,
+              maxTokens: 1024,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  const identityFor =
+    (subject: string, session: string): ProtectedIdentityVerifier =>
+    async () => ({
+      issuer: "https://synthetic.example",
+      subject,
+      expiresAt,
+      sessionId: createHash("sha256").update(session).digest("hex"),
+      assertCurrent() {},
+      async revalidate() {},
+    });
   const options = {
     origin,
     stateDir,
     usersRoot: await root(usersDir),
+    agentExtensions: [protectedResearchAgent, protectedCleanupAgent],
     maxChatsPerUser: 3,
     maxFileBytes: 64_000,
     storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
-    verifyIdentity: (async () => ({
-      issuer: "https://synthetic.example",
-      subject: "synthetic-sparky",
-      expiresAt,
-      sessionId: createHash("sha256").update("synthetic-session").digest("hex"),
-      assertCurrent() {},
-      async revalidate() {},
-    })) satisfies ProtectedIdentityVerifier,
+    verifyIdentity: identityFor("synthetic-sparky", "synthetic-session"),
     turns: createCanonicalProtectedTurns({
-      config: {
-        ...serviceConfig,
-        agents: {
-          ...serviceConfig.agents,
-          defaults: { models: { "openai/gpt-5.6-luna": { params: { transport: "sse" } } } },
-          entries: { protected: { workspace: workspaceDir, agentDir } },
-        },
-        models: {
-          mode: "replace",
-          providers: {
-            sparky: {
-              baseUrl: `${providerOrigin}/v1`,
-              api: "openai-completions",
-              request: { allowPrivateNetwork: true },
-              models: [
-                {
-                  id: "synthetic",
-                  name: "Synthetic",
-                  reasoning: true,
-                  input: ["text"],
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                  contextWindow: 32_000,
-                  maxTokens: 1024,
-                },
-              ],
-            },
-          },
-        },
-      },
+      config: protectedConfig,
       workspaceDir,
       agentDir,
       models: [
@@ -650,6 +850,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     }),
   };
   const open = async () => {
+    await publishConfiguredModelRuntimeSnapshots({ cfg: protectedConfig, workspaceDir });
     const app = createProtectedHttp(options);
     const server = createProtectedServer(origin, app.fetch);
     server.on("request", (incoming, outgoing) => {
@@ -658,14 +859,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       }
     });
     const url = await listen(server);
-    t.after(() => close(server));
+    let shutdownPromise: Promise<void> | undefined;
+    const shutdown = () => (shutdownPromise ??= closeProtectedServer(server, app, stateDir));
+    t.after(() => shutdown());
     const call = (route: string, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       headers.set("origin", headers.get("origin") ?? origin);
       headers.set("content-type", headers.get("content-type") ?? "application/json");
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
-    return { call, shutdown: () => closeProtectedServer(server, app, stateDir) };
+    return { call, shutdown };
   };
   const { call, shutdown } = await open();
   const { user } = await (await call("/me")).json();
@@ -700,7 +903,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.equal(seen.length, 2);
   assert.equal(seen[0]?.auth, "Bearer synthetic-request-only-key");
   const tools = seen[0]?.body.tools?.map((tool) => tool.function.name) ?? [];
-  assert.deepEqual([...tools].toSorted(), ["show_widget", "web_fetch"]);
+  assert.deepEqual([...tools].toSorted(), [
+    "sessions_history",
+    "sessions_list",
+    "sessions_send",
+    "show_widget",
+    "web_fetch",
+  ]);
   assert.ok(tools.includes("show_widget"));
   const { call: reopened } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
@@ -713,12 +922,179 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const widgetResponse = await reopened(`/chats/${chat.id}/widgets/${widget.id}`);
   assert.equal(widgetResponse.status, 200);
   assert.match((await widgetResponse.json()).html, /Scoped widget body/);
+  const mentionedTurn = await reopened(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Create an artifact.","mentions":[{"agentId":"cleanup"}]}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(mentionedTurn.status, 200);
+  const mentionedEvents = (await mentionedTurn.text())
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+  assert.ok(mentionedEvents.some((event) => event.type === "done"));
+  assert.ok(
+    mentionedEvents.some(
+      (event) =>
+        event.type === "child-result" &&
+        event.agentId === "cleanup" &&
+        event.text === "Committed synthetic answer.",
+    ),
+    "the native child result is streamed with its protected agent attribution",
+  );
+  const mentionedRead = await (await reopened(`/chats/${chat.id}`)).json();
+  assert.ok(
+    mentionedRead.chat.messages.some(
+      (message: { agentId?: string; text?: string }) =>
+        message.agentId === "cleanup" && message.text === "Committed synthetic answer.",
+    ),
+    "the attributed result is committed to the parent transcript before cleanup",
+  );
+  const profileFiles = await createAuthorizedUserFiles({
+    usersRoot: await root(usersDir),
+    profileId: user.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+  });
+  try {
+    assert.deepEqual(await profileFiles.list("chats"), [chat.id]);
+  } finally {
+    profileFiles.dispose();
+  }
+  const selected = await reopened(`/chats/${chat.id}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": mentionedRead.chat.version },
+    body: '{"selectedAgentId":"research"}',
+  });
+  assert.equal(selected.status, 200);
+  const firstResearchRequest = seen.length;
+  const researchTurn = await reopened(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Summarize this source"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(researchTurn.status, 200);
+  assert.match(await researchTurn.text(), /"type":"done"/);
+  const researchRequest = seen
+    .slice(firstResearchRequest)
+    .find(({ body }) =>
+      JSON.stringify(body.messages).includes("Use concise, evidence-based summaries."),
+    );
+  assert.ok(researchRequest, "the selected research agent reaches the synthetic provider");
+  assert.deepEqual(
+    researchRequest.body.tools?.map((tool) => tool.function.name),
+    ["web_fetch"],
+  );
+  assert.match(
+    JSON.stringify(researchRequest.body.messages),
+    /Use concise, evidence-based summaries/,
+  );
+  const selectedRead = await (await reopened(`/chats/${chat.id}`)).json();
+  assert.equal(selectedRead.chat.selectedAgentId, "research");
   const deleted = await reopened(`/chats/${chat.id}`, {
     method: "DELETE",
-    headers: { "if-match": read.chat.version },
+    headers: { "if-match": selectedRead.chat.version },
   });
   assert.equal(deleted.status, 204);
   assert.equal((await reopened(`/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
+
+  const foreignApp = createProtectedHttp({
+    ...options,
+    verifyIdentity: identityFor("synthetic-foreign", "synthetic-foreign-session"),
+  });
+  t.after(() => foreignApp.shutdown());
+  const foreignCall = (route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("content-type", headers.get("content-type") ?? "application/json");
+    return foreignApp.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }),
+    );
+  };
+  const foreignMeResponse = await foreignCall("/me");
+  assert.equal(foreignMeResponse.status, 200);
+  const foreignMe = await foreignMeResponse.json();
+  const foreignCreated = await foreignCall("/chats", {
+    method: "POST",
+    body: '{"title":"Foreign profile chat"}',
+  });
+  assert.equal(foreignCreated.status, 200);
+  const foreignChat = (await foreignCreated.json()).chat;
+  const foreignSeeded = await foreignCall(`/chats/${foreignChat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Foreign profile private transcript marker"}',
+    headers: { "x-grogu-profile": foreignMe.user.id },
+  });
+  assert.equal(foreignSeeded.status, 200);
+  assert.match(await foreignSeeded.text(), /"type":"done"/);
+  const foreignTranscript = await foreignCall(`/chats/${foreignChat.id}`);
+  assert.match(
+    JSON.stringify(await foreignTranscript.json()),
+    /Foreign profile private transcript marker/,
+  );
+  const { chat: permitted } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const { chat: coordinator } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const seeded = await reopened(`/chats/${permitted.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Visible same-profile transcript marker"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(seeded.status, 200);
+  assert.match(await seeded.text(), /"type":"done"/);
+  const sessionHistoryTargets = {
+    permitted: `agent:protected:family:${user.id}:${permitted.id}`,
+    foreign: `agent:protected:family:${foreignMe.user.id}:${foreignChat.id}`,
+  };
+  const sessionHistoryPrompt = "Inspect my permitted sessions.";
+  const sessionHistoryTurn = await reopened(`/chats/${coordinator.id}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: sessionHistoryPrompt }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(sessionHistoryTurn.status, 200);
+  assert.match(await sessionHistoryTurn.text(), /"type":"done"/);
+  const sessionHistoryRequests = seen.filter(({ body }) =>
+    JSON.stringify(body.messages).includes(sessionHistoryPrompt),
+  );
+  assert.ok(
+    sessionHistoryRequests.length >= 2,
+    "native session-history results return to the model",
+  );
+  const sessionToolMessages = sessionHistoryRequests
+    .at(-1)
+    ?.body.messages?.filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "role" in message &&
+        message.role === "tool",
+    );
+  const sessionHistoryOutput = JSON.stringify(sessionToolMessages ?? []);
+  assert.match(sessionHistoryOutput, /Visible same-profile transcript marker/);
+  assert.doesNotMatch(sessionHistoryOutput, /Foreign profile private transcript marker/);
+  assert.ok(
+    sessionHistoryOutput.includes(permitted.id),
+    "session list includes the permitted chat",
+  );
+  assert.ok(!sessionHistoryOutput.includes(foreignChat.id), "session list omits the foreign chat");
+  for (const id of [permitted.id, coordinator.id]) {
+    const current = await (await reopened(`/chats/${id}`)).json();
+    const removed = await reopened(`/chats/${id}`, {
+      method: "DELETE",
+      headers: { "if-match": current.chat.version },
+    });
+    assert.equal(removed.status, 204, await removed.text());
+  }
+  const foreignCurrent = await (await foreignCall(`/chats/${foreignChat.id}`)).json();
+  const foreignRemoved = await foreignCall(`/chats/${foreignChat.id}`, {
+    method: "DELETE",
+    headers: { "if-match": foreignCurrent.chat.version },
+  });
+  assert.equal(foreignRemoved.status, 204, await foreignRemoved.text());
 
   const { chat: interrupted } = await (await call("/chats", { method: "POST", body: "{}" })).json();
   const route = `/chats/${interrupted.id}`;
@@ -908,4 +1284,87 @@ void test("Family rate limits separate busy Sparky from personal plan limits", (
     ).code;
   assert.equal(limited("sparky"), "provider_busy");
   assert.equal(limited("github-copilot"), "rate_limit");
+});
+
+void test("An in-flight session capability stops when its profile is merged", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-merge-${randomUUID()}`);
+  const usersDir = path.join(stateDir, "users");
+  await mkdir(usersDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  t.after(() => release.resolve());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  let staleAuthorityAccepted = false;
+  const app = createProtectedHttp({
+    origin,
+    stateDir,
+    usersRoot: await root(usersDir),
+    verifyIdentity: async (request) => {
+      const subject = request.headers.get("cookie") ?? "";
+      return {
+        issuer: "https://synthetic.example",
+        subject,
+        expiresAt,
+        sessionId: createHash("sha256").update(subject).digest("hex"),
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+      async run(turn) {
+        entered.resolve();
+        await release.promise;
+        turn.sessionAccess.assertCurrent();
+        staleAuthorityAccepted = true;
+        await turn.sessionAccess.resolve({
+          action: "history",
+          requesterSessionKey: turn.target.sessionKey,
+          reference: turn.id,
+        });
+        await turn.delta("Must not cross the profile merge.");
+      },
+      async steer() {
+        assert.fail("Unexpected steering.");
+      },
+    },
+  });
+  const call = (subject: string, route: string, init?: RequestInit) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: subject,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const created = await call("alice", "/chats", {
+    method: "POST",
+    body: '{"title":"Alice private"}',
+  });
+  const createdBody = await created.json();
+  assert.equal(created.status, 200, JSON.stringify(createdBody));
+  const { chat } = createdBody;
+  const turn = await call("alice", `/chats/${chat.id}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": alice.id },
+    body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
+  });
+  assert.equal(turn.status, 200);
+  await entered.promise;
+  await mergeCanonicalUserProfiles(alice.id, bob.id, { env: { OPENCLAW_STATE_DIR: stateDir } });
+  release.resolve();
+  const events = await turn.text();
+  assert.equal(staleAuthorityAccepted, false);
+  assert.match(events, /"type":"error"/);
+  assert.doesNotMatch(events, /Must not cross the profile merge|"type":"done"/);
 });

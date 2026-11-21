@@ -124,4 +124,28 @@ describe("native subagent Gateway transport ownership", () => {
     });
     expect(callGateway).toHaveBeenCalledOnce();
   });
+
+  it("refuses a request-owned launch without a local Gateway instead of opening a socket", async () => {
+    const callGateway = vi.fn<() => void>();
+    spawnTesting.setDepsForTest({
+      callGateway: async <T>() => {
+        callGateway();
+        return { runId: "wrong-gateway", status: "accepted" } as T;
+      },
+    });
+
+    await expect(
+      callNativeSubagentGateway(
+        {
+          method: "agent",
+          params: { message: "private task", idempotencyKey: "request-owned" },
+        },
+        undefined,
+        undefined,
+        undefined,
+        { requireInProcess: true },
+      ),
+    ).rejects.toThrow("Request-owned child requires a local Gateway");
+    expect(callGateway).not.toHaveBeenCalled();
+  });
 });

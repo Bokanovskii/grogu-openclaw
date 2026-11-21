@@ -498,6 +498,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     modelOverride?: string;
     /** Session-scoped agent runtime/harness override selected with the model picker. */
     agentRuntimeOverride?: string;
+    /** Protected Family app agent selection; does not change the OpenClaw agent identity. */
+    protectedAgentId?: string;
     /**
      * Tracks whether the persisted model selection came from an explicit user
      * action (`/model`, `sessions.patch`), a temporary runtime fallback, or an
@@ -623,11 +625,20 @@ export type SessionProfileInvolvement = {
   lastMention?: { generation: string; sequence: number; timestamp: number };
 };
 
+export type TransientSessionLifetime = {
+  kind: "request";
+  parentSessionKey: string;
+  parentSessionId: string;
+  profileId: string;
+};
+
 export type InternalSessionEntryCore = SessionEntryCore & {
   /** Personal discovery state, never participation, attribution, or sharing authority. */
   profileInvolvement?: { key: string; profiles: Record<string, SessionProfileInvolvement> };
   /** Transcript-wide account provenance; native binding replacement must not replace it. */
   cliHistoryBoundary?: import("./cli-history-boundary.js").CliHistoryBoundary;
+  /** Cleanup fact for a child bound to one request; never execution authority. */
+  transientLifetime?: TransientSessionLifetime;
   /** Explicit world-readable publication, bound to one transcript generation. */
   publicShare?: { id: string; sessionId: string; createdAt: number };
   /** Run that owns the current non-terminal Gateway lifecycle projection. */

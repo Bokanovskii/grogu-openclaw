@@ -1,7 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
+import { safeParseJson } from "@openclaw/normalization-core";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { readAcpSessionControlInWorker } from "../../../acp/runtime/session-meta-source.worker.js";
 import { requestSessionEntryCurrentAdmission } from "../../../config/sessions/session-entry-current-admission.worker.js";
-import { getNodeSqliteKysely, iterateSqliteQuerySync } from "../../../infra/kysely-sync.js";
+import {
+  executeSqliteQuerySync,
+  getNodeSqliteKysely,
+  iterateSqliteQuerySync,
+} from "../../../infra/kysely-sync.js";
 import { isSqliteCorruptionError } from "../../../infra/sqlite-error-diagnostics.js";
 import { throwSqliteLifecycleErrors } from "../../../infra/sqlite-lifecycle-errors.js";
 import { deferSqlitePostCommitPublication } from "../../../infra/sqlite-post-commit.js";
@@ -32,6 +38,7 @@ import type {
   OpenClawStateReadResult,
   OpenClawStateReadRequest,
 } from "../../../state/openclaw-state-read.types.js";
+import type { TransientRegistryRecovery } from "./subagent-registry-transient-recovery.js";
 import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
 import {
   conflictingSubagentRunVersions,
@@ -48,6 +55,54 @@ import {
 } from "./subagent-registry.store.sqlite.js";
 
 const log = createSubsystemLogger("state/worker");
+
+/** An unreadable or mismatched row is ambiguous and must remain untouched. */
+export function retireTransientSubagentRunInWorker(
+  input: TransientRegistryRecovery,
+  options: OpenClawStateDatabaseOptions & { database: OpenClawStateDatabase },
+): { writeId: string; safe: boolean } {
+  return runOpenClawStateWriteTransaction(
+    (database) => {
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: input.writeId });
+      const rows = executeSqliteQuerySync(
+        database.db,
+        getNodeSqliteKysely<Pick<OpenClawStateKyselyDatabase, "subagent_runs">>(database.db)
+          .selectFrom("subagent_runs")
+          .selectAll()
+          .where("child_session_key", "=", input.childSessionKey),
+      ).rows;
+      const stored = rows.length === 1 ? rows[0] : undefined;
+      const payload = stored ? safeParseJson(stored.payload_json) : undefined;
+      const row = stored ? rowToSubagentRunRecord(stored) : undefined;
+      const safe =
+        rows.length === 0 ||
+        (rows.length === 1 &&
+          isRecord(payload) &&
+          payload.runId === stored?.run_id &&
+          payload.childSessionKey === input.childSessionKey &&
+          payload.requesterSessionKey === input.parentSessionKey &&
+          row !== null &&
+          row !== undefined &&
+          row.requesterSessionKey === input.parentSessionKey &&
+          row.childSessionIdentity?.sessionId === input.childSessionId &&
+          row.childSessionIdentity.lifecycleRevision === input.childLifecycleRevision &&
+          row.cleanup === "delete" &&
+          row.spawnMode === "run" &&
+          row.expectsCompletionMessage === false &&
+          row.task === "" &&
+          row.execution.suppressSessionEffects === true);
+      if (safe && row) {
+        writeSubagentRunValuesInDatabase(database, [], [row.runId]);
+      }
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: input.writeId });
+      const receipt = { writeId: input.writeId, safe };
+      deferSqliteWorkerCommitReceipt(database.db, receipt);
+      return receipt;
+    },
+    options,
+    { operationLabel: "transient subagent recovery" },
+  );
+}
 
 export function readSubagentRunsInWorker(
   db: DatabaseSync,

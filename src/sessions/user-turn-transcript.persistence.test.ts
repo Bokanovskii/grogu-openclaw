@@ -8,8 +8,10 @@ import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtim
 import { castAgentMessage } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { runAgentHarnessBeforeMessageWriteHook } from "../agents/harness/hook-helpers.js";
+import { withTranscriptWriteBudget } from "../agents/sessions/transcript-write-budget.js";
 import { formatChatWorkContext } from "../chat/work-context.js";
 import { loadSessionEntry, replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import { listSessionPendingInputs } from "../config/sessions/session-accessor.pending-inputs.js";
 import { resolveSessionTranscriptDatabasePath } from "../config/sessions/session-accessor.transcript-target.js";
 import { resolveSessionColdArchivePath } from "../config/sessions/session-cold-storage-codec.js";
 import { readSessionColdTranscript } from "../config/sessions/session-cold-storage-state.js";
@@ -39,6 +41,67 @@ describe("persistUserTurnTranscript", () => {
 
   afterEach(() => {
     resetGlobalHookRunner();
+  });
+
+  it("rejects a user transcript write when its request budget is exhausted", async () => {
+    const target = createSqliteTranscriptTarget({ dir: sessionDirs.make() });
+    await persistUserTurnTranscript({
+      ...target,
+      input: { text: "Existing message", timestamp: 1 },
+      updateMode: "none",
+    });
+    await expect(
+      withTranscriptWriteBudget(
+        () => {
+          throw new Error("storage budget exhausted");
+        },
+        () =>
+          persistUserTurnTranscript({
+            ...target,
+            input: { text: "New message", timestamp: 2 },
+            updateMode: "none",
+          }),
+      ),
+    ).rejects.toThrow("storage budget exhausted");
+    const messages = await readTranscriptMessages(target);
+    expect(messages.map((message) => message.content)).toEqual(["Existing message"]);
+  });
+
+  it("charges a request-owned user message when its recorder commits in another context", async () => {
+    const target = createSqliteTranscriptTarget({ dir: sessionDirs.make() });
+    const recorder = withTranscriptWriteBudget(
+      () => {
+        throw new Error("storage budget exhausted");
+      },
+      () =>
+        createUserTurnTranscriptRecorder({
+          target,
+          input: { text: "Request-owned guidance" },
+          updateMode: "none",
+        }),
+    );
+    await expect(recorder.persistApproved()).rejects.toThrow("storage budget exhausted");
+    expect(await readTranscriptMessages(target)).toHaveLength(0);
+  });
+
+  it("rejects a staged user input before storage when its request budget is exhausted", async () => {
+    const target = createSqliteTranscriptTarget({ dir: sessionDirs.make() });
+    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+    const recorder = withTranscriptWriteBudget(
+      () => {
+        throw new Error("storage budget exhausted");
+      },
+      () =>
+        createUserTurnTranscriptRecorder({
+          target,
+          input: { text: "Request-owned child input" },
+          updateMode: "none",
+        }),
+    );
+    await expect(
+      recorder.stageApproved!({ runId: "child-run", assertCurrent: () => {} }),
+    ).rejects.toThrow("storage budget exhausted");
+    expect((await listSessionPendingInputs(target)).items).toHaveLength(0);
   });
 
   it("does not resume a cold transcript when its archive is missing", async () => {

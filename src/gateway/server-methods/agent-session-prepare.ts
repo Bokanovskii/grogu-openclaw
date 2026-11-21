@@ -62,10 +62,14 @@ export async function prepareAgentSession(params: PrepareAgentSessionParams) {
     return undefined;
   }
   const requestedAgentId = requestedSessionAgent.agentId;
-  const selected = loadSessionEntry(params.requestedSessionKey, {
-    agentId: requestedAgentId,
-    clone: false,
-  });
+  const selected = loadSessionEntry(
+    params.requestedSessionKey,
+    {
+      agentId: requestedAgentId,
+      clone: false,
+    },
+    params.cfg,
+  );
   if (!selected.entry?.sessionId) {
     return prepareAdmittedAgentSession(params, selected, requestedAgentId);
   }
@@ -81,10 +85,14 @@ export async function prepareAgentSession(params: PrepareAgentSessionParams) {
     databaseForSession(selected),
     (opened) => {
       params.assertCurrent?.();
-      const current = loadSessionEntry(params.requestedSessionKey, {
-        agentId: requestedAgentId,
-        clone: false,
-      });
+      const current = loadSessionEntry(
+        params.requestedSessionKey,
+        {
+          agentId: requestedAgentId,
+          clone: false,
+        },
+        params.cfg,
+      );
       const currentDatabase = databaseForSession(current);
       if (
         current.canonicalKey !== selected.canonicalKey ||

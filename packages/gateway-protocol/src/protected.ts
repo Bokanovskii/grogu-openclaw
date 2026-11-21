@@ -2,8 +2,30 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
 const id = Type.String({ minLength: 1, maxLength: 256 });
+const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
+export const ProtectedAgentToolSchema = Type.Union([
+  Type.Literal("web_fetch"),
+  Type.Literal("show_widget"),
+  Type.Literal("sessions_list"),
+  Type.Literal("sessions_history"),
+  Type.Literal("sessions_send"),
+]);
+export const ProtectedAgentSchema = node({
+  id: protectedAgentId,
+  name: Type.String({ minLength: 1, maxLength: 80 }),
+  description: Type.String({ minLength: 1, maxLength: 240 }),
+  tools: Type.Array(ProtectedAgentToolSchema),
+});
+export const ProtectedAgentCatalogSchema = node({
+  defaultAgentId: protectedAgentId,
+  agents: Type.Array(ProtectedAgentSchema),
+});
+export const ProtectedAgentSelectionSchema = node({
+  selectedAgentId: protectedAgentId,
+});
+export const ProtectedAgentMentionSchema = node({ agentId: protectedAgentId });
 export const ProtectedProviderSchema = Type.Union([
   Type.Literal("sparky"),
   Type.Literal("github-copilot"),
@@ -19,6 +41,9 @@ export const ProtectedCredentialSchema = node({
 });
 export const ProtectedTurnRequestSchema = node({
   text: Type.String({ minLength: 1, maxLength: 16000 }),
+  mentions: Type.Optional(
+    Type.Array(ProtectedAgentMentionSchema, { maxItems: 4, uniqueItems: true }),
+  ),
   model: Type.Optional(id),
   provider: ProtectedProviderSchema,
   credential: Type.Optional(ProtectedCredentialSchema),
@@ -28,6 +53,12 @@ export const ProtectedWidgetSchema = node({ id, title: Type.String() });
 export const ProtectedTurnEventSchema = Type.Union([
   node({ type: Type.Literal("start"), runId: id }),
   node({ type: Type.Literal("delta"), text: Type.String() }),
+  node({
+    type: Type.Literal("child-result"),
+    runId: id,
+    agentId: protectedAgentId,
+    text: Type.String(),
+  }),
   node({ type: Type.Literal("sources"), sources: Type.Array(ProtectedSourceSchema) }),
   node({ type: Type.Literal("widget"), ...ProtectedWidgetSchema.properties }),
   node({
@@ -53,6 +84,7 @@ export const ProtectedMessageSchema = node({
   id,
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
+  agentId: Type.Optional(protectedAgentId),
   sources: Type.Optional(Type.Array(ProtectedSourceSchema)),
   widgets: Type.Optional(Type.Array(ProtectedWidgetSchema)),
   status: Type.Optional(
@@ -64,11 +96,13 @@ export const ProtectedChatSummarySchema = node({
   title: Type.String(),
   version: Type.String(),
   updatedAt: Type.Number(),
+  selectedAgentId: Type.Optional(protectedAgentId),
 });
 export const ProtectedChatSchema = node({
   ...ProtectedChatSummarySchema.properties,
   messages: Type.Array(ProtectedMessageSchema),
 });
+export const ProtectedAgentSelectionResponseSchema = node({ chat: ProtectedChatSchema });
 export const ProtectedModelSchema = node({
   provider: ProtectedProviderSchema,
   id,
@@ -104,6 +138,7 @@ export const ProtectedChatResponseSchema = node({
 });
 export const ProtectedCreateChatSchema = node({
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
+  selectedAgentId: Type.Optional(protectedAgentId),
 });
 export const ProtectedSteerSchema = node({
   id,
@@ -120,6 +155,12 @@ export const ProtectedFilesSchema = node({
   files: Type.Array(node({ id, name: Type.String(), size: Type.Integer({ minimum: 0 }) })),
 });
 export type ProtectedCredential = Static<typeof ProtectedCredentialSchema>;
+export type ProtectedAgentTool = Static<typeof ProtectedAgentToolSchema>;
+export type ProtectedAgent = Static<typeof ProtectedAgentSchema>;
+export type ProtectedAgentCatalogDto = Static<typeof ProtectedAgentCatalogSchema>;
+export type ProtectedAgentSelection = Static<typeof ProtectedAgentSelectionSchema>;
+export type ProtectedAgentSelectionResponse = Static<typeof ProtectedAgentSelectionResponseSchema>;
+export type ProtectedAgentMention = Static<typeof ProtectedAgentMentionSchema>;
 export type ProtectedTurnEvent = Static<typeof ProtectedTurnEventSchema>;
 export type ProtectedTurnRequest = Static<typeof ProtectedTurnRequestSchema>;
 export type ProtectedChat = Static<typeof ProtectedChatSchema>;
@@ -131,6 +172,10 @@ export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>
   Value.Check(ProtectedTurnRequestSchema, value);
+export const isProtectedAgentSelection = (value: unknown): value is ProtectedAgentSelection =>
+  Value.Check(ProtectedAgentSelectionSchema, value);
+export const isProtectedAgentMention = (value: unknown): value is ProtectedAgentMention =>
+  Value.Check(ProtectedAgentMentionSchema, value);
 export const isProtectedCreateChat = (
   value: unknown,
 ): value is Static<typeof ProtectedCreateChatSchema> =>

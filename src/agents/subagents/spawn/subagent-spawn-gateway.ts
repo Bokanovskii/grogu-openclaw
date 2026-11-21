@@ -44,16 +44,20 @@ const SUBAGENT_AGENT_RECONCILE_TIMEOUT_MS = 6_400;
 type SubagentGatewayResponse = Awaited<ReturnType<typeof callGateway>>;
 
 /** Captures the request's Gateway binding and operator owner before spawn preparation awaits. */
-export function captureSubagentSpawnGatewayContext() {
+export function captureSubagentSpawnGatewayContext(
+  explicitGatewayContextResolver?: GatewayContextResolver,
+) {
   const gatewayCaller = getGatewayToolCallerIdentity();
   const gatewayScope = getPluginRuntimeGatewayRequestScope();
   const gatewayContextResolver =
+    explicitGatewayContextResolver ??
     gatewayCaller?.gatewayContextResolver ??
     gatewayScope?.resolveGatewayContext ??
     gatewayScope?.context?.resolveGatewayContext;
-  const operatorAuthority =
-    resolveGatewayToolOperatorSelection().operatorAuthority ??
-    gatewayScope?.client?.internal?.operatorRunAuthority;
+  const operatorAuthority = explicitGatewayContextResolver
+    ? gatewayScope?.client?.internal?.operatorRunAuthority
+    : (resolveGatewayToolOperatorSelection().operatorAuthority ??
+      gatewayScope?.client?.internal?.operatorRunAuthority);
   return { gatewayContextResolver, operatorAuthority };
 }
 
@@ -64,6 +68,7 @@ async function dispatchSubagentGateway(
     agentRunTracking?: "native_subagent";
     gatewayContextResolver?: GatewayContextResolver;
     preparedLaunch?: PreparedSessionRun;
+    requireInProcess?: boolean;
   },
 ): Promise<{ response: SubagentGatewayResponse; registrationRequired: boolean }> {
   const { sessionSpawnContext, parentExecutionIdentityToken } =
@@ -183,6 +188,9 @@ async function dispatchSubagentGateway(
       : await dispatch();
     return { response, registrationRequired: true };
   }
+  if (options?.requireInProcess) {
+    throw new Error("Request-owned child requires a local Gateway");
+  }
   const dispatchAgentRequest = (timeoutMs?: number | null) => {
     request.assertDispatchCurrent?.();
     return sessionSpawnContext && gatewayCaller?.operationalRunInstance
@@ -273,6 +281,7 @@ export async function callNativeSubagentGateway(
   authorization?: SubagentLaunchAuthorization,
   gatewayContextResolver?: GatewayContextResolver,
   preparedLaunch?: PreparedSessionRun,
+  options?: { requireInProcess?: boolean },
 ) {
   // The trusted marker exists only on direct dispatch. A WebSocket fallback keeps the
   // ordinary Gateway CLI policy: tracking is best-effort and never rejects an accepted run.
@@ -280,6 +289,7 @@ export async function callNativeSubagentGateway(
     agentRunTracking: "native_subagent",
     gatewayContextResolver,
     preparedLaunch,
+    requireInProcess: options?.requireInProcess,
   });
 }
 

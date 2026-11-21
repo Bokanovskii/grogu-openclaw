@@ -9,7 +9,6 @@ import { tryResolveLegacyCompatibilityAgentId } from "../../config/legacy.defaul
 import { createRuntimeConfigReader } from "../../config/runtime-snapshot.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/session-store-owner.js";
 import { shouldResumeParentSubagent } from "../../gateway/session-subagent-resume.js";
-import { resolveGatewaySessionStoreTargetWithStore } from "../../gateway/session-utils-store-lookup.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
@@ -46,6 +45,7 @@ import { jsonResult, readToolStringParam } from "./common.js";
 import { wrapGatewayPersonalToolExecution } from "./gateway-caller-context.js";
 import { callAgentToolGatewayRequest } from "./in-process-gateway.js";
 import {
+  getHostSessionAccess,
   resolveSessionToolTargetAgentId,
   runWithScopedSessionAccess,
 } from "./scoped-session-access.js";
@@ -73,6 +73,7 @@ import {
   createConfiguredAgentMainSession,
   isConfiguredAgentMainSessionKey,
   notifySessionsSendSession,
+  readSessionsSendSession,
   resolveConfiguredAgentMainSessionKey,
 } from "./sessions-send-tool.delivery.js";
 import {
@@ -104,6 +105,10 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const sendGatewayCall = opts?.callGateway ?? callSessionsSendGateway;
       const message = readSessionsSendMessage(params);
       const mode = readSessionsSendMode(params);
+      const hostScope = getHostSessionAccess();
+      if (hostScope && (mode !== "steer" || !hostScope.signal)) {
+        return sendFailure("forbidden", "Only request-bound steering is available.");
+      }
       const resumeCaller =
         mode === undefined || mode === "resume" ? captureSessionsSendResumeCaller() : undefined;
       if (mode === "resume" && !resumeCaller) {
@@ -131,19 +136,11 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       } catch (err) {
         return sendFailure("forbidden", formatErrorMessage(err));
       }
-      const readSession = (key: string, agentId: string) =>
-        resolveGatewaySessionStoreTargetWithStore({
-          cfg,
-          key,
-          agentId,
-          readOnly: true,
-          exactRead: true,
-          clone: false,
-          projection: "full",
-        });
-
       const sessionKeyParam = readToolStringParam(params, "sessionKey");
       const labelParam = readToolStringParam(params, "label");
+      if (hostScope && !sessionKeyParam && labelParam) {
+        return sendFailure("forbidden", "Use a permitted session ID or key instead of a label.");
+      }
       const labelAgentIdInput = readToolStringParam(params, "agentId");
       const normalizedLabelAgentId =
         labelAgentIdInput === undefined ? null : normalizeAgentIdStrict(labelAgentIdInput);
@@ -366,8 +363,8 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const mayUseRequesterForLiteralSentinel =
         isLiteralUnscopedMainTarget && normalizeAgentId(targetAgentId) === requesterAgentId;
       const requesterSessionKey = opts?.agentSessionKey ? effectiveRequesterKey : undefined;
-      const requesterSession = readSession(effectiveRequesterKey, requesterAgentId);
-      const requesterSessionEntry = requesterSession.store[requesterSession.canonicalKey];
+      const requester = readSessionsSendSession(cfg, effectiveRequesterKey, requesterAgentId);
+      const requesterSessionEntry = requester.store[requester.canonicalKey];
       const requesterSessionId = opts?.agentSessionId ?? requesterSessionEntry?.sessionId;
       const requesterContinuationSession = requesterSessionId
         ? {
@@ -378,19 +375,19 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const requesterDeliveryGeneration =
         requesterSessionEntry && requesterContinuationSession
           ? {
-              agentId: requesterSession.agentId,
-              storePath: requesterSession.storePath,
-              sessionKey: requesterSession.canonicalKey,
+              agentId: requester.agentId,
+              storePath: requester.storePath,
+              sessionKey: requester.canonicalKey,
               ...requesterContinuationSession,
               lifecycleRevision: requesterContinuationSession.lifecycleRevision ?? null,
             }
           : undefined;
       const requesterIsSubagent = isSubagentSessionFromEntry(
-        requesterSession.canonicalKey,
+        requester.canonicalKey,
         requesterSessionEntry,
         readAcpSessionMetaForEntry({
-          sessionKey: requesterSession.canonicalKey,
-          agentId: requesterSession.agentId,
+          sessionKey: requester.canonicalKey,
+          agentId: requester.agentId,
           cfg,
           entry: requesterSessionEntry,
         }),
@@ -484,7 +481,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
 
           const requesterChannel = opts?.agentChannel;
           const isIsolatedCronRequester = isCronRunSessionKey(requesterSessionKey);
-          const targetSession = readSession(resolvedKey, targetAgentId);
+          const targetSession = readSessionsSendSession(cfg, resolvedKey, targetAgentId);
           const targetSessionEntry = targetSession.store[targetSession.canonicalKey];
           const targetAcpMeta = readAcpSessionMetaForEntry({
             sessionKey: targetSession.canonicalKey,
@@ -630,7 +627,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
           });
           try {
             const acceptedTarget = start.a2aSessionKey
-              ? readSession(acceptedTargetSessionKey, targetAgentId)
+              ? readSessionsSendSession(cfg, acceptedTargetSessionKey, targetAgentId)
               : targetSession;
             if (start.a2aSessionKey && !acceptedTarget.store[acceptedTarget.canonicalKey]) {
               throw new Error("Accepted Cron parent has no stored session entry.");

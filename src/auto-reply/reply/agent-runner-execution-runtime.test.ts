@@ -24,6 +24,39 @@ vi.mock("../../agents/model-catalog.runtime.js", () => ({
 const state = await setupAgentRunnerExecutionTestState();
 
 describe("executeAgentTurn: runtime selection", () => {
+  it("does not execute a transient child without its initiating request", async () => {
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
+      result: await params.run("test", "model", initialFallbackAttemptOptions(params)),
+      provider: "test",
+      model: "model",
+      attempts: [],
+    }));
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "unexpected" }],
+      meta: {},
+    });
+    const executeAgentTurn = await getExecuteAgentTurnForTest();
+    const followupRun = createFollowupRun();
+    followupRun.run.sessionId = "child-session";
+
+    await executeAgentTurn({
+      ...createMinimalRunAgentTurnParams({ followupRun }),
+      getActiveSessionEntry: () => ({
+        sessionId: "child-session",
+        updatedAt: 1,
+        transientLifetime: {
+          kind: "request",
+          parentSessionKey: "agent:main:parent",
+          parentSessionId: "parent-session",
+          profileId: "profile",
+        },
+      }),
+    });
+
+    expect(state.runEmbeddedAgentMock).not.toHaveBeenCalled();
+    expect(state.runCliAgentMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       provider: "openai",

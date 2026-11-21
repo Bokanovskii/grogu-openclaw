@@ -200,6 +200,10 @@ export type OpenClawStateWorkerOperations = RegisteredStateWorkerOperations &
       input: SubagentRegistryWrite;
       output: SubagentRegistryWriteReceipt;
     };
+    "subagents.recoverTransient": {
+      input: import("../agents/subagents/registry/subagent-registry-transient-recovery.js").TransientRegistryRecovery;
+      output: { writeId: string; safe: boolean };
+    };
     "sessionUpstream.listWatched": { input: undefined; output: SessionUpstreamLink[] };
     "backup.recordOutcome": { input: PreparedBackupRunRecord; output: void };
     "sessionGroups.mutate": {

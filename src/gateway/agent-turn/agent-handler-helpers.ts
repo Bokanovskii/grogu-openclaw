@@ -94,6 +94,7 @@ export function respondDeletedAgentSession(params: {
 }
 
 export function respondUnavailableAgentSessionForKey(params: {
+  cfg: OpenClawConfig;
   sessionKey: string;
   requestedSessionId?: string;
   isRawModelRun: boolean;
@@ -101,11 +102,15 @@ export function respondUnavailableAgentSessionForKey(params: {
   respond: GatewayRequestHandlerOptions["respond"];
   assertCurrent?: () => void;
 }): boolean | Promise<boolean> {
-  const { cfg, entry, canonicalKey, legacyKey } = loadSessionEntry(params.sessionKey, {
-    ...(params.agentId ? { agentId: params.agentId } : {}),
-    clone: false,
-    projection: "list",
-  });
+  const { cfg, entry, canonicalKey, legacyKey } = loadSessionEntry(
+    params.sessionKey,
+    {
+      ...(params.agentId ? { agentId: params.agentId } : {}),
+      clone: false,
+      projection: "list",
+    },
+    params.cfg,
+  );
   const deleted = respondDeletedAgentSession({
     cfg,
     canonicalKey,

@@ -31,6 +31,7 @@ import {
   assertPersistedStateDatabaseAccessAllowed,
   defaultPayload,
   isGatewayStateOwnerDefinitelyStale,
+  isLocalOrdinaryStateAccessRole,
   StateDatabaseAdmissionPendingError,
 } from "./gateway-state-owner-record.js";
 import { normalizeSqliteNonNegativeInteger } from "./sqlite-busy-timeout.js";
@@ -663,7 +664,7 @@ export function assertStateDatabaseReadAllowed(databasePath: string): void {
     !owner ||
     owner.kind !== "process" ||
     !owner.accepting ||
-    (role !== "gateway" && role !== "agent-embedded")
+    !isLocalOrdinaryStateAccessRole(role)
   ) {
     // Maintenance/schema authority and foreign owners keep their existing fresh checks.
     assertStateDatabaseAccessAllowed(databasePath);
@@ -715,7 +716,7 @@ export function assertStateDatabaseAccessAllowed(
       throw new Error(lost);
     }
     const role = local.payload.role ?? "gateway";
-    if (!local.accepting || (role !== "gateway" && role !== "agent-embedded")) {
+    if (!local.accepting || !isLocalOrdinaryStateAccessRole(role)) {
       assertMaintenance();
     }
     return;
@@ -725,6 +726,18 @@ export function assertStateDatabaseAccessAllowed(
     ownerPath: identity.ownerPath,
     assertMaintenance,
   });
+}
+
+/** Recovery needs a live process owner that also excludes foreign ordinary writers. */
+export function assertExclusiveServiceStateOwner(databasePath: string): void {
+  const owner = owners.get(resolveStateOwnerIdentity(databasePath).key);
+  if (
+    owner?.payload.role !== "exclusive-service" ||
+    !owner.accepting ||
+    !hasPhysicalOwnership(owner)
+  ) {
+    throw new Error("Exclusive service state ownership is required for recovery.");
+  }
 }
 
 /** Cleanup must compete with local roots too; it cannot borrow a live Gateway's authority. */

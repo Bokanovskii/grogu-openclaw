@@ -29,6 +29,7 @@ import type {
   SubagentRegistryWorkerWrite,
   SubagentRunMutationOptions,
 } from "./subagent-registry-persistence.types.js";
+import { prepareRestoredSubagentRun } from "./subagent-registry-restore-runtime.js";
 import {
   consumeFreshSubagentRegistryRows,
   publishSubagentRunsAfterAtomicStore,
@@ -269,7 +270,7 @@ async function refreshRows(
         "Subagent mutation found an unreadable durable row",
       );
     }
-    postimages.set(runId, row ?? null);
+    postimages.set(runId, row ? prepareRestoredSubagentRun(runs.get(runId), row) : null);
   }
   publishRows(runs, postimages, context, reply.versions);
 }
@@ -649,10 +650,10 @@ export async function restoreSubagentRunsFromDisk(params: {
         if (params.mergeOnly && params.runs.has(runId)) {
           continue;
         }
-        retainSubagentRunRuntimeOwner(params.runs.get(runId), entry);
-        params.runs.set(runId, entry);
-        rememberRestoredSubagentRunNotification(entry);
-        subagentRuns.settleCommittedOwnership(entry);
+        const installed = prepareRestoredSubagentRun(params.runs.get(runId), entry);
+        params.runs.set(runId, immutableSubagentRun(installed));
+        rememberRestoredSubagentRunNotification(installed);
+        subagentRuns.settleCommittedOwnership(installed);
         added += 1;
       }
       publishSubagentRunsAfterAtomicStore(params.runs, undefined, context.admission.databasePath)();

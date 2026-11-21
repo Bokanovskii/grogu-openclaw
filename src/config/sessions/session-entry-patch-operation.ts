@@ -23,7 +23,11 @@ import {
 } from "./types.js";
 
 type ExpectedSession = Pick<SessionEntry, "sessionId"> &
-  Partial<Pick<SessionEntry, "lifecycleRevision" | "activeWriterRunId">>;
+  Partial<
+    Pick<SessionEntry, "lifecycleRevision" | "activeWriterRunId" | "updatedAt" | "createdVia">
+  > & {
+    createdActorProfileId?: string;
+  };
 
 /** Closed internal operations; arbitrary updater callbacks retain prepare/CAS. */
 export type SessionEntryPatchOperation = (
@@ -80,7 +84,15 @@ export function reduceSessionEntryPatch(
       (Object.hasOwn(expected, "lifecycleRevision") &&
         entry.lifecycleRevision !== expected.lifecycleRevision) ||
       (Object.hasOwn(expected, "activeWriterRunId") &&
-        entry.activeWriterRunId !== expected.activeWriterRunId))
+        entry.activeWriterRunId !== expected.activeWriterRunId) ||
+      (Object.hasOwn(expected, "updatedAt") && entry.updatedAt !== expected.updatedAt) ||
+      (Object.hasOwn(expected, "createdVia") && entry.createdVia !== expected.createdVia) ||
+      (expected.createdActorProfileId !== undefined &&
+        !(
+          entry.createdActor?.type === "human" &&
+          entry.createdActor.source === "profile" &&
+          entry.createdActor.id === expected.createdActorProfileId
+        )))
   ) {
     return null;
   }

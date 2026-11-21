@@ -68,6 +68,7 @@ export async function loadSubagentRecoverySession(params: {
   );
   const retained = retainSessionOwner(storePath, sessionKey, sessionEntry?.sessionId);
   if (
+    sessionEntry?.transientLifetime !== undefined ||
     retained ||
     params.entry.execution.restartRecovery ||
     sessionEntry?.abortedLastRun === true ||

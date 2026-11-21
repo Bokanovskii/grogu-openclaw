@@ -39,6 +39,7 @@ import {
   assertSubagentRegistryWriteSourceCurrent,
   assertSubagentRegistryWriteOutcomeKnown,
 } from "./subagent-registry-persistence.js";
+import { isRequestOwnedSubagentRun } from "./subagent-registry-transient-content.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { getSubagentRunRuntimeKey } from "./subagent-run-generation.js";
 
@@ -125,7 +126,7 @@ export const finalizeSubagentCleanup = async (
       }
       draft.wakeOnDescendantSettle = undefined;
     });
-    await finishCleanup(skipRequesterDelivery);
+    await finishCleanup(skipRequesterDelivery || isRequestOwnedSubagentRun(entry));
     return;
   }
   if (announceOutcome === "delivered" || announceOutcome === "intentional_non_delivery") {

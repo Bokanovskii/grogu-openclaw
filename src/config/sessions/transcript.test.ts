@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { repairToolUseResultPairing } from "../../agents/session-transcript-repair.js";
+import { withTranscriptWriteBudget } from "../../agents/sessions/transcript-write-budget.js";
 import { normalizeLegacySessionEntryDelivery } from "../../infra/state-migrations.legacy-session-store.js";
 import * as transcriptEvents from "../../sessions/transcript-events.js";
 import type { InternalSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
@@ -634,6 +635,28 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]?.idempotencyKey).toBe("mirror:test-source-message");
     expect(messages[0]?.content?.[0]?.text).toBe("Hello from delivery mirror!");
+  });
+
+  it("charges fresh assistant results but not idempotent replays", async () => {
+    await writeTranscriptStore();
+    const append = (idempotencyKey: string) =>
+      appendAssistantMessageToSessionTranscript({
+        sessionKey,
+        text: "Attributed child result",
+        idempotencyKey,
+        storePath: fixture.storePath(),
+      });
+    expect((await append("child:one")).ok).toBe(true);
+    const exhausted = <T>(run: () => T) =>
+      withTranscriptWriteBudget(() => {
+        throw new Error("storage budget exhausted");
+      }, run);
+    expect((await exhausted(() => append("child:one"))).ok).toBe(true);
+    await expect(exhausted(() => append("child:two"))).rejects.toThrow("storage budget exhausted");
+    const messages = (await loadFixtureMessages()).flatMap((event) =>
+      event.message ? [event.message] : [],
+    );
+    expect(messages).toHaveLength(1);
   });
 
   it("dedupes delivery mirrors against the active SQLite branch tail", async () => {

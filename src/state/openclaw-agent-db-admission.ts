@@ -4,6 +4,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import { resolveStateDir } from "../config/state-dir.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
+import { assertStateDatabaseAccessAllowed } from "../infra/gateway-state-owner.js";
 import { assertSqliteIntegrityInWorker } from "../infra/sqlite-integrity-worker.js";
 import {
   runSqliteIntegrityCheckSync,
@@ -73,6 +74,7 @@ import {
   observeOpenClawDatabaseMaintenanceResource,
 } from "./openclaw-state-db-async-lifecycle.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "./openclaw-state-db-contract.js";
+import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 
 /** Denial still invokes run under admission, with a throwing authority check, to permit cleanup. */
 export type OpenClawAgentDatabaseWriteAdmission = <T>(
@@ -90,15 +92,11 @@ function assertAgentDatabaseOpenAuthority(
     const refusal = new Error("Agent database open authority was refused", { cause: error });
     try {
       operation.throw(refusal);
-    } catch (cleanupError) {
-      if (cleanupError !== refusal) {
-        throw new AggregateError(
-          [error, cleanupError],
-          `Agent database authority and cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-          {
-            cause: cleanupError,
-          },
-        );
+    } catch (cleanup) {
+      if (cleanup !== refusal) {
+        throw new AggregateError([error, cleanup], "Agent open and cleanup failed", {
+          cause: cleanup,
+        });
       }
     }
     throw error;
@@ -211,6 +209,8 @@ export function createOpenClawAgentDatabaseAdmissionOwner(
       runSqliteImmediateTransactionSync(
         database.db,
         () => {
+          // A cached agent handle may predate another process's exclusive state ownership.
+          assertStateDatabaseAccessAllowed(resolveOpenClawStateSqlitePath(options.env));
           assertAgentDeletionDatabaseCleanupAccess(database, options);
           assertAgentCreationClaimAccess(database, options);
           const operationResult = operation(database);

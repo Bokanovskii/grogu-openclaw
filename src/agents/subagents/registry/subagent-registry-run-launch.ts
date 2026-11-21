@@ -29,6 +29,7 @@ import {
 import { bindSwarmRunReservation, ownsSwarmRunReservation } from "../swarm/swarm-scheduler.js";
 import { matchesSubagentChildSessionOwner } from "./subagent-child-owner-match.js";
 import { bindSubagentExecRequestOwners } from "./subagent-exec-request-ownership.js";
+import { bindSubagentBeforeDeleteCleanupHook } from "./subagent-registry-child-result-hook.js";
 import {
   getCurrentSubagentRunOwner,
   subagentRuns,
@@ -48,6 +49,7 @@ import {
   type RegisterSubagentRunParams,
 } from "./subagent-registry-run-launch-record.js";
 import { SubagentRecoveryManager } from "./subagent-registry-run-recovery.js";
+import { bindRequestOwnedSubagentRun } from "./subagent-registry-transient-content.js";
 import type {
   RegisterSubagentRunOptions,
   SubagentRegistrationScope,
@@ -110,6 +112,16 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
     const requesterSessionKey = registerParams.requesterSessionKey.trim();
     if (!runId || !childSessionKey || !requesterSessionKey) {
       return;
+    }
+    if (
+      registerParams.requestScopedTransient &&
+      (registerParams.cleanup !== "delete" ||
+        registerParams.expectsCompletionMessage !== false ||
+        registerParams.spawnMode === "session" ||
+        registerParams.collect ||
+        registerParams.queued)
+    ) {
+      throw new Error("Request-owned children require quiet run-mode delete cleanup.");
     }
     const lifecycleGeneration = getAgentEventLifecycleGeneration();
     const cfg = this.options.getRuntimeConfig();
@@ -307,6 +319,9 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
                   )
                 : undefined,
           });
+          if (registerParams.requestScopedTransient) {
+            bindRequestOwnedSubagentRun(entry);
+          }
           entry.requesterStorePath =
             previous?.requesterStorePath ??
             resolvePhysicalSessionStorePath(
@@ -360,6 +375,11 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
               }
             } finally {
               bindGatewayContextResolver(entry, gatewayContextResolver);
+              bindSubagentBeforeDeleteCleanupHook(
+                entry,
+                registerParams.beforeDeleteCleanup,
+                registerParams.deleteCleanupSettled,
+              );
               if (!registrationOwnership.superseded) {
                 registrationOwnership.accept(entry);
               }

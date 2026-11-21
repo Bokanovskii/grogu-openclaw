@@ -2,6 +2,7 @@ import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { getRuntimeConfig } from "../../../config/config.js";
 import { runWithoutOwnedSessionTranscriptWrites } from "../../../config/sessions/transcript-write-context.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { prepareAgentWaitForTurn } from "../../../gateway/agent-turn/agent-wait.js";
 import { callGateway } from "../../../gateway/call.js";
 import {
   getAgentEventLifecycleGeneration,
@@ -10,6 +11,7 @@ import {
 import { isFastTestRuntimeEnv } from "../../../infra/env.js";
 import { hasSqliteWorkerOutcomeUnknown } from "../../../infra/sqlite-worker-contract.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
+import { getGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import { retainGatewayRootWorkAdmissionContinuation } from "../../../process/gateway-work-admission.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
@@ -161,17 +163,77 @@ export abstract class SubagentWaitManager {
         deadlineMs === undefined
           ? normalizedWaitTimeoutMs
           : Math.max(1, Math.min(normalizedWaitTimeoutMs, deadlineMs - waitStartedAt));
+      const resolveGatewayContext = getGatewayContextResolver(entryBeforeWait);
+      const localContext = resolveGatewayContext?.();
+      if (resolveGatewayContext && !localContext) {
+        return;
+      }
+      let invalidLocalObservation = false;
+      const localObserve = localContext?.localEmbedded
+        ? async (observationTimeoutMs: number) => {
+            const assertObservationCurrent = () => {
+              assertSubagentRegistryWriteSourceCurrent(stateContext);
+              const current = this.options.runs.get(runId);
+              if (
+                !isAgentEventLifecycleGenerationCurrent(lifecycleGeneration) ||
+                !current ||
+                !isSameSubagentRunOwner(current, waitedEntry) ||
+                getGatewayContextResolver(current) !== resolveGatewayContext ||
+                resolveGatewayContext?.() !== localContext
+              ) {
+                throw new Error("Subagent wait owner is no longer current");
+              }
+            };
+            assertObservationCurrent();
+            const { result, session } = await prepareAgentWaitForTurn(localContext, {
+              runId,
+              timeoutMs: observationTimeoutMs,
+            }).wait();
+            assertObservationCurrent();
+            const expectedSessionId = entryBeforeWait.childSessionIdentity?.sessionId;
+            const terminal =
+              result.status !== "pending" &&
+              (result.status !== "timeout" ||
+                ("endedAt" in result && result.endedAt !== undefined));
+            if (
+              expectedSessionId &&
+              ((!session && terminal) ||
+                (session &&
+                  (session.sessionId !== expectedSessionId ||
+                    session.sessionKey !== entryBeforeWait.childSessionKey ||
+                    session.lifecycleGeneration !== lifecycleGeneration)))
+            ) {
+              invalidLocalObservation = true;
+              throw new Error("Subagent wait observation belongs to another session");
+            }
+            return result;
+          }
+        : undefined;
       const wait = await waitForAgentRun({
         runId,
         timeoutMs,
         callGateway: this.options.callGateway,
+        observe: localObserve,
       });
       // In-process restart never retains the old wait owner's authority.
       if (!isAgentEventLifecycleGenerationCurrent(lifecycleGeneration)) {
         return;
       }
       const observedEntry = this.options.runs.get(runId);
-      if (!observedEntry || !isSameSubagentRunOwner(observedEntry, waitedEntry)) {
+      if (invalidLocalObservation) {
+        log.warn("Subagent wait observation does not match the owned child session", {
+          runId,
+          childSessionKey: entryBeforeWait.childSessionKey,
+        });
+        return;
+      }
+      if (
+        !observedEntry ||
+        !isSameSubagentRunOwner(observedEntry, waitedEntry) ||
+        (localObserve &&
+          (getGatewayContextResolver(observedEntry) !== resolveGatewayContext ||
+            resolveGatewayContext?.() !== localContext))
+      ) {
         return;
       }
       let entry: SubagentRunRecord = observedEntry;

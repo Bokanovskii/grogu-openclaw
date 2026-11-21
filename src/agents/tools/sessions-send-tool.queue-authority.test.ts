@@ -33,11 +33,130 @@ import {
 import { SessionManager } from "../sessions/session-manager.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
+import { withHostSessionAccess } from "./scoped-session-access.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
 
 registerAgentSessionLoopTestLifecycle();
 
 describe("sessions_send direct queue source authority", () => {
+  it.each(["live", "revoked"] as const)(
+    "settles host-scoped steering with a %s initiating request",
+    async (stateOfRequest) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+        const cfg = {
+          agents: { ownership: "explicit", entries: { main: {} } },
+          tools: { sessions: { visibility: "all" } },
+        } satisfies OpenClawConfig;
+        setRuntimeConfigSnapshot(cfg);
+        setActivePluginRegistry(createSessionConversationTestRegistry());
+        const requesterSessionKey = "agent:main:dashboard:host-source";
+        const sessionKey = "agent:main:dashboard:host-target";
+        const sessionId = "host-target-session";
+        for (const [key, id] of [
+          [requesterSessionKey, "host-source-session"],
+          [sessionKey, sessionId],
+        ] as const) {
+          await replaceSessionEntry(
+            { agentId: "main", sessionKey: key },
+            { sessionId: id, updatedAt: 1 },
+          );
+        }
+        const target = await resolveSessionTranscriptRuntimeTarget({
+          agentId: "main",
+          sessionId,
+          sessionKey,
+        });
+        const manager = await SessionManager.openAsync(target, state.workspaceDir);
+        guardSessionManager(manager);
+        const { session } = await createTestSession({ sessionManager: manager });
+        const accepted = createDeferredCore();
+        const controller = new AbortController();
+        const queueMessage = async (
+          text: string,
+          options?: EmbeddedAgentQueueMessageOptions,
+          assertCurrent?: () => void,
+        ) =>
+          steerActiveSessionWithOptionalDeliveryWait(
+            session,
+            text,
+            {
+              ...options,
+              onQueueAccepted: (value) => {
+                options?.onQueueAccepted?.(value);
+                if (value) {
+                  accepted.resolve();
+                }
+              },
+            },
+            sessionKey,
+            () => {
+              assertCurrent?.();
+              return true;
+            },
+          );
+        const handle: EmbeddedAgentQueueHandle = {
+          runId: "host-target-run",
+          queueMessage,
+          isStreaming: () => true,
+          isCompacting: () => false,
+          abort: () => {},
+          supportsTranscriptCommitWait: true,
+          messageInjectionV2: { version: 2, isAvailable: () => true, queueMessage },
+        };
+        setActiveEmbeddedRun(sessionId, handle, sessionKey, undefined, "main");
+        const message = "request-owned guidance";
+        const pending = withHostSessionAccess(
+          {
+            creatorProfileId: "alice",
+            signal: controller.signal,
+            assertCurrent: () => controller.signal.throwIfAborted(),
+            revalidate: async () => controller.signal.throwIfAborted(),
+            resolve: async ({ reference }) =>
+              reference === sessionKey ? { sessionKey, sessionId, agentId: "main" } : undefined,
+          },
+          () =>
+            createSessionsSendTool({
+              config: cfg,
+              agentSessionKey: requesterSessionKey,
+              expectedTargetSessionId: sessionId,
+              expectedTargetStorePath: target.storePath,
+            }).execute("host-send", { sessionKey, message, mode: "steer" }),
+        );
+        try {
+          await accepted.promise;
+          if (stateOfRequest === "revoked") {
+            controller.abort();
+            await Promise.allSettled([pending]);
+          }
+          streamMocks.streamSimple.mockImplementation(
+            (model: Parameters<typeof createAssistant>[0]) =>
+              createAssistantResultStream(createAssistant(model, [{ type: "text", text: "done" }])),
+          );
+          await session.prompt("Continue without withdrawn guidance.");
+          if (stateOfRequest === "live") {
+            expect((await pending).details).toMatchObject({
+              status: "accepted",
+              targetDisposition: "steered",
+            });
+          }
+          const reopened = await SessionManager.openAsync(target, state.workspaceDir);
+          expect(
+            reopened
+              .buildSessionContext()
+              .messages.some(
+                (entry) => entry.role === "user" && JSON.stringify(entry).includes(message),
+              ),
+          ).toBe(stateOfRequest === "live");
+        } finally {
+          controller.abort();
+          await Promise.allSettled([pending]);
+          clearActiveEmbeddedRun(sessionId, handle, sessionKey);
+          session.dispose();
+        }
+      });
+    },
+  );
+
   it.each(["live", "revoked", "unscoped", "send-revoked", "send-live"] as const)(
     "checks the %s source at the real final enqueue and preserves accepted input",
     async (source) => {

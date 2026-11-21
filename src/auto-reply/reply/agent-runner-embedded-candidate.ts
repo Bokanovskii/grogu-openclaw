@@ -6,7 +6,12 @@ import type {
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
+import {
+  getRequestScopedChildExecution,
+  resolveRequestScopedChild,
+} from "../../agents/request-scoped-child-execution.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
+import { readRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
 import { resolveGroupSessionKey } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { resolveSessionPinnedHarnessId } from "../../sessions/agent-harness-session-key.js";
@@ -298,7 +303,45 @@ export async function runEmbeddedFallbackCandidate(
             : undefined,
         };
       };
-      return runEmbeddedAgent(embeddedRunParams);
+      const activeEntry = turn.getActiveSessionEntry();
+      const requestChild =
+        getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(params.runId);
+      if (!requestChild) {
+        return runEmbeddedAgent(embeddedRunParams);
+      }
+      if (!activeEntry?.lifecycleRevision) {
+        throw new Error("Request-scoped child session generation is unavailable.");
+      }
+      return resolveRequestScopedChild(requestChild, {
+        runId: params.runId,
+        sessionKey: turn.sessionKey,
+        sessionId: turn.followupRun.run.sessionId,
+        lifecycleRevision: activeEntry.lifecycleRevision,
+      }).then((constraints) =>
+        runEmbeddedAgent({
+          ...embeddedRunParams,
+          ...constraints,
+          extraSystemPrompt: [embeddedRunParams.extraSystemPrompt, constraints.extraSystemPrompt]
+            .filter(Boolean)
+            .join("\n\n"),
+          provider: requestChild.provider,
+          model: requestChild.model,
+          abortSignal: AbortSignal.any(
+            [embeddedRunParams.abortSignal, requestChild.signal].filter(
+              (signal): signal is AbortSignal => signal !== undefined,
+            ),
+          ),
+          agentHarnessRuntimeOverride: "openclaw",
+          modelSelectionLocked: true,
+          modelFallbacksOverride: [],
+          disableMessageTool: true,
+          disableToolSearch: true,
+          disableTrajectory: true,
+          codeModeOverride: false,
+          forceMessageTool: false,
+          allowGatewaySubagentBinding: false,
+        }),
+      );
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);
     attemptCompactionCount = Math.max(attemptCompactionCount, resultCompactionCount);

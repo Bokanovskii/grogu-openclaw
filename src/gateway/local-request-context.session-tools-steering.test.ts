@@ -4,12 +4,17 @@ import {
   setActiveEmbeddedRun,
 } from "../agents/embedded-agent-runner/runs.js";
 import { createEmbeddedRunHandle } from "../agents/embedded-agent-runner/runs.test-support.js";
+import { deleteSubagentSessionForCleanup } from "../agents/subagents/registry/subagent-session-cleanup.js";
 import {
   withGatewayToolCallerIdentity,
   withoutGatewayToolCallerIdentity,
 } from "../agents/tools/gateway-caller-context.js";
 import { createSessionsSendTool } from "../agents/tools/sessions-send-tool.js";
-import { loadTranscriptEvents } from "../config/sessions/session-accessor.js";
+import {
+  loadSessionEntry,
+  loadTranscriptEvents,
+  upsertSessionEntryCore,
+} from "../config/sessions/session-accessor.js";
 import { readTranscriptEventMessage } from "../config/sessions/session-accessor.sqlite-read.js";
 import {
   claimAgentRunDelegatedAuthority,
@@ -19,6 +24,7 @@ import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-
 import {
   REQUESTER,
   TARGET,
+  TARGET_ID,
   withSessionToolsFixture,
   PARTICIPANT_SHARED,
   withParticipantSessionToolsFixture,
@@ -36,9 +42,40 @@ vi.mock("../browser-lifecycle-cleanup.js", () => ({
 
 describe("sessions_send steering custody", () => {
   beforeAll(async () => {
-    await import("./server-methods/sessions-read.js");
+    await Promise.all([
+      import("./server-methods/sessions-read.js"),
+      import("./server-methods/sessions-delete.js"),
+    ]);
   });
   afterEach(drainSessionToolsFixture);
+
+  it("deletes an owned child through the local lifecycle without a Gateway socket", async () => {
+    await withSessionToolsFixture(async () => {
+      const current = loadSessionEntry({ agentId: "main", sessionKey: TARGET });
+      expectDefined(current, "Expected the owned child session");
+      await upsertSessionEntryCore(
+        { agentId: "main", sessionKey: TARGET },
+        { ...current, lifecycleRevision: "child-generation" },
+      );
+      const resolver = getPluginRuntimeGatewayRequestScope()?.resolveGatewayContext;
+      expectDefined(resolver, "Expected the local Gateway context resolver");
+      const callGateway = vi.fn(async () => {
+        throw new Error("Unexpected Gateway socket");
+      });
+      expect(
+        await deleteSubagentSessionForCleanup({
+          callGateway,
+          gatewayBinding: { resolveGatewayContext: resolver },
+          isCurrent: () => true,
+          childSessionKey: TARGET,
+          expectedSessionId: TARGET_ID,
+          expectedLifecycleRevision: "child-generation",
+        }),
+      ).toBe("deleted");
+      expect(callGateway).not.toHaveBeenCalled();
+      expect(loadSessionEntry({ agentId: "main", sessionKey: TARGET })).toBeUndefined();
+    });
+  });
 
   it.each([
     ["end", false],
@@ -200,3 +237,4 @@ describe("runtime-only session authority", () => {
     });
   });
 });
+import { expectDefined } from "@openclaw/normalization-core/expect";

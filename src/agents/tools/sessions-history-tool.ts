@@ -37,6 +37,7 @@ import {
   type AgentToolGatewayRequestCaller,
 } from "./in-process-gateway.js";
 import {
+  getHostSessionAccess,
   resolveSessionToolTargetAgentId,
   runWithScopedSessionAccess,
 } from "./scoped-session-access.js";
@@ -434,6 +435,9 @@ export function createSessionsHistoryTool(opts?: {
           }),
         });
       }
+      if (getHostSessionAccess() && sessionId && sessionId !== access.expectedSessionId) {
+        return jsonResult({ status: "forbidden", error: "Session is not available." });
+      }
 
       if (textCursor && messageId) {
         const read = prepareSessionsHistoryTextRead({
@@ -449,6 +453,13 @@ export function createSessionsHistoryTool(opts?: {
             ? { sessionLinkRule: describeSessionLinkRule(opts.sessionLinkBase) }
             : {}),
         });
+        if (
+          getHostSessionAccess() &&
+          read.sessionId &&
+          read.sessionId !== access.expectedSessionId
+        ) {
+          return jsonResult({ status: "forbidden", error: "Session is not available." });
+        }
         return jsonResult(
           await runWithScopedSessionAccess({
             cfg,

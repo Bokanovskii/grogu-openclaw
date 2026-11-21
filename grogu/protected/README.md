@@ -95,6 +95,48 @@ another model request. Another Access session can read its user's chat, but it
 does not receive the run ID. Active runs do not survive a listener restart.
 Updates drain or interrupt them before the new listener starts.
 
+## Protected chat agents
+
+`GET /api/protected/v1/agents` returns the runtime-owned catalog. `travel` is the
+default for new chats and for older chat entries without a selection. Choose
+`general` ("Just chat") for a generic conversation with the same protected tool
+ceiling; this does not change existing selections or the Travel default. The
+catalog also includes the narrow `research` role, which can fetch and summarize
+user-selected sources. The response includes public names, descriptions, and
+tool ceilings, never the server-owned instructions. The service owner can add
+entries through the `agentExtensions` option to `createProtectedHttp`; extension
+IDs must be unique, and their tools can only be chosen from the protected
+runtime's existing tool ceiling.
+
+`POST /api/protected/v1/chats` accepts an optional `selectedAgentId`.
+`PATCH /api/protected/v1/chats/:id/agent` accepts the same field and requires
+the current chat version in `If-Match`. Selection changes are rejected while
+the chat is running. The selected ID is persisted in the canonical session
+entry and returned as `selectedAgentId`; changing it updates the chat version.
+If a later deployment removes an extension that a chat selected, turns fail
+closed until the user selects an agent still present in the catalog.
+The selection supplies only server-owned prompt instructions and a restrictive
+tool ceiling. It does not change the protected OpenClaw agent identity or grant
+permissions beyond the protected runtime's existing policy. Travel can also
+list and read chats owned by the same profile, and steer an active permitted
+chat while the current request remains authorized. Session tools recheck the
+profile and exact chat incarnation; another profile's chats are unavailable.
+Steering cannot start an idle or detached run.
+
+`POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
+up to four distinct, available agent IDs other than the selected agent. Each
+mention runs as a native child of that turn, using the same profile, admitted
+provider credential, file boundary, and deadline. Child work is not detached:
+child transcript and file bytes count against the initiating profile while
+present. The turn saves each completed result as an assistant message with its
+agent ID, removes the child's exact file directory, then lets native cleanup
+delete the child without archiving it. Stopping, revoking access, timing out, or
+shutting down also cancels the child. A listener restart does not resume
+children; it removes files and sessions only when the exact parent, profile, and
+session generation still match. Run this cleanup before rolling back to an
+older service version, which does not recognize the transient-child
+classification.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
@@ -102,12 +144,13 @@ real profile and chat storage. Run it from the checkout with Node 26.12.1:
 
 ```sh
 proof="$PWD/.artifacts/protected-proof-$$"
+node26="$HOME/.local/share/fnm/node-versions/v26.12.1/installation/bin"
 mkdir -m 700 -p "$proof/home" "$proof/state"
 trap 'rm -rf "$proof"' EXIT
-env -i PATH="$PATH" HOME="$proof/home" TMPDIR="$proof" \
+caffeinate -ims "$HOME/.local/bin/heavy" -- env -i \
+  PATH="$node26:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$proof/home" TMPDIR="$proof" \
   OPENCLAW_STATE_DIR="$proof/state" OPENCLAW_CONFIG_PATH="$proof/state/openclaw.json" \
-  "$HOME/.local/bin/heavy" -- node --import ./scripts/tsx.mjs \
-  --test --test-timeout=90000 grogu/protected/http.test.ts
+  node --import ./scripts/tsx.mjs --test --test-timeout=90000 grogu/protected/http.test.ts
 ```
 
 This proves neither a real provider nor the Access identity response. The

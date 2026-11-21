@@ -73,7 +73,9 @@ export async function spawnSubagentDirect(
   const label = params.label?.trim() || "";
   const requestThreadBinding = params.thread === true;
   const sandboxMode = params.sandbox === "require" ? "require" : "inherit";
-  const { gatewayContextResolver, operatorAuthority } = captureSubagentSpawnGatewayContext();
+  const { gatewayContextResolver, operatorAuthority } = captureSubagentSpawnGatewayContext(
+    ctx.gatewayContextResolver,
+  );
   const requestResolution = await resolveSubagentSpawnRequest(params, ctx);
   if (!requestResolution.ok) {
     return requestResolution.result;
@@ -161,11 +163,7 @@ export async function spawnSubagentDirect(
     } = childPlan.resolved;
     let { childSessionOrigin } = childPlan.resolved;
     const { resolvedModel, thinkingOverride } = plan;
-    const sessionError = (error: string): SpawnSubagentResult => ({
-      status: "error",
-      error,
-      childSessionKey,
-    });
+    const sessionError = (error: string) => ({ status: "error" as const, error, childSessionKey });
     const initialSession = await createInitialSubagentSession({
       assertActive,
       cfg,
@@ -177,6 +175,7 @@ export async function spawnSubagentDirect(
       requesterInternalKey,
       senderIsOwner: ctx.senderIsOwner,
       expectedParentSessionId: ctx.expectedParentSessionId,
+      transientLifetime: ctx.transientLifetime,
       creationPolicy,
       completionOwnerSessionKey: ownership.completionRequesterSessionKey,
       spawnedWorkspaceDir,
@@ -206,7 +205,9 @@ export async function spawnSubagentDirect(
     const cleanupOwner =
       gatewayContextResolver &&
       (operatorAuthority ||
-        (!params.collect && cleanupContext && cleanupContext.localEmbedded !== true))
+        (!params.collect &&
+          cleanupContext &&
+          (cleanupContext.localEmbedded !== true || ctx.transientLifetime)))
         ? bindSubagentSpawnCleanup({
             childSessionKey,
             resolveGatewayContext: gatewayContextResolver,
@@ -374,6 +375,17 @@ export async function spawnSubagentDirect(
       });
     let acceptedChildRunId: string | undefined;
     const launchChildRun = async (assertDispatchCurrent?: () => void) => {
+      if (ctx.beforeChildDispatch) {
+        if (!childEntry?.sessionId || !childEntry.lifecycleRevision) {
+          throw new Error("Child session identity is unavailable before dispatch");
+        }
+        await ctx.beforeChildDispatch({
+          sessionKey: childSessionKey,
+          sessionId: childEntry.sessionId,
+          lifecycleRevision: childEntry.lifecycleRevision,
+          runId: childIdem,
+        });
+      }
       const launch = await callNativeSubagentGateway(
         withSubagentGatewayExecutionIdentity(
           {
@@ -409,6 +421,7 @@ export async function spawnSubagentDirect(
               runId: childIdem,
             }
           : undefined,
+        ctx.transientLifetime ? { requireInProcess: true } : undefined,
       );
       acceptedChildRunId = readGatewayRunId(launch.response) ?? childIdem;
       cleanupOwner?.bindAcceptedRun(acceptedChildRunId);
@@ -568,7 +581,10 @@ export async function spawnSubagentDirect(
           groupId: swarmGroupId,
           queuedLaunch,
           queued: params.collect === true,
+          ...(ctx.transientLifetime ? { requestScopedTransient: true as const } : {}),
           ...(gatewayContextResolver ? { gatewayContextResolver } : {}),
+          beforeDeleteCleanup: ctx.beforeChildDeleteCleanup,
+          deleteCleanupSettled: ctx.childDeleteCleanupSettled,
           attachmentId,
           retainAttachmentsOnKeep: materializedAttachments?.retainOnSessionKeep ?? false,
         };

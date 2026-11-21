@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import * as transcriptBudget from "../agents/sessions/transcript-write-budget.js";
 import {
   bindSessionPendingInputSources,
   persistSessionTranscriptTurn,
@@ -31,6 +32,7 @@ import {
 import {
   buildLateResolvedMediaMessage,
   isUserMessage,
+  replacePersistedUserTurnText,
   resolvePersistedUserTurnMessage,
 } from "./user-turn-transcript.message.js";
 import {
@@ -77,6 +79,7 @@ export {
 // so callers can pass a session entry/store without knowing the final path.
 async function persistUserTurnTranscript(
   params: PersistUserTurnTranscriptParams,
+  chargeWrite: (entry: unknown) => void = transcriptBudget.chargeTranscriptWrite,
 ): Promise<UserTurnTranscriptPersistResult | undefined> {
   const message = resolvePersistedUserTurnMessage(params);
   if (!message) {
@@ -123,11 +126,16 @@ async function persistUserTurnTranscript(
           idempotencyLookup: "scan",
           workerPreparation: {
             beforeFreshMessageCommit: params.beforeFreshMessageCommit,
-            prepareMessageAfterIdempotencyCheck: (candidate) =>
-              preparePersistedUserTurnMessageForTranscriptWrite(
+            prepareMessageAfterIdempotencyCheck: (candidate) => {
+              const prepared = preparePersistedUserTurnMessageForTranscriptWrite(
                 candidate as PersistedUserTurnMessage,
                 params,
-              ),
+              );
+              if (prepared) {
+                chargeWrite(prepared);
+              }
+              return prepared;
+            },
           },
         },
       ],
@@ -181,6 +189,8 @@ async function resolveUserTurnTranscriptTarget(
 export function createUserTurnTranscriptRecorder(
   params: CreateUserTurnTranscriptRecorderParams,
 ): UserTurnTranscriptRecorder {
+  const chargeWrite =
+    transcriptBudget.captureTranscriptWriteBudget() ?? transcriptBudget.chargeTranscriptWrite;
   const logicalTurnId = randomUUID();
   let message = resolvePersistedUserTurnMessage(params);
   let blocked = false;
@@ -210,25 +220,9 @@ export function createUserTurnTranscriptRecorder(
   );
   let staging: Promise<boolean> | undefined;
 
-  const applyReplacementText = (
-    candidate: PersistedUserTurnMessage | undefined,
-  ): PersistedUserTurnMessage | undefined => {
-    if (!candidate || replacementText === undefined) {
-      return candidate;
-    }
-    const metadata = { ...candidate["__openclaw"] };
-    if (candidate.content !== replacementText) {
-      delete metadata.humanMentions;
-      delete metadata.workContext;
-    }
-    const next = { ...candidate, content: replacementText };
-    delete next["__openclaw"];
-    return Object.keys(metadata).length > 0 ? { ...next, __openclaw: metadata } : next;
-  };
-
   const applyMessageOverrides = (candidate: PersistedUserTurnMessage | undefined) => {
     const next = rewritePersistedSteerTargetRunId(
-      applyReplacementText(candidate),
+      replacePersistedUserTurnText(candidate, replacementText),
       confirmedSteerTargetRunId,
     );
     // Native mirrors must reuse this admission even when no transport supplied a key.
@@ -440,24 +434,27 @@ export function createUserTurnTranscriptRecorder(
             ? recorder.assertOriginalInputCommit
             : undefined;
         const persist = () =>
-          persistUserTurnTranscript({
-            ...resolvedTarget,
-            logicalTurnId,
-            message: candidate,
-            sessionTurnMutation: params.sessionTurnMutation,
-            expectedSessionId: options.expectedSessionId || resolvedTarget.expectedSessionId,
-            sessionLifecyclePatch: options.sessionLifecyclePatch ?? params.sessionLifecyclePatch,
-            expectedSessionState: options.expectedSessionState ?? params.expectedSessionState,
-            updateMode: candidateUpdateMode,
-            beforeMessageWrite: params.beforeMessageWrite ?? resolvedTarget.beforeMessageWrite,
-            beforeFreshMessageCommit: options.beforeFreshMessageCommit
-              ? composeSessionSourceAssertion([
-                  options.beforeFreshMessageCommit,
-                  assertOriginalInput,
-                ])
-              : assertOriginalInput,
-            onOriginalInputCommitted: notifyOriginalInputCommitted,
-          });
+          persistUserTurnTranscript(
+            {
+              ...resolvedTarget,
+              logicalTurnId,
+              message: candidate,
+              sessionTurnMutation: params.sessionTurnMutation,
+              expectedSessionId: options.expectedSessionId || resolvedTarget.expectedSessionId,
+              sessionLifecyclePatch: options.sessionLifecyclePatch ?? params.sessionLifecyclePatch,
+              expectedSessionState: options.expectedSessionState ?? params.expectedSessionState,
+              updateMode: candidateUpdateMode,
+              beforeMessageWrite: params.beforeMessageWrite ?? resolvedTarget.beforeMessageWrite,
+              beforeFreshMessageCommit: options.beforeFreshMessageCommit
+                ? composeSessionSourceAssertion([
+                    options.beforeFreshMessageCommit,
+                    assertOriginalInput,
+                  ])
+                : assertOriginalInput,
+              onOriginalInputCommitted: notifyOriginalInputCommitted,
+            },
+            chargeWrite,
+          );
         // Collection can resolve its media lazily during admission. Bind custody
         // here too so the canonical append always consumes the exact sources.
         return await (pendingInput
@@ -554,6 +551,7 @@ export function createUserTurnTranscriptRecorder(
             replaySourceSessionKeys: params.pendingInputReplaySourceSessionKeys,
             message: candidate,
             config,
+            chargeFreshInput: chargeWrite,
             prepareMessageAfterIdempotencyCheck: (next) =>
               preparePersistedUserTurnMessageForTranscriptWrite(next, {
                 ...target,

@@ -254,6 +254,12 @@ export async function ensureCanonicalUserProfileForTailscaleIdentity(
 ) {
   return unwrap(await write("userProfiles.ensureTailscale", identity, options));
 }
+export async function ensureCanonicalUserProfileForVerifiedIdentity(
+  identity: UserProfileWriteOperations["userProfiles.ensureVerifiedIdentity"]["input"],
+  options: ProfileWriteOptions = {},
+) {
+  return unwrap(await write("userProfiles.ensureVerifiedIdentity", identity, options));
+}
 export async function syncCanonicalGitHubIdentity(
   input: UserProfileWriteOperations["userProfiles.syncGitHub"]["input"],
   options: ProfileWriteOptions = {},

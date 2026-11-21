@@ -782,6 +782,7 @@ export function createWebFetchTool(
     | "sandboxFsBridge"
     | "execSession"
     | "assertInvocationCurrent"
+    | "userFileScope"
   > & {
     artifactAgentId?: string;
     config?: OpenClawConfig;
@@ -870,18 +871,20 @@ export function createWebFetchTool(
       );
       try {
         const result = await runWebFetch({
-          artifactScope: loadGroguPrivateProfile()
-            ? createWebFetchArtifactScope({
-                workspaceDir:
-                  options?.sandboxRoot ?? options?.fsPolicy?.root ?? options?.workspaceDir,
-                agentId: options?.artifactAgentId,
-                readOnly: options?.execSession?.permissionMode === "read-only",
-                sandboxed: options?.sandboxed,
-                bridge: options?.sandboxFsBridge,
-                signal,
-                assertInvocationCurrent: options?.assertInvocationCurrent,
-              })
-            : undefined,
+          artifactScope:
+            options?.userFileScope || loadGroguPrivateProfile()
+              ? createWebFetchArtifactScope({
+                  userFileScope: options?.userFileScope,
+                  workspaceDir:
+                    options?.sandboxRoot ?? options?.fsPolicy?.root ?? options?.workspaceDir,
+                  agentId: options?.artifactAgentId,
+                  readOnly: options?.execSession?.permissionMode === "read-only",
+                  sandboxed: options?.sandboxed,
+                  bridge: options?.sandboxFsBridge,
+                  signal,
+                  assertInvocationCurrent: options?.assertInvocationCurrent,
+                })
+              : undefined,
           url,
           extractMode,
           maxChars: resolveIntegerOption(

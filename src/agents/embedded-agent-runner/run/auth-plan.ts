@@ -10,13 +10,16 @@ import {
   ensureAuthProfileStore,
   ensureAuthProfileStoreWithoutExternalProfiles,
 } from "../../model-auth.js";
+import { resolveOpenAIModelRoutes } from "../../openai-model-routes.js";
 import { OPENAI_PROVIDER_ID } from "../../openai-routing.js";
 import type { PreparedModelRuntimeSnapshot } from "../../prepared-model-runtime.js";
+import { resolveRequestModelCredential } from "../../request-model-credential.js";
 import { buildAgentRuntimeAuthPlan } from "../../runtime-plan/auth.js";
 import {
   createPreparedRuntimeModelMaterializer,
   providerUsesCredentialScopedModelMetadata,
 } from "../../runtime-plan/credential-scoped-model.js";
+import { materializePreparedRuntimeModel } from "../../runtime-plan/materialize-model.js";
 import {
   prepareAgentRuntimeAuth,
   type PreparedAgentRuntimeAuth,
@@ -58,6 +61,95 @@ export async function prepareEmbeddedRunAuthPlan(params: {
   markStage?: (stage: string) => void;
 }) {
   const runParams = params.runParams;
+  if (runParams.requestModelCredential) {
+    const auth = resolveRequestModelCredential(
+      runParams.requestModelCredential,
+      params.provider,
+      params.modelId,
+    );
+    if (
+      params.getAgentHarness().id !== "openclaw" ||
+      params.nativeSessionRuntime?.auth === "native"
+    ) {
+      throw new Error("Request credentials require the canonical OpenClaw transport.");
+    }
+    const subscriptionRoute =
+      params.provider === OPENAI_PROVIDER_ID
+        ? resolveOpenAIModelRoutes({
+            provider: params.provider,
+            modelId: params.modelId,
+            config: runParams.config,
+            agentId: runParams.agentId,
+            routeIntent: { source: "explicit", authRequirement: "subscription" },
+          })
+        : undefined;
+    const subscription =
+      subscriptionRoute?.kind === "routes"
+        ? subscriptionRoute.routes.find((route) => route.authRequirement === "subscription")
+        : undefined;
+    const modelRoute = subscription && {
+      ...subscription,
+      provider: params.provider,
+      modelId: params.modelId,
+    };
+    if (params.provider === OPENAI_PROVIDER_ID && !modelRoute) {
+      throw new Error("The requested model has no OpenAI subscription route.");
+    }
+    const plan = buildAgentRuntimeAuthPlan({
+      provider: params.provider,
+      modelId: params.modelId,
+      authProfileMode: auth.mode,
+      modelRoute,
+      config: runParams.config,
+      metadataSnapshot: params.preparedModelRuntime?.metadataSnapshot,
+      allowHarnessAuthProfileForwarding: false,
+    });
+    const materialize = async () => {
+      params.assertCurrent();
+      if (!modelRoute) {
+        return params.model;
+      }
+      const model = await materializePreparedRuntimeModel({
+        plan,
+        provider: params.provider,
+        modelId: params.modelId,
+        config: runParams.config,
+        workspaceDir: params.workspaceDir,
+        metadataSnapshot: params.preparedModelRuntime?.metadataSnapshot,
+        model: params.model,
+        resolveModel: ({ config, authProfileMode }) =>
+          resolveModelAsync(params.provider, params.modelId, params.agentDir, config, {
+            abortSignal: runParams.abortSignal,
+            assertCurrent: params.assertCurrent,
+            modelIdSource: "selected",
+            authStorage: params.authStorage,
+            modelRegistry: params.modelRegistry,
+            skipAgentDiscovery: true,
+            deferProviderDynamicModelPreparation: true,
+            allowBundledStaticCatalogFallback: true,
+            preparedModelRuntime: params.preparedModelRuntime,
+            workspaceDir: params.workspaceDir,
+            authProfileMode,
+          }),
+      });
+      params.assertCurrent();
+      if (!model) {
+        throw new Error("The OpenAI subscription model could not be prepared.");
+      }
+      return model;
+    };
+    params.applyResolvedRuntimeModel(await materialize());
+    return {
+      attemptAuthProfileStore: { version: 1, profiles: {} } satisfies AuthProfileStore,
+      lockedProfileId: undefined,
+      preferredProfileId: undefined,
+      providerUsesProfileScopedModelMetadata: false,
+      materializeAuthPlan: materialize,
+      materializeAuthPlanUncached: materialize,
+      preparedAuthAttempts: [{ kind: "implicit" as const, plan }],
+      activePreparedAuthPlan: plan,
+    };
+  }
   const usesOpenAIAuthRouting = params.provider === OPENAI_PROVIDER_ID;
   const initialHarness = params.getAgentHarness();
   const initialPluginHarnessOwnsTransport = initialHarness.id !== "openclaw";

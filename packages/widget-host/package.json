@@ -1,0 +1,12 @@
+{
+  "name": "@grogu/widget-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/protected-host.ts",
+    "./transport": "./src/transport.ts"
+  },
+  "files": ["src", "README.md"]
+}

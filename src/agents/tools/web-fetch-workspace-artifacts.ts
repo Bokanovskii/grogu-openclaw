@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { root } from "@openclaw/fs-safe";
+import type { UserFileScope } from "../../infra/authorized-user-files.js";
 import { captureAgentToolSourceExecutionGuard } from "../agent-tool-source-execution-guard.js";
 import type { SandboxFsBridge } from "../sandbox/fs-bridge.js";
 import { normalizeWorkspaceDir } from "../workspace-dir.js";
@@ -20,6 +21,7 @@ const hash = (value: string | Buffer) => createHash("sha256").update(value).dige
 
 /** Trusted tool construction owns spill paths; model arguments can never select their workspace. */
 export function createWebFetchArtifactScope(params: {
+  userFileScope?: UserFileScope;
   workspaceDir?: string;
   agentId?: string;
   readOnly?: boolean;
@@ -28,8 +30,9 @@ export function createWebFetchArtifactScope(params: {
   signal?: AbortSignal;
   assertInvocationCurrent?: () => void;
 }) {
-  const rootDir = normalizeWorkspaceDir(params.workspaceDir);
-  const bridge = params.sandboxed ? params.bridge : undefined;
+  const userScope = params.userFileScope;
+  const rootDir = userScope ? undefined : normalizeWorkspaceDir(params.workspaceDir);
+  const bridge = !userScope && params.sandboxed ? params.bridge : undefined;
   const namespace =
     bridge && rootDir ? bridge.resolvePath({ filePath: ".", cwd: rootDir }).containerPath : null;
   const cacheKey = `workspace-artifacts-v1:${hash(
@@ -39,12 +42,14 @@ export function createWebFetchArtifactScope(params: {
       namespace,
       params.readOnly === true,
       params.sandboxed === true,
+      userScope?.cacheKey,
     ]),
   )}`;
   const sourceCurrent = captureAgentToolSourceExecutionGuard(params.signal);
   const assertCurrent = () => {
     sourceCurrent();
     params.assertInvocationCurrent?.();
+    userScope?.files.assertCurrent();
   };
   let filesPromise: ReturnType<typeof root> | undefined;
   const files = () => {
@@ -61,7 +66,7 @@ export function createWebFetchArtifactScope(params: {
   };
   const requireWritable = () => {
     assertCurrent();
-    if (!rootDir) {
+    if (!rootDir && !userScope) {
       throw new Error(
         "web_fetch full output requires a trusted workspace; no global artifact fallback is allowed.",
       );
@@ -71,12 +76,15 @@ export function createWebFetchArtifactScope(params: {
         "web_fetch cannot preserve full output in a read-only workspace. Request a smaller inline result.",
       );
     }
-    if (params.sandboxed && !bridge?.createFileExclusive) {
+    if (!userScope && params.sandboxed && !bridge?.createFileExclusive) {
       throw new Error("web_fetch requires a private artifact-capable sandbox filesystem bridge.");
     }
   };
   const readOwned = async (spill: Spill, owner: ArtifactOwner) => {
     assertCurrent();
+    if (userScope) {
+      return userScope.files.read(owner.relativePath);
+    }
     if (bridge) {
       return bridge.readFile({
         filePath: spill.path,
@@ -100,11 +108,14 @@ export function createWebFetchArtifactScope(params: {
     cacheKey,
     async write(content: string, metadata: { chars: number; truncated: boolean }): Promise<Spill> {
       requireWritable();
-      const relativePath = `${directory}/web-fetch-${randomUUID()}.log`;
+      const relativePath = `${userScope ? `${userScope.directory}/web-fetch` : directory}/web-fetch-${randomUUID()}.log`;
       let artifactPath: string;
       let rootReal: string | undefined;
       try {
-        if (bridge?.createFileExclusive) {
+        if (userScope) {
+          await userScope.files.create(relativePath, content);
+          artifactPath = relativePath;
+        } else if (bridge?.createFileExclusive) {
           artifactPath = bridge.resolvePath({
             filePath: relativePath,
             cwd: rootDir ?? undefined,
@@ -170,7 +181,7 @@ export function createWebFetchArtifactScope(params: {
       }
       const owner = owners.get(value);
       if (
-        !rootDir ||
+        (!rootDir && !userScope) ||
         params.readOnly ||
         !owner ||
         owner.cacheKey !== cacheKey ||

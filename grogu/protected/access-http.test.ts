@@ -4,7 +4,9 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { root } from "../../src/infra/fs-safe.js";
+import { requireNodeSqlite } from "../../src/infra/node-sqlite.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
+import { openOpenClawStateDatabase } from "../../src/state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
@@ -23,6 +25,73 @@ import {
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import { createProtectedStaticClient } from "./static-client.js";
+
+void test("startup migrates subjects through the worker on pre-access-workflow state", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-upgrade-test-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const env = { OPENCLAW_STATE_DIR: stateDir };
+  const databasePath = resolveOpenClawStateSqlitePath(env);
+  t.after(async () => {
+    await closeOpenClawStateDatabaseByPathAsync(databasePath);
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  openOpenClawStateDatabase({ env });
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+
+  const { DatabaseSync } = requireNodeSqlite();
+  const prior = new DatabaseSync(databasePath);
+  try {
+    // The prior release has the same schema version and differs only by this
+    // feature's seven tables (aab78bf7194b0abc4bbe5fb64f6c14cb97543279).
+    prior.exec(`
+      DROP TABLE IF EXISTS protected_access_requests;
+      DROP TABLE IF EXISTS protected_admissions;
+      DROP TABLE IF EXISTS protected_admission_migrations;
+      DROP TABLE IF EXISTS protected_policy_sync;
+      DROP TABLE IF EXISTS protected_policy_barrier;
+      DROP TABLE IF EXISTS protected_usage_daily;
+      DROP TABLE IF EXISTS protected_usage_runs;
+      INSERT INTO diagnostic_events (scope, event_key, payload_json, created_at)
+      VALUES ('upgrade-test', 'retained', '{"synthetic":true}', 1);
+    `);
+  } finally {
+    prior.close();
+  }
+
+  const issuer = "https://access.example";
+  const subject = "synthetic-upgrade-subject";
+  assert.equal(await migrateProtectedSubjects(stateDir, { issuer, subjects: [subject] }), 1);
+  assert.equal(await migrateProtectedSubjects(stateDir, { issuer, subjects: [subject] }), 0);
+  assert.deepEqual(
+    (await listProtectedAdmissions(stateDir)).map((admission) => ({
+      issuer: admission.issuer,
+      subject: admission.subject,
+      status: admission.status,
+    })),
+    [{ issuer, subject, status: "approved" }],
+  );
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+  const upgraded = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.equal(
+      upgraded
+        .prepare("SELECT payload_json FROM diagnostic_events WHERE scope = 'upgrade-test'")
+        .get()?.payload_json,
+      '{"synthetic":true}',
+    );
+    assert.deepEqual(
+      upgraded
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'index' AND name LIKE 'idx_protected_%' ORDER BY name",
+        )
+        .all()
+        .map((row) => row.name),
+      ["idx_protected_usage_daily_day", "idx_protected_usage_runs_day"],
+    );
+  } finally {
+    upgraded.close();
+  }
+});
 
 void test("the public page has a separate static asset tree", async (t) => {
   const bundleDir = path.resolve(".artifacts", `protected-access-bundle-${randomUUID()}`);

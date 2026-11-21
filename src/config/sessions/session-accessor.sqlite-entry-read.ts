@@ -45,6 +45,7 @@ import {
   validateCanonicalSessionRowEntry,
   type CanonicalSessionValidationRow,
 } from "./session-canonical-row.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import { parseSqliteSessionEntryRecord } from "./session-entry-json.js";
 import {
   sessionEntrySnapshotColumnsForKeys,
@@ -157,8 +158,8 @@ function parseReadableSessionEntryData(
 ): SessionEntry | null {
   const parsed: SessionEntry | null =
     projection === "delivery"
-      ? parseSqliteSessionEntryRecord(row)
-      : parseSessionEntryRow(row, projection);
+      ? parseSqliteSessionEntryRecord(row, database.db)
+      : parseSessionEntryRow(row, projection, database.db);
   if (parsed) {
     validateDeliveryCanonicalSessionEntry(row.session_key, parsed);
   }
@@ -326,7 +327,14 @@ function selectReadableSessionEntryRows(
   database: Pick<OpenClawAgentDatabase, "db">,
   projection: SessionEntryProjection | "delivery",
 ) {
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   if (projection === "delivery") {
+    if (protectedEntry) {
+      return getNodeSqliteKysely<OpenClawAgentKyselyDatabase>(database.db)
+        .selectFrom("session_nodes")
+        .select(["session_key", "current_session_id", "updated_at", "entry_json"])
+        .select(protectedEntry.as("protected_entry_json"));
+    }
     // Preserve raw JSON strings, including escaped surrogates. Duplicate keys, overdepth
     // JSON and literal NUL retain the existing parser's semantics through the fallback.
     const deliveryJson =
@@ -348,6 +356,9 @@ function selectReadableSessionEntryRows(
     : getNodeSqliteKysely<OpenClawAgentKyselyDatabase>(database.db)
         .selectFrom("session_nodes")
         .selectAll()
+        .$if(protectedEntry !== undefined, (query) =>
+          query.select(protectedEntry!.as("protected_entry_json")),
+        )
         .select(sessionEntrySnapshotColumnsForKeys(undefined, projection));
 }
 

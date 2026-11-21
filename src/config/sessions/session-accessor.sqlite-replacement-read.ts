@@ -1,4 +1,5 @@
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { sql } from "kysely";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import type { SessionEntryReplacementSnapshot } from "./session-accessor.sqlite-contract.js";
@@ -11,6 +12,7 @@ import {
 } from "./session-accessor.sqlite-entry-read.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope-helpers.js";
 import { assertCanonicalSqliteSessionKeysCurrent } from "./session-canonical-key.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 
 export type SessionEntryReplacementSelection = {
   sessionKeys?: readonly string[];
@@ -36,7 +38,11 @@ export function readSessionEntryReplacementLabelOwnerKeys(
         getSessionKysely(database.db)
           .selectFrom("session_nodes")
           .select("session_key")
-          .where("label", "=", label)
+          .where(
+            sql<string>`json_extract(${sessionEntryJsonSql(database.db)}, '$.label')`,
+            "=",
+            label,
+          )
           .orderBy("session_key"),
       ).rows.map((row) => row.session_key);
 }

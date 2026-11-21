@@ -318,7 +318,7 @@ export async function runReclamationWorkerPort(
                   database,
                   request,
                 );
-                return canonical.validateCanonicalSessionValidationBatch(batch);
+                return canonical.validateCanonicalSessionValidationBatch(batch, database.db);
               };
               if (retainedDatabase) {
                 prepared = prepare({ agentId: options.agentId, db: retainedDatabase });

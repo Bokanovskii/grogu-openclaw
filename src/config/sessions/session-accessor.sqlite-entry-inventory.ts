@@ -11,6 +11,7 @@ import {
   sessionEntryInventoryJson,
 } from "./session-accessor.sqlite-status.js";
 import { assertCanonicalSqliteSessionKeysCurrent } from "./session-canonical-key.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import { sessionEntrySnapshotColumns } from "./session-entry-snapshots.js";
 import type { InternalSessionEntry as SessionEntry } from "./types.js";
 
@@ -28,7 +29,11 @@ export function readSessionEntryStore(
     assertCanonicalSqliteSessionKeysCurrent(database);
   }
   const db = getSessionKysely(database.db);
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   let query = db.selectFrom("session_nodes").selectAll().select(sessionEntrySnapshotColumns);
+  query = query.$if(protectedEntry !== undefined, (builder) =>
+    builder.select(protectedEntry!.as("protected_entry_json")),
+  );
   if (options.includeArchived === false) {
     query = query.where("archived_at", "is", null);
   }
@@ -43,7 +48,7 @@ export function readSessionEntryStore(
   for (const row of rows) {
     // Doctor lifecycle projection supplies its separately hydrated expected entry for rejected
     // raw rows; ordinary exact reads still fail loud before a write can replace one.
-    const entry = parseSessionEntryJson(row);
+    const entry = parseSessionEntryJson(row, "full", database.db);
     if (entry) {
       store[row.session_key] = entry;
     }
@@ -87,7 +92,7 @@ export function readSessionEntryCount(
         query
           .where("entry_valid", "!=", 1)
           .select((eb) => eb.val(0).as("count"))
-          .select(sessionEntryInventoryJson),
+          .select(sessionEntryInventoryJson(database.db)),
       )
       .compile();
     if (!queries) {
@@ -116,7 +121,7 @@ export function* iterateSessionEntryKeys(
   const db = getSessionKysely(database.db);
   const query = db
     .selectFrom("session_nodes")
-    .select([sessionEntryInventoryJson, "session_key"])
+    .select([sessionEntryInventoryJson(database.db), "session_key"])
     .orderBy("session_key", "asc");
   for (const row of iterateSqliteQuerySync(
     database.db,

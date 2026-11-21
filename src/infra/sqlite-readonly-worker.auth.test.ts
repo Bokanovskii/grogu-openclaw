@@ -14,6 +14,18 @@ import { createSpawnBrokerHost } from "../process/spawn-broker/host.js";
 import { SpawnBrokerError } from "../process/spawn-broker/protocol.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
+import { PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
+import {
+  PROTECTED_ENCRYPTION_KEY_CHECK,
+  PROTECTED_ENCRYPTION_KEY_CHECK_VALUE,
+  PROTECTED_ENCRYPTION_TABLE,
+} from "../state/openclaw-agent-db-schema-read.js";
+import { createStorageValueEncryption } from "../storage/encryption.js";
+import {
+  disposeSqliteStorageValueEncryption,
+  registerSqliteStorageValueEncryption,
+  sealSqliteStorageText,
+} from "../storage/sqlite-encryption.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import { SQLITE_READONLY_CHILD_ARG } from "./runtime-process-entrypoints.js";
 import {
@@ -71,6 +83,52 @@ function createAuthDatabase(key = "synthetic", metadata?: Record<string, string>
       store: { status: "readable", raw: store },
       state: { status: "readable", raw: state },
       cacheable: true,
+    },
+  };
+}
+
+function createProtectedAuthDatabase() {
+  const root = tempDirs.make("openclaw-protected-auth-");
+  const stateDir = path.join(root, "state");
+  const source = path.join(stateDir, "openclaw-agent.sqlite");
+  const keyFile = path.join(root, "protected-storage-key");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(keyFile, Buffer.alloc(32, 0x37), { mode: 0o600 });
+  const encryption = createStorageValueEncryption(Buffer.alloc(32, 0x37));
+  const database = new (requireNodeSqlite().DatabaseSync)(source);
+  try {
+    registerSqliteStorageValueEncryption(database, encryption);
+    database.exec(`
+      PRAGMA user_version = ${PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION};
+      CREATE TABLE ${PROTECTED_ENCRYPTION_TABLE} (id INTEGER PRIMARY KEY, key_check TEXT NOT NULL);
+      CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT);
+      CREATE TABLE auth_profile_state (state_key TEXT PRIMARY KEY, state_json TEXT);
+    `);
+    database
+      .prepare(`INSERT INTO ${PROTECTED_ENCRYPTION_TABLE} VALUES (1, ?)`)
+      .run(
+        sealSqliteStorageText(
+          database,
+          PROTECTED_ENCRYPTION_KEY_CHECK_VALUE,
+          PROTECTED_ENCRYPTION_KEY_CHECK,
+        ),
+      );
+    database
+      .prepare("INSERT INTO auth_profile_store VALUES (?, ?)")
+      .run("primary", JSON.stringify({ version: 1, profiles: {} }));
+    database
+      .prepare("INSERT INTO auth_profile_state VALUES (?, ?)")
+      .run("primary", JSON.stringify({ version: 1 }));
+  } finally {
+    database.close();
+    disposeSqliteStorageValueEncryption(database);
+  }
+  return {
+    source,
+    env: {
+      ...process.env,
+      OPENCLAW_STATE_DIR: stateDir,
+      OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyFile,
     },
   };
 }
@@ -259,8 +317,19 @@ it("reuses equivalent state roots and replaces changed auth environments or sour
     await read(source, "snapshot", undefined, changedRoot);
     expect(vi.mocked(spawn).mock.results[2]?.value.exitCode).toBe(0);
   });
+
   expect(spawn).toHaveBeenCalledTimes(4);
   expect(vi.mocked(spawn).mock.results[3]?.value.exitCode).toBe(0);
+});
+
+it("reads auth profiles from an admitted protected agent database", async () => {
+  const { source, env } = createProtectedAuthDatabase();
+  const rows = await read(source, "canonical", undefined, env);
+  expect(rows).toEqual({
+    store: { status: "readable", raw: { version: 1, profiles: {} } },
+    state: { status: "readable", raw: { version: 1 } },
+    cacheable: true,
+  });
 });
 
 it("closes a scoped auth child before rejecting queued reads on shutdown", async () => {

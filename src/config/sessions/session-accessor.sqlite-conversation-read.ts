@@ -9,6 +9,7 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import type { ConversationReadQuery, ConversationRecord } from "./conversation-registry.types.js";
 import { parseStoredConversationRouteContext } from "./conversation-route-context.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 
 const CONVERSATION_REF_PATTERN = /^conv_[a-f0-9]{32}$/u;
 
@@ -62,7 +63,7 @@ export function selectConversationRowsFromDatabase(
       "sc.last_seen_at",
       "s.session_id as associated_session_id",
       "sn.current_session_id as current_session_id",
-      "sn.entry_json as current_entry_json",
+      sessionEntryJsonSql(database.db, "sn").as("current_entry_json"),
       "sn.session_key as current_session_key",
     ]);
   const channel = normalizeOptionalLowercaseString(options.channel);

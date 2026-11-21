@@ -44,6 +44,7 @@ import {
 } from "../../src/state/user-profile-writes.js";
 import { createProfileAvatarReader } from "../../src/state/user-profiles-avatar.js";
 import { formatUserProfileAvatarEtag } from "../../src/state/user-profiles.js";
+import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/storage/sqlite-encryption.js";
 import {
   bindProtectedProfile,
   editProtectedAccessRequest,
@@ -206,6 +207,13 @@ export function createProtectedHttp(options: {
   if (new URL(options.origin).origin !== options.origin) {
     throw new TypeError("Configure the exact protected client origin.");
   }
+  const ownedEncryption = createSqliteStorageValueEncryptionFromEnvironment();
+  if (!ownedEncryption) {
+    throw new Error(
+      "Protected storage encryption requires OPENCLAW_PROTECTED_STORAGE_KEY_FILE; provision the private key before starting the service.",
+    );
+  }
+  const encryption = options.encryption ?? ownedEncryption;
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
   const chats = createProtectedChats({ ...options, agentCatalog });
   const storageMeasurement = {
@@ -723,6 +731,7 @@ export function createProtectedHttp(options: {
       ) =>
         createAuthorizedUserFiles({
           ...options,
+          encryption,
           profileId: profile.id,
           assertCurrent: assert,
           signal,
@@ -800,7 +809,7 @@ export function createProtectedHttp(options: {
             ? accountUser(profile.displayName, await readAccountIcon())
             : { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure:
-            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
+            "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
           models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
@@ -2122,6 +2131,7 @@ export function createProtectedHttp(options: {
       while (pending.size) {
         await Promise.allSettled(pending);
       }
+      ownedEncryption?.dispose();
     },
     async revokeProfile(profileId: string) {
       invalidateProfile(profileId);

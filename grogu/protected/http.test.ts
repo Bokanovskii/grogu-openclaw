@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promis
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { before as beforeTests, test } from "node:test";
+import { after, before as beforeTests, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ProtectedAutomationCatalogSchema,
@@ -76,6 +76,38 @@ beforeTests(async () => {
     });
   });
   assert.ok(denied, `Native network isolation was not verified. Run: ${command}`);
+});
+
+const protectedTestStateDirs = new Set<string>();
+const originalOpenClawStateDir = process.env.OPENCLAW_STATE_DIR;
+const originalProtectedKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+const sqliteEncryptionStateDir =
+  originalOpenClawStateDir ?? path.resolve(".artifacts", `protected-http-${randomUUID()}`);
+const sqliteEncryptionKeyFile = `${sqliteEncryptionStateDir}.protected-storage-key`;
+beforeTests(async () => {
+  await mkdir(sqliteEncryptionStateDir, { recursive: true, mode: 0o700 });
+  await writeFile(sqliteEncryptionKeyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
+  process.env.OPENCLAW_STATE_DIR = sqliteEncryptionStateDir;
+  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = sqliteEncryptionKeyFile;
+});
+after(async () => {
+  await Promise.all(
+    [...protectedTestStateDirs].map(async (stateDir) => {
+      await rm(stateDir, { recursive: true, force: true });
+    }),
+  );
+  await rm(sqliteEncryptionKeyFile, { force: true });
+  if (originalOpenClawStateDir === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR;
+    await rm(sqliteEncryptionStateDir, { recursive: true, force: true });
+  } else {
+    process.env.OPENCLAW_STATE_DIR = originalOpenClawStateDir;
+  }
+  if (originalProtectedKeyFile === undefined) {
+    delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+  } else {
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = originalProtectedKeyFile;
+  }
 });
 
 function providerSse(events: Array<{ type: string; [field: string]: unknown }>, named = false) {
@@ -178,7 +210,7 @@ void test("protected responses use neutral service wording", async (t) => {
   assert.equal(user.setupRequired, true);
   assert.equal(
     disclosure,
-    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
+    "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
   );
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
@@ -319,6 +351,7 @@ void test("fixture blocks egress from work that outlives its test", () => {
 
 void test("Family HTTP isolates chats, relays device authorization, and durably revokes sessions", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-test-${randomUUID()}`);
+  protectedTestStateDirs.add(stateDir);
   const usersDir = path.join(stateDir, "users");
   const bundleDir = path.join(stateDir, "bundle");
   await Promise.all([
@@ -331,8 +364,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     writeFile(path.join(bundleDir, "assets/notebook-Ab12_cd.woff2"), "wOF2"),
     symlink("../index.html", path.join(bundleDir, "assets/index-Symlink.js")),
   ]);
+  const release = Promise.withResolvers<void>();
+  const shutdownApps: Array<() => Promise<void>> = [];
+  t.after(async () => {
+    release.resolve();
+    await Promise.all(shutdownApps.map((shutdown) => shutdown()));
+  });
   const staticClient = await createProtectedStaticClient(await root(bundleDir));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const usersRoot = await root(usersDir);
   const expiresAt = Date.now() + 120_000;
   const verifyIdentity: ProtectedIdentityVerifier = async (request) => {
@@ -351,8 +389,6 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     };
   };
   const submitted = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  t.after(() => release.resolve());
   const origin = "https://family.example";
   const catalogExtensions = [protectedResearchAgent];
   const open = async (
@@ -404,6 +440,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     });
     const server = createProtectedServer(origin, app.fetch, staticClient);
     const url = await listen(server);
+    let shutdownPromise: Promise<void> | undefined;
+    const shutdown = () => (shutdownPromise ??= closeProtectedServer(server, app, stateDir));
+    shutdownApps.push(shutdown);
     const call = (user: string, route: string, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       headers.set("origin", headers.get("origin") ?? origin);
@@ -412,9 +451,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
     return {
-      server,
       url,
       call,
+      shutdown,
       observedAgents,
       revokeProfile: (id: string) => app.revokeProfile(id),
     };
@@ -428,7 +467,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       thinking: { levels: ["low", "medium", "ultra"], default: "ultra" },
     },
   ]);
-  t.after(() => close(first.server));
+  t.after(() => first.shutdown());
   // The proof route answers from its own assertion; entering the verifier here would recurse.
   const proof = await fetch(`${first.url}/api/protected/v1/access-proof?challenge=c`);
   assert.deepEqual(await proof.json(), {
@@ -745,7 +784,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     method: "POST",
     body: '{"title":"Alice private"}',
   });
-  assert.equal(created.status, 200);
+  assert.equal(created.status, 200, await created.clone().text());
   const { chat } = await created.json();
   assert.equal(chat.selectedAgentId, "travel");
   const route = `/chats/${chat.id}`;
@@ -758,7 +797,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   const selectedChat = (await selected.json()).chat;
   assert.equal(selectedChat.selectedAgentId, "general");
   const reloadedRuntime = await open(1, catalogExtensions);
-  t.after(() => close(reloadedRuntime.server));
+  t.after(() => reloadedRuntime.shutdown());
   assert.equal((await reloadedRuntime.call("alice", "/automations/catalog")).status, 404);
   const reloadedChat = await reloadedRuntime.call("alice", route);
   assert.equal(reloadedChat.status, 200);
@@ -1015,10 +1054,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
   assert.equal((await (await first.call("bob", "/storage/chats")).json()).usedBytes, 0);
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
-  await close(first.server);
+  await first.shutdown();
 
   const reopened = await open(Number.MAX_SAFE_INTEGER);
-  t.after(() => close(reopened.server));
   assert.equal((await reopened.call("alice", "/me")).status, 401);
   assert.equal((await reopened.call("bob", "/me")).status, 401);
   const lowDisk = await reopened.call("carol", "/chats", { method: "POST", body: "{}" });
@@ -1448,6 +1486,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
     "Set an isolated OPENCLAW_STATE_DIR under .artifacts/protected-proof-*.",
   );
+  protectedTestStateDirs.add(stateDir);
   const usersDir = path.join(stateDir, "users");
   const workspaceDir = path.join(stateDir, "workspace");
   const agentDir = path.join(stateDir, "agents", "protected", "agent");
@@ -1950,7 +1989,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     return { call, shutdown };
   };
   const { call, shutdown } = await open();
-  const { user, models: fixedModels } = await (await call("/me")).json();
+  const me = await call("/me");
+  assert.equal(me.status, 200, await me.clone().text());
+  const { user, models: fixedModels } = await me.json();
   const sparkyModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "sparky",
   );
@@ -1971,7 +2012,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       .aliases,
     ["adaptive"],
   );
-  const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+  const created = await call("/chats", { method: "POST", body: "{}" });
+  assert.equal(created.status, 200, await created.clone().text());
+  const { chat } = await created.json();
   const response = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Reply briefly"}',
@@ -2071,6 +2114,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const widgetResponse = await reopened(`/chats/${chat.id}/widgets/${widget.id}`);
   assert.equal(widgetResponse.status, 200);
   assert.match((await widgetResponse.json()).html, /Scoped widget body/);
+  const exported = await reopened("/export", {
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(exported.status, 200, await exported.clone().text());
+  const exportedChats = await exported.json();
+  assert.ok(exportedChats.chats.some((item: { id: string }) => item.id === chat.id));
+  assert.match(JSON.stringify(exportedChats), /Committed synthetic answer\./);
   const profileDirectory = path.join(usersDir, createHash("sha256").update(user.id).digest("hex"));
   const storedFiles = (
     await readdir(profileDirectory, { recursive: true, withFileTypes: true })
@@ -2452,9 +2502,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         }),
         headers: { "x-grogu-profile": user.id },
       });
-    const before = providerRequests.length;
+    const requestsBeforeCredential = providerRequests.length;
     assert.match(await (await turn()).text(), /provider_credential_required/);
-    assert.equal(providerRequests.length, before);
+    assert.equal(providerRequests.length, requestsBeforeCredential);
     const result = await turn(credential);
     assert.equal(result.status, 200);
     const trace = await result.text();
@@ -2694,14 +2744,22 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   } finally {
     await restart.shutdown();
   }
-  for (const dir of [stateDir, process.env.HOME!]) {
-    for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-      if (entry.isFile()) {
-        const bytes = await readFile(path.join(entry.parentPath, entry.name));
-        assert.ok(
-          !bytes.includes(suffix),
-          `synthetic personal credential persisted in ${entry.name}`,
-        );
+  const plaintextMarkers = [
+    suffix,
+    "Reply briefly",
+    "Committed synthetic answer.",
+    "Scoped widget body",
+    "Synthetic widget",
+    sourceUrl,
+    "Family source evidence.",
+    offlinePrompt,
+  ];
+  for (const entry of await readdir(stateDir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) {
+      const filePath = path.join(entry.parentPath, entry.name);
+      const bytes = await readFile(filePath);
+      for (const marker of plaintextMarkers) {
+        assert.ok(!bytes.includes(marker), `plaintext marker persisted in ${filePath}`);
       }
     }
   }

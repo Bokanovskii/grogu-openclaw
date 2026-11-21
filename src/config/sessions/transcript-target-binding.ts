@@ -10,6 +10,7 @@ type StorageEnvironment = Readonly<SqliteWorkerStateContext["environment"]>;
 
 const storageEnvironmentKeys = new Set([
   "OPENCLAW_STATE_DIR",
+  "OPENCLAW_PROTECTED_STORAGE_KEY_FILE",
   "OPENCLAW_SUPERVISOR_MODE",
   "OPENCLAW_HOME",
   "HOME",
@@ -44,6 +45,9 @@ export function captureSessionTranscriptStorageEnvironment(
   );
   return {
     OPENCLAW_STATE_DIR: resolveStateDir(env),
+    ...(env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE
+      ? { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE }
+      : {}),
     ...(isGatewayExternallySupervised(env) ? { OPENCLAW_SUPERVISOR_MODE: "external" } : {}),
   };
 }
@@ -66,6 +70,7 @@ export function sameSessionTranscriptStorageEnvironment(
 ): boolean {
   return (
     left?.OPENCLAW_STATE_DIR === right?.OPENCLAW_STATE_DIR &&
+    left?.OPENCLAW_PROTECTED_STORAGE_KEY_FILE === right?.OPENCLAW_PROTECTED_STORAGE_KEY_FILE &&
     left?.OPENCLAW_SUPERVISOR_MODE === right?.OPENCLAW_SUPERVISOR_MODE
   );
 }

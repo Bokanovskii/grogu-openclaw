@@ -2,12 +2,54 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import zlib from "node:zlib";
 import { z } from "zod";
+import {
+  createSqliteStorageValueEncryptionFromEnvironment,
+  hasSqliteStorageValueEncryption,
+  openSqliteStorageBytes,
+  sealSqliteStorageBytes,
+} from "../../storage/sqlite-encryption.js";
 import { resolveSessionArtifactDirectory } from "./paths.js";
 import type { SessionColdArchive } from "./session-cold-storage-state.js";
 
 export const MAX_COLD_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const SEALED_VALUE_MAGIC = Buffer.from("OCSEAL1\n");
+
+export function sessionColdArchiveStorageContext(sessionId: string, generation: string): string {
+  return `openclaw:protected-session-cold-archive:${sessionId}:${generation}`;
+}
+
+export function sealSessionColdArchiveBytes(
+  database: DatabaseSync,
+  bytes: Uint8Array,
+  sessionId: string,
+  generation: string,
+): Buffer {
+  return sealSqliteStorageBytes(
+    database,
+    bytes,
+    sessionColdArchiveStorageContext(sessionId, generation),
+  );
+}
+
+export function isProtectedSessionColdArchiveStore(database: DatabaseSync): boolean {
+  return hasSqliteStorageValueEncryption(database);
+}
+
+export function openSessionColdArchiveBytes(
+  database: DatabaseSync,
+  bytes: Uint8Array,
+  sessionId: string,
+  generation: string,
+): Buffer {
+  return openSqliteStorageBytes(
+    database,
+    bytes,
+    sessionColdArchiveStorageContext(sessionId, generation),
+  );
+}
 
 export function resolveSessionColdArchivePath(storePath: string, archiveName: string): string {
   if (!/^[a-f0-9]{64}\.jsonl\.zst$/.test(archiveName)) {
@@ -19,6 +61,8 @@ export function resolveSessionColdArchivePath(storePath: string, archiveName: st
 export async function readVerifiedSessionColdArchive(params: {
   storePath: string;
   archive: {
+    session_id: string;
+    generation: string;
     archive_name: string;
     archive_sha256: string;
     archive_bytes: number;
@@ -46,7 +90,23 @@ export async function readVerifiedSessionColdArchive(params: {
       `Cold transcript archive ${archive.archive_name} failed verification. Restore it from a verified backup.`,
     );
   }
-  return bytes;
+  if (!bytes.subarray(0, SEALED_VALUE_MAGIC.length).equals(SEALED_VALUE_MAGIC)) {
+    return bytes;
+  }
+  const encryption = createSqliteStorageValueEncryptionFromEnvironment();
+  if (!encryption) {
+    throw new Error(
+      "Cold transcript archive is encrypted but its key is unavailable; restore the key and restart the protected service.",
+    );
+  }
+  try {
+    return encryption.decrypt(
+      bytes,
+      sessionColdArchiveStorageContext(archive.session_id, archive.generation),
+    );
+  } finally {
+    encryption.dispose();
+  }
 }
 
 const integer = z.number().int();

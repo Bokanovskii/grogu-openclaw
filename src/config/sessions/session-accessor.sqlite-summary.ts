@@ -25,6 +25,7 @@ import {
   readWithCanonicalSessionReaderContinuation,
   type CanonicalSessionReaderContinuation,
 } from "./session-canonical-key.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import { sessionEntrySnapshotColumns } from "./session-entry-snapshots.js";
 import { resolveDeliveryProvenCanonicalSessionKey } from "./store-entry.js";
 
@@ -75,12 +76,16 @@ export function readSessionStoreSummaryReadOnly(
               }
               const rows = candidates;
               candidates = [];
+              const protectedEntry = protectedSessionEntryPayloadSql(database.db);
               const storedRows = new Map(
                 executeSqliteQuerySync(
                   database.db,
                   db
                     .selectFrom("session_nodes")
                     .selectAll()
+                    .$if(protectedEntry !== undefined, (query) =>
+                      query.select(protectedEntry!.as("protected_entry_json")),
+                    )
                     .select(sessionEntrySnapshotColumns)
                     .where("session_key", "in", sqliteStringSet(rows.map((row) => row.sessionKey))),
                 ).rows.map((row) => [row.session_key, row]),
@@ -104,7 +109,7 @@ export function readSessionStoreSummaryReadOnly(
                   continue;
                 }
                 const { current_session_id: _currentSessionId, ...listRow } = stored;
-                const entry = parseSessionEntryJson(listRow);
+                const entry = parseSessionEntryJson(listRow, "full", database.db);
                 if (!entry) {
                   continue;
                 }

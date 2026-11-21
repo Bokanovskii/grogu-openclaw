@@ -1,24 +1,400 @@
+import fs from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeMemoryEmbedding } from "../../packages/memory-host-sdk/src/host/embedding-vector.js";
+import { acpParentStreamEventStorageContext } from "../agents/subagents/spawn/acp-parent-stream-storage.js";
+import { resolveSessionArtifactDirectory } from "../config/sessions/paths.js";
+import {
+  PROTECTED_SESSION_ENTRY_TABLE,
+  protectedSessionEntryContext,
+} from "../config/sessions/session-entry-encryption.js";
+import {
+  openSessionInputCompletionOutcome,
+  openSessionPendingInputMessage,
+} from "../config/sessions/session-pending-input-encryption.js";
+import { openSessionTranscriptArchiveBytes } from "../config/sessions/session-transcript-archive-encryption.js";
+import { readTranscriptPayload } from "../config/sessions/transcript-payload.js";
 import { sha256Hex } from "../infra/crypto-digest.js";
 import { decodeUsageCostRollup } from "../infra/session-cost-usage-rollup-codec.js";
 import { createSessionUsageRollupData } from "../infra/session-cost-usage-rollup.js";
 import { resolveZstdCodec } from "../infra/zstd-codec.js";
+import { createStorageValueEncryption } from "../storage/encryption.js";
+import {
+  disposeSqliteStorageValueEncryption,
+  openSqliteStorageText,
+  registerSqliteStorageValueEncryption,
+} from "../storage/sqlite-encryption.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import { trajectoryRuntimeEventStorageContext } from "../trajectory/storage-context.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+} from "./openclaw-agent-db-contract.js";
 import { AGENT_DATABASE_MAINTENANCE_LEASE } from "./openclaw-agent-db-lease.js";
 import { withAgentDatabaseMaintenanceLease } from "./openclaw-agent-db-maintenance-lease.js";
+import { persistAgentSchemaMetadata } from "./openclaw-agent-db-metadata-write.js";
+import { assertSupportedAgentSchemaVersion } from "./openclaw-agent-db-schema-read.js";
 import { ensureOpenClawAgentDatabaseSchema } from "./openclaw-agent-db-schema.js";
 import {
   seedOpenClawAgentSchemaV22,
   OPENCLAW_AGENT_SCHEMA_V22_SQL,
 } from "./openclaw-agent-schema-v22.test-support.js";
+import { OPENCLAW_AGENT_SCHEMA_SQL } from "./openclaw-agent-schema.js";
 import { createOpenClawDatabaseMaintenanceScope } from "./openclaw-state-db-async-lifecycle.js";
 import { runOpenClawStateWriteTransaction } from "./openclaw-state-db.js";
 import { OpenClawStateLeaseError } from "./openclaw-state-lease-error.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+it("atomically migrates protected transcript data and refuses unsupported or wrong keys", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const pathname = state.path("protected-encryption.sqlite");
+    const plaintext = JSON.stringify({
+      type: "message",
+      id: "protected-encryption-event",
+      message: { role: "user", content: "protected-plaintext-sentinel" },
+    });
+    const trajectoryPlaintext = JSON.stringify({
+      type: "message",
+      content: "protected-trajectory-sentinel",
+    });
+    const acpPlaintext = JSON.stringify({
+      type: "text",
+      content: "protected-acp-sentinel",
+    });
+    const pendingInputPlaintext = JSON.stringify({
+      role: "user",
+      content: "protected-pending-input-sentinel",
+    });
+    const completionPlaintext = JSON.stringify({
+      reason: "completed",
+      resultText: "protected-completion-sentinel",
+    });
+    const sessionKey = "agent:main:protected";
+    const sessionEntry = JSON.stringify({
+      sessionId: "protected-session",
+      updatedAt: 2,
+      title: "protected-title-sentinel",
+      summary: "protected-summary-sentinel",
+    });
+    const snapshot = JSON.stringify({
+      prompt: "protected-snapshot-sentinel",
+      skills: [],
+    });
+    const archiveBytes = Buffer.from(
+      '{"type":"message","message":{"role":"user","content":"protected-archive-sentinel"}}\n',
+    );
+    const archiveName = "protected.jsonl.deleted.20261120T000000000Z.generation.jsonl";
+    const archivePath = path.join(resolveSessionArtifactDirectory(pathname), archiveName);
+    fs.writeFileSync(archivePath, archiveBytes, { mode: 0o600 });
+    const key = Buffer.alloc(32, 0x37);
+    const database = new DatabaseSync(pathname);
+    registerSqliteStorageValueEncryption(database, createStorageValueEncryption(key));
+    try {
+      database.exec(OPENCLAW_AGENT_SCHEMA_SQL);
+      database.exec(`PRAGMA user_version = ${OPENCLAW_AGENT_SCHEMA_VERSION};`);
+      persistAgentSchemaMetadata(database, "main", OPENCLAW_AGENT_SCHEMA_VERSION);
+      database.exec(`
+        INSERT INTO session_transcript_archives(
+          session_id, generation, session_key, reason, encoding, archive_blob,
+          archive_sha256, archive_name, created_at, published_at
+        ) VALUES(
+          'protected-session', 'protected-generation', 'agent:main:protected',
+          'deleted', 'identity', X'${archiveBytes.toString("hex")}',
+          '${sha256Hex(archiveBytes)}', '${archiveName}', 4, 5
+        );
+        INSERT INTO session_nodes(session_key, current_session_id, entry_json, updated_at)
+          VALUES('agent:main:protected', 'protected-session', '${sessionEntry.replaceAll("'", "''")}', 2);
+        INSERT INTO session_windows(session_id, session_key, created_at, updated_at, display_name)
+          VALUES('protected-session', 'agent:main:protected', 1, 2, 'protected-window-sentinel');
+        INSERT INTO session_entry_snapshots(session_key, field, value_json)
+          VALUES('agent:main:protected', 'skillsSnapshot', '${snapshot.replaceAll("'", "''")}');
+        UPDATE session_nodes
+          SET label = 'protected-label-sentinel', display_name = 'protected-display-sentinel'
+          WHERE session_key = 'agent:main:protected';
+        INSERT INTO session_transcript_fts(rowid, text, session_id, message_id, role, timestamp)
+          VALUES(7, 'protected-plaintext-sentinel', 'protected-session',
+            'protected-encryption-event', 'user', 3);
+      `);
+      database
+        .prepare(
+          "INSERT INTO transcript_events(session_id, seq, event_json, created_at) VALUES(?, 7, ?, 3)",
+        )
+        .run("protected-session", plaintext);
+      database
+        .prepare(
+          "INSERT INTO trajectory_runtime_events(session_id, seq, event_json, created_at) VALUES(?, 8, ?, 3)",
+        )
+        .run("protected-session", trajectoryPlaintext);
+      database
+        .prepare(
+          "INSERT INTO acp_parent_stream_events(session_id, run_id, seq, event_json, created_at) VALUES(?, ?, 9, ?, 3)",
+        )
+        .run("protected-session", "protected-parent-run", acpPlaintext);
+      database
+        .prepare(
+          `INSERT INTO session_pending_inputs(
+            input_id, session_key, session_id, idempotency_key, run_id, request_hash,
+            message_json, lifecycle_generation, state, accepted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 4)`,
+        )
+        .run(
+          "protected-pending-id",
+          sessionKey,
+          "protected-session",
+          "protected-pending-key",
+          "protected-pending-run",
+          "protected-pending-hash",
+          pendingInputPlaintext,
+          "protected-lifecycle",
+        );
+      database
+        .prepare(
+          `INSERT INTO session_input_completions(
+            session_key, session_id, idempotency_key, run_id, request_hash,
+            outcome_json, succeeded, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 1, 5)`,
+        )
+        .run(
+          sessionKey,
+          "protected-session",
+          "protected-completion-key",
+          "protected-completion-run",
+          "protected-completion-hash",
+          completionPlaintext,
+        );
+      database.exec(`
+        CREATE TRIGGER interrupt_protected_storage_migration
+        BEFORE UPDATE ON transcript_events
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated migration interruption');
+        END;
+      `);
+      await expect(
+        withAgentDatabaseMaintenanceLease({ env: state.env }, async () => {
+          ensureOpenClawAgentDatabaseSchema(database, {
+            agentId: "main",
+            path: pathname,
+            env: state.env,
+          });
+        }),
+      ).rejects.toThrow("simulated migration interruption");
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
+        OPENCLAW_AGENT_SCHEMA_VERSION,
+      );
+      expect(
+        database.prepare("SELECT event_json FROM transcript_events WHERE seq = 7").get()
+          ?.event_json,
+      ).toBe(plaintext);
+      expect(
+        database.prepare("SELECT event_json FROM trajectory_runtime_events WHERE seq = 8").get()
+          ?.event_json,
+      ).toBe(trajectoryPlaintext);
+      expect(fs.existsSync(archivePath)).toBe(true);
+      expect(
+        database
+          .prepare("SELECT 1 FROM sqlite_schema WHERE name = 'grogu_protected_storage'")
+          .get(),
+      ).toBeUndefined();
+      database.exec("DROP TRIGGER interrupt_protected_storage_migration;");
+
+      await withAgentDatabaseMaintenanceLease({ env: state.env }, async () => {
+        ensureOpenClawAgentDatabaseSchema(database, {
+          agentId: "main",
+          path: pathname,
+          env: state.env,
+        });
+      });
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
+        PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+      );
+      const event = database
+        .prepare(
+          "SELECT event_json, event_zstd, event_utf8_bytes FROM transcript_events WHERE seq = 7",
+        )
+        .get();
+      expect(typeof event?.event_json).toBe("string");
+      expect(event?.event_json).not.toContain("protected-plaintext-sentinel");
+      expect(event?.event_zstd).toBeNull();
+      const trajectoryEvent = database
+        .prepare("SELECT event_json FROM trajectory_runtime_events WHERE seq = 8")
+        .get()?.event_json;
+      expect(typeof trajectoryEvent).toBe("string");
+      expect(trajectoryEvent).not.toContain("protected-trajectory-sentinel");
+      const encryptedEntry = database
+        .prepare(
+          `SELECT encrypted_entry_json FROM ${PROTECTED_SESSION_ENTRY_TABLE} WHERE session_key = ?`,
+        )
+        .get(sessionKey)?.encrypted_entry_json;
+      expect(typeof encryptedEntry).toBe("string");
+      expect(
+        openSqliteStorageText(
+          database,
+          encryptedEntry as string,
+          protectedSessionEntryContext(sessionKey),
+        ),
+      ).toBe(
+        JSON.stringify({
+          sessionId: "protected-session",
+          updatedAt: 2,
+          title: "protected-title-sentinel",
+          summary: "protected-summary-sentinel",
+          skillsSnapshot: { prompt: "protected-snapshot-sentinel", skills: [] },
+        }),
+      );
+      expect(
+        database
+          .prepare(
+            "SELECT entry_json, label, display_name FROM session_nodes WHERE session_key = ?",
+          )
+          .get(sessionKey),
+      ).toEqual({
+        entry_json: JSON.stringify({ sessionId: "protected-session", updatedAt: 2 }),
+        label: null,
+        display_name: null,
+      });
+      expect(
+        database.prepare("SELECT count(*) AS count FROM session_entry_snapshots").get()?.count,
+      ).toBe(0);
+      expect(
+        database
+          .prepare("SELECT display_name FROM session_windows WHERE session_key = ?")
+          .get(sessionKey)?.display_name,
+      ).toBeNull();
+      expect(
+        openSqliteStorageText(
+          database,
+          trajectoryEvent as string,
+          trajectoryRuntimeEventStorageContext("protected-session", 8),
+        ),
+      ).toBe(trajectoryPlaintext);
+      const acpEvent = database
+        .prepare(
+          "SELECT event_json FROM acp_parent_stream_events WHERE session_id = ? AND run_id = ? AND seq = 9",
+        )
+        .get("protected-session", "protected-parent-run")?.event_json;
+      expect(typeof acpEvent).toBe("string");
+      expect(acpEvent).not.toContain("protected-acp-sentinel");
+      expect(
+        openSqliteStorageText(
+          database,
+          acpEvent as string,
+          acpParentStreamEventStorageContext("protected-session", "protected-parent-run", 9),
+        ),
+      ).toBe(acpPlaintext);
+      const pendingInput = database
+        .prepare("SELECT message_json FROM session_pending_inputs WHERE input_id = ?")
+        .get("protected-pending-id")?.message_json;
+      expect(typeof pendingInput).toBe("string");
+      expect(pendingInput).not.toContain("protected-pending-input-sentinel");
+      expect(
+        openSessionPendingInputMessage(database, "protected-pending-id", pendingInput as string),
+      ).toBe(pendingInputPlaintext);
+      const completion = database
+        .prepare(
+          "SELECT outcome_json FROM session_input_completions WHERE session_id = ? AND idempotency_key = ?",
+        )
+        .get("protected-session", "protected-completion-key")?.outcome_json;
+      expect(typeof completion).toBe("string");
+      expect(completion).not.toContain("protected-completion-sentinel");
+      expect(
+        openSessionInputCompletionOutcome(
+          database,
+          "protected-session",
+          "protected-completion-key",
+          completion as string,
+        ),
+      ).toBe(completionPlaintext);
+      const encryptedArchive = database
+        .prepare(
+          "SELECT archive_blob, archive_sha256, published_at FROM session_transcript_archives WHERE session_id = ? AND generation = ?",
+        )
+        .get("protected-session", "protected-generation");
+      expect(encryptedArchive?.archive_blob).toBeInstanceOf(Uint8Array);
+      expect(encryptedArchive?.archive_blob).not.toEqual(archiveBytes);
+      expect(encryptedArchive?.archive_sha256).not.toBe(sha256Hex(archiveBytes));
+      expect(encryptedArchive?.published_at).toBeNull();
+      if (!(encryptedArchive?.archive_blob instanceof Uint8Array)) {
+        throw new Error("Expected an encrypted transcript archive.");
+      }
+      expect(
+        openSessionTranscriptArchiveBytes(
+          database,
+          encryptedArchive.archive_blob,
+          "protected-session",
+          "protected-generation",
+        ),
+      ).toEqual(archiveBytes);
+      expect(fs.existsSync(archivePath)).toBe(false);
+      expect(
+        database.prepare("SELECT count(*) AS count FROM session_transcript_fts").get()?.count,
+      ).toBe(0);
+      expect(
+        database.prepare("SELECT cleanup_pending FROM grogu_protected_storage WHERE id = 1").get()
+          ?.cleanup_pending,
+      ).toBe(0);
+      expect(
+        readTranscriptPayload(
+          {
+            event_json: event?.event_json as string,
+            event_zstd: null,
+            event_utf8_bytes: event?.event_utf8_bytes as number | null,
+          },
+          {
+            database,
+            sessionId: "protected-session",
+            seq: 7,
+          },
+        ),
+      ).toBe(plaintext);
+      const persistedFiles = [pathname, `${pathname}-wal`].filter(fs.existsSync);
+      expect(
+        persistedFiles.some(
+          (file) =>
+            fs.readFileSync(file).includes(Buffer.from("protected-plaintext-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-trajectory-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-title-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-summary-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-snapshot-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-label-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-display-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-window-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-archive-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-acp-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-pending-input-sentinel")) ||
+            fs.readFileSync(file).includes(Buffer.from("protected-completion-sentinel")),
+        ),
+      ).toBe(false);
+    } finally {
+      disposeSqliteStorageValueEncryption(database);
+      database.close();
+    }
+
+    const missingKeyDatabase = new DatabaseSync(pathname);
+    try {
+      expect(() => assertSupportedAgentSchemaVersion(missingKeyDatabase, pathname)).toThrow(
+        "key is unavailable",
+      );
+    } finally {
+      missingKeyDatabase.close();
+    }
+
+    const wrongKeyDatabase = new DatabaseSync(pathname);
+    registerSqliteStorageValueEncryption(
+      wrongKeyDatabase,
+      createStorageValueEncryption(Buffer.alloc(32, 0x38)),
+    );
+    try {
+      expect(() => assertSupportedAgentSchemaVersion(wrongKeyDatabase, pathname)).toThrow(
+        "could not be opened with the configured storage key",
+      );
+    } finally {
+      disposeSqliteStorageValueEncryption(wrongKeyDatabase);
+      wrongKeyDatabase.close();
+    }
+  });
+});
 
 function seedHistoricalData(db: DatabaseSync) {
   const event = ` {"type":"message","id":"first","id":"second","parentId":null,"message":{"role":"assistant","content":${JSON.stringify("saffronquasar 雪🦞 ".repeat(1024))}}}\n`;
@@ -76,7 +452,7 @@ function seedHistoricalData(db: DatabaseSync) {
   const rollup = createSessionUsageRollupData();
   rollup.untimestamped.totals.totalTokens = 17;
   const usage = {
-    version: 6,
+    version: 7,
     pricingFingerprint: "synthetic",
     checkpoint: {
       kind: "jsonl",

@@ -19,6 +19,10 @@ import {
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
 import { scanCanonicalSqliteSessionEntries } from "./session-canonical-key.js";
 import {
+  openProtectedSessionEntryJson,
+  protectedSessionEntryPayloadSql,
+} from "./session-entry-encryption.js";
+import {
   attachSessionEntrySnapshots,
   sessionEntrySnapshotColumns,
 } from "./session-entry-snapshots.js";
@@ -68,10 +72,22 @@ type CanonicalSessionRepairEntry = SessionEntrySummary &
   );
 
 /** Doctor inventory hydrates rejected legacy blobs from promoted node/window columns. */
-function hydrateCanonicalRepairEntry(row: CanonicalRepairRow): SessionEntry {
+function hydrateCanonicalRepairEntry(
+  row: CanonicalRepairRow,
+  database: Pick<OpenClawAgentDatabase, "db">,
+): SessionEntry {
   let record: Record<string, unknown> = {};
+  const rawEntryJson =
+    row.protected_entry_json === undefined
+      ? row.entry_json
+      : openProtectedSessionEntryJson(
+          database.db,
+          row.session_key,
+          row.entry_json,
+          row.protected_entry_json,
+        );
   try {
-    const parsed = JSON.parse(row.entry_json) as unknown;
+    const parsed = JSON.parse(rawEntryJson) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       record = parsed as Record<string, unknown>;
     }
@@ -145,6 +161,7 @@ function hydrateCanonicalRepairEntry(row: CanonicalRepairRow): SessionEntry {
 
 function canonicalRepairQuery(database: Pick<OpenClawAgentDatabase, "db">) {
   const db = getSessionKysely(database.db);
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   return db
     .selectFrom("session_nodes")
     .leftJoin("session_windows as current_window", (join) =>
@@ -163,6 +180,9 @@ function canonicalRepairQuery(database: Pick<OpenClawAgentDatabase, "db">) {
       "current_window.primary_conversation_id",
     )
     .selectAll("session_nodes")
+    .$if(protectedEntry !== undefined, (query) =>
+      query.select(protectedEntry!.as("protected_entry_json")),
+    )
     .select(sessionEntrySnapshotColumns)
     .select([
       "current_window_owner.session_key as current_window_owner_session_key",
@@ -198,13 +218,13 @@ function scanCanonicalSessionFactsFromDatabase(
   const inventoriedSessionKeys = new Set<string>();
   for (const row of iterateSqliteQuerySync(database.db, canonicalRepairQuery(database))) {
     inventoriedSessionKeys.add(row.session_key);
-    const persistedEntry = parseSessionEntryJson(row);
+    const persistedEntry = parseSessionEntryJson(row, "full", database.db);
     if (row.entry_valid === 1 && persistedEntry) {
       const keys = validSessionKeysById.get(row.current_session_id) ?? [];
       keys.push(row.session_key);
       validSessionKeysById.set(row.current_session_id, keys);
     }
-    const entry = persistedEntry ?? hydrateCanonicalRepairEntry(row);
+    const entry = persistedEntry ?? hydrateCanonicalRepairEntry(row, database);
     if (selectedKeys?.has(row.session_key)) {
       loaded.set(row.session_key, {
         entry,
@@ -396,9 +416,9 @@ export function scanDoctorSessionEntriesTolerant(
       if (!eligible.has(row.session_key) || isInternalSessionEffectsKey(row.session_key)) {
         continue;
       }
-      const entry = parseSessionEntryJson(row);
+      const entry = parseSessionEntryJson(row, "full", database.db);
       visit({
-        entry: entry ?? hydrateCanonicalRepairEntry(row),
+        entry: entry ?? hydrateCanonicalRepairEntry(row, database),
         recoveredFromProjections: entry === null,
         sessionKey: row.session_key,
       });

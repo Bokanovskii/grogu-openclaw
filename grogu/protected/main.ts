@@ -67,6 +67,20 @@ async function main() {
   const stateRoot = await root(stateDir);
   await stateRoot.mkdir("users", { private: true });
   await stateRoot.mkdir("workspace", { private: true });
+  const { createSqliteStorageValueEncryptionFromEnvironment } =
+    await import("../../src/storage/sqlite-encryption.js");
+  const storageEncryption = createSqliteStorageValueEncryptionFromEnvironment();
+  if (!storageEncryption) {
+    throw new Error(
+      "Protected storage encryption requires OPENCLAW_PROTECTED_STORAGE_KEY_FILE; provision the private key before starting the service.",
+    );
+  }
+  storageEncryption.dispose();
+  const { runOpenClawAgentWriteTransaction } = await import("../../src/state/openclaw-agent-db.js");
+  runOpenClawAgentWriteTransaction(() => undefined, {
+    agentId: "protected",
+    env: process.env,
+  });
   const usersRoot = await root(path.join(stateRoot.rootReal, "users"));
   const workspaceDir = path.join(stateRoot.rootReal, "workspace");
   const agentDir = path.join(stateRoot.rootReal, "agents", "protected", "agent");
@@ -213,8 +227,15 @@ async function main() {
 
 void main().catch((error: unknown) => {
   releaseStateOwner();
+  const storageFailure =
+    error instanceof Error &&
+    /Protected storage key|Protected storage encryption|is encrypted but its key is unavailable|could not be opened with the configured storage key|invalid encryption key check/iu.test(
+      error.message,
+    );
   process.stderr.write(
-    `${error instanceof ProtectedStartupError || error instanceof ProtectedWorkerBuildError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
+    storageFailure
+      ? "Protected runtime initialization failed. Restore the original storage key or provision it before startup; never replace a lost key.\n"
+      : `${error instanceof ProtectedStartupError || error instanceof ProtectedWorkerBuildError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
   );
   process.exitCode = 1;
 });

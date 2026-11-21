@@ -31,16 +31,18 @@ import {
   readSessionColdRetentionEligibility,
   retireRestoredAutomationArchive,
 } from "./session-cold-retention.worker.js";
+import { mutateSessionColdBatch } from "./session-cold-storage-batch-mutation.js";
 import {
   MAX_COLD_ARCHIVE_BYTES,
   decodeSessionColdRecords,
+  isProtectedSessionColdArchiveStore,
+  openSessionColdArchiveBytes,
   readVerifiedSessionColdArchive,
   resolveSessionColdArchivePath,
+  sealSessionColdArchiveBytes,
   sessionColdRecordSchema,
-  verifyPublishedSessionColdArchive,
   type SessionColdRecord,
 } from "./session-cold-storage-codec.js";
-import { readSessionColdStorageProtection } from "./session-cold-storage-eligibility.js";
 import type { SessionColdRestorationGuard } from "./session-cold-storage-guard.types.js";
 import { readSessionColdStorageInventory } from "./session-cold-storage-inventory.js";
 import {
@@ -72,7 +74,6 @@ import {
 } from "./session-transcript-authority.js";
 import {
   createSessionTranscriptFtsInserter,
-  deleteSessionTranscriptFtsRowsInTransaction,
   selectSessionTranscriptFtsRows,
 } from "./session-transcript-fts.js";
 import {
@@ -80,7 +81,7 @@ import {
   sqliteSessionTranscriptTurnRebound,
 } from "./session-turn.kernel.js";
 import { resolveSessionWorkStartError } from "./session-work-start.js";
-import { prepareTranscriptPayload, transcriptEventJsonSql } from "./transcript-payload.js";
+import { createTranscriptEventInserter, transcriptEventJsonSql } from "./transcript-payload.js";
 
 export type SessionColdPreparationWorkerData = {
   type: "sqlite-transcript-archive-v2";
@@ -137,6 +138,7 @@ async function prepareSessionColdArchiveInWorker(
   let eventCount = 0;
   let rawBytes = 0;
   let stagedBytes = 0;
+  let encryptedStore = false;
   try {
     const fd = fs.openSync(stagePath, "wx", 0o600);
     try {
@@ -237,6 +239,7 @@ async function prepareSessionColdArchiveInWorker(
               )) {
                 write(sessionColdRecordSchema.parse({ kind: "fts", row }));
               }
+              return isProtectedSessionColdArchiveStore(database.db);
             },
             { databaseLabel: database.path, operationLabel: "cold transcript snapshot" },
           ),
@@ -245,6 +248,7 @@ async function prepareSessionColdArchiveInWorker(
       if (!opened.found || eventCount === 0) {
         throw new Error("Cannot archive a missing or empty transcript");
       }
+      encryptedStore = opened.value;
       if (pending) {
         fs.writeSync(fd, pending);
       }
@@ -257,29 +261,59 @@ async function prepareSessionColdArchiveInWorker(
       fs.createWriteStream(compressedPath, { flags: "wx", mode: 0o600 }),
     );
     const bytes = fs.readFileSync(compressedPath);
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const storedBytes = encryptedStore
+      ? withOpenClawAgentDatabaseReadOnly((database) => {
+          const encrypted = sealSessionColdArchiveBytes(
+            database.db,
+            bytes,
+            plan.sessionId,
+            plan.snapshot.generation!,
+          );
+          if (
+            !openSessionColdArchiveBytes(
+              database.db,
+              encrypted,
+              plan.sessionId,
+              plan.snapshot.generation!,
+            ).equals(bytes)
+          ) {
+            throw new Error("Protected transcript archive failed encrypted read-back.");
+          }
+          return encrypted;
+        }, plan.databaseOptions)
+      : { found: true as const, value: bytes };
+    if (!storedBytes.found) {
+      throw new Error("Protected transcript archive database disappeared during encryption");
+    }
+    const archiveBytes = storedBytes.value;
+    const sha256 = createHash("sha256").update(archiveBytes).digest("hex");
     const archiveName = `${sha256}.jsonl.zst`;
-    publishEncodedSessionTranscriptArchive({
-      archiveDirectory: directory,
-      archiveName,
-      bytes,
-      sha256,
-    });
-    requireDirectorySync(syncDirectorySync(directory), "Cold archive directory");
-    requireDirectorySync(syncDirectorySync(path.dirname(directory)), "Session artifact directory");
+    if (!encryptedStore) {
+      publishEncodedSessionTranscriptArchive({
+        archiveDirectory: directory,
+        archiveName,
+        bytes: archiveBytes,
+        sha256,
+      });
+      requireDirectorySync(syncDirectorySync(directory), "Cold archive directory");
+      requireDirectorySync(
+        syncDirectorySync(path.dirname(directory)),
+        "Session artifact directory",
+      );
+    }
     // Decode before deleting the only hot copy, including the envelope's row contracts.
     const archive: SessionColdArchive = {
       session_id: plan.sessionId,
       generation: plan.snapshot.generation,
       archive_name: archiveName,
       archive_sha256: sha256,
-      archive_bytes: bytes.length,
+      archive_bytes: archiveBytes.length,
       event_count: eventCount,
       raw_bytes: rawBytes + eventCount - 1,
       last_seq: plan.snapshot.lastSeq!,
       archived_at: Date.now(),
-      storage: "file",
-      archive_blob: null,
+      storage: encryptedStore ? "sqlite" : "file",
+      archive_blob: encryptedStore ? archiveBytes : null,
     };
     decodeSessionColdRecords(bytes, archive);
     return { plan, archive, envelopeBytes: stagedBytes };
@@ -297,18 +331,21 @@ async function prepareExternalization(
   maxBytes: number,
 ): Promise<SessionColdExternalization | undefined> {
   const opened = withOpenClawAgentDatabaseReadOnly(
-    (database) =>
-      executeSqliteQuerySync(
+    (database) => ({
+      archive: executeSqliteQuerySync(
         database.db,
         getNodeSqliteKysely<DB>(database.db)
           .selectFrom("session_transcript_cold_archives")
           .selectAll()
           .where("session_id", "=", expected.session_id),
       ).rows[0],
+      encrypted: isProtectedSessionColdArchiveStore(database.db),
+    }),
     input.databaseOptions,
   );
-  const archive = opened.found ? opened.value : undefined;
+  const archive = opened.found ? opened.value.archive : undefined;
   if (
+    (opened.found && opened.value.encrypted) ||
     !archive ||
     archive.storage !== "sqlite" ||
     archive.generation !== expected.generation ||
@@ -470,74 +507,7 @@ export function mutateSessionColdTranscriptInWorker(
         return result;
       }
       if (plan.kind === "cold-batch") {
-        const protectionKeys = readSessionAdmissionProtectionKeys(database, [
-          ...plan.prepared.map((item) => item.plan.sessionId),
-          ...plan.externalizations.map((item) => item.archive.session_id),
-        ]);
-        if ([...protectionKeys].some((key) => !plan.protectionKeys.includes(key))) {
-          throw new Error("Transcript ownership changed; cold archival was canceled");
-        }
-        const protectedIds = readSessionColdStorageProtection(
-          database,
-          plan.beforeMs,
-          new Set(plan.liveSessionKeys),
-        );
-        const archivedIds: string[] = [];
-        for (const prepared of plan.prepared) {
-          const { sessionId, snapshot } = prepared.plan;
-          const fresh = readSessionStateDeleteSnapshot(database.db, sessionId);
-          if (
-            readSessionColdTranscript(database.db, sessionId) ||
-            protectedIds.has(sessionId) ||
-            !sqliteSessionStateDeleteSnapshotsEqual(fresh, snapshot) ||
-            fresh.transcriptUpdatedAt === null ||
-            fresh.transcriptUpdatedAt >= plan.beforeMs
-          ) {
-            continue;
-          }
-          verifyPublishedSessionColdArchive(plan.databaseOptions.path, prepared.archive);
-          executeSqliteQuerySync(
-            database.db,
-            db.insertInto("session_transcript_cold_archives").values(prepared.archive),
-          );
-          executeSqliteQuerySync(
-            database.db,
-            db.deleteFrom("transcript_events").where("session_id", "=", sessionId),
-          );
-          archivedIds.push(sessionId);
-          executeSqliteQuerySync(
-            database.db,
-            db.deleteFrom("session_transcript_index_state").where("session_id", "=", sessionId),
-          );
-          if (fresh.sessionKey) {
-            publishUnchangedSessionTranscriptAuthority(database, fresh.sessionKey);
-          }
-          result.archivedTranscripts++;
-        }
-        if (archivedIds.length > 0) {
-          deleteSessionTranscriptFtsRowsInTransaction(database.db, archivedIds);
-        }
-        for (const { archive } of plan.externalizations) {
-          const current = readSessionColdTranscript(database.db, archive.session_id);
-          if (
-            !current ||
-            current.storage !== "sqlite" ||
-            current.generation !== archive.generation ||
-            current.archive_sha256 !== archive.archive_sha256 ||
-            current.archive_name !== archive.archive_name
-          ) {
-            continue;
-          }
-          verifyPublishedSessionColdArchive(plan.databaseOptions.path, archive);
-          executeSqliteQuerySync(
-            database.db,
-            db
-              .updateTable("session_transcript_cold_archives")
-              .set({ storage: "file", archive_blob: null })
-              .where("session_id", "=", archive.session_id),
-          );
-          result.externalizedTranscripts++;
-        }
+        mutateSessionColdBatch(database, plan, result);
       } else {
         if (plan.guard?.kind === "turn") {
           const { sessionKey, options, goalOperation } = plan.guard;
@@ -601,6 +571,7 @@ export function mutateSessionColdTranscriptInWorker(
           throw new Error("Cold transcript changed during restoration");
         }
         const session_id = plan.sessionId;
+        const insertEvent = createTranscriptEventInserter(database.db, session_id);
         if (!readSessionColdRetentionEligibility(database, plan, records, result)) {
           result.transcriptPublication = readStagedSessionTranscriptAuthority(database);
           assertSessionColdRetentionCurrent(database, plan);
@@ -614,15 +585,11 @@ export function mutateSessionColdTranscriptInWorker(
             case "header":
               break;
             case "event":
-              executeSqliteQuerySync(
-                database.db,
-                db.insertInto("transcript_events").values({
-                  session_id,
-                  seq: record.row.seq,
-                  created_at: record.row.created_at,
-                  ...prepareTranscriptPayload(database.db, record.row.event_json),
-                }),
-              );
+              insertEvent({
+                seq: record.row.seq,
+                eventJson: record.row.event_json,
+                createdAt: record.row.created_at,
+              });
               break;
             case "identity":
               executeSqliteQuerySync(

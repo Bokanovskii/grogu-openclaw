@@ -159,7 +159,14 @@ export function createProtectedChats(options: {
   };
   const capacityEntries = async () => {
     const entries = await readSessionEntrySummariesInWorker({ agentId, env, storePath });
-    return entries.flatMap(({ sessionKey, entry }) => {
+    return entries.flatMap<{
+      profileId: string;
+      id: string;
+      sessionKey: string;
+      updatedAt: number;
+      transient: boolean;
+      title?: string;
+    }>(({ sessionKey, entry }) => {
       const internal: InternalSessionEntry = entry;
       if (internal.transientLifetime !== undefined) {
         const lifetime = readSessionTransientLifetime(internal);
@@ -205,6 +212,7 @@ export function createProtectedChats(options: {
           sessionKey,
           updatedAt: entry.updatedAt,
           transient: false,
+          title: entry.displayName,
         },
       ];
     });

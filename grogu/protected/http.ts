@@ -11,6 +11,7 @@ import {
   isProtectedTurnRequest,
   type ProtectedAgentCatalogDto,
   type ProtectedAgentSelectionResponse,
+  type ProtectedChatStorage,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -946,6 +947,24 @@ export function createProtectedHttp(options: {
             { ...relayAuthority, assertCurrent, revalidate },
           ),
         );
+      }
+      if (pathname === "/storage/chats" && method === "GET") {
+        const items: ProtectedChatStorage["chats"] = [];
+        const { personalBytes } = await measureProtectedStorage(
+          { ...options, chats },
+          profile.id,
+          assertCurrent,
+          false,
+          (item) => items.push(item),
+        );
+        await revalidate();
+        return json({
+          limitBytes: options.storageLimits?.userBytes ?? null,
+          usedBytes: personalBytes,
+          chats: items.toSorted(
+            (a, b) => b.approximateBytes - a.approximateBytes || a.id.localeCompare(b.id),
+          ),
+        } satisfies ProtectedChatStorage);
       }
       if (pathname === "/chats" && method === "GET") {
         const result = await chats.list(authority);

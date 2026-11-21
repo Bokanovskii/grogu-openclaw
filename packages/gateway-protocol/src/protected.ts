@@ -321,6 +321,19 @@ export const ProtectedErrorSchema = node({
   error: node({ code: Type.String(), message: Type.String() }),
 });
 export const ProtectedChatsSchema = node({ chats: Type.Array(ProtectedChatSummarySchema) });
+export const ProtectedChatStorageSchema = node({
+  limitBytes: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+  usedBytes: Type.Integer({ minimum: 0 }),
+  chats: Type.Array(
+    node({
+      id,
+      title: Type.String(),
+      updatedAt: Type.Number(),
+      version: Type.String(),
+      approximateBytes: Type.Integer({ minimum: 0 }),
+    }),
+  ),
+});
 export const ProtectedExportSchema = node({ chats: Type.Array(ProtectedChatSchema) });
 export const ProtectedChatResponseSchema = node({
   chat: ProtectedChatSchema,
@@ -363,6 +376,7 @@ export type ProtectedTurnEvent = Static<typeof ProtectedTurnEventSchema>;
 export type ProtectedTurnRequest = Static<typeof ProtectedTurnRequestSchema>;
 export type ProtectedChat = Static<typeof ProtectedChatSchema>;
 export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
+export type ProtectedChatStorage = Static<typeof ProtectedChatStorageSchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;

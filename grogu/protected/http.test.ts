@@ -652,7 +652,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const offlineSettled = Promise.withResolvers<void>();
   const offlineDisconnected = Promise.withResolvers<void>();
   const offlinePrompt = "Finish this reply after the connection closes";
+  const failedOfflinePrompt = "Fail this reply after the connection closes";
+  const failedOfflineProvider = Promise.withResolvers<void>();
+  const failedOfflineRelease = Promise.withResolvers<void>();
+  const failedOfflineSettled = Promise.withResolvers<void>();
+  const failedOfflineDisconnected = Promise.withResolvers<void>();
   t.after(() => offlineRelease.resolve());
+  t.after(() => failedOfflineRelease.resolve());
   const sourceUrl = "https://example.com/family-source";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
@@ -763,6 +769,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         chunks.push(Buffer.from(chunk));
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (JSON.stringify(body.messages).includes(failedOfflinePrompt)) {
+        failedOfflineProvider.resolve();
+        await failedOfflineRelease.promise;
+        response
+          .writeHead(401, { "content-type": "application/json" })
+          .end(
+            '{"error":{"message":"Invalid API key synthetic-private-error","code":"invalid_api_key"}}',
+          );
+        return;
+      }
       if (JSON.stringify(body.messages).includes(rejectedKeyPrompt)) {
         response
           .writeHead(401, { "content-type": "application/json" })
@@ -904,6 +920,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     server.on("request", (incoming, outgoing) => {
       if (incoming.headers["x-proof-disconnect"] === "yes") {
         outgoing.once("close", () => offlineDisconnected.resolve());
+      }
+      if (incoming.headers["x-proof-disconnect"] === "failure") {
+        outgoing.once("close", () => failedOfflineDisconnected.resolve());
       }
     });
     const url = await listen(server);
@@ -1107,6 +1126,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       if (turn.input.text === offlinePrompt) {
         offlineSettled.resolve();
       }
+      if (turn.input.text === failedOfflinePrompt) {
+        failedOfflineSettled.resolve();
+      }
     }
   };
   const { chat: offline } = await (
@@ -1139,6 +1161,35 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.equal(savedOffline.chat.messages.at(-1)?.status, "complete");
     assert.match(savedOffline.chat.messages.at(-1)?.text, /Committed synthetic answer\./);
     assert.deepEqual(detached.activeRun, { id: offlineStart.runId });
+
+    const { chat: failedOffline } = await (
+      await restart.call("/chats", { method: "POST", body: "{}" })
+    ).json();
+    const failedRoute = `/chats/${failedOffline.id}`;
+    const failedResponse = await restart.call(`${failedRoute}/turns`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "sparky", text: failedOfflinePrompt }),
+      headers: { "x-grogu-profile": user.id, "x-proof-disconnect": "failure" },
+    });
+    const failedReader = failedResponse.body!.getReader();
+    assert.equal(
+      JSON.parse(new TextDecoder().decode((await failedReader.read()).value)).type,
+      "start",
+    );
+    await failedOfflineProvider.promise;
+    await failedReader.cancel();
+    await failedOfflineDisconnected.promise;
+    failedOfflineRelease.resolve();
+    await failedOfflineSettled.promise;
+    const failedHistory = await (await reopened(failedRoute)).json();
+    const failure = failedHistory.chat.messages.at(-1);
+    assert.equal(failure.role, "assistant");
+    assert.equal(failure.status, "failed");
+    assert.equal(
+      failure.text,
+      "Sparky did not accept the Family service key. Choose another model, or ask the owner to check Sparky.",
+    );
+    assert.doesNotMatch(JSON.stringify(failedHistory), /synthetic-private-error|Invalid API key/);
   } finally {
     await restart.shutdown();
   }

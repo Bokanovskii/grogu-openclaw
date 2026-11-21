@@ -94,6 +94,8 @@ the chat again to find the saved reply. This does not replay the stream or start
 another model request. Another Access session can read its user's chat, but it
 does not receive the run ID. Active runs do not survive a listener restart.
 Updates drain or interrupt them before the new listener starts.
+Saved terminal model failures appear in the chat as a failed assistant message
+with fixed, classified guidance. Provider error text is never returned.
 
 ## File encryption API
 

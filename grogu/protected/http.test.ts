@@ -504,6 +504,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     account: string | null;
     key: string | null;
   }> = [];
+  const copilotBodies: Array<{ model?: string; reasoning?: { effort?: string } }> = [];
   const originalFetch = globalThis.fetch;
   let fixtureCompleted = false;
   const opened: Array<{ app: { shutdown: () => Promise<void> }; server: Server }> = [];
@@ -527,8 +528,41 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         });
         switch (endpoint) {
           case "https://api.github.com/copilot_internal/user":
+            if (headers.get("authorization") === "Bearer denied-synthetic") {
+              return new Response(null, { status: 401 });
+            }
             return Response.json({ endpoints: { api: "https://api.business.githubcopilot.com" } });
+          case "https://api.business.githubcopilot.com/models":
+            return Response.json({
+              data: [
+                {
+                  id: "gpt-5.3-codex",
+                  name: "Default",
+                  object: "model",
+                  model_picker_enabled: true,
+                  capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
+                },
+                {
+                  id: "gpt-5.4",
+                  name: "Second model",
+                  object: "model",
+                  model_picker_enabled: true,
+                  capabilities: {
+                    type: "chat",
+                    limits: { max_context_window_tokens: 64000 },
+                    supports: { reasoning_effort: ["low", "high"] },
+                  },
+                },
+                {
+                  id: "hidden",
+                  object: "model",
+                  model_picker_enabled: false,
+                  capabilities: { type: "chat" },
+                },
+              ],
+            });
           case "https://api.business.githubcopilot.com/responses":
+            copilotBodies.push(await new Request(input, init).json());
             return responsesReply("Canonical Copilot reply.");
           case "https://chatgpt.com/backend-api/codex/responses":
             return responsesReply("Canonical OpenAI reply.");
@@ -811,6 +845,88 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
 
   const { chat: interrupted } = await (await call("/chats", { method: "POST", body: "{}" })).json();
   const route = `/chats/${interrupted.id}`;
+  const copilotModels = () =>
+    call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({ credential: { accessToken: githubToken } }),
+    });
+  const copilotTurn = (thinking: string) =>
+    call(`${route}/turns`, {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({
+        provider: "github-copilot",
+        model: "gpt-5.4",
+        text: "Test a different Copilot model",
+        thinking,
+        credential: { accessToken: githubToken },
+      }),
+    });
+  await t.test("lists the account's visible Copilot models", async () => {
+    const listing = await copilotModels();
+    assert.equal(listing.status, 200);
+    const { models } = await listing.json();
+    assert.deepEqual(
+      models.map((model: { id: string }) => model.id),
+      ["gpt-5.3-codex", "gpt-5.4"],
+    );
+    assert.equal(models[1].contextWindow, 64000);
+    assert.ok(models[1].thinking.levels.includes("high"));
+    assert.ok(!models[1].thinking.levels.includes("max"));
+  });
+  await t.test("rejects unavailable Copilot thinking levels", async () => {
+    const rejected = await copilotTurn("max");
+    assert.equal(rejected.status, 422);
+    assert.equal((await rejected.json()).error.code, "thinking_unavailable");
+  });
+  await t.test("rejects models unavailable to the account", async () => {
+    const rejected = await call(`${route}/turns`, {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({
+        provider: "github-copilot",
+        model: "hidden",
+        text: "Use a hidden model",
+        credential: { accessToken: githubToken },
+      }),
+    });
+    assert.equal(rejected.status, 422);
+    assert.equal((await rejected.json()).error.code, "model_unavailable");
+  });
+  await t.test("rejects expired Copilot credentials", async () => {
+    const rejected = await call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({ credential: { accessToken: githubToken, expiresAt: Date.now() - 1 } }),
+    });
+    assert.equal(rejected.status, 401);
+    assert.equal((await rejected.json()).error.code, "provider_credential_expired");
+  });
+  await t.test("rejects denied credentials and requires the signed-in profile", async () => {
+    const request = (profile?: string) =>
+      call("/providers/github-copilot/models", {
+        method: "POST",
+        headers: profile ? { "x-grogu-profile": profile } : {},
+        body: JSON.stringify({ credential: { accessToken: "denied-synthetic" } }),
+      });
+    const denied = await request(user.id);
+    assert.equal(denied.status, 401);
+    assert.equal((await denied.json()).error.code, "provider_auth_failed");
+    assert.equal((await request()).status, 403);
+  });
+  await t.test("runs a chosen Copilot model with the selected reasoning", async () => {
+    const chosen = await copilotTurn("high");
+    assert.equal(chosen.status, 200);
+    const chosenEvents = (await chosen.text())
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(copilotBodies.at(-1)?.model, "gpt-5.4");
+    assert.equal(copilotBodies.at(-1)?.reasoning?.effort, "high");
+    assert.equal(chosenEvents.at(-1)?.type, "done");
+  });
+  providerRequests.length = 0;
   for (const [providerName, label, credential] of [
     ["github-copilot", "Copilot", { accessToken: githubToken }],
     [
@@ -849,10 +965,28 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     );
     const transcript = await (await call(route)).json();
     assert.ok(transcript.chat.messages.at(-1).text.includes(`Canonical ${label} reply.`));
+    if (providerName === "anthropic") {
+      const usageEvents = trace
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(usageEvents.at(-2), { type: "usage", contextTokens: 3 });
+      assert.deepEqual(transcript.usage, {
+        contextTokens: 3,
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      });
+    }
   }
   assert.deepEqual(
     providerRequests.filter(({ endpoint }) => !endpoint.endsWith("/models")),
     [
+      {
+        endpoint: "https://api.github.com/copilot_internal/user",
+        authorization: `Bearer ${githubToken}`,
+        account: null,
+        key: null,
+      },
       {
         endpoint: "https://api.github.com/copilot_internal/user",
         authorization: `Bearer ${githubToken}`,

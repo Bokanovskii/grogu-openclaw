@@ -4,6 +4,7 @@ import type {
   ProtectedChat,
   ProtectedChatSummary,
   ProtectedMessage,
+  ProtectedModel,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
@@ -17,10 +18,12 @@ import {
 } from "../../src/config/sessions/session-entry-read-runtime.js";
 import { readTranscriptStatsAsync } from "../../src/config/sessions/session-transcript-stats.js";
 import type { SessionEntry } from "../../src/config/sessions/types.js";
+import { aggregateSessionTranscriptUsage } from "../../src/gateway/session-transcript-derived-readers.js";
 import { ProtectedError } from "./errors.js";
 import { projectToolResult } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
+type ProtectedMessageProvider = ProtectedModel["provider"];
 
 function missing(): never {
   throw new ProtectedError(404, "not_found", "Chat not found.");
@@ -126,7 +129,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
       return [{ profileId: actor.id, id: entry.sessionId, sessionKey }];
     });
   };
-  const read = async (authority: ProtectedChatAuthority, id: string): Promise<ProtectedChat> => {
+  const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {
     const entry = await readEntry(authority, id);
     const events = await loadTranscriptEvents({
       ...scope(authority, id),
@@ -137,6 +140,9 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     const messages: ProtectedMessage[] = [];
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
+    let usage:
+      | { contextTokens: number; provider: ProtectedMessageProvider; model: string }
+      | undefined;
     for (const event of events) {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
@@ -172,6 +178,19 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
               ? "failed"
               : "complete"
           : undefined;
+      if (message.role === "assistant" && status === "complete") {
+        const snapshot = aggregateSessionTranscriptUsage([message]);
+        const provider = snapshot?.modelProvider;
+        usage =
+          typeof snapshot?.totalTokens === "number" &&
+          typeof snapshot.model === "string" &&
+          (provider === "sparky" ||
+            provider === "github-copilot" ||
+            provider === "anthropic" ||
+            provider === "openai")
+            ? { contextTokens: snapshot.totalTokens, provider, model: snapshot.model }
+            : undefined;
+      }
       if (message.role === "user") {
         projections = projectToolResult(undefined, undefined);
         reply = undefined;
@@ -192,7 +211,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
         reply = projected;
       }
     }
-    return {
+    const chat: ProtectedChat = {
       ...summary(entry),
       messages: messages.filter(
         (message) =>
@@ -202,6 +221,7 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
           message.status !== "failed",
       ),
     };
+    return { chat, usage };
   };
   return {
     env,
@@ -210,7 +230,9 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     scope,
     readEntry,
     list,
-    read,
+    read: async (authority: ProtectedChatAuthority, id: string) =>
+      (await readWithUsage(authority, id)).chat,
+    readWithUsage,
     capacityEntries,
     async transcriptBytes(sessionId: string, sessionKey: string) {
       const stats = await readTranscriptStatsAsync({

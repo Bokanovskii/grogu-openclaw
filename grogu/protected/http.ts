@@ -18,6 +18,7 @@ import { chatArtifactsDirectory, chatFilesDirectory, chatWidgetsDirectory } from
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { resolveProtectedProfile, type ProtectedIdentityVerifier } from "./identity.js";
+import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { widgetIdPattern } from "./tool-events.js";
@@ -239,7 +240,7 @@ export function createProtectedHttp(options: {
           }
         });
       const readChat = async (id: string) => {
-        const chat = await chats.read(authority, id);
+        const { chat, usage } = await chats.readWithUsage(authority, id);
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(async (owned) => {
             for (const message of chat.messages) {
@@ -264,14 +265,14 @@ export function createProtectedHttp(options: {
             }
           });
         }
-        return chat;
+        return { chat, usage };
       };
       if (pathname === "/me" && method === "GET") {
         return json({
           user: { id: profile.id, displayName: profile.displayName ?? "Family member" },
           disclosure:
             "Family keeps your chats and generated files until you delete them. The host operator can read them. They are stored unencrypted on the server, with no backups, so a disk failure can lose your history. The server uses personal provider credentials only for the current request. Family can fetch known public URLs, but it does not search the web.",
-          models: options.turns.models,
+          models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
             openaiConnect: options.providerRelay !== undefined,
@@ -303,6 +304,18 @@ export function createProtectedHttp(options: {
         assertCurrent: assertGrant,
         revalidate: checkGrant,
       };
+      if (pathname === "/providers/github-copilot/models" && method === "POST") {
+        requireProfile();
+        const data = await body(request);
+        if (!isProtectedRenew(data)) {
+          return invalid();
+        }
+        const models = await fetchProtectedCopilotModels(data.credential, {
+          signal: request.signal,
+          revalidate,
+        });
+        return json({ models: models.map(({ model }) => model) });
+      }
       if (connection && (method === "POST" || method === "DELETE")) {
         requireProfile();
         if (!relay) {
@@ -394,7 +407,7 @@ export function createProtectedHttp(options: {
         const result = [];
         for (const chat of await chats.list(authority)) {
           await revalidate();
-          result.push(await readChat(chat.id));
+          result.push((await readChat(chat.id)).chat);
         }
         await revalidate();
         return json({ chats: result });
@@ -454,11 +467,12 @@ export function createProtectedHttp(options: {
       await chats.readEntry(authority, id);
       await revalidate();
       if (!rest && method === "GET") {
-        const chat = await readChat(id);
+        const { chat, usage } = await readChat(id);
         await revalidate();
         const active = runs.get(id);
         return json({
           chat,
+          ...(usage ? { usage } : {}),
           ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
             ? { activeRun: { id: active.id } }
             : {}),
@@ -512,16 +526,13 @@ export function createProtectedHttp(options: {
         if (!isProtectedTurnRequest(data)) {
           return invalid();
         }
-        const model = options.turns.models.find(
+        const fixedModel = options.turns.models.find(
           (candidate) =>
             candidate.provider === data.provider &&
             (data.model === undefined || candidate.id === data.model),
         );
-        if (!model) {
-          throw new ProtectedError(422, "model_unavailable", "This model is not available.");
-        }
         const credential = data.credential;
-        if (credential !== undefined && (!isRecord(credential) || model.provider === "sparky")) {
+        if (credential !== undefined && (!isRecord(credential) || data.provider === "sparky")) {
           return invalid();
         }
         const expiresAt = isRecord(credential) ? credential.expiresAt : undefined;
@@ -537,10 +548,43 @@ export function createProtectedHttp(options: {
             "Reconnect or renew this provider first.",
           );
         }
+        let copilotModel:
+          | Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number]
+          | undefined;
+        if (data.provider === "github-copilot") {
+          if (!credential) {
+            throw new ProtectedError(
+              401,
+              "provider_credential_required",
+              "Connect this provider first.",
+            );
+          }
+          const models = await fetchProtectedCopilotModels(credential, {
+            signal: request.signal,
+            revalidate,
+          });
+          const requested = data.model ?? fixedModel?.id;
+          copilotModel = models.find(({ model }) => model.id === requested);
+        }
+        const model =
+          copilotModel?.model ??
+          (data.provider === "github-copilot" ? undefined : fixedModel && withThinking(fixedModel));
+        if (!model) {
+          throw new ProtectedError(422, "model_unavailable", "This model is not available.");
+        }
+        if (data.thinking !== undefined && !model.thinking?.levels.includes(data.thinking)) {
+          throw new ProtectedError(
+            422,
+            "thinking_unavailable",
+            "This reasoning level is not available.",
+          );
+        }
         const input: TurnInput = {
           provider: model.provider,
           model: model.id,
           text: text(data.text, 16_000),
+          thinking: data.thinking ?? model.thinking?.default,
+          ...(copilotModel ? { copilotModel } : {}),
           ...(isRecord(credential)
             ? {
                 credential: {
@@ -662,7 +706,7 @@ export function createProtectedHttp(options: {
                   signal,
                 );
                 storage?.assertResult();
-                const chat = await chats.read(runAuthority, id);
+                const { chat, usage } = await chats.readWithUsage(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 if (
@@ -677,6 +721,9 @@ export function createProtectedHttp(options: {
                     "save_failed",
                     "The reply could not be confirmed as saved.",
                   );
+                }
+                if (usage && usage.provider === input.provider && usage.model === input.model) {
+                  send({ type: "usage", contextTokens: usage.contextTokens });
                 }
                 send({ type: "done", chatVersion: chat.version });
               } catch (error) {

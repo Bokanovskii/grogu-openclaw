@@ -5,14 +5,12 @@ import { resolveRunEntryCliRuntime } from "../../agents/embedded-agent-runner/ru
 import { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
 import {
-  getRequestScopedChildExecution,
+  prepareRequestScopedChildExecution,
   resolveRequestScopedChild,
   withRequestScopedChildExecution,
 } from "../../agents/request-scoped-child-execution.js";
 import { resolveSessionRuntimeOverrideForProvider } from "../../agents/session-runtime-compat.js";
-import { readRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
 import { resolveCandidateAgentRuntime } from "../../agents/thinking-runtime.js";
-import { readSessionTransientLifetime } from "../../config/sessions/session-transient-lifetime.js";
 import { buildGenericCliContextEngineHostSupport } from "../../context-engine/host-compat.js";
 import { revokeMessageActionTurnCapability } from "../../gateway/message-action-turn-capability.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
@@ -55,25 +53,14 @@ import {
 export async function runAgentFallbackCandidates(params: AgentFallbackCycleParams) {
   const turn = params.turn;
   const activeEntry = turn.getActiveSessionEntry();
-  const requestChild =
-    getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(params.runId);
-  if (
-    readSessionTransientLifetime(activeEntry) &&
-    (!requestChild || !activeEntry?.lifecycleRevision)
-  ) {
-    throw new Error("Request-scoped child execution is no longer authorized.");
-  }
-  if (requestChild) {
-    if (!activeEntry?.lifecycleRevision) {
-      throw new Error("Request-scoped child session generation is unavailable.");
-    }
-    await resolveRequestScopedChild(requestChild, {
+  const requestChild = await prepareRequestScopedChildExecution(
+    {
       runId: params.runId,
       sessionKey: turn.sessionKey,
       sessionId: turn.followupRun.run.sessionId,
-      lifecycleRevision: activeEntry.lifecycleRevision,
-    });
-  }
+    },
+    activeEntry,
+  );
   const sourceReplyDeliveryRuntimeOptions = turn.opts as
     | SourceReplyDeliveryRuntimeOptions
     | undefined;

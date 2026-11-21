@@ -8,7 +8,7 @@ import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
 import {
   getRequestScopedChildExecution,
-  resolveRequestScopedChild,
+  runRequestScopedChild,
 } from "../../agents/request-scoped-child-execution.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
 import { readRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
@@ -312,35 +312,15 @@ export async function runEmbeddedFallbackCandidate(
       if (!activeEntry?.lifecycleRevision) {
         throw new Error("Request-scoped child session generation is unavailable.");
       }
-      return resolveRequestScopedChild(requestChild, {
-        runId: params.runId,
-        sessionKey: turn.sessionKey,
-        sessionId: turn.followupRun.run.sessionId,
-        lifecycleRevision: activeEntry.lifecycleRevision,
-      }).then((constraints) =>
-        runEmbeddedAgent({
-          ...embeddedRunParams,
-          ...constraints,
-          extraSystemPrompt: [embeddedRunParams.extraSystemPrompt, constraints.extraSystemPrompt]
-            .filter(Boolean)
-            .join("\n\n"),
-          provider: requestChild.provider,
-          model: requestChild.model,
-          abortSignal: AbortSignal.any(
-            [embeddedRunParams.abortSignal, requestChild.signal].filter(
-              (signal): signal is AbortSignal => signal !== undefined,
-            ),
-          ),
-          agentHarnessRuntimeOverride: "openclaw",
-          modelSelectionLocked: true,
-          modelFallbacksOverride: [],
-          disableMessageTool: true,
-          disableToolSearch: true,
-          disableTrajectory: true,
-          codeModeOverride: false,
-          forceMessageTool: false,
-          allowGatewaySubagentBinding: false,
-        }),
+      return runRequestScopedChild(
+        {
+          runId: params.runId,
+          sessionKey: turn.sessionKey,
+          sessionId: turn.followupRun.run.sessionId,
+          lifecycleRevision: activeEntry.lifecycleRevision,
+        },
+        embeddedRunParams,
+        runEmbeddedAgent,
       );
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);

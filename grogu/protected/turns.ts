@@ -149,6 +149,7 @@ async function runMentionedAgent(
         toolsAllow: [...agent.tools],
         toolExecutionAllow: agent.tools,
         extraSystemPrompt: agent.instructions,
+        clientCaps: ["inline-widgets"],
       };
     },
   };

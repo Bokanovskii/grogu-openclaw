@@ -432,6 +432,23 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await secondAlice.json()).error.code, "quota_exceeded");
   assert.equal((await first.call("bob", route)).status, 404);
   assert.deepEqual(await (await first.call("bob", "/export")).json(), { chats: [] });
+  const storage = await (await first.call("alice", "/storage/chats")).json();
+  assert.equal(storage.limitBytes, 58_000);
+  assert.ok(storage.usedBytes > 0);
+  assert.deepEqual(storage.chats, [
+    {
+      id: chat.id,
+      title: "Alice private",
+      version: selectedChat.version,
+      updatedAt: selectedChat.updatedAt,
+      approximateBytes: storage.usedBytes,
+    },
+  ]);
+  assert.deepEqual(await (await first.call("bob", "/storage/chats")).json(), {
+    limitBytes: 58_000,
+    usedBytes: 0,
+    chats: [],
+  });
   assert.equal(
     (await first.call("alice", route, { method: "DELETE", headers: { "if-match": "stale" } }))
       .status,
@@ -640,6 +657,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     204,
   );
   assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
+  assert.equal((await (await first.call("bob", "/storage/chats")).json()).usedBytes, 0);
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
   await close(first.server);
 

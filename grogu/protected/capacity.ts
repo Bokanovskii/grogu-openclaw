@@ -1,4 +1,5 @@
 import { statfsSync } from "node:fs";
+import type { ProtectedChatStorage } from "@openclaw/gateway-protocol/protected";
 import {
   createAuthorizedUserFiles,
   type AuthorizedUserFiles,
@@ -63,6 +64,7 @@ export async function measureProtectedStorage(
   profileId: string,
   assertCurrent: () => void,
   includeOtherProfiles: boolean,
+  onPersonalChat?: (chat: ProtectedChatStorage["chats"][number]) => void,
 ) {
   let globalBytes = 0;
   let personalBytes = 0;
@@ -91,6 +93,13 @@ export async function measureProtectedStorage(
         if (!entry.transient) {
           chatCount++;
           lastChatActivityAt = Math.max(lastChatActivityAt ?? entry.updatedAt, entry.updatedAt);
+          onPersonalChat?.({
+            id: entry.id,
+            title: entry.title ?? "New chat",
+            version: String(entry.updatedAt),
+            updatedAt: entry.updatedAt,
+            approximateBytes: bytes,
+          });
         }
       }
     } finally {

@@ -109,6 +109,14 @@ If a quota is reached, export or delete a chat to free admission; the runtime
 does not evict chats or keep backups. A volume below its floor stops accepting
 writes until space is available. Chat deletion remains available.
 
+`GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
+estimated size, largest first. Each estimate uses the same transcript, file,
+and overhead charges as the quota. `usedBytes` also counts transient child work,
+which is not a separate cleanup item. `limitBytes` is the member's configured
+limit, not the host's free disk space. To delete a reviewed chat, send its
+`version` in `If-Match` to the existing `DELETE /api/protected/v1/chats/:id`
+route. Read storage again after deletion to show the new total.
+
 The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
 and display the resulting sources. It does not have a search provider;
 `web_search` is disabled. Managed search would require a separately approved

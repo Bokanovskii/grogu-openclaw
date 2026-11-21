@@ -52,7 +52,9 @@ with the app during repair. The app denies a removed person throughout.
 
 Place the reviewed client build output in `protected-client/` at the installed
 service root, alongside `grogu/` and `scripts/`. Install only the compiled
-`dist` contents there, not the separate client checkout. The listener requires
+`dist` contents there, not the separate client checkout. Keep the build's hashed
+entry and shared asset names unchanged; they do not have to start with `index-`.
+The listener requires
 `protected-client/index.html` before it starts. Then use Node 26.12.1:
 
 ```sh

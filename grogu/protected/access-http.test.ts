@@ -31,6 +31,9 @@ void test("the public page has a separate static asset tree", async (t) => {
   await Promise.all([
     writeFile(path.join(bundleDir, "index.html"), "Private app"),
     writeFile(path.join(bundleDir, "assets", "index-private.js"), "private"),
+    writeFile(path.join(bundleDir, "assets", "privateApp-compiled.js"), "private entry"),
+    writeFile(path.join(bundleDir, "assets", "style-shared.js"), "shared module"),
+    writeFile(path.join(bundleDir, "assets", "style-compiled.css"), "shared style"),
     writeFile(path.join(bundleDir, "request-access", "index.html"), "Public request"),
     writeFile(path.join(bundleDir, "request-access", "assets", "access-public.js"), "public"),
   ]);
@@ -39,7 +42,17 @@ void test("the public page has a separate static asset tree", async (t) => {
   const get = (pathname: string) => serve(new Request(`https://alcove.example${pathname}`));
   assert.equal(await (await get("/request-access"))?.text(), "Public request");
   assert.equal(await (await get("/settings/admin"))?.text(), "Private app");
+  for (const [name, content] of [
+    ["index-private.js", "private"],
+    ["privateApp-compiled.js", "private entry"],
+    ["style-shared.js", "shared module"],
+    ["style-compiled.css", "shared style"],
+  ]) {
+    assert.equal(await (await get(`/assets/${name}`))?.text(), content);
+  }
   assert.equal(await (await get("/request-access/assets/access-public.js"))?.text(), "public");
+  assert.equal(await get("/assets/private.json"), undefined);
+  assert.equal(await get("/assets/privateApp.js"), undefined);
   assert.equal(await get("/request-access/index.html"), undefined);
   assert.equal(await get("/request-access/assets/private.json"), undefined);
   assert.equal(await get("/request-access/api/status"), undefined);

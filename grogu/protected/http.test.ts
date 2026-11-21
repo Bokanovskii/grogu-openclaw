@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
+import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { test } from "node:test";
+import { before as beforeTests, test } from "node:test";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
@@ -15,7 +17,33 @@ import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
 import { protectedOpenClawConfig } from "./settings.js";
 import { createProtectedStaticClient } from "./static-client.js";
+import { installFixtureFetch } from "./test-fetch-guard.js";
 import { createCanonicalProtectedTurns } from "./turns.js";
+
+beforeTests(async () => {
+  const command = "~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh";
+  assert.equal(
+    process.env.OPENCLAW_PROTECTED_ISOLATED_TEST,
+    "1",
+    `Run this fixture with: ${command}`,
+  );
+  const denied = await new Promise<boolean>((resolve) => {
+    const socket = connectSocket({ host: "198.51.100.1", port: 443 });
+    socket.setTimeout(2_000);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      resolve(error.code === "EPERM" || error.code === "EACCES");
+    });
+  });
+  assert.ok(denied, `Native network isolation was not verified. Run: ${command}`);
+});
 
 function providerSse(events: Array<{ type: string; [field: string]: unknown }>, named = false) {
   return new Response(
@@ -66,6 +94,38 @@ function close(server: Server) {
     server.closeAllConnections();
   });
 }
+
+void test("fixture blocks egress from work that outlives its test", () => {
+  const script = `
+    import { test } from "node:test";
+    import { installFixtureFetch } from "./grogu/protected/test-fetch-guard.ts";
+    globalThis.fetch = async () => new Response("escaped");
+    const controller = new AbortController();
+    test("cancelled fixture", { signal: controller.signal }, async (child) => {
+      const release = Promise.withResolvers();
+      installFixtureFetch(child, async () => new Response("blocked"), async () => {}, () => false);
+      child.after(() => release.resolve());
+      setImmediate(() => controller.abort());
+      await release.promise;
+      await new Promise((resolve) => setImmediate(resolve));
+      const result = await fetch("https://outside.invalid");
+      process.stdout.write("late fetch: " + await result.text() + "\\n");
+    });
+  `;
+  const child = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", script],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 15_000,
+    },
+  );
+  assert.ifError(child.error);
+  assert.equal(child.status, 1, child.stdout + child.stderr);
+  assert.match(child.stdout, /late fetch: blocked/);
+  assert.doesNotMatch(child.stdout, /late fetch: escaped/);
+});
 
 void test("Family HTTP isolates chats, relays device authorization, and durably revokes sessions", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-test-${randomUUID()}`);
@@ -445,70 +505,85 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     key: string | null;
   }> = [];
   const originalFetch = globalThis.fetch;
-  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(input instanceof Request ? input.url : input);
-    if (url.hostname === "127.0.0.1") {
-      return originalFetch(input, init);
-    }
-    if (url.href !== sourceUrl) {
-      const endpoint = `${url.origin}${url.pathname}`;
-      const headers = new Headers(
-        init?.headers ?? (input instanceof Request ? input.headers : undefined),
-      );
-      providerRequests.push({
-        endpoint,
-        authorization: headers.get("authorization"),
-        account: headers.get("chatgpt-account-id"),
-        key: headers.get("x-api-key"),
-      });
-      switch (endpoint) {
-        case "https://api.github.com/copilot_internal/user":
-          return Response.json({ endpoints: { api: "https://api.business.githubcopilot.com" } });
-        case "https://api.business.githubcopilot.com/responses":
-          return responsesReply("Canonical Copilot reply.");
-        case "https://chatgpt.com/backend-api/codex/responses":
-          return responsesReply("Canonical OpenAI reply.");
-        case "https://api.anthropic.com/v1/messages":
-          return providerSse(
-            [
-              {
-                type: "message_start",
-                message: {
-                  id: "msg_family",
-                  type: "message",
-                  role: "assistant",
-                  model: "claude-sonnet-4-6",
-                  content: [],
-                  usage: { input_tokens: 3, output_tokens: 0 },
-                },
-              },
-              { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-              {
-                type: "content_block_delta",
-                index: 0,
-                delta: { type: "text_delta", text: "Canonical Anthropic reply." },
-              },
-              { type: "content_block_stop", index: 0 },
-              {
-                type: "message_delta",
-                delta: { stop_reason: "end_turn", stop_sequence: null },
-                usage: { output_tokens: 1 },
-              },
-              { type: "message_stop" },
-            ],
-            true,
-          );
-        default:
-          return new Response(null, { status: 404 });
+  let fixtureCompleted = false;
+  const opened: Array<{ app: { shutdown: () => Promise<void> }; server: Server }> = [];
+  installFixtureFetch(
+    t,
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.hostname === "127.0.0.1") {
+        return originalFetch(input, init);
       }
-    }
-    return new Response(
-      "<html><title>Synthetic source</title><p>Family source evidence.</p></html>",
-      {
-        headers: { "content-type": "text/html" },
-      },
-    );
-  });
+      if (url.href !== sourceUrl) {
+        const endpoint = `${url.origin}${url.pathname}`;
+        const headers = new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        );
+        providerRequests.push({
+          endpoint,
+          authorization: headers.get("authorization"),
+          account: headers.get("chatgpt-account-id"),
+          key: headers.get("x-api-key"),
+        });
+        switch (endpoint) {
+          case "https://api.github.com/copilot_internal/user":
+            return Response.json({ endpoints: { api: "https://api.business.githubcopilot.com" } });
+          case "https://api.business.githubcopilot.com/responses":
+            return responsesReply("Canonical Copilot reply.");
+          case "https://chatgpt.com/backend-api/codex/responses":
+            return responsesReply("Canonical OpenAI reply.");
+          case "https://api.anthropic.com/v1/messages":
+            return providerSse(
+              [
+                {
+                  type: "message_start",
+                  message: {
+                    id: "msg_family",
+                    type: "message",
+                    role: "assistant",
+                    model: "claude-sonnet-4-6",
+                    content: [],
+                    usage: { input_tokens: 3, output_tokens: 0 },
+                  },
+                },
+                {
+                  type: "content_block_start",
+                  index: 0,
+                  content_block: { type: "text", text: "" },
+                },
+                {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: "Canonical Anthropic reply." },
+                },
+                { type: "content_block_stop", index: 0 },
+                {
+                  type: "message_delta",
+                  delta: { stop_reason: "end_turn", stop_sequence: null },
+                  usage: { output_tokens: 1 },
+                },
+                { type: "message_stop" },
+              ],
+              true,
+            );
+          default:
+            return new Response(null, { status: 404 });
+        }
+      }
+      return new Response(
+        "<html><title>Synthetic source</title><p>Family source evidence.</p></html>",
+        {
+          headers: { "content-type": "text/html" },
+        },
+      );
+    },
+    async () => {
+      offlineRelease.resolve();
+      await Promise.all(opened.map(({ app }) => app.shutdown()));
+      await Promise.all(opened.map(({ server }) => close(server)));
+    },
+    () => fixtureCompleted,
+  );
   const provider = createServer((request, response) => {
     void (async () => {
       if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -662,7 +737,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       }
     });
     const url = await listen(server);
-    t.after(() => close(server));
+    opened.push({ app, server });
     const call = (route: string, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       headers.set("origin", headers.get("origin") ?? origin);
@@ -908,6 +983,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       }
     }
   }
+  fixtureCompleted = true;
 });
 
 void test("Family rate limits separate busy Sparky from personal plan limits", () => {

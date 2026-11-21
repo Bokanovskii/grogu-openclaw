@@ -37,9 +37,22 @@ export const ProtectedTurnRequestSchema = node({
 });
 export const ProtectedSourceSchema = node({ title: Type.String(), url: Type.String() });
 export const ProtectedWidgetSchema = node({ id, title: Type.String() });
+export const ProtectedActivitySchema = node({
+  id,
+  kind: Type.Union([
+    Type.Literal("search"),
+    Type.Literal("fetch"),
+    Type.Literal("widget"),
+    Type.Literal("tool"),
+  ]),
+  label: Type.String({ maxLength: 200 }),
+  status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed")]),
+});
 export const ProtectedTurnEventSchema = Type.Union([
   node({ type: Type.Literal("start"), runId: id }),
   node({ type: Type.Literal("delta"), text: Type.String() }),
+  node({ type: Type.Literal("reasoning"), text: Type.String() }),
+  node({ type: Type.Literal("activity"), ...ProtectedActivitySchema.properties }),
   node({ type: Type.Literal("sources"), sources: Type.Array(ProtectedSourceSchema) }),
   node({ type: Type.Literal("widget"), ...ProtectedWidgetSchema.properties }),
   node({ type: Type.Literal("usage"), contextTokens: Type.Integer({ minimum: 0 }) }),
@@ -66,6 +79,9 @@ export const ProtectedMessageSchema = node({
   id,
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
+  reasoning: Type.Optional(Type.String()),
+  activity: Type.Optional(Type.Array(ProtectedActivitySchema)),
+  durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
   sources: Type.Optional(Type.Array(ProtectedSourceSchema)),
   widgets: Type.Optional(Type.Array(ProtectedWidgetSchema)),
   status: Type.Optional(
@@ -77,6 +93,7 @@ export const ProtectedChatSummarySchema = node({
   title: Type.String(),
   version: Type.String(),
   updatedAt: Type.Number(),
+  activeRun: Type.Optional(node({ id })),
 });
 export const ProtectedChatSchema = node({
   ...ProtectedChatSummarySchema.properties,
@@ -153,6 +170,7 @@ export type ProtectedTurnRequest = Static<typeof ProtectedTurnRequestSchema>;
 export type ProtectedChat = Static<typeof ProtectedChatSchema>;
 export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
+export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;

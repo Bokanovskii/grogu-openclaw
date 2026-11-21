@@ -80,6 +80,12 @@ select a listed model and reasoning level; unavailable choices are rejected.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
 
+Reasoning is streamed as append-only `reasoning` text events when the provider
+exposes it. Tool activity uses `activity` events with a safe label and a running,
+done, or failed status. Saved replies include available reasoning, tool activity,
+and duration. Chat summaries include `activeRun` only for the Access session
+that started the active turn.
+
 A turn can run for up to 15 minutes, because Sparky with Ultra reasoning can
 take several minutes to write a widget. While a turn runs, the turn stream sends
 a blank line every 15 seconds. The blank line keeps the Cloudflare tunnel from

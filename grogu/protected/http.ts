@@ -377,6 +377,12 @@ export function createProtectedHttp(options: {
       if (pathname === "/chats" && method === "GET") {
         const result = await chats.list(authority);
         await revalidate();
+        for (const chat of result) {
+          const active = runs.get(chat.id);
+          if (active?.profileId === profile.id && active.sessionHash === identity.sessionId) {
+            chat.activeRun = { id: active.id };
+          }
+        }
         return json({ chats: result });
       }
       if (pathname === "/chats" && method === "POST") {
@@ -683,6 +689,14 @@ export function createProtectedHttp(options: {
                         delta: async (value) => {
                           await checkRun();
                           send({ type: "delta", text: value });
+                        },
+                        reasoning: async (value) => {
+                          await checkRun();
+                          send({ type: "reasoning", text: value });
+                        },
+                        activity: async (item) => {
+                          await checkRun();
+                          send({ type: "activity", ...item });
                         },
                         sources: async (sources) => {
                           await checkRun();

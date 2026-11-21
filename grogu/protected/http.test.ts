@@ -655,6 +655,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       const frames =
         seen.length === 1
           ? [
+              [{ role: "assistant", reasoning_content: "Check the source. " }, null],
+              [{ reasoning_content: "Prepare the widget." }, null],
               [
                 {
                   role: "assistant",
@@ -795,6 +797,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
+  assert.equal(
+    events
+      .filter((event) => event.type === "reasoning")
+      .map((event) => event.text)
+      .join(""),
+    "Check the source. Prepare the widget.",
+  );
+  for (const [id, kind] of [
+    ["call_widget_1", "widget"],
+    ["call_fetch_1", "fetch"],
+  ]) {
+    const activity = events.filter((event) => event.type === "activity" && event.id === id);
+    assert.deepEqual(
+      activity.map((event) => [event.kind, event.status]),
+      [
+        [kind, "running"],
+        [kind, "done"],
+      ],
+    );
+    assert.ok(activity.every((event) => !JSON.stringify(event).includes("widget_code")));
+  }
   assert.ok(
     events.some(
       (event) => event.type === "widget-draft" && event.html?.includes("Scoped widget body"),
@@ -818,6 +841,21 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const { call: reopened } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
   assert.match(JSON.stringify(read), /Committed synthetic answer\./);
+  assert.equal(read.chat.messages.at(-1).reasoning, "Check the source. Prepare the widget.");
+  assert.deepEqual(
+    read.chat.messages
+      .at(-1)
+      .activity.map((item: { id: string; kind: string; status: string }) => [
+        item.id,
+        item.kind,
+        item.status,
+      ]),
+    [
+      ["call_widget_1", "widget", "done"],
+      ["call_fetch_1", "fetch", "done"],
+    ],
+  );
+  assert.ok(Number.isInteger(read.chat.messages.at(-1).durationMs));
   assert.doesNotMatch(JSON.stringify(read), /synthetic-request-only-key|Scoped widget body/);
   assert.notEqual(read.chat.version, chat.version);
   assert.deepEqual(read.chat.messages.at(-1).widgets, [
@@ -1027,6 +1065,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const { type, runId } = JSON.parse(new TextDecoder().decode(start.value));
   assert.equal(type, "start");
   await activeProvider.promise;
+  const activeChats = await (await call("/chats")).json();
+  assert.deepEqual(
+    activeChats.chats.find((item: { id: string }) => item.id === interrupted.id)?.activeRun,
+    { id: runId },
+  );
   assert.ok(readActiveOpenClawAgentDatabaseLeasesReadOnly().length > 0);
   const steering = await call(`${route}/runs/${runId}/steer`, {
     method: "POST",

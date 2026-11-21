@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   ProtectedChat,
   ProtectedChatSummary,
+  ProtectedActivity,
   ProtectedMessage,
   ProtectedModel,
 } from "@openclaw/gateway-protocol/protected";
@@ -20,7 +21,7 @@ import { readTranscriptStatsAsync } from "../../src/config/sessions/session-tran
 import type { SessionEntry } from "../../src/config/sessions/types.js";
 import { aggregateSessionTranscriptUsage } from "../../src/gateway/session-transcript-derived-readers.js";
 import { ProtectedError } from "./errors.js";
-import { projectToolResult } from "./tool-events.js";
+import { projectActivity, projectToolResult } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
 type ProtectedMessageProvider = ProtectedModel["provider"];
@@ -140,6 +141,9 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
     const messages: ProtectedMessage[] = [];
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
+    let reasoning: string[] = [];
+    let activity = new Map<string, ProtectedActivity>();
+    let turnStartedAt: number | undefined;
     let usage:
       | { contextTokens: number; provider: ProtectedMessageProvider; model: string }
       | undefined;
@@ -148,13 +152,19 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
         continue;
       }
       const message = event.message;
-      if (message.role === "toolResult" && !message.isError) {
-        const projected = projectToolResult(message.toolName, message.details);
-        projections.sources = [...projections.sources, ...projected.sources].slice(0, 20);
-        projections.widgets = [...projections.widgets, ...projected.widgets].slice(0, 20);
-        if (reply) {
-          reply.sources = projections.sources;
-          reply.widgets = projections.widgets;
+      if (message.role === "toolResult") {
+        const prior = typeof message.toolCallId === "string" && activity.get(message.toolCallId);
+        if (prior) {
+          activity.set(prior.id, { ...prior, status: message.isError ? "failed" : "done" });
+        }
+        if (!message.isError) {
+          const projected = projectToolResult(message.toolName, message.details);
+          projections.sources = [...projections.sources, ...projected.sources].slice(0, 20);
+          projections.widgets = [...projections.widgets, ...projected.widgets].slice(0, 20);
+          if (reply) {
+            reply.sources = projections.sources;
+            reply.widgets = projections.widgets;
+          }
         }
         continue;
       }
@@ -194,13 +204,48 @@ export function createProtectedChats(options: { stateDir: string; maxChatsPerUse
       if (message.role === "user") {
         projections = projectToolResult(undefined, undefined);
         reply = undefined;
+        reasoning = [];
+        activity = new Map();
+        const timestamp =
+          typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
+        turnStartedAt = Number.isFinite(timestamp) ? timestamp : undefined;
+      } else if (Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (!isRecord(block)) {
+            continue;
+          }
+          if (block.type === "thinking" && typeof block.thinking === "string") {
+            reasoning.push(block.thinking.trim());
+          }
+          if (block.type === "toolCall") {
+            const item = projectActivity(block.name, block.id, "running");
+            if (item) {
+              activity.set(item.id, item);
+            }
+          }
+        }
       }
+      const completedAt =
+        typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
       const projected: ProtectedMessage = {
         id: typeof event.id === "string" ? event.id : `${id}:${messages.length}`,
         role: message.role,
         text,
         ...(status ? { status } : {}),
         ...(message.role === "assistant" ? projections : {}),
+        ...(message.role === "assistant" && status !== "failed" && reasoning.length
+          ? { reasoning: reasoning.join("\n") }
+          : {}),
+        ...(message.role === "assistant" && status !== "failed" && activity.size
+          ? { activity: [...activity.values()] }
+          : {}),
+        ...(message.role === "assistant" &&
+        status === "complete" &&
+        turnStartedAt !== undefined &&
+        Number.isFinite(completedAt) &&
+        completedAt >= turnStartedAt
+          ? { durationMs: completedAt - turnStartedAt }
+          : {}),
       };
       messages.push(projected);
       if (message.role === "assistant") {

@@ -838,6 +838,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   );
   assert.equal(groguV1.examplePrompts.length, 4);
   assert.ok(groguV1.tools.includes("web_search"));
+  assert.ok(!groguV1.tools.includes("sessions_search"));
   for (const agent of catalogV1.agents) {
     assert.deepEqual(agent.tools, groguV1.tools, "every agent shares one tool surface");
   }
@@ -1933,15 +1934,6 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                             }),
                           },
                         },
-                        {
-                          index: 3,
-                          id: "call_sessions_search",
-                          type: "function",
-                          function: {
-                            name: "sessions_search",
-                            arguments: JSON.stringify({ query: "transcript marker" }),
-                          },
-                        },
                       ],
                     },
                     null,
@@ -2234,7 +2226,6 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const sharedTools = [
     "sessions_history",
     "sessions_list",
-    "sessions_search",
     "sessions_send",
     "show_widget",
     "web_fetch",
@@ -2665,18 +2656,6 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "session list includes the permitted chat",
   );
   assert.ok(!sessionHistoryOutput.includes(foreignChat.id), "session list omits the foreign chat");
-  // Strict tool-call IDs drop underscores before results return to the model.
-  const searchOutput = JSON.stringify(
-    sessionToolMessages?.find(
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        "tool_call_id" in message &&
-        message.tool_call_id === "callsessionssearch",
-    ) ?? null,
-  );
-  assert.match(searchOutput, /Transcript search is unavailable for encrypted storage/);
-  assert.ok(!searchOutput.includes(foreignChat.id), "sessions_search omits the foreign chat");
   for (const id of [permitted.id, coordinator.id]) {
     const current = await (await reopened(`/chats/${id}`)).json();
     const removed = await reopened(`/chats/${id}`, {

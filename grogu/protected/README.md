@@ -418,7 +418,7 @@ presentation hints for the client.
   working. Chats saved before agent selection was recorded still use Travel.
 
 Shared tools are `web_search`, `web_fetch`, `show_widget`, `sessions_list`,
-`sessions_history`, `sessions_search`, and `sessions_send`. They reach only the
+`sessions_history`, and `sessions_send`. They reach only the
 signed-in member's own chats, the public web, and widgets in the current chat.
 Session tools recheck the profile and exact chat incarnation, so another
 member's chats are unavailable. `sessions_send` can steer only an active

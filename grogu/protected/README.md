@@ -434,21 +434,21 @@ survives the restart. `GET /healthz` reports listener readiness without user dat
 `GET /api/protected/v1/account` returns the signed-in person's profile and
 directory settings. `PUT /api/protected/v1/account/name` saves a `displayName`
 of 1 to 40 characters. `PUT /api/protected/v1/account/directory-settings`
-saves a `description` of up to 140 characters and a Boolean `hidden` value.
+saves a `description` of up to 140 characters. The request keeps the `hidden`
+field for installed clients. Human members must send `false`. Sending `true`
+returns `400 directory_visibility_required` without changing the description.
 These are separate saves. Neither endpoint accepts another person's ID.
 
 `GET /api/protected/v1/people` returns eligible people with their ID, display
 name, and description. It returns up to 100 people and a `nextCursor`. If the
 cursor is not null, pass it as the `cursor` query parameter for the next page.
-The directory does not include email addresses or identity claims. People are
-listed by default. Hide me removes a person from the directory. It does not
-revoke a share. The development identity is always hidden and receives an
+The directory does not include email addresses or identity claims. All eligible
+members appear by name. A description saved under the former Hide me setting
+stays unpublished until the member saves a public description. The development identity is always hidden and receives an
 empty directory, even if its stored settings say otherwise.
 
 Directory membership follows current canonical admissions, not later edits to
 the legacy `allowedSubjects` configuration. Names use the canonical profile store. Directory settings use the existing
 profile preferences store. They remain after logout or access revocation and
 follow the existing profile merge and deletion rules. A revoked or no longer
-allowed identity is not listed. Older versions ignore the directory settings
-and do not provide this API. They cannot enforce Hide me for a separate
-directory implementation.
+allowed identity is not listed.

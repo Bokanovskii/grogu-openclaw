@@ -486,6 +486,18 @@ The command removes the file only if it is the generated default. It keeps an
 edited or linked file and refuses without printing its content. If the file is
 missing, the command does nothing. It refuses while the listener is running.
 
+To print a bounded metadata-only report of possible archive staging files, run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run archive-residue
+```
+
+The command derives the configured archive and cold roots. It refuses while the
+listener or another maintenance operation owns protected state. Every candidate
+is reported as `unknown`; writer quiescence is not established, and the command
+does not read transcript contents or delete files. This report does not authorize
+cleanup.
+
 Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
 `name` and `description`. A `{{template}}` marker is replaced with that
 directory's `template.html`. The runtime archive must include

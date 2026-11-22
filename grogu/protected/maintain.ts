@@ -294,9 +294,32 @@ async function main() {
     );
     return;
   }
+  if (action === "archive-residue" && arg === undefined && rest.length === 0) {
+    const { acquireProtectedStateOwner } = await import("./state-owner.js");
+    const owner = await acquireProtectedStateOwner(stateDir);
+    if (!owner) {
+      throw new MaintenanceRefused(
+        "Protected state is busy; stop the listener or wait for maintenance to finish.",
+      );
+    }
+    try {
+      const { inspectConfiguredSqliteTranscriptArchiveResidue } =
+        await import("../../src/config/sessions/session-accessor.js");
+      const report = await inspectConfiguredSqliteTranscriptArchiveResidue({
+        config: protectedOpenClawConfig(stateDir, fileURLToPath(new URL("../..", import.meta.url))),
+        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+        assertCurrent: () => owner.assertCurrent(),
+      });
+      owner.assertCurrent();
+      process.stdout.write(`${JSON.stringify(report)}\n`);
+    } finally {
+      owner.release();
+    }
+    return;
+  }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, turn-timings.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

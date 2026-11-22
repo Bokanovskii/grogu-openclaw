@@ -23,6 +23,7 @@ import {
 } from "@openclaw/gateway-protocol/protected";
 import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { ALCOVE_CONTENT_STYLES } from "../../packages/widget-host/src/styles.js";
 import { buildSandboxHostDocument } from "../../src/agents/sandbox-host.js";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
@@ -339,7 +340,9 @@ export function createProtectedHttp(options: {
       const pathname = path.startsWith(`${base}/`) ? path.slice(base.length) : "";
       const method = request.method;
       if (pathname === "/widget-sandbox" && method === "GET") {
-        const doc = buildSandboxHostDocument({ profile: "protected" }, true);
+        const doc = buildSandboxHostDocument({ profile: "protected" }, true, {
+          protectedWidgetStyles: ALCOVE_CONTENT_STYLES,
+        });
         return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
       }
       if (path === protectedAccessProofPath && options.answerAccessProof) {

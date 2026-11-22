@@ -252,8 +252,13 @@ export function buildSandboxHostPath(csp?: SandboxHostCsp, sameOriginSandbox = f
 }
 
 /** Version the public shell and its security headers together, never widget content. */
-export function buildSandboxHostDocument(csp?: SandboxHostCsp, sameOriginSandbox = false) {
-  const html = buildSandboxHostProxyHtml(csp, sameOriginSandbox);
+export function buildSandboxHostDocument(
+  csp?: SandboxHostCsp,
+  sameOriginSandbox = false,
+  // This is host-owned CSS, never content supplied by a widget.
+  options?: { protectedWidgetStyles?: string },
+) {
+  const html = buildSandboxHostProxyHtml(csp, sameOriginSandbox, options);
   const headers = {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Security-Policy": [
@@ -316,14 +321,21 @@ export function decodeSandboxHostCsp(value: string | null): SandboxHostCsp | und
 }
 
 /** Trusted outer document. Untrusted content is written only into its inner iframe. */
-function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = false): string {
+function buildSandboxHostProxyHtml(
+  csp?: SandboxHostCsp,
+  sameOriginSandbox = false,
+  options?: { protectedWidgetStyles?: string },
+): string {
   const protectedProfile = csp?.profile === "protected";
   const blockDescendantFrames = csp?.blockDescendantFrames === true;
   // Runtime insertion reaches existing saved widgets without changing their
   // approved bytes. Capture listeners consume private host state before stored
   // scripts, including older wrappers whose scroll bridge must stay nonce-less.
   const serializedDocumentGuard = JSON.stringify(
-    (protectedProfile ? buildProtectedWidgetBridgeHtml() : "") +
+    (protectedProfile && options?.protectedWidgetStyles
+      ? `<style>${options.protectedWidgetStyles}</style>`
+      : "") +
+      (protectedProfile ? buildProtectedWidgetBridgeHtml() : "") +
       buildSandboxDocumentGuardHtml(blockDescendantFrames) +
       (protectedProfile
         ? ""
@@ -347,12 +359,15 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
   try { void window.top.document; throw new Error("MCP App sandbox isolation failed"); } catch (error) {
     if (error instanceof Error && error.message === "MCP App sandbox isolation failed") throw error;
   }
+  let hostTheme;
   const createInner = (allowScripts = true) => {
     const frame = document.createElement("iframe");
     // Block native popups here without reserving widget globals such as open.
     frame.setAttribute("sandbox", allowScripts ? ${JSON.stringify(protectedProfile ? "allow-scripts" : "allow-scripts allow-forms")} : "");
+    if (hostTheme) frame.style.colorScheme = hostTheme;
     return frame;
   };
+  let widgetTheme;
   let inner = createInner();
   document.body.appendChild(inner);
   let hostPort;
@@ -378,23 +393,29 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
   };
   const documentGuard = ${serializedDocumentGuard};
   const resolveLeadingDoctypeEnd = ${RESOLVE_LEADING_DOCTYPE_END_SOURCE};
+  let draftResource;
   const guardDocument = html => {
     if (blockDescendantFrames && hasBlockedDescendant(new DOMParser().parseFromString(html, "text/html"))) {
       throw new Error("sandbox descendant browsing contexts are disabled");
     }
     const doctypeEnd = resolveLeadingDoctypeEnd(html);
-    return html.slice(0, doctypeEnd) + documentGuard + html.slice(doctypeEnd);
+    const themeStyle = ${protectedProfile} && hostTheme
+      ? "<style>:root:has(.alcove){color-scheme:" + hostTheme + "}</style>"
+      : "";
+    return html.slice(0, doctypeEnd) + documentGuard + themeStyle + html.slice(doctypeEnd);
   };
   const receiveHost = (data) => {
       if (data?.method === "ui/notifications/sandbox-resource-ready") {
         const params = data.params ?? {};
         if (typeof params.html === "string") {
+          draftResource = ${protectedProfile} && params.allowScripts === false ? data : undefined;
           const guardedHtml = guardDocument(params.html);
           // Replace the browsing context so a superseded document cannot race
           // the new wrapper's first private bridge-port offer.
           const nextInner = createInner(params.allowScripts !== false);
           nextInner.addEventListener("load", () => {
             if (inner !== nextInner || typeof params.renderId !== "string") return;
+            if (widgetTheme) nextInner.contentWindow?.postMessage(widgetTheme, "*");
             postHost({
               jsonrpc: "2.0",
               method: "ui/notifications/sandbox-resource-loaded",
@@ -416,7 +437,14 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
       const theme = data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)} ? data.mode
         : data?.method === "ui/notifications/host-context-changed" ? data.params?.theme
         : data?.result?.hostContext?.theme;
-      if (theme === "light" || theme === "dark") document.documentElement.style.colorScheme = theme;
+      if (theme === "light" || theme === "dark") {
+        const themeChanged = hostTheme !== theme;
+        hostTheme = theme;
+        document.documentElement.style.colorScheme = theme;
+        inner.style.colorScheme = theme;
+        if (data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)}) widgetTheme = data;
+        if (themeChanged && draftResource) receiveHost(draftResource);
+      }
       inner.contentWindow?.postMessage(data, "*");
   };
   window.addEventListener("message", (event) => {

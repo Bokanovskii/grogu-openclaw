@@ -119,6 +119,28 @@ route. Read storage again after deletion to show the new total.
 
 ## Automation discovery and draft validation
 
+### Owner connector storage
+
+Alcove connector bindings and credentials share one private aggregate per
+profile in the existing `secret_store_entries` table. Their names are
+`alcove-connector-gmail` and `alcove-connector-icloud-calendar`, with
+`scope_kind = identity`. They do not enter model accounts, agent auth stores,
+generic secret readers, or personal Grogu state. The caller supplies the
+configured owner's live authority and exact profile. The worker also refuses
+missing, merged, or revoked profiles.
+
+SQLite workers own reads and writes. Conditional replacement compares the
+current generation inside the transaction. Write admission checks the owner's
+authority again before commit. The binding and credential commit together.
+Credential values register for log redaction in both processes.
+
+`revoke-profile` hard-deletes both aggregates in its existing denial transaction.
+There is no credential copy, backup, schema-version change, or migration.
+These records extend the existing purpose-specific identity-secret pattern,
+rather than widening the model-account store or adding a generic identity-secret
+reader. Older runtimes cannot use these records or enforce their deletion.
+Disconnect the connectors before downgrading to a runtime without this owner.
+
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.
 It returns the public protected-agent catalog, the configured Sparky model and
 its supported reasoning levels/default, and capabilities. `/me` remains

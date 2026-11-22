@@ -1,6 +1,7 @@
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { requestSqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
+import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 import { runOpenClawStateWriteTransaction } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
@@ -72,6 +73,19 @@ export function updateUserProfileAccess(
               .values({ profile_id: input.profileId })
               .onConflict((conflict) => conflict.doNothing()),
           );
+          if (tableExists(db, "secret_store_entries")) {
+            executeSqliteQuerySync(
+              db,
+              queries
+                .deleteFrom("secret_store_entries")
+                .where("scope_kind", "=", "identity")
+                .where("scope_id", "=", input.profileId)
+                .where("name", "in", [
+                  "alcove-connector-gmail",
+                  "alcove-connector-icloud-calendar",
+                ]),
+            );
+          }
           accepted = true;
         } else if (input.action === "logout") {
           executeSqliteQuerySync(

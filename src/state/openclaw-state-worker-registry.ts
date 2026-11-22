@@ -50,6 +50,7 @@ import type { agentDeletionOperations } from "./agent-deletion.worker.js";
 import type { OnboardingRecommendationWriteOperations } from "./onboarding-recommendations.kernel.js";
 import type { AgentDatabaseRegistryWorkerOperations } from "./openclaw-agent-db-contract.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
+import type { UserConnectorWorkerOperations } from "./user-connectors.worker.js";
 import type { UserProfileWorkerOperations } from "./user-profiles.worker.js";
 import type { WorkerOperations, WorkerWriteOperationContext } from "./worker-operation-registry.js";
 import { createWorkerOperationRegistry } from "./worker-operation-registry.js";
@@ -106,12 +107,15 @@ export type RegisteredStateWorkerOperations = WorkerOperations<typeof gatewayBoo
   WorkerEnvironmentWorkerOperations &
   WorkerTranscriptCommitOperations &
   RepositoryWorkspaceWorkerOperations &
-  UserProfileWorkerOperations;
+  UserProfileWorkerOperations &
+  UserConnectorWorkerOperations;
 
 export const stateWorkerRegistry = createWorkerOperationRegistry<
   RegisteredStateWorkerOperations,
   WorkerWriteOperationContext
 >({
+  userConnectors: () =>
+    import("./user-connectors.worker.js").then((m) => m.userConnectorOperations),
   agentDeletion: () => import("./agent-deletion.worker.js").then((m) => m.agentDeletionOperations),
   agentRecovery: () =>
     import("./agent-deletion-recovery.worker.js").then((m) => m.agentRecoveryOperations),

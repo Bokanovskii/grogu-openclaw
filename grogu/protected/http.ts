@@ -75,6 +75,7 @@ const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "
 const maxBodyBytes = 48_000;
 const directoryPreference = "grogu.protected.directory";
 const loadProtectedPush = createLazyRuntimeModule(() => import("./push.js"));
+const loadProtectedConnectors = createLazyRuntimeModule(() => import("./connectors.js"));
 type Run = {
   id: string;
   profileId: string;
@@ -469,6 +470,70 @@ export function createProtectedHttp(options: {
         await checkGrant();
         assertCurrent();
       };
+      if (pathname === "/connectors" || pathname.startsWith("/connectors/")) {
+        if (!isOwner || identity.kind !== "human") {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        await revalidate();
+        const { createProtectedConnectors } = await loadProtectedConnectors();
+        const connectorOwner = () => {
+          assertCurrent();
+          if (
+            identity.issuer !== options.accessIssuer ||
+            identity.subject !== options.ownerSubject ||
+            identity.kind !== "human"
+          ) {
+            throw new ProtectedError(403, "owner_required", "Owner access is required.");
+          }
+        };
+        const connectors = createProtectedConnectors({
+          stateDir: options.stateDir,
+          authority: { profileId: profile.id, assertCurrent: connectorOwner, revalidate },
+        });
+        if (pathname === "/connectors" && method === "GET") {
+          return json(await connectors.status());
+        }
+        if (pathname === "/connectors/gmail/start" && method === "POST") {
+          const value = await body(request);
+          return json(
+            await connectors.startGmail({
+              clientId: text(value.clientId, 512),
+              ...(value.clientSecret !== undefined
+                ? { clientSecret: text(value.clientSecret, 8192) }
+                : {}),
+              redirectUri: `${options.origin}${base}/connectors/gmail/callback`,
+            }),
+          );
+        }
+        if (pathname === "/connectors/gmail/callback" && method === "GET") {
+          const query = new URL(request.url).searchParams;
+          await connectors.completeGmail(
+            text(query.get("code"), 8192),
+            text(query.get("state"), 43),
+          );
+          return new Response(null, {
+            status: 303,
+            headers: { ...commonHeaders, location: options.origin },
+          });
+        }
+        if (pathname === "/connectors/icloud-calendar" && method === "POST") {
+          const value = await body(request);
+          return json(
+            await connectors.connectCalendar(text(value.account, 254), text(value.password, 64)),
+          );
+        }
+        if (
+          (pathname === "/connectors/gmail" || pathname === "/connectors/icloud-calendar") &&
+          method === "DELETE"
+        ) {
+          return json(
+            await connectors.disconnect(
+              pathname === "/connectors/gmail" ? "gmail" : "icloud-calendar",
+            ),
+          );
+        }
+        return notFound();
+      }
       if (pathname === "/admin/push/key" && method === "GET") {
         if (!isOwner) {
           throw new ProtectedError(403, "owner_required", "Owner access is required.");

@@ -98,6 +98,8 @@ void test("removal immediately denies the person and interrupts their active tur
     );
   const activeSince = Date.now();
   const me = await (await call("/me", "GET", memberSubject)).json();
+  assert.equal((await call("/connectors", "GET", memberSubject)).status, 403);
+  assert.equal((await call("/connectors/gmail/start", "POST", memberSubject)).status, 403);
   const initialPeople = await (await call("/admin/people", "GET", ownerSubject)).json();
   const initialMember = initialPeople.people.find(
     (person: { subject?: string }) => person.subject === memberSubject,

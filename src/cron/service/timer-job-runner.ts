@@ -446,10 +446,13 @@ async function executeJobCoreWithTimeoutUnfinalized(
         settlement: runPromise,
       });
     }
+    const stateIdentityKey =
+      receiptSource?.context.admission.identity.key ?? opts?.activeJobMarker?.stateIdentityKey;
     trackActiveCronTaskRunSettlement(
       runPromise,
       runAbortController.signal,
       opts?.runReceipt?.agentId ?? opts?.activeJobMarker?.agentId,
+      stateIdentityKey ? { jobId: job.id, stateIdentityKey } : undefined,
     );
     void runPromise.catch((err: unknown) => {
       if (runAbortController.signal.aborted) {

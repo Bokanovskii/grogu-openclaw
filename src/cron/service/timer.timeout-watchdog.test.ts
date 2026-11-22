@@ -16,7 +16,10 @@ import { readCronRunRecordsForTests } from "../run-history.test-support.js";
 import { saveCronStore } from "../store.js";
 import { inspectActiveCronRunReceipt } from "../store/run-receipt-store.test-support.js";
 import type { CronJob } from "../types.js";
-import { getSuspensionVisibleCronTaskRunCount } from "./active-run-cancellation.js";
+import {
+  getSuspensionVisibleCronTaskRunCount,
+  retireActiveCronTaskRunTracking,
+} from "./active-run-cancellation.js";
 import { resetActiveCronTaskRunsForTests } from "./active-run-cancellation.test-support.js";
 import { stop } from "./ops-lifecycle.js";
 import type { CronServiceDeps, CronServiceState } from "./state.js";
@@ -226,7 +229,10 @@ describe("cron execution watchdogs", () => {
       payload: { kind: "agentTurn", message: "work", timeoutSeconds: 0 },
     });
     const { storePath } = fixtures.makeStorePath();
-    const activeJobMarker = markCronJobActive(job.id);
+    const activeJobMarker = markCronJobActive(job.id, {
+      agentId: "protected",
+      stateIdentityKey: "cancel-attribution-state",
+    });
     const entered = createDeferred();
     const release = createDeferred<{ status: "ok"; summary: string }>();
     const state = createCronRegressionState({
@@ -259,6 +265,25 @@ describe("cron execution watchdogs", () => {
       expect(result.model).toBe("deepseek-v4-pro");
       expect(result.sessionId).toBe("sess-attrib");
       expect(result.sessionKey).toBe("key-attrib");
+      retireActiveCronTaskRunTracking();
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "cancel-attribution-state",
+          jobIds: [job.id],
+        }),
+      ).toBe(1);
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "cancel-attribution-state",
+          jobIds: ["another-member-job"],
+        }),
+      ).toBe(0);
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "another-state",
+          jobIds: [job.id],
+        }),
+      ).toBe(0);
     } finally {
       stop(state);
       release.resolve({ status: "ok", summary: "done" });

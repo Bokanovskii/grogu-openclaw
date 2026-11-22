@@ -3,6 +3,11 @@
 import { createAgentRunRestartAbortError } from "../../agents/run-termination.js";
 import type { CronActiveJobMarker } from "../active-jobs.js";
 
+type CronTaskRunJobScope = Readonly<{ jobId: string; stateIdentityKey: string }>;
+type CronTaskRunScope =
+  | { agentId: string }
+  | { jobIds: readonly string[]; stateIdentityKey: string };
+
 const activeCronTaskRunsByRunId = new Map<
   string,
   { controller: AbortController; onCancel?: (reason: string) => void }
@@ -11,7 +16,10 @@ const settlingCronTaskRuns = new Map<Promise<unknown>, { retirementTimer?: NodeJ
 const activeCronTaskRunDrainWaiters = new Set<() => void>();
 // Restart drain may retire an abort-ignoring core after a bounded grace, but a
 // host snapshot must keep refusing readiness until that core actually settles.
-const suspensionVisibleCronTaskRuns = new Map<Promise<unknown>, string | undefined>();
+const suspensionVisibleCronTaskRuns = new Map<
+  Promise<unknown>,
+  { agentId?: string; job?: CronTaskRunJobScope }
+>();
 const CRON_TASK_RUN_SETTLEMENT_TRACKING_MAX_MS = 60_000;
 
 function notifyActiveCronTaskRunDrainWaitersIfEmpty(): void {
@@ -98,9 +106,10 @@ export function trackActiveCronTaskRunSettlement(
   promise: Promise<unknown>,
   abortSignal?: AbortSignal,
   agentId?: string,
+  job?: CronTaskRunJobScope,
 ): void {
   settlingCronTaskRuns.set(promise, {});
-  suspensionVisibleCronTaskRuns.set(promise, agentId);
+  suspensionVisibleCronTaskRuns.set(promise, { agentId, job: job && { ...job } });
   // Cancellation belongs to this core only; sibling jobs must remain drain-visible.
   const startSettlementGrace = () => startActiveCronTaskRunSettlementGrace(promise);
   abortSignal?.addEventListener("abort", startSettlementGrace, { once: true });
@@ -122,14 +131,20 @@ export function trackActiveCronTaskRunSettlement(
 }
 
 /** Cron cores that can still mutate state even after timeout/cancel returned. */
-export function getSuspensionVisibleCronTaskRunCount(scope?: { agentId: string }): number {
+export function getSuspensionVisibleCronTaskRunCount(scope?: CronTaskRunScope): number {
   if (!scope) {
     return suspensionVisibleCronTaskRuns.size;
   }
   let count = 0;
-  for (const agentId of suspensionVisibleCronTaskRuns.values()) {
-    // An unclassified core cannot establish that an agent's filesystem is safe.
-    if (!agentId || agentId === scope.agentId) {
+  for (const run of suspensionVisibleCronTaskRuns.values()) {
+    // Missing ownership facts cannot establish that the selected state is safe.
+    if (
+      "agentId" in scope
+        ? !run.agentId || run.agentId === scope.agentId
+        : !run.job ||
+          (run.job.stateIdentityKey === scope.stateIdentityKey &&
+            scope.jobIds.includes(run.job.jobId))
+    ) {
       count += 1;
     }
   }

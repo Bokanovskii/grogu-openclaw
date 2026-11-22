@@ -1,14 +1,23 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  migrateAuthorizedUserFiles,
+  verifyAuthorizedUserFiles,
+} from "../../src/infra/authorized-user-files.js";
 import { protectedResearchAgent } from "./agents.js";
 import { configureProtectedRuntimeWorkers, ProtectedWorkerBuildError } from "./runtime-workers.js";
 import {
   parseRuntimeSettings,
+  protectedMaxFileBytes,
   protectedOpenClawConfig,
   readSettingsJson,
   sparky,
 } from "./settings.js";
+import {
+  requireProtectedStorageEncryption,
+  resolveProtectedStorageKeyFile,
+} from "./storage-key.js";
 import type { ProtectedModel } from "./turns.js";
 
 const anthropic: ProtectedModel = {
@@ -49,6 +58,7 @@ async function main() {
       "The runtime archive is missing extensions/duckduckgo, which web search needs. Repackage it.",
     );
   }
+  resolveProtectedStorageKeyFile();
   await configureProtectedRuntimeWorkers(serviceRoot);
   const { acquireProtectedStateOwner } = await import("./state-owner.js");
   const stateOwner = await acquireProtectedStateOwner(stateDir);
@@ -67,21 +77,30 @@ async function main() {
   const stateRoot = await root(stateDir);
   await stateRoot.mkdir("users", { private: true });
   await stateRoot.mkdir("workspace", { private: true });
-  const { createSqliteStorageValueEncryptionFromEnvironment } =
-    await import("../../src/storage/sqlite-encryption.js");
-  const storageEncryption = createSqliteStorageValueEncryptionFromEnvironment();
-  if (!storageEncryption) {
-    throw new Error(
-      "Protected storage encryption requires OPENCLAW_PROTECTED_STORAGE_KEY_FILE; provision the private key before starting the service.",
-    );
-  }
-  storageEncryption.dispose();
-  const { runOpenClawAgentWriteTransaction } = await import("../../src/state/openclaw-agent-db.js");
-  runOpenClawAgentWriteTransaction(() => undefined, {
-    agentId: "protected",
-    env: process.env,
-  });
   const usersRoot = await root(path.join(stateRoot.rootReal, "users"));
+  const storageEncryption = requireProtectedStorageEncryption();
+  try {
+    await verifyAuthorizedUserFiles({
+      usersRoot,
+      assertCurrent: () => stateOwner.assertCurrent(),
+      maxBytes: protectedMaxFileBytes,
+      encryption: storageEncryption,
+    });
+    const { runOpenClawAgentWriteTransaction } =
+      await import("../../src/state/openclaw-agent-db.js");
+    runOpenClawAgentWriteTransaction(() => undefined, {
+      agentId: "protected",
+      env: process.env,
+    });
+    await migrateAuthorizedUserFiles({
+      usersRoot,
+      assertCurrent: () => stateOwner.assertCurrent(),
+      maxBytes: protectedMaxFileBytes,
+      encryption: storageEncryption,
+    });
+  } finally {
+    storageEncryption.dispose();
+  }
   const workspaceDir = path.join(stateRoot.rootReal, "workspace");
   const agentDir = path.join(stateRoot.rootReal, "agents", "protected", "agent");
   const config = protectedOpenClawConfig(stateRoot.rootReal, serviceRoot);
@@ -170,7 +189,7 @@ async function main() {
       },
     },
     maxChatsPerUser: 100,
-    maxFileBytes: 2 * 1024 * 1024,
+    maxFileBytes: protectedMaxFileBytes,
     storageLimits: settings.storageLimits,
     agentExtensions: [protectedResearchAgent],
     verifyIdentity,

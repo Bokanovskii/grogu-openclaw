@@ -10,6 +10,10 @@ const VALUE_KEY_BYTES = 32;
 const VALUE_HEADER_BYTES = VALUE_MAGIC.length + VALUE_NONCE_BYTES * 2 + VALUE_KEY_BYTES + TAG_BYTES;
 const VALUE_OVERHEAD_BYTES = VALUE_HEADER_BYTES + TAG_BYTES;
 
+export function isStorageValueEncrypted(value: Buffer): boolean {
+  return value.subarray(0, VALUE_MAGIC.length).equals(VALUE_MAGIC);
+}
+
 export type StorageValueEncryption = {
   encrypt(value: Buffer, context: string): Buffer;
   decrypt(value: Buffer, context: string): Buffer;

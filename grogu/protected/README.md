@@ -362,18 +362,42 @@ its index would create a readable copy. Session reference lookup and deletion
 safety continue to use the non-content projection. User-requested exports may
 be readable to the user who requested them.
 
-The forward migration verifies encrypted read-back before removing plaintext
-archive files. It checkpoints and vacuums SQLite after conversion, but this
-cannot promise forensic erasure from filesystem snapshots, storage-device
-remapping, or copies outside the managed state. Grogu keeps no backups.
-Interrupted migration can be retried; missing or wrong keys and unsupported
-schema versions fail closed rather than reopening the store as plaintext.
+The forward migration verifies encrypted read-back before replacing plaintext
+user files. It keeps only a transient encrypted staging copy, atomically
+replaces the plaintext file after verification, and removes the staging
+directory before startup completes. It checkpoints and vacuums SQLite after
+conversion, but this cannot promise forensic erasure from filesystem snapshots,
+storage-device remapping, or copies outside the managed state. Grogu keeps no
+backups. Interrupted migration can be retried; missing or wrong keys and
+unsupported schema versions fail closed rather than reopening the store as
+plaintext.
 Protected encrypted agent databases use schema version 26 so older builds
 refuse them. Ordinary personal Grogu databases keep the upstream schema and
 version. When merging this fork with upstream, resolve the shared numeric
 sequence first: select an unused protected version above the updated upstream
 agent schema and update the protected-version contract, migration checks, and
 tests together; never reuse an upstream number.
+
+### Upgrade an existing installation
+
+Stop the protected listener before running maintenance. The installed
+service-owned helper can provision the key and migrate an existing plaintext
+agent database and per-user files without replacing the root launcher:
+
+```sh
+sudo -n -u groguProtected \
+  /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run provision-storage-key
+```
+
+The command derives the key path from the validated service home when an older
+launcher does not export `OPENCLAW_PROTECTED_STORAGE_KEY_FILE`. It preserves an
+existing key, verifies encrypted files before changing the database, and
+migrates through the agent database and user-file owners. If the key is missing
+but encrypted database or user-file data exists, the command refuses to create
+a replacement; restore the original key instead. An interrupted plaintext
+migration can be retried with the same key. Startup repeats the idempotent file
+migration before opening the listener. Start the listener again only after
+maintenance succeeds.
 
 ## Protected chat agents
 

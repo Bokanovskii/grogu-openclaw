@@ -34,7 +34,7 @@ WRITABLE_FIELDS = frozenset(
     )
 )
 READ_ONLY_FIELDS = frozenset(
-    ("id", "account_id", "created_at", "updated_at", "app_count", "reusable")
+    ("id", "uid", "account_id", "created_at", "updated_at", "app_count", "reusable")
 )
 
 
@@ -80,7 +80,7 @@ def target_path(config):
     return "/client/v4/accounts/{}/access/apps/{}/policies/{}".format(account, app, policy)
 
 
-def policy_snapshot(response, config):
+def policy_snapshot(response, config, require_app_count=False):
     if not isinstance(response, dict) or response.get("success") is not True:
         raise PolicyError()
     policy = response.get("result")
@@ -90,7 +90,16 @@ def policy_snapshot(response, config):
         policy.get("id") != config["policyId"]
         or policy.get("name") != config["policyName"]
         or policy.get("decision") != "allow"
-        or ("reusable" in policy and policy["reusable"] is not False)
+        or ("reusable" in policy and type(policy["reusable"]) is not bool)
+        or (require_app_count and (
+            type(policy.get("app_count")) is not int or policy["app_count"] != 1
+        ))
+        or (policy.get("reusable") is True and "app_count" in policy and (
+            type(policy["app_count"]) is not int or policy["app_count"] != 1
+        ))
+        or ("uid" in policy and (
+            not isinstance(policy["uid"], str) or not IDENTIFIER.fullmatch(policy["uid"])
+        ))
         or set(policy) - WRITABLE_FIELDS - READ_ONLY_FIELDS
     ):
         raise PolicyError()
@@ -110,7 +119,22 @@ def policy_snapshot(response, config):
     if config["ownerEmail"] not in current:
         raise PolicyError()
     payload = {key: value for key, value in policy.items() if key in WRITABLE_FIELDS}
-    return payload, sorted(set(current))
+    reusable = policy.get("reusable") is True
+    if reusable:
+        payload.pop("precedence", None)
+    return payload, sorted(set(current)), reusable
+
+
+def read_policy(send, path, account_path, token, config):
+    payload, emails, reusable = policy_snapshot(send("GET", path, token), config)
+    if reusable:
+        account_payload, account_emails, account_reusable = policy_snapshot(
+            send("GET", account_path, token), config, require_app_count=True
+        )
+        if not account_reusable or account_payload != payload or account_emails != emails:
+            raise PolicyError()
+        return account_payload, account_emails, reusable
+    return payload, emails, reusable
 
 
 def send_cloudflare(method, path, token, payload=None):
@@ -138,6 +162,10 @@ def synchronize(config, value, send):
         raise PolicyError()
     revision, additions, removals = validate_request(value, owner_email)
     path = target_path(config)
+    account_path = "/client/v4/accounts/{}/access/policies/{}".format(
+        urllib.parse.quote(config["accountId"], safe=""),
+        urllib.parse.quote(config["policyId"], safe=""),
+    )
     token = config.get("token")
     if (
         not isinstance(token, str)
@@ -148,23 +176,23 @@ def synchronize(config, value, send):
         or not config["policyName"]
     ):
         raise PolicyError()
-    payload, current = policy_snapshot(send("GET", path, token), config)
+    payload, current, reusable = read_policy(send, path, account_path, token, config)
     emails = sorted((set(current) | additions) - removals)
     payload["include"] = [{"email": {"email": email}} for email in emails]
     if current == emails:
         return {"revision": revision, "status": "synced"}
     try:
-        send("PUT", path, token, payload)
+        send("PUT", account_path if reusable else path, token, payload)
     except Exception:
         # A failed response can follow a committed remote write. Read before any retry.
         pass
     try:
-        _, observed = policy_snapshot(send("GET", path, token), config)
+        _, observed, observed_reusable = read_policy(send, path, account_path, token, config)
     except Exception:
         return {"revision": revision, "status": "unknown"}
     return {
         "revision": revision,
-        "status": "synced" if observed == emails else "unknown",
+        "status": "synced" if observed == emails and observed_reusable == reusable else "unknown",
     }
 
 

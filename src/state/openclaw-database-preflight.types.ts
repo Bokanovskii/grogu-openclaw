@@ -84,6 +84,8 @@ export type OpenClawDatabasePreflightOptions = {
   preserveSourceArtifacts?: boolean;
   /** Omit for current-runtime checks; updates pass their complete target pair. */
   supportedVersions?: OpenClawSchemaVersions;
+  /** Candidate-owned admission may verify this build's protected formats in addition. */
+  inspectCandidateProtectedFormats?: boolean;
   verifyCurrentSchemaShape?: boolean;
   requireStartupMigrationReadiness?: boolean;
   /** Consume this startup owner's unchanged compatibility headers once, never readiness proof. */

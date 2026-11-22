@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import * as runtimeGuard from "../../infra/runtime-guard.js";
 import {
@@ -16,9 +17,22 @@ import {
   type UpdateAdmissionVerdict,
 } from "../../infra/update-run-schema.js";
 import * as pluginMigrationResources from "../../plugins/doctor-migration-resources.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../../state/openclaw-agent-db-contract.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+} from "../../state/openclaw-agent-db-contract.js";
+import {
+  closeOpenClawAgentDatabasesForTest,
+  openOpenClawAgentDatabase,
+} from "../../state/openclaw-agent-db.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
+import { cleanupProtectedSharedStateAfterMigration } from "../../state/openclaw-state-protected-cleanup.js";
+import { migrateProtectedSharedStateInTransaction } from "../../state/openclaw-state-protected-migration.js";
 import { runCli } from "../run-main.js";
 import { registerUpdateCli } from "../update-cli.js";
 import * as schemaPreflight from "./schema-preflight.js";
@@ -145,6 +159,71 @@ afterEach(() => {
 });
 
 describe("candidate update admission", () => {
+  it("admits this candidate's protected stores without admitting an unmarked or newer agent", async () => {
+    fs.writeFileSync(path.join(home, "protected-key"), Buffer.alloc(32, 7), { mode: 0o600 });
+    vi.stubEnv("OPENCLAW_PROTECTED_STORAGE_KEY_FILE", path.join(home, "protected-key"));
+    const statePath = openOpenClawStateDatabase({ env: process.env }).path;
+    const agent = openOpenClawAgentDatabase({ agentId: "main", env: process.env });
+    const agentPath = agent.path;
+    expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+    closeOpenClawAgentDatabasesForTest();
+    closeOpenClawStateDatabaseForTest();
+
+    const assertAdmission = async (verdict: "admit" | "refuse") => {
+      stdout = "";
+      const before = snapshotFiles();
+      await updateAdmitCommand(contextPath);
+      const actual = readVerdict();
+      expect(actual.verdict).toBe(verdict);
+      expect(actual.reasons.map((reason) => reason.code)).toEqual(
+        verdict === "refuse" ? ["database-schema-preflight"] : [],
+      );
+      expect(process.exitCode).toBe(verdict === "admit" ? 0 : 3);
+      expect(snapshotFiles()).toEqual(before);
+    };
+
+    await assertAdmission("admit");
+    {
+      using shared = openNodeSqliteDatabase(statePath);
+      shared.exec("PRAGMA secure_delete = ON; BEGIN IMMEDIATE");
+      migrateProtectedSharedStateInTransaction(shared);
+      shared.exec("COMMIT");
+      cleanupProtectedSharedStateAfterMigration(shared, () => {});
+    }
+    await assertAdmission("admit");
+
+    const mutate = (pathname: string, sql: string) => {
+      using database = new DatabaseSync(pathname);
+      database.exec(sql);
+    };
+    mutate(statePath, "DROP INDEX idx_cron_jobs_store_order");
+    await assertAdmission("admit");
+    mutate(statePath, "UPDATE grogu_protected_shared_state SET cleanup_pending = 1");
+    await assertAdmission("refuse");
+    mutate(
+      statePath,
+      `UPDATE grogu_protected_shared_state SET cleanup_pending = 0; PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 2}`,
+    );
+    await assertAdmission("refuse");
+    mutate(statePath, `PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
+    mutate(statePath, "ALTER TABLE cron_jobs RENAME TO damaged_cron_jobs");
+    await assertAdmission("refuse");
+    mutate(statePath, "ALTER TABLE damaged_cron_jobs RENAME TO cron_jobs");
+    mutate(agentPath, "ALTER TABLE session_nodes RENAME TO damaged_session_nodes");
+    await assertAdmission("refuse");
+    mutate(agentPath, "ALTER TABLE damaged_session_nodes RENAME TO session_nodes");
+    mutate(agentPath, `PRAGMA user_version = ${PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION + 1}`);
+    await assertAdmission("refuse");
+
+    mutate(
+      agentPath,
+      `PRAGMA user_version = ${PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION}; UPDATE grogu_protected_storage SET key_check = 'protected-storage-key-v1' WHERE id = 1`,
+    );
+    await assertAdmission("refuse");
+    mutate(agentPath, "DROP TABLE grogu_protected_storage");
+    await assertAdmission("refuse");
+  });
+
   it.each(["retired call log", "Cannot inspect source: EACCES"])(
     "returns a published-driver refusal for plugin state failure: %s",
     async (message) => {

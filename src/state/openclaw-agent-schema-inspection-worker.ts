@@ -124,6 +124,7 @@ const inspectionResponse = z.discriminatedUnion("ok", [
     inspection: z
       .object({
         version: z.number().int().safe(),
+        candidateProtectedFormat: z.literal(true).optional(),
         integrityGateOutcome: z.enum(["cached", "healthy"]).optional(),
         preparationPending: z.literal(true).optional(),
         emptyStore: z.boolean().optional(),

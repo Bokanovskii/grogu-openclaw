@@ -268,6 +268,7 @@ export async function preflightOpenClawDatabaseSchemas(
       const input: StateSchemaInspectionInput = {
         pathname: statePath,
         supportedVersion: supportedVersions.state,
+        inspectCandidateProtectedFormats: options.inspectCandidateProtectedFormats,
         requireStartupMigrationReadiness: options.requireStartupMigrationReadiness,
         verifyCurrentSchemaShape: options.verifyCurrentSchemaShape,
         scope: options.scope,
@@ -446,6 +447,7 @@ export async function preflightOpenClawDatabaseSchemas(
           pathname: realAgentPath,
           agentId: row.agentId,
           supportedVersion: supportedVersions.agent,
+          inspectCandidateProtectedFormats: options.inspectCandidateProtectedFormats,
           inspectOwnership,
           verifyCurrentSchemaShape: row.holdForDeletionRecovery
             ? false
@@ -484,6 +486,9 @@ export async function preflightOpenClawDatabaseSchemas(
           throw new Error(`Agent database inspection returned no result: ${agentPath}`);
         }
         const { version: agentVersion, writerAppVersion, agentSchemaMeta } = schemaInspection;
+        const supportedAgentVersion = schemaInspection.candidateProtectedFormat
+          ? agentVersion
+          : supportedVersions.agent;
         if (row.holdForDeletionRecovery) {
           recordAgentDatabaseRecoveryInspection(
             preparedDiscovery,
@@ -563,13 +568,13 @@ export async function preflightOpenClawDatabaseSchemas(
           inspection.indeterminate.push(failure);
           return undefined;
         }
-        if (agentVersion > supportedVersions.agent) {
+        if (agentVersion > supportedAgentVersion) {
           const incompatible = {
             kind: "agent",
             path: agentPath,
             ...(row.agentId !== undefined ? { agentId: row.agentId } : {}),
             foundVersion: agentVersion,
-            supportedVersion: supportedVersions.agent,
+            supportedVersion: supportedAgentVersion,
             ...(writerAppVersion ? { writerAppVersion } : {}),
           } as const;
           if (

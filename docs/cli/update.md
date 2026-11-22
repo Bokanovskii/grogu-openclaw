@@ -509,6 +509,13 @@ update execution authority. A missing custom `plugins.load.paths` entry can
 therefore produce an admission warning while preserving the configured path
 and plugin configuration bytes. Admission does not promise to repair that path.
 
+In the Grogu fork, candidate admission recognizes its authenticated protected
+shared-state schema 21 and agent schema 26 without changing the personal schema
+limits. The storage key must be available, and incomplete protected-state cleanup
+still refuses admission. Dry runs use the installed updater's checks, which may
+not recognize these formats. An older updater can also fail before it stages the
+candidate; candidate admission cannot repair that earlier step.
+
 Legacy plugin configuration, such as Discord's nested `dm.policy` and
 `dm.allowFrom`, is admitted with a warning when the candidate's Doctor planner
 produces a fully valid configuration. Admission checks the projected database

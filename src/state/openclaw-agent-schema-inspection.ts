@@ -15,7 +15,10 @@ import { readMainTableList } from "../infra/sqlite-strict.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
 import { configureSqliteReadOnlyPragmas } from "../infra/sqlite-wal.js";
 import { isValidAgentId } from "../routing/session-key.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+} from "./openclaw-agent-db-contract.js";
 import { assertOpenClawAgentDatabaseForMaintenance } from "./openclaw-agent-db-maintenance.js";
 import type { ExistingAgentSchemaMeta } from "./openclaw-agent-db-metadata.js";
 import {
@@ -26,6 +29,7 @@ import {
   assertOpenClawAgentSchemaContains,
   getOpenClawAgentMigrationSchema,
 } from "./openclaw-agent-db-schema-helpers.js";
+import { assertSupportedAgentSchemaVersion } from "./openclaw-agent-db-schema-read.js";
 import type { OpenClawAgentSchemaPreflightResult } from "./openclaw-database-preflight.types.js";
 import {
   canReuseOpenClawAgentIntegrityVerification,
@@ -38,6 +42,7 @@ export type AgentSchemaInspectionInput = {
   agentId?: string;
   env?: NodeJS.ProcessEnv;
   supportedVersion: number;
+  inspectCandidateProtectedFormats?: boolean;
   verifyCurrentSchemaShape?: boolean;
   inspectOwnership?: boolean;
   requireStartupMigrationReadiness?: boolean;
@@ -49,6 +54,7 @@ export type AgentSchemaInspectionInput = {
 
 export type AgentSchemaInspection = {
   version: number;
+  candidateProtectedFormat?: true;
   integrityGateOutcome?: "cached" | "healthy";
   preparationPending?: true;
   writerAppVersion?: string;
@@ -127,8 +133,24 @@ export function inspectAgentDatabaseSchema(
         database,
         input.inspectOwnership ? input.supportedVersion : undefined,
       );
+      const candidateProtectedFormat =
+        input.inspectCandidateProtectedFormats &&
+        userVersion === PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION &&
+        userVersion > input.supportedVersion;
+      if (candidateProtectedFormat) {
+        assertSupportedAgentSchemaVersion(database, input.pathname);
+        assertSqliteIntegrity(database, input.pathname);
+        assertOpenClawAgentSchemaContains(
+          database,
+          input.pathname,
+          getOpenClawAgentMigrationSchema(userVersion),
+          "current",
+          true,
+        );
+      }
       return {
         version: userVersion,
+        ...(candidateProtectedFormat ? { candidateProtectedFormat: true as const } : {}),
         ...header,
         ...(input.inspectEmptyStore
           ? {

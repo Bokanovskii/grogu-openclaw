@@ -148,6 +148,7 @@ export async function captureTargetDatabaseSchemaContext(
 export async function checkTargetDatabaseSchemasForContexts(
   supportedVersions: OpenClawSchemaVersions | undefined,
   contexts: readonly TargetDatabaseSchemaContext[],
+  options?: { inspectCandidateProtectedFormats?: boolean },
 ): Promise<OpenClawDatabaseSchemaPreflight> {
   if (!supportedVersions) {
     return { incompatible: [], indeterminate: [] };
@@ -172,6 +173,7 @@ export async function checkTargetDatabaseSchemasForContexts(
     contexts: inspectionContexts,
     supportedVersions,
     preserveSourceArtifacts: isArtifactPreservingStateRead(),
+    inspectCandidateProtectedFormats: options?.inspectCandidateProtectedFormats,
   });
 }
 

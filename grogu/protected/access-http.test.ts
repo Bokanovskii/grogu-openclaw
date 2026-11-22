@@ -223,6 +223,17 @@ void test("the public page has a separate static asset tree", async (t) => {
   const get = (pathname: string) => serve(new Request(`https://alcove.example${pathname}`));
   assert.equal(await (await get("/request-access"))?.text(), "Public request");
   assert.equal(await (await get("/settings/admin"))?.text(), "Private app");
+  for (const kind of ["c", "f", "p"]) {
+    const shell = await get(`/${kind}/example-id`);
+    assert.equal(await shell?.text(), "Private app");
+    assert.match(shell?.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/u);
+    const head = await serve(
+      new Request(`https://alcove.example/${kind}/example-id`, { method: "HEAD" }),
+    );
+    assert.equal(await head?.text(), "");
+    assert.equal(head?.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(await get(`/${kind}/example-id/extra`), undefined);
+  }
   for (const [name, content] of [
     ["index-private.js", "private"],
     ["privateApp-compiled.js", "private entry"],

@@ -2,6 +2,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { FsSafeError } from "@openclaw/fs-safe/errors";
+import { root as createFsSafeRoot, type Root } from "@openclaw/fs-safe/root";
+import type { DirEntry } from "@openclaw/fs-safe/types";
 import { syncDirectoryBestEffortSync } from "../../infra/directory-durability.js";
 import { hasErrnoCode } from "../../infra/errno.js";
 import {
@@ -16,6 +19,211 @@ import {
 } from "./artifacts.js";
 
 export const MAX_MATERIALIZED_ARCHIVE_BATCH_BYTES = 256 * 1024 * 1024;
+const MAX_ARCHIVE_RESIDUE_ROOTS = 128;
+const MAX_ARCHIVE_RESIDUE_ENTRIES_PER_ROOT = 512;
+const MAX_ARCHIVE_RESIDUE_ENTRIES = 8192;
+
+type ArchiveResidueEntryKind = "file" | "directory" | "symlink" | "other";
+
+export type SqliteTranscriptArchiveResidueReport = {
+  writerQuiescence: "not-established";
+  candidates: Array<{
+    root: string;
+    name: string;
+    status: "unknown";
+    metadata?: {
+      kind: ArchiveResidueEntryKind;
+      sizeBytes: number;
+      modifiedAtMs: number;
+    };
+  }>;
+  aliases: Array<{
+    root: string;
+    physicalRoot: string;
+    reason: "resolved-path" | "duplicate-physical-root";
+    aliasOf?: string;
+  }>;
+  races: Array<{
+    root: string;
+    name?: string;
+    operation: "root-identity" | "directory-enumeration";
+    code?: string;
+  }>;
+  errors: Array<{
+    root: string;
+    operation: "resolve" | "open" | "read" | "stat";
+    code?: string;
+  }>;
+  truncations: Array<{
+    root?: string;
+    limit: "root-count" | "entries-per-root" | "total-entries";
+  }>;
+  scannedEntries: number;
+};
+
+function isArchiveResidueCandidateName(name: string): boolean {
+  return (
+    name.endsWith(".jsonl-stage") ||
+    name.endsWith(".stage") ||
+    name.endsWith(".tmp") ||
+    name.endsWith(".tmp.zst")
+  );
+}
+
+function archiveResidueEntryKind(entry: DirEntry): ArchiveResidueEntryKind {
+  if (entry.isSymbolicLink) {
+    return "symlink";
+  }
+  if (entry.isFile) {
+    return "file";
+  }
+  if (entry.isDirectory) {
+    return "directory";
+  }
+  return "other";
+}
+
+function archiveResidueErrorCode(error: unknown): string | undefined {
+  if (error instanceof FsSafeError) {
+    return error.code;
+  }
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
+function isArchiveResidueEntryRace(error: unknown): boolean {
+  const code = archiveResidueErrorCode(error);
+  return (
+    code === "path-mismatch" ||
+    code === "not-found" ||
+    code === "symlink" ||
+    code === "ENOENT" ||
+    code === "ENOTDIR"
+  );
+}
+
+/**
+ * Observe possible stage metadata without reading contents or assigning ownership.
+ * Roots must come from configured session-store paths; cold roots are supplied separately.
+ */
+export async function inspectSqliteTranscriptArchiveResidue(
+  configuredRoots: readonly string[],
+): Promise<SqliteTranscriptArchiveResidueReport> {
+  const report: SqliteTranscriptArchiveResidueReport = {
+    writerQuiescence: "not-established",
+    candidates: [],
+    aliases: [],
+    races: [],
+    errors: [],
+    truncations: [],
+    scannedEntries: 0,
+  };
+  const physicalRoots = new Map<string, string>();
+  const roots = configuredRoots.slice(0, MAX_ARCHIVE_RESIDUE_ROOTS);
+  if (configuredRoots.length > roots.length) {
+    report.truncations.push({ limit: "root-count" });
+  }
+
+  for (const configuredRoot of roots) {
+    if (!path.isAbsolute(configuredRoot)) {
+      report.errors.push({ root: configuredRoot, operation: "resolve", code: "EINVAL" });
+      continue;
+    }
+    const root = path.resolve(configuredRoot);
+    let safeRoot: Root;
+    try {
+      safeRoot = await createFsSafeRoot(root, {
+        mkdir: false,
+        symlinks: "reject",
+      });
+    } catch (error) {
+      report.errors.push({ root, operation: "open", code: archiveResidueErrorCode(error) });
+      continue;
+    }
+    const physicalRoot = safeRoot.rootReal;
+    let rootStat: Awaited<ReturnType<Root["stat"]>>;
+    try {
+      rootStat = await safeRoot.stat(".");
+    } catch (error) {
+      if (isArchiveResidueEntryRace(error)) {
+        report.races.push({
+          root,
+          operation: "root-identity",
+          code: archiveResidueErrorCode(error),
+        });
+      } else {
+        report.errors.push({ root, operation: "stat", code: archiveResidueErrorCode(error) });
+      }
+      continue;
+    }
+
+    if (!rootStat.isDirectory || rootStat.dev === 0 || rootStat.ino === 0) {
+      report.errors.push({ root, operation: "stat", code: "IDENTITY_UNAVAILABLE" });
+      continue;
+    }
+    const rootIdentity = `${rootStat.dev}:${rootStat.ino}`;
+    const priorRoot = physicalRoots.get(rootIdentity);
+    if (priorRoot) {
+      report.aliases.push({
+        root,
+        physicalRoot,
+        reason: "duplicate-physical-root",
+        aliasOf: priorRoot,
+      });
+      continue;
+    }
+    if (root !== physicalRoot) {
+      report.aliases.push({ root, physicalRoot, reason: "resolved-path" });
+    }
+    physicalRoots.set(rootIdentity, root);
+
+    const remainingEntries = MAX_ARCHIVE_RESIDUE_ENTRIES - report.scannedEntries;
+    const maxEntries = Math.min(MAX_ARCHIVE_RESIDUE_ENTRIES_PER_ROOT, remainingEntries);
+    const truncationLimit =
+      remainingEntries <= MAX_ARCHIVE_RESIDUE_ENTRIES_PER_ROOT
+        ? "total-entries"
+        : "entries-per-root";
+    try {
+      for await (const entry of safeRoot.entries(".", {
+        maxEntries,
+        order: "filesystem",
+        symlinks: "reject",
+      })) {
+        report.scannedEntries += 1;
+        if (isArchiveResidueCandidateName(entry.name)) {
+          report.candidates.push({
+            root,
+            name: entry.name,
+            status: "unknown",
+            metadata: {
+              kind: archiveResidueEntryKind(entry),
+              sizeBytes: entry.size,
+              modifiedAtMs: entry.mtimeMs,
+            },
+          });
+        }
+      }
+    } catch (error) {
+      if (error instanceof FsSafeError && error.code === "too-large") {
+        report.truncations.push({ root, limit: truncationLimit });
+      } else if (isArchiveResidueEntryRace(error)) {
+        report.races.push({
+          root,
+          operation: "directory-enumeration",
+          code: archiveResidueErrorCode(error),
+        });
+      } else {
+        report.errors.push({ root, operation: "read", code: archiveResidueErrorCode(error) });
+      }
+    }
+  }
+
+  report.candidates.sort(
+    (left, right) => left.root.localeCompare(right.root) || left.name.localeCompare(right.name),
+  );
+  return report;
+}
 
 // Leave room under the 255-byte component limit for timestamps, generations,
 // compression suffixes, and staging UUIDs. Raising this can break publication.

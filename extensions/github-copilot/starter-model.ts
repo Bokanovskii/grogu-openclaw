@@ -1,7 +1,12 @@
 // Resolves a safe setup default from the authenticated Copilot model catalog.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { DEFAULT_COPILOT_MODEL } from "./model-metadata.js";
-import { fetchCopilotModelCatalog, PROVIDER_ID, selectCopilotStarterModel } from "./models.js";
+import {
+  COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS,
+  fetchCopilotModelCatalog,
+  PROVIDER_ID,
+  selectCopilotStarterModel,
+} from "./models.js";
 import { resolveCopilotRuntimeAuth } from "./runtime-auth.js";
 import { buildCopilotRuntimeHeaders } from "./runtime-identity.js";
 
@@ -12,17 +17,29 @@ export async function resolveCopilotStarterModel(params: {
   env?: NodeJS.ProcessEnv;
   githubDomain?: string;
   config?: OpenClawConfig;
+  signal?: AbortSignal;
 }): Promise<string> {
   const auth = await resolveCopilotRuntimeAuth({
     githubToken: params.githubToken,
     ...(params.env ? { env: params.env } : {}),
     ...(params.githubDomain ? { githubDomain: params.githubDomain } : {}),
     ...(params.config ? { config: params.config } : {}),
+    ...(params.signal ? { signal: params.signal } : {}),
   });
+  params.signal?.throwIfAborted();
   const models = await fetchCopilotModelCatalog({
     copilotApiToken: auth.apiKey,
     baseUrl: auth.baseUrl,
     headers: buildCopilotRuntimeHeaders({ config: params.config }),
+    // A caller signal replaces the catalog's own timeout, so keep both.
+    ...(params.signal
+      ? {
+          signal: AbortSignal.any([
+            params.signal,
+            AbortSignal.timeout(COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS),
+          ]),
+        }
+      : {}),
   });
   const selected = selectCopilotStarterModel(models, PREFERRED_COPILOT_STARTER_MODEL_ID);
   if (!selected) {

@@ -25,8 +25,9 @@ operator-owned staging directory (mode 0700), place the reviewed
 `protected-policy-helper.py` and `protected-policy-config.json` as regular,
 operator-owned files with mode 0600. The JSON configuration contains exactly
 `accountId`, `appId`, `policyId`, `policyName`, `ownerEmail`, and `token`.
-Choose an application-specific allow policy dedicated to this app; the token
-needs Cloudflare's `Access: Policies Write` permission. The token's Cloudflare
+Choose an allow policy dedicated to this app. A reusable policy must be attached
+only to this app. The token needs Cloudflare's `Access: Policies Write`
+permission. The token's Cloudflare
 scope is not restricted to one application: the fixed helper supplies that
 restriction. Never put the token in command arguments or logs.
 
@@ -41,7 +42,21 @@ sudo /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
 The installer checks the helper's pinned digest, installs root-owned code and
 root-only configuration, and removes the staged configuration after verifying
 the copy. It makes no Cloudflare request. Existing helper paths require
-inspection instead of being overwritten. Before each policy write, the app
+inspection instead of being overwritten.
+
+To update the previously installed helper, place the reviewed new
+`protected-policy-helper.py` in the same private staging directory. Run:
+
+```sh
+sudo /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
+  --operator USER --staging-dir /absolute/private/staging --update-policy-helper
+```
+
+The update replaces only the Python helper when the installed and staged
+digests match the installer's pins. It preserves the wrapper, configuration,
+and sudoers file. It makes no Cloudflare request.
+
+Before each policy write, the app
 records a recovery barrier in its state database. A crash or an unknown outcome
 blocks later policy writes until the owner requests reconciliation. The helper
 reads the policy before it applies the current admission. Cloudflare does not
@@ -442,21 +457,21 @@ survives the restart. `GET /healthz` reports listener readiness without user dat
 `GET /api/protected/v1/account` returns the signed-in person's profile and
 directory settings. `PUT /api/protected/v1/account/name` saves a `displayName`
 of 1 to 40 characters. `PUT /api/protected/v1/account/directory-settings`
-saves a `description` of up to 140 characters and a Boolean `hidden` value.
+saves a `description` of up to 140 characters. The request keeps the `hidden`
+field for installed clients. Human members must send `false`. Sending `true`
+returns `400 directory_visibility_required` without changing the description.
 These are separate saves. Neither endpoint accepts another person's ID.
 
 `GET /api/protected/v1/people` returns eligible people with their ID, display
 name, and description. It returns up to 100 people and a `nextCursor`. If the
 cursor is not null, pass it as the `cursor` query parameter for the next page.
-The directory does not include email addresses or identity claims. People are
-listed by default. Hide me removes a person from the directory. It does not
-revoke a share. The development identity is always hidden and receives an
+The directory does not include email addresses or identity claims. All eligible
+members appear by name. A description saved under the former Hide me setting
+stays unpublished until the member saves a public description. The development identity is always hidden and receives an
 empty directory, even if its stored settings say otherwise.
 
 Directory membership follows current canonical admissions, not later edits to
 the legacy `allowedSubjects` configuration. Names use the canonical profile store. Directory settings use the existing
 profile preferences store. They remain after logout or access revocation and
 follow the existing profile merge and deletion rules. A revoked or no longer
-allowed identity is not listed. Older versions ignore the directory settings
-and do not provide this API. They cannot enforce Hide me for a separate
-directory implementation.
+allowed identity is not listed.

@@ -63,6 +63,7 @@ export async function resolveCopilotRuntimeAuth(params: {
   fetchImpl?: typeof fetch;
   githubDomain?: string;
   config?: OpenClawConfig;
+  signal?: AbortSignal;
 }): Promise<{
   apiKey: string;
   source: string;
@@ -76,7 +77,8 @@ export async function resolveCopilotRuntimeAuth(params: {
   });
   const userUrl = copilotUserUrl(domain);
   const fetchImpl = params.fetchImpl ?? fetch;
-  const signal = AbortSignal.timeout(COPILOT_RUNTIME_AUTH_TIMEOUT_MS);
+  const timeout = AbortSignal.timeout(COPILOT_RUNTIME_AUTH_TIMEOUT_MS);
+  const signal = params.signal ? AbortSignal.any([params.signal, timeout]) : timeout;
   try {
     const response = await fetchImpl(userUrl, {
       method: "GET",
@@ -106,7 +108,7 @@ export async function resolveCopilotRuntimeAuth(params: {
       baseUrl,
     };
   } catch (error) {
-    if (signal.aborted) {
+    if (timeout.aborted && !params.signal?.aborted) {
       throw new CopilotRuntimeAuthError({
         reason: "timeout",
         timeoutMs: COPILOT_RUNTIME_AUTH_TIMEOUT_MS,

@@ -129,6 +129,7 @@ async function resolveInteractiveCopilotStarterModel(params: {
   if (params.ctx.credentialOnly) {
     return {};
   }
+  params.ctx.assertCurrent?.();
   try {
     const { resolveCopilotStarterModel } = await loadGithubCopilotRuntime();
     return {
@@ -137,9 +138,14 @@ async function resolveInteractiveCopilotStarterModel(params: {
         env: params.ctx.env ?? process.env,
         githubDomain: params.githubDomain,
         config: params.ctx.config,
+        ...(params.ctx.signal ? { signal: params.ctx.signal } : {}),
       }),
     };
-  } catch {
+  } catch (error) {
+    // A cancelled sign-in must not become a successful credential result.
+    if (params.ctx.signal?.aborted) {
+      throw error;
+    }
     // Interactive auth must not discard a valid durable credential when live
     // discovery is transiently unavailable. The following model picker can
     // retry discovery or let the user retain an explicit model selection.

@@ -770,8 +770,9 @@ export function createProtectedHttp(options: {
             displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
           },
           directory: {
-            description: saved?.description ?? "",
-            hidden: identity.kind === "development" || saved?.hidden === true,
+            description:
+              saved?.hidden && identity.kind !== "development" ? "" : (saved?.description ?? ""),
+            hidden: identity.kind === "development",
           },
         });
       }
@@ -803,6 +804,13 @@ export function createProtectedHttp(options: {
             403,
             "development_hidden",
             "The development account is always hidden.",
+          );
+        }
+        if (identity.kind !== "development" && input.hidden) {
+          throw new ProtectedError(
+            400,
+            "directory_visibility_required",
+            "Members cannot hide from the people list. Save your description without Hide me.",
           );
         }
         await revalidate();

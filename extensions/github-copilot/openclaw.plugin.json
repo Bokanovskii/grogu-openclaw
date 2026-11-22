@@ -300,6 +300,7 @@
     {
       "provider": "github-copilot",
       "method": "device",
+      "personalAccount": true,
       "choiceId": "github-copilot",
       "appGuidedAuth": "device-code",
       "credentialOnly": true,

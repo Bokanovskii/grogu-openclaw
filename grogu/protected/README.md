@@ -201,6 +201,10 @@ An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
+Both include optional `inputTokens` and `outputTokens` for the latest parent
+turn, summed from its saved provider calls. The existing `contextTokens` remains
+the latest call's context size. Unknown counters and adapter-default zeros are
+omitted, as in native run usage. Admin usage totals do not change.
 
 Reasoning is streamed as append-only `reasoning` text events when the provider
 exposes it. Tool activity uses `activity` events with a safe label and a running,

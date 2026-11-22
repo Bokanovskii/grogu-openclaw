@@ -15,17 +15,25 @@ import { readMainTableList } from "../infra/sqlite-strict.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
 import { configureSqliteReadOnlyPragmas } from "../infra/sqlite-wal.js";
 import { isValidAgentId } from "../routing/session-key.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+} from "./openclaw-agent-db-contract.js";
 import { assertOpenClawAgentDatabaseForMaintenance } from "./openclaw-agent-db-maintenance.js";
 import type { ExistingAgentSchemaMeta } from "./openclaw-agent-db-metadata.js";
 import {
   assertCanonicalAgentPersistenceVersion,
+  assertCurrentAgentSchemaMetadata,
   assertOpenClawAgentCurrentRuntimeSchema,
   readExistingAgentSchemaMeta,
   hasPendingCurrentVersionAgentDatabaseMigration,
   assertOpenClawAgentSchemaContains,
   getOpenClawAgentMigrationSchema,
 } from "./openclaw-agent-db-schema-helpers.js";
+import {
+  assertSupportedAgentSchemaVersion,
+  PROTECTED_ENCRYPTION_TABLE,
+} from "./openclaw-agent-db-schema-read.js";
 import type { OpenClawAgentSchemaPreflightResult } from "./openclaw-database-preflight.types.js";
 import {
   canReuseOpenClawAgentIntegrityVerification,
@@ -38,6 +46,7 @@ export type AgentSchemaInspectionInput = {
   agentId?: string;
   env?: NodeJS.ProcessEnv;
   supportedVersion: number;
+  inspectOwnProtectedFormats?: boolean;
   verifyCurrentSchemaShape?: boolean;
   inspectOwnership?: boolean;
   requireStartupMigrationReadiness?: boolean;
@@ -49,6 +58,7 @@ export type AgentSchemaInspectionInput = {
 
 export type AgentSchemaInspection = {
   version: number;
+  ownProtectedFormat?: true;
   integrityGateOutcome?: "cached" | "healthy";
   preparationPending?: true;
   writerAppVersion?: string;
@@ -116,6 +126,40 @@ function isEmptyAgentStore(
   return true;
 }
 
+function inspectOwnProtectedAgentFormat(
+  database: DatabaseSync,
+  input: AgentSchemaInspectionInput,
+  version: number,
+): boolean {
+  if (
+    !input.inspectOwnProtectedFormats ||
+    version !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION ||
+    version <= input.supportedVersion
+  ) {
+    return false;
+  }
+  // An unmarked newer store retains the normal incompatible-version refusal.
+  if (
+    !database
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
+      .get(PROTECTED_ENCRYPTION_TABLE)
+  ) {
+    return false;
+  }
+  assertSupportedAgentSchemaVersion(database, input.pathname);
+  if (!input.requireStartupMigrationReadiness) {
+    assertSqliteIntegrity(database, input.pathname);
+    assertOpenClawAgentSchemaContains(
+      database,
+      input.pathname,
+      getOpenClawAgentMigrationSchema(version),
+      "current",
+      true,
+    );
+  }
+  return true;
+}
+
 /** All facts belong to the caller's single read transaction or private snapshot. */
 export function inspectAgentDatabaseSchema(
   database: DatabaseSync,
@@ -127,9 +171,14 @@ export function inspectAgentDatabaseSchema(
         database,
         input.inspectOwnership ? input.supportedVersion : undefined,
       );
+      const ownProtectedFormat = inspectOwnProtectedAgentFormat(database, input, userVersion);
       return {
         version: userVersion,
+        ...(ownProtectedFormat ? { ownProtectedFormat: true as const } : {}),
         ...header,
+        ...(ownProtectedFormat && input.inspectOwnership
+          ? { agentSchemaMeta: readExistingAgentSchemaMeta(database) }
+          : {}),
         ...(input.inspectEmptyStore
           ? {
               emptyStore:
@@ -146,7 +195,18 @@ export function inspectAgentDatabaseSchema(
   const inspection: AgentSchemaInspection = { version };
   let checkingShape = false;
   try {
-    if (version > input.supportedVersion) {
+    const ownProtectedFormat = inspectOwnProtectedAgentFormat(database, input, version);
+    if (ownProtectedFormat) {
+      if (!input.requireStartupMigrationReadiness) {
+        const metadata = readExistingAgentSchemaMeta(database);
+        if (input.verifyCurrentSchemaShape && input.agentId) {
+          assertCurrentAgentSchemaMetadata(metadata, input.agentId, input.pathname, version);
+        }
+        return { version, ownProtectedFormat: true, agentSchemaMeta: metadata };
+      }
+      inspection.ownProtectedFormat = true;
+    }
+    if (version > input.supportedVersion && !ownProtectedFormat) {
       const writerAppVersion = readSqliteWriterAppVersion(database);
       return { version, ...(writerAppVersion ? { writerAppVersion } : {}) };
     }
@@ -157,7 +217,7 @@ export function inspectAgentDatabaseSchema(
     }
     if (input.requireStartupMigrationReadiness) {
       const migrationPending =
-        version !== input.supportedVersion ||
+        (version !== input.supportedVersion && !ownProtectedFormat) ||
         hasPendingCurrentVersionAgentDatabaseMigration(database);
       if (
         canReuseOpenClawAgentIntegrityVerification(

@@ -149,6 +149,7 @@ export async function prepareGatewayServerBootstrap(input: {
         signal,
         env: process.env,
         reuseStartupSchemaPreparation: true,
+        inspectOwnProtectedFormats: true,
         agentAdmissionConfig: captureConfigOverrideApplier()(
           startupConfigSnapshotRead.snapshot.config,
         ),

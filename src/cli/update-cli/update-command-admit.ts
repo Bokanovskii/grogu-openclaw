@@ -44,7 +44,9 @@ import { assertPluginStateRetention } from "../../plugins/doctor-migration-resou
 import { loadInstalledPluginIndexInstallRecordsSync } from "../../plugins/installed-plugin-index-record-reader.js";
 import { resolveLegacyInstalledPluginIndexStorePath } from "../../plugins/installed-plugin-index-store-path.js";
 import { defaultRuntime } from "../../runtime.js";
+import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../../state/openclaw-agent-db-contract.js";
 import { parsePackageOpenClawSchemaVersions } from "../../state/openclaw-schema-versions.js";
+import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
 import { withArtifactPreservingStateReads } from "../../state/openclaw-state-db-readonly.js";
 import { quoteCliArg } from "../quote-cli-arg.js";
 import {
@@ -214,9 +216,15 @@ async function inspectUpdateAdmission(
         schemaContext: NonNullable<typeof databaseContext>,
       ): Promise<boolean> => {
         try {
-          const schemas = await checkTargetDatabaseSchemasForContexts(schemaVersions, [
-            schemaContext,
-          ]);
+          const schemas = await checkTargetDatabaseSchemasForContexts(
+            schemaVersions,
+            [schemaContext],
+            {
+              inspectOwnProtectedFormats:
+                schemaVersions.state === OPENCLAW_STATE_SCHEMA_VERSION &&
+                schemaVersions.agent === OPENCLAW_AGENT_SCHEMA_VERSION,
+            },
+          );
           if (hasSchemaRefusal(schemas)) {
             refuse(
               "database-schema",

@@ -6,13 +6,13 @@ import {
 } from "../infra/sqlite-schema-contract.js";
 import { SqliteSchemaMismatchError } from "../infra/sqlite-schema-issues.js";
 import { assertOpenClawStateDatabaseOwner } from "./openclaw-state-db-maintenance.js";
+import { getAdmittedSharedStateSchema } from "./openclaw-state-protected-schema.js";
 import {
   isOpenClawStateFirstUseSchemaIssue,
   isOpenClawStateStartupRepairableSchemaIssue,
   OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
   STATE_RUNTIME_SCHEMA_COMPATIBILITY,
 } from "./openclaw-state-schema-compatibility.js";
-import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 function deduplicateSchemaIssues(issues: readonly SqliteSchemaIssue[]): SqliteSchemaIssue[] {
   return [
@@ -35,19 +35,15 @@ export function inspectCurrentStateStartupSchema(
   }
   // Both policies inspect the same private or immutable snapshot; later opens read fresh facts.
   const readTable = createSqliteTableContractReader(database);
+  const schema = getAdmittedSharedStateSchema(database);
   const issues = deduplicateSchemaIssues([
     ...collectSqliteSchemaIssues(
       database,
-      OPENCLAW_STATE_SCHEMA_SQL,
+      schema,
       OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
       readTable,
     ),
-    ...collectSqliteSchemaIssues(
-      database,
-      OPENCLAW_STATE_SCHEMA_SQL,
-      STATE_RUNTIME_SCHEMA_COMPATIBILITY,
-      readTable,
-    ),
+    ...collectSqliteSchemaIssues(database, schema, STATE_RUNTIME_SCHEMA_COMPATIBILITY, readTable),
   ]);
   return {
     blockingIssues: issues.filter(

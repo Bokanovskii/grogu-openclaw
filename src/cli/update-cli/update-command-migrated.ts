@@ -65,21 +65,30 @@ export async function inspectActivatedUpdateState(
       root: result.root ?? null,
       nodeRunner: params.packageUpdateNodeRunner,
       timeoutMs: params.timeoutMs,
+      inspectOwnProtectedFormats: true,
     });
     const shared = current.find((entry) => entry.path === resolveOpenClawStateSqlitePath(env));
     const sharedVersion = shared ? resolveUpdateStateContentVersion(shared) : undefined;
+    const sharedReady =
+      sharedVersion === candidateSchemaVersions?.state ||
+      (shared?.ownProtectedFormat?.kind === "state" &&
+        shared.ownProtectedFormat.personalVersion === candidateSchemaVersions?.state);
     const incompleteAgents = candidateSchemaVersions
       ? current.filter(
           (entry) =>
             entry !== shared &&
             entry.userVersion !== null &&
-            entry.userVersion !== candidateSchemaVersions.agent,
+            entry.userVersion !== candidateSchemaVersions.agent &&
+            !(
+              entry.ownProtectedFormat?.kind === "agent" &&
+              entry.ownProtectedFormat.personalVersion === candidateSchemaVersions.agent
+            ),
         )
       : [];
     if (
       result.status === "ok" &&
       candidateSchemaVersions &&
-      (sharedVersion !== candidateSchemaVersions.state || incompleteAgents.length > 0)
+      (!sharedReady || incompleteAgents.length > 0)
     ) {
       // Doctor can warn without failing. Require applied content so startup
       // cannot migrate late; deferred publication alone is already ready.
@@ -92,7 +101,7 @@ export async function inspectActivatedUpdateState(
         durationMs: 0,
         exitCode: 1,
         stderrTail: [
-          ...(sharedVersion !== candidateSchemaVersions.state
+          ...(!sharedReady
             ? [
                 `Shared state migration did not finish: expected schema ${candidateSchemaVersions.state}, found ${sharedVersion ?? "missing"}.`,
               ]

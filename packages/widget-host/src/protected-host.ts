@@ -3,6 +3,7 @@ import { createSandboxHostTransport } from "./transport.js";
 export type ProtectedWidgetOptions = {
   html: string;
   theme: "light" | "dark";
+  themeTokens?: Readonly<Record<string, string>>;
   sandboxUrl?: string;
   draft?: boolean;
   onReady?: () => void;
@@ -27,6 +28,12 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
   let ready = false;
   let promptPort: MessagePort | undefined;
   let theme = options.theme;
+  let themeTokens = { ...options.themeTokens };
+  const setHeight = (height: number) => {
+    if (!disposed && Number.isFinite(height)) {
+      frame.style.height = `${Math.max(120, Math.min(1200, Math.ceil(height)))}px`;
+    }
+  };
   const renderId = crypto.randomUUID();
   const transport = createSandboxHostTransport({
     frame,
@@ -68,11 +75,11 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
       }
       if (data.method === "ui/notifications/sandbox-proxy-ready" && !loaded) {
         loaded = true;
+        transport.send({ type: "openclaw:widget-theme", mode: theme, tokens: themeTokens });
         transport.send({
           method: "ui/notifications/sandbox-resource-ready",
           params: { html: options.html, allowScripts: !options.draft, renderId },
         });
-        transport.send({ type: "openclaw:widget-theme", mode: theme, tokens: {} });
       } else if (
         data.method === "ui/notifications/sandbox-resource-loaded" &&
         data.params?.renderId === renderId
@@ -82,12 +89,8 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
           ready = true;
           options.onReady?.();
         }
-      } else if (
-        data.type === "openclaw:widget-size" &&
-        Number.isFinite(data.height) &&
-        !options.draft
-      ) {
-        frame.style.height = `${Math.max(120, Math.min(1200, Math.ceil(data.height)))}px`;
+      } else if (data.type === "openclaw:widget-size" && typeof data.height === "number") {
+        setHeight(data.height);
       } else if (data.type === "openclaw:widget-runtime-error") {
         options.onError(new Error("This widget could not run. Try reopening it."));
       }
@@ -107,10 +110,12 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
     }
   }, 30_000);
   return {
-    setTheme(mode: "light" | "dark") {
+    setTheme(mode: "light" | "dark", tokens: Readonly<Record<string, string>> = {}) {
       theme = mode;
-      transport.send({ type: "openclaw:widget-theme", mode, tokens: {} });
+      themeTokens = { ...tokens };
+      transport.send({ type: "openclaw:widget-theme", mode, tokens: themeTokens });
     },
+    setHeight,
     dispose() {
       disposed = true;
       clearTimeout(timeout);

@@ -539,6 +539,11 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     widgetHost.headers.get("content-security-policy") ?? "",
     /frame-ancestors 'none'/,
   );
+  const measurement = await first.call("alice", "/widget-measurement");
+  assert.equal(measurement.status, 200);
+  assert.match(measurement.headers.get("content-security-policy") ?? "", /script-src 'none'/);
+  assert.equal(measurement.headers.get("set-cookie"), null);
+  assert.match(await measurement.text(), /<style data-widget-base>/);
   const me = await first.call("alice", "/me");
   assert.equal(me.status, 200);
   const { user, capabilities } = await me.json();

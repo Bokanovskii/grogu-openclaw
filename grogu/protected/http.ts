@@ -103,6 +103,7 @@ import { widgetIdPattern } from "./tool-events.js";
 import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
 import { listProtectedUsage, recordProtectedUsage } from "./usage-store.js";
+import { buildProtectedWidgetMeasurementDocument } from "./widget-measurement.js";
 
 const base = "/api/protected/v1";
 const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
@@ -343,6 +344,10 @@ export function createProtectedHttp(options: {
         const doc = buildSandboxHostDocument({ profile: "protected" }, true, {
           protectedWidgetStyles: ALCOVE_CONTENT_STYLES,
         });
+        return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
+      }
+      if (pathname === "/widget-measurement" && method === "GET") {
+        const doc = buildProtectedWidgetMeasurementDocument();
         return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
       }
       if (path === protectedAccessProofPath && options.answerAccessProof) {

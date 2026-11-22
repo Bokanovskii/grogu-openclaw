@@ -13,6 +13,7 @@ import { chatFilesDirectory } from "./chat-files.js";
 import type { ProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import {
+  createStoredDataReplacementReservation,
   createStoredDataReservation,
   retireStoredData,
   storedDataTransferKey,
@@ -21,6 +22,8 @@ import {
   storedDataRetirementKey,
   type StoredDataEntry,
   type StoredDataLedger,
+  type StoredDataReplacement,
+  type StoredDataReplacementReservation,
   type StoredDataReservation,
   type StoredDataRetirement,
   type StoredDataTransfer,
@@ -50,6 +53,9 @@ export type StorageAdmission = {
   ): void;
   assertResult(): void;
   reserveStoredData(bytes: number): StoredDataReservation;
+  // Await admission before the native transaction. Reserve synchronously against its
+  // measured ledger; retain the receipt through commit/rollback, including unknown outcomes.
+  reserveStoredDataReplacement(change: StoredDataReplacement): StoredDataReplacementReservation;
   files(files: AuthorizedUserFiles): AuthorizedUserFiles;
 };
 
@@ -457,26 +463,33 @@ export function createStorageAdmission(
       const refund = (bytes: number) => {
         account.globalBytes -= bytes;
         account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
-        remaining += bytes;
+        remaining = Math.min(8 * MiB, remaining + bytes);
+      };
+      const storedDataOptions = {
+        account,
+        profileId,
+        charge,
+        refund,
+        begin() {
+          pendingWrites++;
+        },
+        finish() {
+          pendingWrites--;
+          finishReservation();
+        },
       };
       return {
         release,
         charge,
         reserveStoredData(bytes) {
           return createStoredDataReservation({
-            account,
-            profileId,
+            ...storedDataOptions,
             bytes,
-            charge,
-            refund,
-            begin() {
-              pendingWrites++;
-            },
-            finish() {
-              pendingWrites--;
-              finishReservation();
-            },
           });
+        },
+        reserveStoredDataReplacement(change) {
+          assertDisk();
+          return createStoredDataReplacementReservation({ ...storedDataOptions, change });
         },
         chargeChatCreation() {
           charge(chatBytes);

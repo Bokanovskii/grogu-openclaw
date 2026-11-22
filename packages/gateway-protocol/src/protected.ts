@@ -192,6 +192,9 @@ export const ProtectedAutomationScheduleSchema = Type.Union([
     tz: Type.String({ minLength: 1, maxLength: 64 }),
   }),
 ]);
+export const ProtectedAutomationIdSchema = Type.String({
+  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+});
 export const ProtectedAutomationCronCatalogSchema = node({
   format: Type.Literal("5-field"),
   repeats: Type.Array(
@@ -264,11 +267,12 @@ export const ProtectedAutomationPatchRequestSchema = node({
   model: Type.Optional(protectedAutomationDraftFields.model),
   thinking: Type.Optional(Type.Union([ProtectedThinkLevelSchema, Type.Null()])),
   schedule: Type.Optional(ProtectedAutomationScheduleSchema),
+  enabled: Type.Optional(Type.Boolean()),
 });
 export const ProtectedAutomationRecordSchema = node({
   ...protectedAutomationDraftFields,
   thinking: ProtectedThinkLevelSchema,
-  id,
+  id: ProtectedAutomationIdSchema,
   version: Type.String({ minLength: 1, maxLength: 128 }),
   enabled: Type.Boolean(),
   state: Type.Union([Type.Literal("active"), Type.Literal("paused")]),
@@ -521,6 +525,7 @@ export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
+export type ProtectedAutomationId = Static<typeof ProtectedAutomationIdSchema>;
 export type ProtectedAutomationSchedule = Static<typeof ProtectedAutomationScheduleSchema>;
 export type ProtectedAutomationCronCatalog = Static<typeof ProtectedAutomationCronCatalogSchema>;
 export type ProtectedAutomationDraft = Static<typeof ProtectedAutomationDraftSchema>;
@@ -583,6 +588,10 @@ export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>
   Value.Check(ProtectedTurnRequestSchema, value);
+export const isProtectedAutomationPatchRequest = (
+  value: unknown,
+): value is ProtectedAutomationPatchRequest =>
+  Value.Check(ProtectedAutomationPatchRequestSchema, value);
 export const isProtectedAgentSelection = (value: unknown): value is ProtectedAgentSelection =>
   Value.Check(ProtectedAgentSelectionSchema, value);
 export const isProtectedAgentMention = (value: unknown): value is ProtectedAgentMention =>

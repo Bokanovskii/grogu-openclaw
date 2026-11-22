@@ -118,19 +118,24 @@ Initialization measures free space on the state volume. It reserves a 512 MiB
 free-space floor and takes at most one-sixteenth of the remaining space, capped
 at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
 that budget. The runtime counts canonical chat/transcript bytes and files in
-each chat's directory, including widgets and fetched artifacts, and conservatively
-limits growth per turn. The pilot allows one storage-growing request at a time.
-If a quota is reached, export or delete a chat to free admission; the runtime
-does not evict chats or keep backups. A volume below its floor stops accepting
-writes until space is available. Chat deletion remains available.
+each chat's directory, including widgets and fetched artifacts. It also counts
+each saved automation definition against its owner profile and the global
+budget. Automation storage uses its UTF-8 definition bytes and the same 4 KiB
+entry overhead as stored files. The runtime limits growth per operation and
+reserves quota before writes so concurrent requests stay within the configured
+limits. If a quota is reached, delete a chat or reduce a saved automation
+definition to free space, or contact the server operator. The runtime does not
+evict chats or keep backups. A volume below its floor stops accepting writes
+until space is available. Chat deletion remains available.
 
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
-and overhead charges as the quota. `usedBytes` also counts transient child work,
-which is not a separate cleanup item. `limitBytes` is the member's configured
-limit, not the host's free disk space. To delete a reviewed chat, send its
-`version` in `If-Match` to the existing `DELETE /api/protected/v1/chats/:id`
-route. Read storage again after deletion to show the new total.
+and overhead charges as the quota. `usedBytes` also counts saved automation
+definitions and transient child work. Neither is listed as a chat. `limitBytes`
+is the member's configured limit, not the host's free disk space. To delete a
+reviewed chat, send its `version` in `If-Match` to the existing
+`DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
+show the new total.
 
 ## Automation discovery and draft validation
 
@@ -140,11 +145,12 @@ its supported reasoning levels/default, and capabilities. `/me` remains
 unchanged for strict older clients. If Sparky or its reasoning catalog is
 unavailable, the automation catalog route returns 404; older servers also
 return 404, so clients can keep the feature unavailable without breaking sign-in.
-At this stage only `catalog` and `draftValidation` are true; list, create,
-schedule control, run, sharing, and notification capabilities are false. The
-catalog advertises interval and fixed calendar schedules for draft validation
-only. This does not enable listing, saving, starting, pausing, or running
-automations.
+`catalog` and `draftValidation` are true when the model catalog is available.
+`list` and `create` are true only when the protected storage budget is
+configured. Without it, list and write routes return 404. Schedule control, run,
+sharing, and notification capabilities remain false. The catalog advertises
+interval and fixed calendar schedules for draft validation only; those schedules
+are not active jobs.
 
 `POST /api/protected/v1/automations/drafts/validate` accepts an in-memory draft:
 `name`, `instructions`, `whenToNotify`, optional `doneWhen`, `agentId`,
@@ -167,9 +173,43 @@ Valid input returns `{ valid: true, draft }`, including the resolved thinking
 level. Invalid input returns `{ valid: false, errors }` with field, code, and
 message entries. Schedule intervals are checked against the native Cron
 schema's technical range of 1 through 8,640,000,000,000,000 milliseconds; this
-does not enable scheduling or recommend a cadence. This route does not call a
-model or provider, save a draft, create a schedule, or produce a run. There is
-no automation list or persistence route yet.
+does not enable scheduling or recommend a cadence. Validation itself does not
+call a model or provider, save a draft, create a schedule, or produce a run.
+
+`GET /api/protected/v1/automations` lists the signed-in member's private
+automations. `GET /api/protected/v1/automations/:id` reads one private record,
+and `POST /api/protected/v1/automations` saves a validated draft. Creation
+always starts paused; an `enabled` field is not accepted on create. `PATCH
+/api/protected/v1/automations/:id` accepts partial draft fields and the
+canonical optional `enabled` boolean, and requires the current `version` in
+`If-Match`. Stale versions return 412. Paused definitions can be edited; a
+request to enable an automation returns `503 scheduler_unavailable` without
+changing the record because no native Cron control bridge is wired yet. Thus
+`scheduleControl` remains false and no saved automation can run on a schedule.
+The existing per-profile and global storage budgets cover both operations.
+Creation charges the definition's stored UTF-8 bytes and the existing per-entry
+overhead. An edit charges only positive definition growth, so an edit that
+reduces storage can free budget. A quota refusal returns `413 quota_exceeded`
+before the state worker writes. The PATCH route is not a substitute scheduler.
+
+When an administrator removes an admitted member, the removal transaction deletes
+that member's saved private, paused definitions and their sole-owner memberships.
+It leaves other members' definitions, shared or co-owned definitions, enabled
+definitions, and definitions with native job bindings intact. Access revocation
+and active-turn interruption do not wait for broader retirement work. Legacy
+stores without automation definitions still support removal. This save-only
+cleanup does not delete chats, files, profiles, or scheduler jobs.
+
+The internal state owner stores automation definitions, owners, followers,
+visibility, the paused/enabled state, and native Cron job bindings in the
+shared-state worker. A binding ties one native job to the current central owner
+and definition revision. Reads and mutations require an active admission and
+private definitions are exposed only to their owners. Shared definitions,
+results, runs, account grants, and notifications are not exposed by HTTP.
+The first release stores no Research Topics reference and does not give
+automation turns the Research Topics tool. Automation IDs are canonical
+lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines
+the accepted form.
 
 The fixed calendar draft-validation contract uses schedules of
 `{ kind: "cron", expr, tz }`. The currently designed choices map to
@@ -184,19 +224,13 @@ not evidence that an automation can be saved or dispatched. Native Cron owns
 the DST behavior, and its isolated schedule tests cover the advertised
 `America/Los_Angeles` zone.
 
-The inactive owner-operation DTOs use one full record shape for list rows,
-detail reads, and every `{ automation }` mutation response: the draft fields
-above plus `id`, opaque `version`, `enabled`, `state: "active" | "paused"`, and
-`nextCheckAt: string | null`; records include the resolved effective
-`thinking` level. Create uses the full draft body; patch uses its partial form
-and does not change enabled state. Omitted patch fields are retained;
-`doneWhen: null` clears that rule and `thinking: null` resets to the catalog
-default. The proposed owner routes are
-`GET /automations`, `GET /automations/:id`, `POST /automations`,
-`PATCH /automations/:id`, `POST /automations/:id/start`,
-`POST /automations/:id/pause`, and `POST /automations/:id/run`. Mutations use
-`If-Match`; create starts paused. None is mounted until the protected-to-Gateway
-trust and native durable ownership boundary are approved and implemented.
+List, detail, create, and patch responses use the full record shape: the draft
+fields above plus `id`, opaque `version`, `enabled`, `state: "active" | "paused"`,
+and `nextCheckAt: string | null`; records include the resolved effective
+`thinking` level. Omitted patch fields are retained; `doneWhen: null` clears
+that rule and `thinking: null` resets to the catalog default. Start, run, and
+pause of active schedules remain unavailable until the protected-to-Gateway
+trust boundary reaches the native Cron owner.
 
 The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
 and display the resulting sources. It does not have a search provider;

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { sql } from "kysely";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely as getTypedSqliteKysely,
 } from "../infra/kysely-sync.js";
+import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import {
   deferSqliteWorkerCommitReceipt,
   requestSqliteWorkerOperationAdmission,
@@ -13,6 +15,10 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
+import type {
+  ProtectedAutomationDatabase,
+  ProtectedAutomationStorageUsage,
+} from "./protected-automations.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -476,6 +482,58 @@ export function removeProtectedAdmission(
           .set({ status: "removed", revision, updated_at: input.now })
           .where("id", "=", admission.id),
       );
+      // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
+      const profileId = admission.profile_id;
+      let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
+      if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
+        retiredAutomations = executeSqliteQuerySync(
+          db,
+          getTypedSqliteKysely<ProtectedAutomationDatabase>(db)
+            .deleteFrom("protected_automations")
+            .where("creator_profile_id", "=", profileId)
+            .where("central_owner_profile_id", "=", profileId)
+            .where("visibility", "=", "private")
+            .where("enabled", "=", 0)
+            .where((expression) =>
+              expression.exists(
+                expression
+                  .selectFrom("protected_automation_members")
+                  .select("automation_id")
+                  .whereRef("automation_id", "=", "protected_automations.id")
+                  .where("profile_id", "=", profileId)
+                  .where("role", "=", "owner"),
+              ),
+            )
+            .where((expression) =>
+              expression.not(
+                expression.exists(
+                  expression
+                    .selectFrom("protected_automation_members")
+                    .select("automation_id")
+                    .whereRef("automation_id", "=", "protected_automations.id")
+                    .where("profile_id", "!=", profileId)
+                    .where("role", "=", "owner"),
+                ),
+              ),
+            )
+            .where((expression) =>
+              expression.not(
+                expression.exists(
+                  expression
+                    .selectFrom("protected_automation_job_bindings")
+                    .select("automation_id")
+                    .whereRef("automation_id", "=", "protected_automations.id"),
+                ),
+              ),
+            )
+            .returning([
+              "id",
+              "central_owner_profile_id as profileId",
+              /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for deleted definitions. */
+              sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+            ]),
+        ).rows;
+      }
       if (admission.email) {
         executeSqliteQuerySync(
           db,
@@ -505,7 +563,7 @@ export function removeProtectedAdmission(
         revision,
       };
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts: "removed" });
-      deferSqliteWorkerCommitReceipt(db, result);
+      deferSqliteWorkerCommitReceipt(db, { ...result, retiredAutomations });
       return result;
     },
     { path: database.path },

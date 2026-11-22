@@ -542,7 +542,9 @@ void test("artifact pages expose only owned saved content through guarded reads"
     turns: {
       models: [],
       async run() {},
-      async steer() {},
+      async steer() {
+        assert.fail("This fixture does not steer turns.");
+      },
     },
   });
   t.after(() => app.shutdown());

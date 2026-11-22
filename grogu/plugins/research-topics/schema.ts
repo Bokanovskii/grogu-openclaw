@@ -402,24 +402,33 @@ export function parseRequest(value: unknown): Request {
   return value;
 }
 
-export const toolDescription =
+const sharedToolIntroduction =
   "Internal shared Research Topics owner; no routine ledger narration to the user. " +
   "lookup (default 8, max 20) finds bounded candidates by title/aliases/summary; category only filters lookup/due by tag, so label topics with tags. " +
   "Review semantic equivalence in this turn, get the full brief, then add/update/merge. " +
   "add needs a new stable slug id and title. update patches supplied fields inside changes and requires expectedRevision. " +
   "notes is a short lookup summary (max 2,000 characters); each write replaces it, so never append history; details and history go in brief. On conflict reread " +
-  "and reconcile, never blindly replay. merge also requires sourceRevision and reconciled title/brief; " +
+  "and reconcile, never blindly replay. merge also requires sourceRevision and reconciled title/brief; ";
+
+const personalSessionsDescription =
   "it unions links and returns affectedSessionRefs for you to update those sessions. New sessionRefs " +
   "must be your current conversation; existing refs survive updates/merges. To receive updates on an existing " +
   "topic your conversation did not add, call link_session with only id after you contribute to it (add already " +
   "links you; scheduled runs cannot link). sourceIds are " +
   "provider budgets, not conversations. No claims: overlapping research is allowed. " +
-  "Intake runs bounded new-evidence passes; only the research worker advances old topics. " +
+  "Intake runs bounded new-evidence passes; only the research worker advances old topics. ";
+
+const sharedSchedulingDescription =
   "due orders least-served first, then priority and oldest waiting. record_check uses expectedRevision " +
   "and a unique operationId per completed unit; it preserves content and keeps unfinished work ready. " +
   "Monitoring is workState monitoring with an actual monitoringReason and nextDueAtMs in the same call; other states take neither, and there is no default timer. " +
   "Before each fetch use source_attempt; its id is the provider from source_list, never a topic id. If denied do not fetch. Record its attemptId via source_result " +
-  "(ok/throttled/error/skipped, retryAfterMinutes for Retry-After). Saved-info synthesis needs no fetch. " +
+  "(ok/throttled/error/skipped, retryAfterMinutes for Retry-After). Saved-info synthesis needs no fetch. ";
+
+export const toolDescription =
+  sharedToolIntroduction +
+  personalSessionsDescription +
+  sharedSchedulingDescription +
   "complete freezes the topic with a reason and resolves configured Main itself. " +
   "For an explicit owner correction, reopen with expectedRevision, then update the returned revision; " +
   "this invalidates the old completion. Ordinary producer updates must not reopen automatically. " +
@@ -432,3 +441,19 @@ export const toolDescription =
   "native history; no model-supplied delivery claim is accepted. finalize never deletes unconfirmed destinations. forget takes only id and expectedRevision; it is immediate permanent " +
   "deletion only for an explicit owner request, never a completion-verification workaround. " +
   "No archives, source fetches, or per-topic jobs are created.";
+
+export const memberToolDescription =
+  sharedToolIntroduction +
+  "it unions links and returns affectedSessionRefs. New sessionRefs must be your current conversation; " +
+  "existing refs survive updates/merges. Scheduled runs cannot link. sourceIds are provider budgets, not conversations. " +
+  "No claims: overlapping research is allowed. " +
+  sharedSchedulingDescription +
+  "Member delivery requires host-provided authorized operations. Do not assume inbox delivery is available. " +
+  "For an inbox-only host, deliver only to the owner's protected inbox; never send updates to conversations, " +
+  "never send texts or use the message tool for member research. " +
+  "Do not claim delivery without native evidence. Complete only when the host can support the required destinations; " +
+  "finalize only after every destination has a native receipt. If delivery is unavailable, report the blocker " +
+  "and leave the topic active or pending. For an explicit owner correction, reopen with expectedRevision, " +
+  "then update the returned revision; this invalidates the old completion. Ordinary producer updates must not reopen automatically. " +
+  "forget takes only id and expectedRevision; it is immediate permanent deletion only for an explicit owner request, " +
+  "never a completion-verification workaround. No archives, source fetches, or per-topic jobs are created.";

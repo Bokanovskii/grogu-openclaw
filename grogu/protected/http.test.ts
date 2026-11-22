@@ -838,7 +838,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   );
   assert.equal(groguV1.examplePrompts.length, 4);
   assert.ok(groguV1.tools.includes("web_search"));
-  assert.ok(!groguV1.tools.includes("sessions_search"));
+  assert.ok(groguV1.tools.includes("sessions_search"));
   for (const agent of catalogV1.agents) {
     assert.deepEqual(agent.tools, groguV1.tools, "every agent shares one tool surface");
   }
@@ -1934,6 +1934,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                             }),
                           },
                         },
+                        {
+                          index: 3,
+                          id: "callsessionssearch",
+                          type: "function",
+                          function: {
+                            name: "sessions_search",
+                            arguments: JSON.stringify({ query: "transcript marker" }),
+                          },
+                        },
                       ],
                     },
                     null,
@@ -2226,6 +2235,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const sharedTools = [
     "sessions_history",
     "sessions_list",
+    "sessions_search",
     "sessions_send",
     "show_widget",
     "web_fetch",
@@ -2588,7 +2598,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const foreignChat = (await foreignCreated.json()).chat;
   const foreignSeeded = await foreignCall(`/chats/${foreignChat.id}/turns`, {
     method: "POST",
-    body: '{"provider":"sparky","text":"Foreign profile private transcript marker"}',
+    body: '{"provider":"sparky","text":"Transcript marker private to the foreign profile"}',
     headers: { "x-grogu-profile": foreignMe.user.id },
   });
   assert.equal(foreignSeeded.status, 200);
@@ -2596,10 +2606,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const foreignTranscript = await foreignCall(`/chats/${foreignChat.id}`);
   assert.match(
     JSON.stringify(await foreignTranscript.json()),
-    /Foreign profile private transcript marker/,
+    /Transcript marker private to the foreign profile/,
   );
   const foreignRequest = seen.find(({ body }) =>
-    JSON.stringify(body.messages?.slice(1)).includes("Foreign profile private transcript marker"),
+    JSON.stringify(body.messages?.slice(1)).includes(
+      "Transcript marker private to the foreign profile",
+    ),
   );
   assert.equal(
     sharedPrefix(foreignRequest),
@@ -2615,7 +2627,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   ).json();
   const seeded = await reopened(`/chats/${permitted.id}/turns`, {
     method: "POST",
-    body: '{"provider":"sparky","text":"Visible same-profile transcript marker"}',
+    body: '{"provider":"sparky","text":"Transcript marker visible to this profile"}',
     headers: { "x-grogu-profile": user.id },
   });
   assert.equal(seeded.status, 200);
@@ -2642,20 +2654,29 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const sessionToolMessages = sessionHistoryRequests
     .at(-1)
     ?.body.messages?.filter(
-      (message) =>
+      (message): message is { role: "tool" } =>
         typeof message === "object" &&
         message !== null &&
         "role" in message &&
         message.role === "tool",
     );
   const sessionHistoryOutput = JSON.stringify(sessionToolMessages ?? []);
-  assert.match(sessionHistoryOutput, /Visible same-profile transcript marker/);
-  assert.doesNotMatch(sessionHistoryOutput, /Foreign profile private transcript marker/);
+  assert.match(sessionHistoryOutput, /Transcript marker visible to this profile/);
+  assert.doesNotMatch(sessionHistoryOutput, /Transcript marker private to the foreign profile/);
   assert.ok(
     sessionHistoryOutput.includes(permitted.id),
     "session list includes the permitted chat",
   );
   assert.ok(!sessionHistoryOutput.includes(foreignChat.id), "session list omits the foreign chat");
+  const searchMessage = sessionToolMessages?.find(
+    (message) => "tool_call_id" in message && message.tool_call_id === "callsessionssearch",
+  );
+  assert.ok(searchMessage, "native encrypted search returns its result to the model");
+  const searchOutput = JSON.stringify(searchMessage);
+  assert.match(searchOutput, /Transcript marker visible to this profile/);
+  assert.ok(searchOutput.includes(permitted.id), "search identifies the permitted chat");
+  assert.doesNotMatch(searchOutput, /Transcript marker private to the foreign profile/);
+  assert.ok(!searchOutput.includes(foreignChat.id), "search omits the foreign chat");
   for (const id of [permitted.id, coordinator.id]) {
     const current = await (await reopened(`/chats/${id}`)).json();
     const removed = await reopened(`/chats/${id}`, {

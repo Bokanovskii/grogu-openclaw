@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,10 +11,12 @@ import type { DB } from "../../state/openclaw-agent-db.generated.js";
 import { runOpenClawAgentWriteTransaction } from "../../state/openclaw-agent-db.js";
 import * as agentExecution from "../../state/openclaw-agent-execution.js";
 import { runOpenClawAgentWorkerWrite } from "../../state/openclaw-agent-write-admission.js";
+import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db-cache.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { replaceTranscriptEvents } from "./session-accessor.sqlite-transcript-write.js";
 import { captureSessionStoreReadCandidate } from "./session-store-read-candidates.js";
 import * as projectionWriter from "./session-transcript-projection-writer.js";
+import { closeSessionTranscriptReconcileWorkerPool } from "./session-transcript-reconcile-pool.js";
 import {
   isSessionTranscriptIndexReconcileRunning,
   reconcileSessionTranscriptIndexes,
@@ -29,6 +32,162 @@ import {
   withSessionHistoryWorkerReadCandidates,
 } from "./session-transcript-worker-resources.js";
 import { retainSessionHistoryWorkerDatabase } from "./session-transcript-worker-runtime.js";
+
+async function withEncryptedSearchDatabase(
+  run: (scope: { agentId: string; env: NodeJS.ProcessEnv; storePath: string }) => Promise<void>,
+) {
+  // Reader and reconciliation workers capture the process-wide key. Retire
+  // both before changing the fixture key, and before its file is removed.
+  await closeSessionTranscriptReconcileWorkerPool();
+  await closeOpenClawStateDatabaseAsync();
+  await withOpenClawTestState(
+    { scenario: "minimal", env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined } },
+    async (state) => {
+      const keyFile = state.path("storage-key");
+      fs.writeFileSync(keyFile, randomBytes(32), { mode: 0o600 });
+      state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyFile;
+      state.applyEnv();
+      const scope = {
+        agentId: "main",
+        env: { ...state.env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyFile },
+        storePath: state.statePath("encrypted-search.sqlite"),
+      };
+      try {
+        await run(scope);
+      } finally {
+        await closeSessionTranscriptReconcileWorkerPool();
+        await closeOpenClawAgentDatabaseByPathAsync(scope.storePath, scope.agentId);
+        await closeOpenClawStateDatabaseAsync();
+      }
+    },
+  );
+}
+
+it("searches encrypted member text in its reader worker without a plaintext index", async () => {
+  await withEncryptedSearchDatabase(async (scope) => {
+    const { storePath } = scope;
+    for (const member of ["selected", "foreign"]) {
+      const sessionKey = `agent:main:${member}`;
+      await replaceTranscriptEvents({ ...scope, sessionKey, sessionId: member }, [
+        { type: "session", id: member, version: 3 },
+        {
+          type: "message",
+          id: `${member}-message`,
+          parentId: null,
+          timestamp: 1,
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "Café coastal itinerary" }],
+          },
+        },
+        {
+          type: "message",
+          id: `${member}-abandoned`,
+          parentId: `${member}-message`,
+          timestamp: 2,
+          message: { role: "user", content: "Café coastal itinerary abandoned" },
+        },
+        {
+          type: "message",
+          id: `${member}-reasoning`,
+          parentId: `${member}-message`,
+          timestamp: 3,
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "Private reasoning needle" }],
+          },
+        },
+      ]);
+    }
+    const database = { agentId: scope.agentId, env: scope.env, path: scope.storePath };
+    await reconcileSessionTranscriptIndexes(database);
+    await waitForSessionTranscriptIndexReconcile(database);
+    const request = {
+      ...scope,
+      sessionKeys: ["agent:main:selected"],
+      query: "cafe coastal",
+      role: "user" as const,
+      limit: 1,
+    };
+    const hostSql = observeHostDataSql();
+    try {
+      expect(await searchSessionTranscripts(request)).toMatchObject({
+        hits: [
+          {
+            sessionKey: "agent:main:selected",
+            sessionId: "selected",
+            messageId: "selected-message",
+            role: "user",
+            snippet: "Café coastal itinerary",
+          },
+        ],
+        indexing: false,
+        truncated: false,
+      });
+      expect((await searchSessionTranscripts({ ...request, query: "coas" })).hits).toEqual([]);
+      expect(
+        (
+          await searchSessionTranscripts({
+            ...request,
+            query: "coas",
+            match: "prefix",
+          })
+        ).hits,
+      ).toHaveLength(1);
+      expect(
+        (
+          await searchSessionTranscripts({
+            ...request,
+            query: "reasoning",
+            role: "assistant",
+          })
+        ).hits,
+      ).toEqual([]);
+      expect(hostSql.queries).toEqual([]);
+    } finally {
+      hostSql.restore();
+    }
+    await closeOpenClawAgentDatabaseByPathAsync(storePath, "main");
+    expect(fs.readFileSync(storePath).includes(Buffer.from("Café coastal itinerary"))).toBe(false);
+  });
+});
+
+it.each([
+  { bound: "rows", count: 4_000, bytes: 8 },
+  { bound: "bytes", count: 4, bytes: 1024 * 1024 },
+])("reports an incomplete encrypted scan at its $bound limit", async ({ count, bytes }) => {
+  await withEncryptedSearchDatabase(async (scope) => {
+    const sessionKey = "agent:main:bounded";
+    const padding = "padding ".repeat(bytes / 8);
+    await replaceTranscriptEvents({ ...scope, sessionKey, sessionId: "bounded" }, [
+      { type: "session", id: "bounded", version: 3 },
+      {
+        type: "message",
+        id: "earlier",
+        parentId: null,
+        timestamp: 1,
+        message: { role: "user", content: "Earlier needle" },
+      },
+      ...Array.from({ length: count }, (_, index) => ({
+        type: "message",
+        id: `padding-${index}`,
+        parentId: index === 0 ? "earlier" : `padding-${index - 1}`,
+        timestamp: index + 2,
+        message: { role: "user", content: padding },
+      })),
+    ]);
+    const database = { agentId: scope.agentId, env: scope.env, path: scope.storePath };
+    await reconcileSessionTranscriptIndexes(database);
+    await waitForSessionTranscriptIndexReconcile(database);
+    expect(
+      await searchSessionTranscripts({
+        ...scope,
+        sessionKeys: [sessionKey],
+        query: "needle",
+      }),
+    ).toMatchObject({ hits: [], truncated: true, indexing: false });
+  });
+});
 
 it("reenters the projection writer from a cold search's retained read admission", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {

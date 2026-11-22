@@ -70,7 +70,7 @@ and the history is restored. Search does not restore archived history automatica
 
 ## Index lifecycle
 
-OpenClaw stores a full-text index next to the transcript rows in each agent's SQLite database.
+For unencrypted stores, OpenClaw stores a full-text index next to the transcript rows in each agent's SQLite database.
 New user and assistant messages are indexed in the same transaction that persists them, so the
 index never lags live conversations; tool results, reasoning blocks, and images are excluded.
 Only the transcript's active branch is searchable.
@@ -81,6 +81,17 @@ with the next search. A response with `indexing: true` can therefore be incomple
 indexing finishes. Deleting a session removes its index entries in the same transaction.
 
 Search uses SQLite's Unicode word tokenizer with diacritic removal.
+
+Encrypted stores do not save a plaintext index. Their existing reader worker
+decrypts at most 4,000 recent active message rows and 4 MiB of transcript payloads
+per search, after applying the session scope. Matching ignores case and accents,
+excludes tool results and reasoning, and supports the final-word prefix option.
+Matches return newest first with `score: 0`, rather than full-text relevance scores.
+
+If an encrypted scan reaches either limit, it returns `truncated: true`, even
+when it finds no matches. Older matches can be missing. Narrow to one session
+or use `sessions_history` to read older text. Search still excludes cold archives
+and dirty branches while the existing projection owner reconciles them.
 
 ## Session search vs. memory search
 

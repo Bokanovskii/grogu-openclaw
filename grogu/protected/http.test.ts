@@ -2474,6 +2474,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       ["assistant", "travel", "Committed synthetic answer."],
     ],
   );
+  assert.equal(routedRead.chat.messages[1]?.status, "complete", "a routing reply reloads complete");
   const { chat: selfRoutedChat } = await (
     await reopened("/chats", { method: "POST", body: "{}" })
   ).json();

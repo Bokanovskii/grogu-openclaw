@@ -2749,6 +2749,47 @@ CREATE INDEX IF NOT EXISTS idx_protected_usage_daily_day ON protected_usage_dail
 CREATE INDEX IF NOT EXISTS idx_protected_usage_runs_day
   ON protected_usage_runs(day);
 
+CREATE TABLE IF NOT EXISTS protected_shared_resources (
+  id TEXT NOT NULL PRIMARY KEY CHECK (
+    length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+    AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+    AND id NOT GLOB '*[^0-9a-f-]*' AND substr(id, 15, 1) = '4'
+    AND substr(id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  kind TEXT NOT NULL CHECK (kind IN ('chat', 'file', 'page')),
+  route_id TEXT NOT NULL CHECK (length(route_id) BETWEEN 1 AND 256),
+  created_at INTEGER NOT NULL,
+  UNIQUE (id, owner_profile_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_shared_resources_route
+  ON protected_shared_resources(kind, route_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_protected_shared_resources_owner
+  ON protected_shared_resources(owner_profile_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS protected_shared_grants (
+  id TEXT NOT NULL PRIMARY KEY CHECK (
+    length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+    AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+    AND id NOT GLOB '*[^0-9a-f-]*' AND substr(id, 15, 1) = '4'
+    AND substr(id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  resource_id TEXT NOT NULL,
+  owner_profile_id TEXT NOT NULL,
+  recipient_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  permission TEXT NOT NULL CHECK (permission = 'read'),
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (resource_id, owner_profile_id)
+    REFERENCES protected_shared_resources(id, owner_profile_id) ON DELETE CASCADE,
+  UNIQUE (resource_id, recipient_profile_id),
+  CHECK (owner_profile_id <> recipient_profile_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_shared_grants_owner
+  ON protected_shared_grants(owner_profile_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_protected_shared_grants_recipient
+  ON protected_shared_grants(recipient_profile_id, created_at, id);
+
 CREATE TABLE IF NOT EXISTS protected_automations (
   id TEXT NOT NULL PRIMARY KEY CHECK (
     length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'

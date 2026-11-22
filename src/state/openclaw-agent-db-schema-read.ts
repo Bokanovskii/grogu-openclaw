@@ -100,6 +100,22 @@ export function assertSupportedAgentSchemaVersion(db: DatabaseSync, pathname: st
   return userVersion;
 }
 
+/** Require an existing encrypted agent schema, without migrating plaintext state. */
+export function assertRequiredProtectedAgentStorage(db: DatabaseSync, pathname: string): void {
+  if (!hasSqliteStorageValueEncryption(db)) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} requires its storage key; restore the key before starting the service.`,
+    );
+  }
+  if (
+    assertSupportedAgentSchemaVersion(db, pathname) !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
+  ) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} is unmarked or unencrypted; stop the service and run provision-storage-key before starting it.`,
+    );
+  }
+}
+
 /** Readers may pass their immediate check; writers reread the version after integrity work. */
 export function assertCanonicalAgentPersistenceVersion(
   db: DatabaseSync,

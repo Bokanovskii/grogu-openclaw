@@ -86,12 +86,8 @@ async function main() {
       maxBytes: protectedMaxFileBytes,
       encryption: storageEncryption,
     });
-    const { runOpenClawAgentWriteTransaction } =
-      await import("../../src/state/openclaw-agent-db.js");
-    runOpenClawAgentWriteTransaction(() => undefined, {
-      agentId: "protected",
-      env: process.env,
-    });
+    const { admitProtectedPhysicalAgentStorage } = await import("./agent-storage.js");
+    admitProtectedPhysicalAgentStorage(() => stateOwner.assertCurrent());
     await migrateAuthorizedUserFiles({
       usersRoot,
       assertCurrent: () => stateOwner.assertCurrent(),

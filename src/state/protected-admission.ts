@@ -4,6 +4,7 @@ import {
   executeSqliteQuerySync,
   getNodeSqliteKysely as getTypedSqliteKysely,
 } from "../infra/kysely-sync.js";
+import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import {
   deferSqliteWorkerCommitReceipt,
   requestSqliteWorkerOperationAdmission,
@@ -13,6 +14,7 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
+import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -476,6 +478,51 @@ export function removeProtectedAdmission(
           .set({ status: "removed", revision, updated_at: input.now })
           .where("id", "=", admission.id),
       );
+      // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
+      const profileId = admission.profile_id;
+      if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
+        executeSqliteQuerySync(
+          db,
+          getTypedSqliteKysely<ProtectedAutomationDatabase>(db)
+            .deleteFrom("protected_automations")
+            .where("creator_profile_id", "=", profileId)
+            .where("central_owner_profile_id", "=", profileId)
+            .where("visibility", "=", "private")
+            .where("enabled", "=", 0)
+            .where((expression) =>
+              expression.exists(
+                expression
+                  .selectFrom("protected_automation_members")
+                  .select("automation_id")
+                  .whereRef("automation_id", "=", "protected_automations.id")
+                  .where("profile_id", "=", profileId)
+                  .where("role", "=", "owner"),
+              ),
+            )
+            .where((expression) =>
+              expression.not(
+                expression.exists(
+                  expression
+                    .selectFrom("protected_automation_members")
+                    .select("automation_id")
+                    .whereRef("automation_id", "=", "protected_automations.id")
+                    .where("profile_id", "!=", profileId)
+                    .where("role", "=", "owner"),
+                ),
+              ),
+            )
+            .where((expression) =>
+              expression.not(
+                expression.exists(
+                  expression
+                    .selectFrom("protected_automation_job_bindings")
+                    .select("automation_id")
+                    .whereRef("automation_id", "=", "protected_automations.id"),
+                ),
+              ),
+            ),
+        );
+      }
       if (admission.email) {
         executeSqliteQuerySync(
           db,

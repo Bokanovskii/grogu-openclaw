@@ -20,6 +20,7 @@ import {
 } from "@openclaw/gateway-protocol/protected";
 import { Value } from "typebox/value";
 import { FailoverError } from "../../src/agents/failover/error.js";
+import { createCanvasDocument } from "../../src/canvas/documents.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
@@ -319,6 +320,146 @@ void test("deleting another member's chat frees quota for a running turn", async
   proceed.resolve();
   await written.promise;
   await running.text();
+});
+
+void test("artifact pages expose only owned saved content through guarded reads", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-artifacts-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    encryption,
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [],
+      async run() {},
+      async steer() {},
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", user);
+    headers.set("content-type", "application/json");
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const chatResponse = await call("alice", "/chats", {
+    method: "POST",
+    body: '{"title":"Synthetic chat"}',
+  });
+  assert.equal(chatResponse.status, 200, await chatResponse.clone().text());
+  const { chat } = await chatResponse.json();
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: alice.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  t.after(() => files.dispose());
+  const widget = await createCanvasDocument(
+    { title: "Synthetic widget", html: "<p>widget content</p>" },
+    { storage: { files, directory: `chats/${chat.id}/widgets` } },
+  );
+  await files.write(`chats/${chat.id}/widgets/cv_${"a".repeat(32)}/index.html`, "draft");
+  const generatedName = `artifact-${randomUUID()}-portugal-itinerary.html`;
+  await files.write(`chats/${chat.id}/artifacts/${generatedName}`, "<p>generated content</p>");
+  for (let index = 0; index < 100; index++) {
+    await files.write(`chats/${chat.id}/web-fetch/file-${String(index).padStart(3, "0")}.txt`, "x");
+  }
+  const profile = { "x-grogu-profile": alice.id };
+  assert.equal((await call("alice", "/artifacts")).status, 403);
+  assert.equal((await call("bob", "/artifacts", { headers: profile })).status, 403);
+  assert.equal(
+    (await call("alice", "/artifacts?cursor=invalid", { headers: profile })).status,
+    400,
+  );
+  const first = await (await call("alice", "/artifacts", { headers: profile })).json();
+  assert.equal(first.artifacts.length, 100);
+  assert.ok(first.nextCursor);
+  const second = await (
+    await call("alice", `/artifacts?cursor=${first.nextCursor}`, { headers: profile })
+  ).json();
+  const all = [...first.artifacts, ...second.artifacts];
+  assert.equal(all.length, 102);
+  assert.equal(second.nextCursor, undefined);
+  assert.equal(new Set(all.map((item: { id: string }) => item.id)).size, 102);
+  assert.ok(
+    all.every(
+      (item: { chatId: string; chatTitle: string; updatedAt: number }) =>
+        item.chatId === chat.id &&
+        item.chatTitle === chat.title &&
+        item.updatedAt === chat.updatedAt,
+    ),
+  );
+  assert.ok(
+    all.some(
+      (item: { kind: string; id: string; title?: string }) =>
+        item.kind === "widget" && item.id === widget.id && item.title === "Synthetic widget",
+    ),
+  );
+  const generatedId = `generated~${chat.id}~${generatedName}`;
+  assert.ok(
+    all.some(
+      (item: { kind: string; id: string; name?: string }) =>
+        item.kind === "file" && item.id === generatedId && item.name === "portugal itinerary.html",
+    ),
+  );
+  assert.deepEqual(
+    (
+      await (
+        await call("bob", "/artifacts", {
+          headers: { "x-grogu-profile": bob.id },
+        })
+      ).json()
+    ).artifacts,
+    [],
+  );
+  assert.equal((await call("bob", `/files/${generatedId}`)).status, 404);
+  assert.equal((await call("bob", `/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
+  assert.equal(
+    (
+      await call("alice", `/files/${generatedId}`, {
+        headers: { "x-grogu-profile": bob.id },
+      })
+    ).status,
+    403,
+  );
+  const download = await call("alice", `/files/${generatedId}`, { headers: profile });
+  assert.equal(download.headers.get("content-type"), "application/octet-stream");
+  assert.equal(await download.text(), "<p>generated content</p>");
+  assert.match(
+    (
+      await (
+        await call("alice", `/chats/${chat.id}/widgets/${widget.id}`, {
+          headers: profile,
+        })
+      ).json()
+    ).html,
+    /widget content/,
+  );
 });
 
 void test("fixture blocks egress from work that outlives its test", () => {

@@ -150,6 +150,20 @@ earlier visible tool-call fragments in the same user turn. A child result or
 a later user turn does not complete unfinished parent output. Saved errors
 and interrupted replies keep their failure or interruption status.
 
+`GET /api/protected/v1/artifacts` lists saved widgets, fetched files, and
+generated files for the signed-in member. Send the current profile ID in
+`X-Grogu-Profile`. Each page contains at most 100 entries and an optional
+`nextCursor`. Pass that value as `cursor` to read the next page. Entries sort by
+chat update time, newest first, then chat ID, kind, and artifact ID. The
+`updatedAt` value is the chat update time, not the artifact creation time.
+Concurrent chat changes can change the order between pages.
+
+File entries use `id`, `name`, and `size`. Widget entries use `id` and `title`.
+Both include `kind`, `chatId`, `chatTitle`, and `updatedAt`. Read files through
+`GET /api/protected/v1/files/:id` and widgets through
+`GET /api/protected/v1/chats/:chatId/widgets/:id`. These routes check chat
+ownership again. File responses are downloads, not HTML pages.
+
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
 and overhead charges as the quota. `usedBytes` also counts saved automation

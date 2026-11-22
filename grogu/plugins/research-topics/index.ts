@@ -3,7 +3,13 @@ import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin
 import { isCronSessionKey, isIncognitoSessionKey } from "openclaw/plugin-sdk/routing";
 import { createDelivery } from "./delivery.js";
 import { isResearchMemberBinding, ResearchLedger } from "./ledger.js";
-import { type LedgerOperations, parseRequest, toolSchema, toolDescription } from "./schema.js";
+import {
+  type LedgerOperations,
+  memberToolDescription,
+  parseRequest,
+  toolSchema,
+  toolDescription,
+} from "./schema.js";
 
 export default definePluginEntry({
   id: "research-topics",
@@ -161,7 +167,7 @@ export default definePluginEntry({
           return {
             name: "research_topics",
             label: "Research topics",
-            description: toolDescription,
+            description: member ? memberToolDescription : toolDescription,
             parameters: toolSchema,
             execute: async (_callId, value) => {
               let request = parseRequest(value);

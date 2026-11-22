@@ -61,6 +61,7 @@ import {
   createUserProfileWriteOperation,
   linkEmail,
   mergeProfiles,
+  clearAvatar,
   setAvatar,
   setDisplayName,
   setUserProfileRole,
@@ -191,6 +192,14 @@ const userProfileWriteOperations = {
         ? { ok: true as const, value: { profile: result.value, display: display() } }
         : result;
     },
+    (input) => input.profileId,
+  ),
+  "userProfiles.clearAvatar": createUserProfileWriteOperation(
+    "userProfiles.clearAvatar",
+    (input: { profileId: string }, owned, display) => ({
+      profile: clearAvatar(input.profileId, owned),
+      display: display(),
+    }),
     (input) => input.profileId,
   ),
 } satisfies WorkerOperationHandlers;
@@ -354,6 +363,7 @@ export const userProfileOperations = {
       preferenceKey: string;
       after: string | null;
       limit: number;
+      profileId?: string;
     },
     { open, stateOptions },
   ) => {
@@ -394,6 +404,9 @@ export const userProfileOperations = {
         .limit(input.limit + 1);
       if (input.after !== null) {
         query = query.where("p.id", ">", input.after);
+      }
+      if (input.profileId !== undefined) {
+        query = query.where("p.id", "=", input.profileId);
       }
       const rows = executeSqliteQuerySync(database.db, query).rows;
       const page = rows.slice(0, input.limit);

@@ -149,3 +149,109 @@ void test("result retirement during measurement reconciles a stale snapshot with
     turn.release();
   }
 });
+
+void test("committed ownership transfer preserves global usage and keeps an over-quota successor's data", async (t) => {
+  const previous = { id: "run:transferred", profileId: "departing", bytes: 8192 };
+  const current = { ...previous, profileId: "successor" };
+  const existing = { id: "run:existing", profileId: "successor", bytes: 8192 };
+  let entries = [previous, existing];
+  const admission = await createFixture(t, 24_576, async () => entries, 8192);
+  const holder = await admission("holder", () => {}, "stored-data");
+  try {
+    entries = [current, existing];
+    admission.transferredStoredData([{ previous, current }]);
+    admission.transferredStoredData([{ previous, current }]);
+    admission.retiredStoredData([{ removed: previous }]);
+
+    const available = await admission.reserveStoredData("departing", () => {}, 8192);
+    await assert.rejects(
+      admission.reserveStoredData("other", () => {}, 1),
+      {
+        code: "quota_exceeded",
+      },
+    );
+    available.release();
+    await assert.rejects(
+      admission.reserveStoredData("successor", () => {}, 1),
+      {
+        code: "quota_exceeded",
+      },
+    );
+  } finally {
+    holder.release();
+  }
+});
+
+void test("ownership transfer reconciles both sides of a measurement race and later retirement", async (t) => {
+  const previous = { id: "run:transferred", profileId: "departing", bytes: 8192 };
+  const current = { ...previous, profileId: "successor" };
+  for (const snapshot of [previous, current]) {
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const admission = await createFixture(
+      t,
+      16_384,
+      async () => {
+        started.resolve();
+        await finish.promise;
+        return [snapshot];
+      },
+      8192,
+    );
+    const pendingHolder = admission("holder", () => {}, "stored-data");
+    await started.promise;
+    admission.transferredStoredData([{ previous, current }]);
+    admission.retiredStoredData([{ removed: current, retained: { ...current, bytes: 4096 } }]);
+    finish.resolve();
+    const holder = await pendingHolder;
+    try {
+      const available = await admission.reserveStoredData("departing", () => {}, 8192);
+      available.release();
+      const successor = await admission.reserveStoredData("successor", () => {}, 4096);
+      await assert.rejects(
+        admission.reserveStoredData("successor", () => {}, 1),
+        {
+          code: "quota_exceeded",
+        },
+      );
+      successor.release();
+    } finally {
+      holder.release();
+    }
+  }
+});
+
+void test("late old-owner retirement during a scan cannot credit transferred data", async (t) => {
+  const previous = { id: "run:transferred", profileId: "departing", bytes: 8192 };
+  const current = { ...previous, profileId: "successor" };
+  const started = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const admission = await createFixture(
+    t,
+    16_384,
+    async () => {
+      started.resolve();
+      await finish.promise;
+      return [previous];
+    },
+    8192,
+  );
+  const pendingHolder = admission("holder", () => {}, "stored-data");
+  await started.promise;
+  admission.transferredStoredData([{ previous, current }]);
+  admission.retiredStoredData([{ removed: previous }]);
+  finish.resolve();
+  const holder = await pendingHolder;
+  try {
+    const available = await admission.reserveStoredData("departing", () => {}, 8192);
+    await assert.rejects(
+      admission.reserveStoredData("other", () => {}, 1),
+      {
+        code: "quota_exceeded",
+      },
+    );
+    available.release();
+  } finally {
+    holder.release();
+  }
+});

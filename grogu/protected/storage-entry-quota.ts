@@ -1,5 +1,6 @@
 export type StoredDataEntry = { id: string; profileId: string; bytes: number };
 export type StoredDataRetirement = { removed: StoredDataEntry; retained?: StoredDataEntry };
+export type StoredDataTransfer = { previous: StoredDataEntry; current: StoredDataEntry };
 export type StoredDataReservation = {
   settle(result: { created: boolean; entries: readonly StoredDataEntry[] }): void;
   // Only release after a proven abort. An uncertain commit keeps its reservation.
@@ -53,6 +54,57 @@ export function retireStoredData(account: StoredDataLedger, change: StoredDataRe
     account.storedEntries.set(key, retained);
   } else {
     account.storedEntries.delete(key);
+  }
+}
+
+export function storedDataTransferKey(change: StoredDataTransfer): string {
+  const previousKey = storedDataEntryKey(change.previous);
+  const currentKey = storedDataEntryKey(change.current);
+  if (
+    previousKey === currentKey ||
+    change.previous.id !== change.current.id ||
+    change.previous.bytes !== change.current.bytes
+  ) {
+    throw new Error("Stored data transfer must change only the accounting owner.");
+  }
+  return previousKey;
+}
+
+// The removal owner has already fenced native writers and settled their quota reservations.
+export function transferStoredData(account: StoredDataLedger, change: StoredDataTransfer): void {
+  const previousKey = storedDataTransferKey(change);
+  const currentKey = storedDataEntryKey(change.current);
+  const previous = account.storedEntries.get(previousKey);
+  const current = account.storedEntries.get(currentKey);
+  if (previous && current) {
+    throw new Error("Stored data transfer found duplicate accounting owners.");
+  }
+  const retained = account.retiredStoredEntries.has(currentKey)
+    ? account.retiredStoredEntries.get(currentKey)
+    : change.current;
+  if (
+    (previous && previous.bytes !== change.previous.bytes) ||
+    (retained && retained.bytes > change.current.bytes) ||
+    (current && current.bytes !== retained?.bytes)
+  ) {
+    throw new Error("Stored data transfer disagrees with committed accounting.");
+  }
+  account.retiredStoredEntries.set(previousKey, null);
+  if (!previous) {
+    return;
+  }
+  account.storedEntries.delete(previousKey);
+  account.users.set(
+    previous.profileId,
+    (account.users.get(previous.profileId) ?? 0) - previous.bytes,
+  );
+  account.globalBytes -= previous.bytes - (retained?.bytes ?? 0);
+  if (retained) {
+    account.storedEntries.set(currentKey, retained);
+    account.users.set(
+      retained.profileId,
+      (account.users.get(retained.profileId) ?? 0) + retained.bytes,
+    );
   }
 }
 

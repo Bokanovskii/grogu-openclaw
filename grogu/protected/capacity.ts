@@ -15,12 +15,15 @@ import { ProtectedError } from "./errors.js";
 import {
   createStoredDataReservation,
   retireStoredData,
+  storedDataTransferKey,
+  transferStoredData,
   storedDataEntryKey,
   storedDataRetirementKey,
   type StoredDataEntry,
   type StoredDataLedger,
   type StoredDataReservation,
   type StoredDataRetirement,
+  type StoredDataTransfer,
 } from "./storage-entry-quota.js";
 
 const MiB = 1024 * 1024;
@@ -229,7 +232,10 @@ export function createStorageAdmission(
     | Map<string, ProtectedAutomationStorageUsage["entries"][number]>
     | undefined;
   let pendingFileWrites = 0;
-  let retiredStoredDataDuringScan: Map<string, StoredDataRetirement> | undefined;
+  type StoredDataScanChange =
+    | { kind: "retire"; change: StoredDataRetirement }
+    | { kind: "transfer"; change: StoredDataTransfer };
+  let storedDataChangesDuringScan: StoredDataScanChange[] | undefined;
   const fileWriters = new Map<string, Promise<void>>();
   const forgetChat = (account: Ledger, profileId: string, id: string) => {
     for (const [key, entry] of account.baseline) {
@@ -310,8 +316,8 @@ export function createStorageAdmission(
         >();
         deletedDuringScan = deleted;
         deletedAutomationsDuringScan = deletedAutomations;
-        const retiredStoredData = new Map<string, StoredDataRetirement>();
-        retiredStoredDataDuringScan = retiredStoredData;
+        const storedDataChanges: StoredDataScanChange[] = [];
+        storedDataChangesDuringScan = storedDataChanges;
         let finishScan!: () => void;
         scanInProgress = new Promise<void>((resolve) => {
           finishScan = resolve;
@@ -361,14 +367,19 @@ export function createStorageAdmission(
           for (const entry of deletedAutomations.values()) {
             forgetAutomation(account, entry);
           }
-          for (const change of retiredStoredData.values()) {
-            retireStoredData(account, change);
+          // Preserve receipt order so late retirement cannot erase a transferred identity.
+          for (const event of storedDataChanges) {
+            if (event.kind === "retire") {
+              retireStoredData(account, event.change);
+            } else {
+              transferStoredData(account, event.change);
+            }
           }
           ledger = account;
         } finally {
           deletedDuringScan = undefined;
           deletedAutomationsDuringScan = undefined;
-          retiredStoredDataDuringScan = undefined;
+          storedDataChangesDuringScan = undefined;
           scanInProgress = undefined;
           finishScan();
         }
@@ -695,18 +706,20 @@ export function createStorageAdmission(
     },
     retiredStoredData(changes: readonly StoredDataRetirement[]) {
       for (const change of changes) {
-        const key = storedDataRetirementKey(change);
-        const previous = retiredStoredDataDuringScan?.get(key);
-        if (
-          !previous ||
-          (previous.retained &&
-            (!change.retained || change.retained.bytes < previous.retained.bytes))
-        ) {
-          retiredStoredDataDuringScan?.set(key, change);
-        }
+        storedDataRetirementKey(change);
+        storedDataChangesDuringScan?.push({ kind: "retire", change: structuredClone(change) });
         if (ledger) {
           retireStoredData(ledger, change);
         }
+      }
+    },
+    transferredStoredData(changes: readonly StoredDataTransfer[]) {
+      for (const change of changes) {
+        storedDataTransferKey(change);
+        if (ledger) {
+          transferStoredData(ledger, change);
+        }
+        storedDataChangesDuringScan?.push({ kind: "transfer", change: structuredClone(change) });
       }
     },
     deletedChat(profileId: string, id: string) {

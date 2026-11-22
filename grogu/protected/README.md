@@ -63,6 +63,14 @@ OPENCLAW_CONFIG_PATH=/absolute/private/config/openclaw.json \
 node --import ./scripts/tsx.mjs grogu/protected/main.ts /absolute/private/config/protected.json
 ```
 
+For production, run `pnpm build` from the exact source revision being packaged.
+Include the complete generated root `dist/` and workspace package build outputs
+in the runtime archive, alongside that source and the client build. The source
+entrypoint uses the production workers when `dist/` is present; an incomplete
+build stops startup. If `dist/` is absent, source-only development continues to
+use TypeScript workers. Never combine workers and source from different builds.
+The installed launcher does not need to change.
+
 The fixed macOS maintenance helper runs pinned pnpm 12.15.0 through its
 `bin/pnpm.mjs` Node fallback. Its install scripts are disabled, so do not assume
 that the package's top-level native launcher was installed or use the older

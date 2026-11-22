@@ -1,12 +1,17 @@
 // Runtime launchers and the package build share these subprocess locations.
-function runtimeProcessEntrypoint(modulePath: string) {
+function runtimeProcessEntrypoint(modulePath: string): {
+  currentModuleUrl: string;
+  sourceWorkerName: string;
+  distWorkerPath: string;
+  root?: string;
+} {
   return {
     currentModuleUrl: import.meta.url,
     sourceWorkerName: modulePath.startsWith("infra/")
       ? modulePath.slice("infra/".length)
       : `../${modulePath}`,
     distWorkerPath: `${modulePath}.js`,
-  } as const;
+  };
 }
 
 export const SQLITE_READONLY_CHILD_ARG = "--openclaw-sqlite-readonly-child";
@@ -121,3 +126,9 @@ export const runtimeProcessEntrypoints = {
   // executables so they select the same SQLite library the Gateway will run with.
   bunSqliteLibrary: runtimeProcessEntrypoint("infra/bun-sqlite-library"),
 } as const;
+
+export function setRuntimeProcessEntrypointsRoot(root: string | undefined): void {
+  for (const entry of Object.values(runtimeProcessEntrypoints)) {
+    entry.root = root;
+  }
+}

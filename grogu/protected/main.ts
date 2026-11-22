@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { protectedResearchAgent } from "./agents.js";
+import { configureProtectedRuntimeWorkers, ProtectedWorkerBuildError } from "./runtime-workers.js";
 import {
   parseRuntimeSettings,
   protectedOpenClawConfig,
@@ -41,6 +42,7 @@ async function main() {
   ) {
     throw new Error("Protected runtime requires isolated process state and an unprivileged user");
   }
+  await configureProtectedRuntimeWorkers(fileURLToPath(new URL("../..", import.meta.url)));
   const { acquireProtectedStateOwner } = await import("./state-owner.js");
   const stateOwner = await acquireProtectedStateOwner(stateDir);
   if (!stateOwner) {
@@ -205,7 +207,7 @@ async function main() {
 void main().catch((error: unknown) => {
   releaseStateOwner();
   process.stderr.write(
-    `${error instanceof ProtectedStartupError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
+    `${error instanceof ProtectedStartupError || error instanceof ProtectedWorkerBuildError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
   );
   process.exitCode = 1;
 });

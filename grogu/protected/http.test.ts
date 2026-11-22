@@ -1420,9 +1420,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         offlineProvider.resolve();
         await offlineRelease.promise;
       }
+      const finalWidgetTurn = JSON.stringify(body.messages).includes(
+        "Finish this answer with only a widget.",
+      );
       const widgetArguments = JSON.stringify({
         title: "Synthetic widget",
         widget_code: "<p>Scoped widget body</p>",
+        ...(finalWidgetTurn ? { final: true } : {}),
       });
       const researchTurn = JSON.stringify(body.messages).includes(
         "Use concise, evidence-based summaries.",
@@ -1437,7 +1441,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         "Inspect my permitted sessions.",
       );
       const frames =
-        cleanupTurn && !hasToolResponse
+        (cleanupTurn || finalWidgetTurn) && !hasToolResponse
           ? [
               [
                 {
@@ -1879,6 +1883,51 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       "the child receives only its admitted tool surface",
     );
   }
+  const { chat: finalWidgetChat } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const finalWidgetRoute = `/chats/${finalWidgetChat.id}`;
+  const beforeFinalWidget = seen.length;
+  const finalWidgetResponse = await reopened(`${finalWidgetRoute}/turns`, {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "sparky",
+      text: "Finish this answer with only a widget.",
+    }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  const finalWidgetStream = await finalWidgetResponse.text();
+  assert.match(finalWidgetStream, /"type":"widget"/);
+  assert.match(finalWidgetStream, /"type":"done"/, finalWidgetStream);
+  assert.doesNotMatch(finalWidgetStream, /"type":"error"/);
+  assert.match(finalWidgetStream, /"type":"usage"/);
+  assert.equal(seen.length - beforeFinalWidget, 1, "a final widget needs no follow-up model call");
+  const finalWidgetSaved = await (await reopened(finalWidgetRoute)).json();
+  assert.equal(finalWidgetSaved.chat.messages.length, 2);
+  assert.equal(finalWidgetSaved.chat.messages.at(-1).status, "complete");
+  assert.equal(finalWidgetSaved.chat.messages.at(-1).widgets.length, 1);
+  assert.equal(
+    finalWidgetSaved.chat.messages.filter(
+      (message: { status?: string }) => message.status === "failed",
+    ).length,
+    0,
+  );
+  const finalWidgetFollowup = await reopened(`${finalWidgetRoute}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: "Continue after the widget." }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await finalWidgetFollowup.text(), /"type":"done"/);
+  const finalWidgetUpdated = await (await reopened(finalWidgetRoute)).json();
+  assert.equal(
+    (
+      await reopened(finalWidgetRoute, {
+        method: "DELETE",
+        headers: { "if-match": finalWidgetUpdated.chat.version },
+      })
+    ).status,
+    204,
+  );
   const profileFiles = await createAuthorizedUserFiles({
     usersRoot: await root(usersDir),
     profileId: user.id,

@@ -429,29 +429,48 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
     expect(mutationCommitted).toBe(true);
   });
 
-  it("releases admission when final lifecycle marking fails", async () => {
-    const sessionKey = "agent:main:cron:final-lifecycle-failure";
-    const sessionId = "final-lifecycle-session";
-    seedPersistentSession(sessionKey, sessionId);
-    const originalLogSessionStateChange = diagnostic.logSessionStateChange;
-    const logSessionStateChangeSpy = vi
-      .spyOn(diagnostic, "logSessionStateChange")
-      .mockImplementation((params) => {
-        if (params.state === "idle") {
-          throw new Error("simulated final lifecycle failure");
-        }
-        return originalLogSessionStateChange(params);
-      });
+  it.each(["transcript identity", "final lifecycle marking"] as const)(
+    "releases admission when %s fails",
+    async (failurePoint) => {
+      const sessionKey = "agent:main:cron:final-lifecycle-failure";
+      const sessionId = "final-lifecycle-session";
+      seedPersistentSession(sessionKey, sessionId);
+      const failure = new Error(`simulated ${failurePoint} failure`);
+      const originalLogSessionStateChange = diagnostic.logSessionStateChange;
+      const logSessionStateChangeSpy = vi
+        .spyOn(diagnostic, "logSessionStateChange")
+        .mockImplementation((params) => {
+          if (failurePoint === "final lifecycle marking" && params.state === "idle") {
+            throw failure;
+          }
+          return originalLogSessionStateChange(params);
+        });
 
-    try {
-      await expect(runCronIsolatedAgentTurn(makePersistentCronParams(sessionKey))).rejects.toThrow(
-        "simulated final lifecycle failure",
-      );
-      expect(isSessionWorkAdmissionActive(inMemoryStorePath, [sessionKey, sessionId])).toBe(false);
-    } finally {
-      logSessionStateChangeSpy.mockRestore();
-    }
-  });
+      try {
+        await expect(
+          runCronIsolatedAgentTurn({
+            ...makePersistentCronParams(sessionKey),
+            onTranscriptIdentity: (identity) => {
+              if (failurePoint === "transcript identity" && identity.runId) {
+                expect(
+                  isSessionWorkAdmissionActive(inMemoryStorePath, [sessionKey, sessionId]),
+                ).toBe(true);
+                throw failure;
+              }
+            },
+          }),
+        ).rejects.toBe(failure);
+        expect(isSessionWorkAdmissionActive(inMemoryStorePath, [sessionKey, sessionId])).toBe(
+          false,
+        );
+        expect(runEmbeddedAgentMock).toHaveBeenCalledTimes(
+          failurePoint === "transcript identity" ? 0 : 1,
+        );
+      } finally {
+        logSessionStateChangeSpy.mockRestore();
+      }
+    },
+  );
 
   it.each(["silent", "best-effort", "execution error", "presentation warning"])(
     "settles isolated %s cleanup after releasing its lease",

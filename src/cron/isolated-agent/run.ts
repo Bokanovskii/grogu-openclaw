@@ -497,5 +497,7 @@ async function runCronIsolatedAgentTurnInTrace(
     );
   } finally {
     leaseActive = false;
+    // Preparation transfers admission before callbacks can reject execution setup.
+    prepared.context.sessionWorkAdmission.release();
   }
 }

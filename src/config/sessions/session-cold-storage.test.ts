@@ -744,6 +744,11 @@ describe("cold transcript storage workers", () => {
     try {
       const fixture = await createSessionColdStorageFixture(storePath);
       const protectedBefore = fixture.snapshot();
+      const coldDirectory = path.dirname(
+        resolveSessionColdArchivePath(storePath, `${"0".repeat(64)}.jsonl.zst`),
+      );
+      await fs.mkdir(path.dirname(coldDirectory), { recursive: true });
+      await fs.writeFile(coldDirectory, "no plaintext staging");
       await expect(
         runSessionColdStorageMaintenance({
           config: maintenanceConfig(storePath),
@@ -762,7 +767,8 @@ describe("cold transcript storage workers", () => {
       expect(archiveBytes.subarray(0, 8).toString("utf8")).toBe("OCSEAL1\n");
       expect(archiveBytes.includes(Buffer.from("Preserved response"))).toBe(false);
       const archivePath = resolveSessionColdArchivePath(storePath, descriptor.archive_name);
-      await expect(fs.stat(archivePath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(path.dirname(archivePath)).toBe(coldDirectory);
+      expect(await fs.readFile(coldDirectory, "utf8")).toBe("no plaintext staging");
       await restoreSessionColdTranscript(fixture.scope);
       expect(fixture.snapshot()).toEqual(protectedBefore);
       expect(JSON.stringify(transcriptRows(fixture, historicalId))).not.toContain(

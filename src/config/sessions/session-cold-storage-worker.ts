@@ -132,15 +132,15 @@ async function prepareSessionColdArchiveInWorker(
   const directory = path.dirname(
     resolveSessionColdArchivePath(plan.databaseOptions.path, `${"0".repeat(64)}.jsonl.zst`),
   );
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const stagePath = path.join(directory, `${randomUUID()}.tmp`);
   const compressedPath = `${stagePath}.zst`;
   let eventCount = 0;
   let rawBytes = 0;
   let stagedBytes = 0;
   let encryptedStore = false;
+  const protectedChunks: Buffer[] = [];
   try {
-    const fd = fs.openSync(stagePath, "wx", 0o600);
+    let fd: number | undefined;
     try {
       let pending = "";
       const write = (record: SessionColdRecord) => {
@@ -151,7 +151,14 @@ async function prepareSessionColdArchiveInWorker(
         }
         pending += line;
         if (pending.length >= 64 * 1024) {
-          fs.writeSync(fd, pending);
+          if (encryptedStore) {
+            protectedChunks.push(Buffer.from(pending));
+          } else {
+            if (fd === undefined) {
+              throw new Error("Cold archive staging file was not opened");
+            }
+            fs.writeSync(fd, pending);
+          }
           pending = "";
         }
       };
@@ -160,6 +167,11 @@ async function prepareSessionColdArchiveInWorker(
           runSqliteDeferredTransactionSync(
             database.db,
             () => {
+              encryptedStore = isProtectedSessionColdArchiveStore(database.db);
+              if (!encryptedStore) {
+                fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+                fd = fs.openSync(stagePath, "wx", 0o600);
+              }
               if (
                 !sqliteSessionStateDeleteSnapshotsEqual(
                   readSessionStateDeleteSnapshot(database.db, plan.sessionId),
@@ -239,7 +251,6 @@ async function prepareSessionColdArchiveInWorker(
               )) {
                 write(sessionColdRecordSchema.parse({ kind: "fts", row }));
               }
-              return isProtectedSessionColdArchiveStore(database.db);
             },
             { databaseLabel: database.path, operationLabel: "cold transcript snapshot" },
           ),
@@ -248,19 +259,32 @@ async function prepareSessionColdArchiveInWorker(
       if (!opened.found || eventCount === 0) {
         throw new Error("Cannot archive a missing or empty transcript");
       }
-      encryptedStore = opened.value;
       if (pending) {
-        fs.writeSync(fd, pending);
+        if (encryptedStore) {
+          protectedChunks.push(Buffer.from(pending));
+        } else {
+          if (fd === undefined) {
+            throw new Error("Cold archive staging file was not opened");
+          }
+          fs.writeSync(fd, pending);
+        }
       }
     } finally {
-      fs.closeSync(fd);
+      if (fd !== undefined) {
+        fs.closeSync(fd);
+      }
     }
-    await pipeline(
-      fs.createReadStream(stagePath),
-      zlib.createZstdCompress(),
-      fs.createWriteStream(compressedPath, { flags: "wx", mode: 0o600 }),
-    );
-    const bytes = fs.readFileSync(compressedPath);
+    let bytes: Buffer;
+    if (encryptedStore) {
+      bytes = zlib.zstdCompressSync(Buffer.concat(protectedChunks, stagedBytes));
+    } else {
+      await pipeline(
+        fs.createReadStream(stagePath),
+        zlib.createZstdCompress(),
+        fs.createWriteStream(compressedPath, { flags: "wx", mode: 0o600 }),
+      );
+      bytes = fs.readFileSync(compressedPath);
+    }
     const storedBytes = encryptedStore
       ? withOpenClawAgentDatabaseReadOnly((database) => {
           const encrypted = sealSessionColdArchiveBytes(
@@ -318,8 +342,10 @@ async function prepareSessionColdArchiveInWorker(
     decodeSessionColdRecords(bytes, archive);
     return { plan, archive, envelopeBytes: stagedBytes };
   } finally {
-    fs.rmSync(stagePath, { force: true });
-    fs.rmSync(compressedPath, { force: true });
+    if (!encryptedStore) {
+      fs.rmSync(stagePath, { force: true });
+      fs.rmSync(compressedPath, { force: true });
+    }
   }
 }
 

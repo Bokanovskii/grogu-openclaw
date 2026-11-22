@@ -8,6 +8,7 @@ import {
   executeOpenClawStateWorker,
   runOpenClawStateWorkerOperation,
 } from "../../src/state/openclaw-state-worker-store.js";
+import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
 
 export type { ProtectedAccessRequest } from "../../src/state/protected-admission.js";
 
@@ -65,7 +66,11 @@ function ownerMutationAdmission(
   context: ReturnType<typeof captureOpenClawStateWorkerContext>,
   status: "approved" | "denied" | "removed" | "retry_policy",
   assertCurrent: () => void,
-  onRemovalCommitted: (subject?: string, profileId?: string) => void,
+  onRemovalCommitted: (
+    subject: string | undefined,
+    profileId: string | undefined,
+    retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+  ) => void,
   onPolicyChanged: () => void,
 ) {
   const admission = createSqliteWorkerOperationAdmission((request, grant) => {
@@ -86,11 +91,21 @@ function ownerMutationAdmission(
       !isRecord(facts) ||
       facts.status !== "removed" ||
       (facts.subject !== undefined && typeof facts.subject !== "string") ||
-      (facts.profileId !== undefined && typeof facts.profileId !== "string")
+      (facts.profileId !== undefined && typeof facts.profileId !== "string") ||
+      !Array.isArray(facts.retiredAutomations) ||
+      !facts.retiredAutomations.every(
+        (entry) =>
+          isRecord(entry) &&
+          typeof entry.id === "string" &&
+          typeof entry.profileId === "string" &&
+          typeof entry.definitionBytes === "number" &&
+          Number.isSafeInteger(entry.definitionBytes) &&
+          entry.definitionBytes >= 0,
+      )
     ) {
       throw new Error("Access removal committed with invalid publication facts.");
     }
-    onRemovalCommitted(facts.subject, facts.profileId);
+    onRemovalCommitted(facts.subject, facts.profileId, facts.retiredAutomations);
     onPolicyChanged();
   });
   return { nativeLocations: [context.admission.databasePath], admission };
@@ -133,7 +148,11 @@ export function removeProtectedAdmission(
   stateDir: string,
   input: { id: string; issuer: string; ownerSubject: string },
   assertCurrent: () => void,
-  onRemovalCommitted: (subject?: string, profileId?: string) => void,
+  onRemovalCommitted: (
+    subject: string | undefined,
+    profileId: string | undefined,
+    retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+  ) => void,
   onPolicyChanged: () => void,
 ) {
   const context = captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });

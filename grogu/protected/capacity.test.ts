@@ -167,6 +167,13 @@ void test("automation definitions remain charged in the shared reservation ledge
         profileDefinitionBytes: currentDefinitionBytes,
         profileRecords: 1,
         profiles: [{ profileId, definitionBytes: currentDefinitionBytes, records: 1 }],
+        entries: [
+          {
+            id: "measured-automation",
+            profileId,
+            definitionBytes: currentDefinitionBytes,
+          },
+        ],
       };
     },
   });
@@ -188,6 +195,171 @@ void test("automation definitions remain charged in the shared reservation ledge
   } finally {
     blockedCreate.release();
     automation.release();
+    turn.release();
+  }
+});
+
+void test("retired definitions release measured and reserved bytes without double refunds", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-automation-retirement-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const retiredProfileId = "synthetic-retired-profile";
+  const thirdProfileId = "synthetic-retry-profile";
+  const measuredDefinition = {
+    name: "Measured private draft",
+    instructions: "x".repeat(3_000),
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  } satisfies ProtectedAutomationDraft;
+  const postMeasurementDefinition = {
+    ...measuredDefinition,
+    name: "New private draft",
+    instructions: "Summarize synthetic test material.",
+  };
+  const measured = {
+    id: "measured-automation",
+    profileId: retiredProfileId,
+    definitionBytes: Buffer.byteLength(JSON.stringify(measuredDefinition), "utf8"),
+  };
+  const created = {
+    id: "created-after-measurement",
+    profileId: retiredProfileId,
+    definitionBytes: Buffer.byteLength(JSON.stringify(postMeasurementDefinition), "utf8"),
+  };
+  const measuredBytes = measured.definitionBytes + 4096;
+  const createdBytes = created.definitionBytes + 4096;
+  const limit = 16 * 1024 + measuredBytes + createdBytes + 32 * 1024 - 1;
+  const admission = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    encryption,
+    maxFileBytes: 1024,
+    limits: { globalBytes: limit, userBytes: limit, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+    async automationUsage() {
+      return {
+        totalDefinitionBytes: measured.definitionBytes,
+        totalRecords: 1,
+        profileDefinitionBytes: measured.definitionBytes,
+        profileRecords: 1,
+        profiles: [
+          {
+            profileId: retiredProfileId,
+            definitionBytes: measured.definitionBytes,
+            records: 1,
+          },
+        ],
+        entries: [measured],
+      };
+    },
+  });
+  const turn = await admission("synthetic-active-profile", () => {}, "turn");
+  const automation = await admission(retiredProfileId, () => {}, "automation");
+  try {
+    automation.chargeAutomationCreate(postMeasurementDefinition);
+    automation.settleAutomationCreate(postMeasurementDefinition, true, created.id);
+    await assert.rejects(
+      admission(thirdProfileId, () => {}, "create"),
+      {
+        code: "quota_exceeded",
+      },
+    );
+
+    admission.deletedAutomations([measured, created]);
+    admission.deletedAutomations([measured, created]);
+
+    const retry = await admission(thirdProfileId, () => {}, "create");
+    const noDuplicateCredit = await admission(thirdProfileId, () => {}, "automation");
+    try {
+      assert.throws(() => noDuplicateCredit.charge(measuredBytes + createdBytes), {
+        code: "quota_exceeded",
+      });
+    } finally {
+      noDuplicateCredit.release();
+      retry.release();
+    }
+  } finally {
+    automation.release();
+    turn.release();
+  }
+});
+
+void test("automation retirement reconciles with an in-progress storage measurement", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-automation-scan-race-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const profileId = "synthetic-retired-profile";
+  const measured = {
+    id: "measured-automation",
+    profileId,
+    definitionBytes: 4_000,
+  };
+  const absentFromSnapshot = {
+    id: "already-retired-automation",
+    profileId,
+    definitionBytes: measured.definitionBytes,
+  };
+  const bytes = measured.definitionBytes + 4096;
+  const measureStarted = Promise.withResolvers<void>();
+  const finishMeasure = Promise.withResolvers<void>();
+  const limit = 16 * 1024 + bytes + 32 * 1024 - 1;
+  const admission = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    encryption,
+    maxFileBytes: 1024,
+    limits: { globalBytes: limit, userBytes: limit, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+    async automationUsage() {
+      measureStarted.resolve();
+      await finishMeasure.promise;
+      return {
+        totalDefinitionBytes: measured.definitionBytes,
+        totalRecords: 1,
+        profileDefinitionBytes: measured.definitionBytes,
+        profileRecords: 1,
+        profiles: [{ profileId, definitionBytes: measured.definitionBytes, records: 1 }],
+        entries: [measured],
+      };
+    },
+  });
+  const pendingTurn = admission("synthetic-active-profile", () => {}, "turn");
+  await measureStarted.promise;
+  admission.deletedAutomations([measured, absentFromSnapshot]);
+  finishMeasure.resolve();
+  const turn = await pendingTurn;
+  try {
+    const retry = await admission("synthetic-retry-profile", () => {}, "create");
+    const noAbsentCredit = await admission("synthetic-retry-profile", () => {}, "automation");
+    try {
+      assert.throws(() => noAbsentCredit.charge(bytes), { code: "quota_exceeded" });
+    } finally {
+      noAbsentCredit.release();
+      retry.release();
+    }
+  } finally {
     turn.release();
   }
 });

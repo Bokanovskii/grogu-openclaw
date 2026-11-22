@@ -55,6 +55,9 @@ for (const saveDrafts of [false, true]) {
       },
       maxChatsPerUser: 3,
       maxFileBytes: 1024,
+      ...(saveDrafts
+        ? { storageLimits: { globalBytes: 1_000_000, userBytes: 1_000_000, freeFloorBytes: 1 } }
+        : {}),
       turns: {
         models: [
           {

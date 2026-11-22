@@ -622,13 +622,14 @@ export function createProtectedHttp(options: {
           options.stateDir,
           { id: adminPerson[1]!, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
           assertCurrent,
-          (subject, profileId) => {
+          (subject, profileId, retiredAutomations) => {
             if (subject) {
               options.onRemoveSubject?.(subject);
             }
             if (profileId) {
               invalidateProfile(profileId);
             }
+            admitStorage?.deletedAutomations(retiredAutomations);
           },
           () => options.onPolicyChanged?.(),
         );

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { sql } from "kysely";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely as getTypedSqliteKysely,
@@ -14,7 +15,10 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
-import type { ProtectedAutomationDatabase } from "./protected-automations.js";
+import type {
+  ProtectedAutomationDatabase,
+  ProtectedAutomationStorageUsage,
+} from "./protected-automations.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -480,8 +484,9 @@ export function removeProtectedAdmission(
       );
       // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
       const profileId = admission.profile_id;
+      let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
-        executeSqliteQuerySync(
+        retiredAutomations = executeSqliteQuerySync(
           db,
           getTypedSqliteKysely<ProtectedAutomationDatabase>(db)
             .deleteFrom("protected_automations")
@@ -520,8 +525,14 @@ export function removeProtectedAdmission(
                     .whereRef("automation_id", "=", "protected_automations.id"),
                 ),
               ),
-            ),
-        );
+            )
+            .returning([
+              "id",
+              "central_owner_profile_id as profileId",
+              /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for deleted definitions. */
+              sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+            ]),
+        ).rows;
       }
       if (admission.email) {
         executeSqliteQuerySync(
@@ -552,7 +563,7 @@ export function removeProtectedAdmission(
         revision,
       };
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts: "removed" });
-      deferSqliteWorkerCommitReceipt(db, result);
+      deferSqliteWorkerCommitReceipt(db, { ...result, retiredAutomations });
       return result;
     },
     { path: database.path },

@@ -24,13 +24,18 @@ export type StorageAdmission = {
   chargeChatCreation(): void;
   recordCreatedChat(id: string, sessionKey: string): void;
   chargeAutomationCreate(definition: ProtectedAutomationDraft): void;
-  settleAutomationCreate(definition: ProtectedAutomationDraft, created: boolean): void;
+  settleAutomationCreate(
+    definition: ProtectedAutomationDraft,
+    created: boolean,
+    automationId?: string,
+  ): void;
   chargeAutomationPatch(current: ProtectedAutomationDraft, next: ProtectedAutomationDraft): void;
   settleAutomationPatch(
     current: ProtectedAutomationDraft,
     next: ProtectedAutomationDraft,
     updated: boolean,
   ): void;
+  deletedAutomations(records: readonly ProtectedAutomationStorageUsage["entries"][number][]): void;
   assertResult(): void;
   files(files: AuthorizedUserFiles): AuthorizedUserFiles;
 };
@@ -98,6 +103,7 @@ export async function measureProtectedStorage(
     bytes: number,
   ) => void,
   onAutomationUsage?: (profileId: string, bytes: number) => void,
+  onAutomationEntry?: (entry: ProtectedAutomationStorageUsage["entries"][number]) => void,
 ) {
   let globalBytes = 0;
   let personalBytes = 0;
@@ -157,6 +163,9 @@ export async function measureProtectedStorage(
         profile.definitionBytes + profile.records * storageEntryOverheadBytes,
       );
     }
+    for (const entry of automationUsage.entries) {
+      onAutomationEntry?.(entry);
+    }
   }
   assertCurrent();
   return { globalBytes, personalBytes, chatCount, lastChatActivityAt };
@@ -175,13 +184,20 @@ export function createStorageAdmission(
     users: Map<string, number>;
     active: Set<Reservation>;
     baseline: Map<string, { profileId: string; id: string; bytes: number }>;
+    baselineAutomations: Set<string>;
+    postMeasurementAutomations: Set<string>;
+    retiredAutomations: Set<string>;
   };
   const entryKey = (entry: { profileId: string; id: string; sessionKey: string }) =>
     JSON.stringify([entry.profileId, entry.id, entry.sessionKey]);
   const chatKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
+  const automationKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
   let ledger: Ledger | undefined;
   let scanInProgress: Promise<void> | undefined;
   let deletedDuringScan: Set<string> | undefined;
+  let deletedAutomationsDuringScan:
+    | Map<string, ProtectedAutomationStorageUsage["entries"][number]>
+    | undefined;
   let pendingFileWrites = 0;
   const fileWriters = new Map<string, Promise<void>>();
   const forgetChat = (account: Ledger, profileId: string, id: string) => {
@@ -192,6 +208,24 @@ export function createStorageAdmission(
         account.baseline.delete(key);
       }
     }
+  };
+  const forgetAutomation = (
+    account: Ledger,
+    entry: ProtectedAutomationStorageUsage["entries"][number],
+  ) => {
+    const key = automationKey(entry.profileId, entry.id);
+    if (account.retiredAutomations.has(key)) {
+      return;
+    }
+    const wasMeasured = account.baselineAutomations.delete(key);
+    const wasCharged = account.postMeasurementAutomations.delete(key);
+    account.retiredAutomations.add(key);
+    if (!wasMeasured && !wasCharged) {
+      return;
+    }
+    const bytes = entry.definitionBytes + storageEntryOverheadBytes;
+    account.globalBytes -= bytes;
+    account.users.set(entry.profileId, (account.users.get(entry.profileId) ?? 0) - bytes);
   };
   const admit = async (
     profileId: string,
@@ -239,7 +273,12 @@ export function createStorageAdmission(
       assertDisk();
       const measure = async () => {
         const deleted = new Set<string>();
+        const deletedAutomations = new Map<
+          string,
+          ProtectedAutomationStorageUsage["entries"][number]
+        >();
         deletedDuringScan = deleted;
+        deletedAutomationsDuringScan = deletedAutomations;
         let finishScan!: () => void;
         scanInProgress = new Promise<void>((resolve) => {
           finishScan = resolve;
@@ -247,6 +286,7 @@ export function createStorageAdmission(
         try {
           const users = new Map<string, number>();
           const baseline = new Map<string, { profileId: string; id: string; bytes: number }>();
+          const baselineAutomations = new Set<string>();
           const { globalBytes } = await measureProtectedStorage(
             options,
             profileId,
@@ -260,21 +300,31 @@ export function createStorageAdmission(
             (automationProfileId, bytes) => {
               users.set(automationProfileId, (users.get(automationProfileId) ?? 0) + bytes);
             },
+            (entry) => {
+              baselineAutomations.add(automationKey(entry.profileId, entry.id));
+            },
           );
           const account: Ledger = {
             globalBytes,
             users,
             active: new Set<Reservation>(),
             baseline,
+            baselineAutomations,
+            postMeasurementAutomations: new Set<string>(),
+            retiredAutomations: new Set<string>(),
           };
           for (const entry of baseline.values()) {
             if (deleted.has(chatKey(entry.profileId, entry.id))) {
               forgetChat(account, entry.profileId, entry.id);
             }
           }
+          for (const entry of deletedAutomations.values()) {
+            forgetAutomation(account, entry);
+          }
           ledger = account;
         } finally {
           deletedDuringScan = undefined;
+          deletedAutomationsDuringScan = undefined;
           scanInProgress = undefined;
           finishScan();
         }
@@ -371,11 +421,24 @@ export function createStorageAdmission(
           }
           charge(Buffer.byteLength(JSON.stringify(definition), "utf8") + storageEntryOverheadBytes);
         },
-        settleAutomationCreate(definition, created) {
+        settleAutomationCreate(definition, created, automationId) {
           if (operation !== "automation") {
             throw new Error("Only automation admission can settle an automation create.");
           }
           if (created) {
+            if (!automationId) {
+              throw new Error("A created automation must have an identifier.");
+            }
+            const key = automationKey(profileId, automationId);
+            if (account.retiredAutomations.has(key)) {
+              const bytes =
+                Buffer.byteLength(JSON.stringify(definition), "utf8") + storageEntryOverheadBytes;
+              account.globalBytes -= bytes;
+              account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
+              remaining = Math.min(8 * MiB, remaining + bytes);
+              return;
+            }
+            account.postMeasurementAutomations.add(key);
             return;
           }
           const bytes =
@@ -555,6 +618,15 @@ export function createStorageAdmission(
       deletedDuringScan?.add(chatKey(profileId, id));
       if (ledger) {
         forgetChat(ledger, profileId, id);
+      }
+    },
+    deletedAutomations(records: readonly ProtectedAutomationStorageUsage["entries"][number][]) {
+      for (const entry of records) {
+        const key = automationKey(entry.profileId, entry.id);
+        deletedAutomationsDuringScan?.set(key, entry);
+        if (ledger) {
+          forgetAutomation(ledger, entry);
+        }
       }
     },
   });

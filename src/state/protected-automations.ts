@@ -87,6 +87,7 @@ export type ProtectedAutomationStorageUsage = {
   profileDefinitionBytes: number;
   profileRecords: number;
   profiles: Array<{ profileId: string; definitionBytes: number; records: number }>;
+  entries: Array<{ id: string; profileId: string; definitionBytes: number }>;
 };
 
 export type ProtectedAutomationJobBinding = {
@@ -174,30 +175,38 @@ export function readProtectedAutomationStorageUsage(
   profileId: string,
 ): ProtectedAutomationStorageUsage {
   ensureSchema(database);
-  const profiles = executeSqliteQuerySync(
+  const entries = executeSqliteQuerySync(
     database.db,
     typedDatabase(database.db)
       .selectFrom("protected_automations")
       .select([
+        "id",
         "central_owner_profile_id as profileId",
         /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for stored definitions. */
-        sql<number>`COALESCE(SUM(length(CAST(definition_json AS BLOB))), 0)`.as("definitionBytes"),
-        sql<number>`COUNT(*)`.as("records"),
+        sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
       ])
-      .groupBy("central_owner_profile_id"),
+      .orderBy("central_owner_profile_id")
+      .orderBy("id"),
   ).rows;
-  const profileUsage = profiles.map((entry) => ({
-    profileId: entry.profileId,
-    definitionBytes: entry.definitionBytes,
-    records: entry.records,
+  const profiles = new Map<string, { definitionBytes: number; records: number }>();
+  for (const entry of entries) {
+    const profile = profiles.get(entry.profileId) ?? { definitionBytes: 0, records: 0 };
+    profile.definitionBytes += entry.definitionBytes;
+    profile.records++;
+    profiles.set(entry.profileId, profile);
+  }
+  const profileUsage = Array.from(profiles, ([ownerProfileId, usage]) => ({
+    profileId: ownerProfileId,
+    ...usage,
   }));
   const personal = profileUsage.find((entry) => entry.profileId === profileId);
   return {
-    totalDefinitionBytes: profileUsage.reduce((sum, entry) => sum + entry.definitionBytes, 0),
-    totalRecords: profileUsage.reduce((sum, entry) => sum + entry.records, 0),
+    totalDefinitionBytes: entries.reduce((sum, entry) => sum + entry.definitionBytes, 0),
+    totalRecords: entries.length,
     profileDefinitionBytes: personal?.definitionBytes ?? 0,
     profileRecords: personal?.records ?? 0,
     profiles: profileUsage,
+    entries,
   };
 }
 

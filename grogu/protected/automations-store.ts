@@ -125,7 +125,11 @@ export async function createProtectedAutomationRecord(
   const workerContext = context(stateDir);
   const result = await createProtectedAutomationWithAdmission(workerContext, input, authority);
   const created = result.status === "created";
-  storage.settleAutomationCreate(input.definition, created);
+  storage.settleAutomationCreate(
+    input.definition,
+    created,
+    created ? result.automation.id : undefined,
+  );
   storage.assertResult();
   if (!created) {
     return undefined;

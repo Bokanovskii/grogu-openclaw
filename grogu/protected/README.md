@@ -373,6 +373,10 @@ storage-device remapping, or copies outside the managed state. Grogu keeps no
 backups. Interrupted migration can be retried; missing or wrong keys and
 unsupported schema versions fail closed rather than reopening the store as
 plaintext.
+Protected runtime startup requires an existing encrypted agent database with a
+valid key and encryption marker. It refuses a missing or plaintext database
+instead of creating or migrating it. Stop the listener and use the maintenance
+command below to provision or migrate plaintext state.
 Protected encrypted agent databases use schema version 26 so older builds
 refuse them. Ordinary personal Grogu databases keep the upstream schema and
 version. When merging this fork with upstream, resolve the shared numeric

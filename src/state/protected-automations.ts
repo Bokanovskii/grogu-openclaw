@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { sql } from "kysely";
 import { Value } from "typebox/value";
 import {
   ProtectedAutomationDraftSchema,
@@ -80,6 +81,14 @@ export type ProtectedAutomationStorageRecord = {
   updatedAt: number;
 };
 
+export type ProtectedAutomationStorageUsage = {
+  totalDefinitionBytes: number;
+  totalRecords: number;
+  profileDefinitionBytes: number;
+  profileRecords: number;
+  profiles: Array<{ profileId: string; definitionBytes: number; records: number }>;
+};
+
 export type ProtectedAutomationJobBinding = {
   jobId: string;
   automationId: string;
@@ -157,6 +166,38 @@ function toStorageRecord(row: AutomationRow): ProtectedAutomationStorageRecord {
     relation,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+export function readProtectedAutomationStorageUsage(
+  database: OpenClawStateDatabase,
+  profileId: string,
+): ProtectedAutomationStorageUsage {
+  ensureSchema(database);
+  const profiles = executeSqliteQuerySync(
+    database.db,
+    typedDatabase(database.db)
+      .selectFrom("protected_automations")
+      .select([
+        "central_owner_profile_id as profileId",
+        /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for stored definitions. */
+        sql<number>`COALESCE(SUM(length(CAST(definition_json AS BLOB))), 0)`.as("definitionBytes"),
+        sql<number>`COUNT(*)`.as("records"),
+      ])
+      .groupBy("central_owner_profile_id"),
+  ).rows;
+  const profileUsage = profiles.map((entry) => ({
+    profileId: entry.profileId,
+    definitionBytes: entry.definitionBytes,
+    records: entry.records,
+  }));
+  const personal = profileUsage.find((entry) => entry.profileId === profileId);
+  return {
+    totalDefinitionBytes: profileUsage.reduce((sum, entry) => sum + entry.definitionBytes, 0),
+    totalRecords: profileUsage.reduce((sum, entry) => sum + entry.records, 0),
+    profileDefinitionBytes: personal?.definitionBytes ?? 0,
+    profileRecords: personal?.records ?? 0,
+    profiles: profileUsage,
   };
 }
 

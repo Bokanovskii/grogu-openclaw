@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
+import { root } from "../../src/infra/fs-safe.js";
 import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
 import {
@@ -12,7 +13,13 @@ import {
   createProtectedAutomationWithAdmission,
 } from "../../src/state/protected-automation-operations.js";
 import { ensureCanonicalUserProfileForVerifiedIdentity } from "../../src/state/user-profile-writes.js";
+import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
+import {
+  readProtectedAutomationStorageUsage,
+  createProtectedAutomationRecord,
+} from "./automations-store.js";
+import { createStorageAdmission } from "./capacity.js";
 
 void test("protected automation records are private, bound to revisions, and survive process restart", async (t) => {
   const stateDir = path.resolve(".artifacts", `automation-records-${randomUUID()}`);
@@ -166,6 +173,63 @@ void test("protected automation records are private, bound to revisions, and sur
   assert.equal(storedBinding?.definitionRevision, 1);
   assert.ok(Number.isSafeInteger(storedBinding?.createdAt));
   assert.ok(Number.isSafeInteger(storedBinding?.updatedAt));
+
+  const usage = await readProtectedAutomationStorageUsage(stateDir, ownerProfileId, () => {});
+  const createBytes = Buffer.byteLength(JSON.stringify(definition), "utf8") + 4096;
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const admission = createStorageAdmission({
+    stateDir,
+    usersRoot: await root(stateDir),
+    encryption,
+    maxFileBytes: 1024,
+    limits: {
+      globalBytes: usage.totalDefinitionBytes + usage.totalRecords * 4096 + 16 * 1024 + createBytes,
+      userBytes:
+        usage.profileDefinitionBytes + usage.profileRecords * 4096 + 16 * 1024 + createBytes,
+      freeFloorBytes: 1,
+    },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+    automationUsage: readProtectedAutomationStorageUsage.bind(null, stateDir),
+  });
+  const heldTurn = await admission(ownerProfileId, () => {}, "turn");
+  try {
+    const failedCreate = await admission("inactive-member", () => {}, "automation");
+    try {
+      assert.equal(
+        await createProtectedAutomationRecord(
+          stateDir,
+          { profileId: "inactive-member", definition, now: Date.now() },
+          authority("inactive-member"),
+          failedCreate,
+        ),
+        undefined,
+      );
+    } finally {
+      failedCreate.release();
+    }
+    const retryCreate = await admission(ownerProfileId, () => {}, "automation");
+    try {
+      const retried = await createProtectedAutomationRecord(
+        stateDir,
+        { profileId: ownerProfileId, definition, now: Date.now() },
+        authority(ownerProfileId),
+        retryCreate,
+      );
+      assert.equal(retried?.name, definition.name);
+    } finally {
+      retryCreate.release();
+    }
+  } finally {
+    heldTurn.release();
+  }
 
   const child = spawnSync(
     process.execPath,

@@ -232,7 +232,13 @@ export function createProtectedChats(options: {
     let activity = new Map<string, ProtectedActivity>();
     let turnStartedAt: number | undefined;
     let usage:
-      | { contextTokens: number; provider: ProtectedMessageProvider; model: string }
+      | {
+          contextTokens: number;
+          inputTokens?: number;
+          outputTokens?: number;
+          provider: ProtectedMessageProvider;
+          model: string;
+        }
       | undefined;
     for (const event of events) {
       if (!isRecord(event) || !isRecord(event.message)) {
@@ -298,6 +304,12 @@ export function createProtectedChats(options: {
             usageProvider === "openai")
             ? {
                 contextTokens: snapshot.totalTokens,
+                ...(typeof snapshot.inputTokens === "number" && snapshot.inputTokens > 0
+                  ? { inputTokens: snapshot.inputTokens }
+                  : {}),
+                ...(typeof snapshot.outputTokens === "number" && snapshot.outputTokens > 0
+                  ? { outputTokens: snapshot.outputTokens }
+                  : {}),
                 provider: usageProvider,
                 model: snapshot.model,
               }

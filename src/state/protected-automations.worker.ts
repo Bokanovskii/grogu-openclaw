@@ -6,6 +6,7 @@ import {
   patchProtectedAutomation,
   readProtectedAutomation,
   readProtectedAutomationJobBinding,
+  readProtectedAutomationStorageUsage,
 } from "./protected-automations.js";
 import type { WorkerOperationHandlers, WorkerOperations } from "./worker-operation-registry.js";
 
@@ -16,6 +17,8 @@ export const protectedAutomationOperations = {
   ) => createProtectedAutomation(open(), input),
   "protectedAutomations.list": (input: { profileId: string }, { open }) =>
     listProtectedAutomations(open(), input.profileId),
+  "protectedAutomations.storageUsage": (input: { profileId: string }, { open }) =>
+    readProtectedAutomationStorageUsage(open(), input.profileId),
   "protectedAutomations.read": (input: { profileId: string; automationId: string }, { open }) =>
     readProtectedAutomation(open(), input),
   "protectedAutomations.patch": (input: Parameters<typeof patchProtectedAutomation>[1], { open }) =>

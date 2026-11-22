@@ -53,6 +53,7 @@ import {
   listProtectedAutomationRecords,
   patchProtectedAutomationRecord,
   readProtectedAutomationRecord,
+  readProtectedAutomationStorageUsage,
 } from "./automations-store.js";
 import {
   createProtectedAutomationCatalog,
@@ -182,15 +183,22 @@ export function createProtectedHttp(options: {
     throw new TypeError("Configure the exact protected client origin.");
   }
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const chats = createProtectedChats({ ...options, agentCatalog });
+  const storageMeasurement = {
+    ...options,
+    chats,
+    automationUsage: (profileId: string, assertCurrent: () => void) =>
+      readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
+  };
+  const admitStorage = options.storageLimits
+    ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
+    : undefined;
   const automationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,
     calendarDraftValidationAvailable: true,
+    persistenceAvailable: Boolean(admitStorage),
   });
-  const chats = createProtectedChats({ ...options, agentCatalog });
-  const admitStorage = options.storageLimits
-    ? createStorageAdmission({ ...options, chats, limits: options.storageLimits })
-    : undefined;
   const runs = new Map<string, Run>();
   const pending = new Set<Promise<unknown>>();
   const revokedSessions = new Set<string>();
@@ -557,12 +565,7 @@ export function createProtectedHttp(options: {
           : [];
         const storage = person.profileId
           ? await measureProtectedStorage(
-              {
-                usersRoot: options.usersRoot,
-                chats,
-                maxFileBytes: options.maxFileBytes,
-                encryption: options.encryption,
-              },
+              storageMeasurement,
               person.profileId,
               assertCurrent,
               false,
@@ -890,7 +893,7 @@ export function createProtectedHttp(options: {
         return json(result);
       }
       if (pathname === "/automations" && method === "GET") {
-        if (!automationCatalog) {
+        if (!automationCatalog?.capabilities.automations.list) {
           return notFound();
         }
         await revalidate();
@@ -900,7 +903,7 @@ export function createProtectedHttp(options: {
         return json(result);
       }
       if (pathname === "/automations" && method === "POST") {
-        if (!automationCatalog) {
+        if (!automationCatalog?.capabilities.automations.create) {
           return notFound();
         }
         const draft = await body(request);
@@ -910,21 +913,30 @@ export function createProtectedHttp(options: {
           return json(validation, 422);
         }
         await revalidate();
-        const automation = await createProtectedAutomationRecord(
-          options.stateDir,
-          { profileId: profile.id, definition: validation.draft, now: Date.now() },
-          authority,
-        );
-        if (!automation) {
-          unauthorized();
+        if (!admitStorage) {
+          return notFound();
         }
-        assertCurrent();
-        const result: ProtectedAutomationResponse = { automation };
-        return json(result, 201);
+        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        try {
+          const automation = await createProtectedAutomationRecord(
+            options.stateDir,
+            { profileId: profile.id, definition: validation.draft, now: Date.now() },
+            authority,
+            storage,
+          );
+          if (!automation) {
+            unauthorized();
+          }
+          assertCurrent();
+          const result: ProtectedAutomationResponse = { automation };
+          return json(result, 201);
+        } finally {
+          storage.release();
+        }
       }
       const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
       if (automationMatch && method === "GET") {
-        if (!automationCatalog) {
+        if (!automationCatalog?.capabilities.automations.list) {
           return notFound();
         }
         await revalidate();
@@ -941,7 +953,7 @@ export function createProtectedHttp(options: {
         return json(result);
       }
       if (automationMatch && method === "PATCH") {
-        if (!automationCatalog) {
+        if (!automationCatalog?.capabilities.automations.create) {
           return notFound();
         }
         const patch = await body(request);
@@ -1008,40 +1020,49 @@ export function createProtectedHttp(options: {
           return json(validation, 422);
         }
         await revalidate();
-        const updated = await patchProtectedAutomationRecord(
-          options.stateDir,
-          {
-            profileId: profile.id,
-            automationId,
-            expectedRevision: Number(version),
-            definition: validation.draft,
-            now: Date.now(),
-          },
-          authority,
-        );
-        if (updated && "status" in updated) {
-          if (updated.status === "member_inactive") {
-            unauthorized();
-          }
-          if (updated.status === "version_mismatch") {
-            throw new ProtectedError(
-              412,
-              "version_mismatch",
-              "This automation changed. Reload it before saving.",
-            );
-          }
-          if (updated.status === "scheduler_required") {
-            throw new ProtectedError(
-              503,
-              "scheduler_unavailable",
-              "Automation scheduling is not available yet. Your changes were not saved.",
-            );
-          }
+        if (!admitStorage) {
           return notFound();
         }
-        assertCurrent();
-        const result: ProtectedAutomationResponse = { automation: updated };
-        return json(result);
+        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        try {
+          const updated = await patchProtectedAutomationRecord(
+            options.stateDir,
+            {
+              profileId: profile.id,
+              automationId,
+              expectedRevision: Number(version),
+              definition: validation.draft,
+              now: Date.now(),
+            },
+            authority,
+            storage,
+          );
+          if (updated && "status" in updated) {
+            if (updated.status === "member_inactive") {
+              unauthorized();
+            }
+            if (updated.status === "version_mismatch") {
+              throw new ProtectedError(
+                412,
+                "version_mismatch",
+                "This automation changed. Reload it before saving.",
+              );
+            }
+            if (updated.status === "scheduler_required") {
+              throw new ProtectedError(
+                503,
+                "scheduler_unavailable",
+                "Automation scheduling is not available yet. Your changes were not saved.",
+              );
+            }
+            return notFound();
+          }
+          assertCurrent();
+          const result: ProtectedAutomationResponse = { automation: updated };
+          return json(result);
+        } finally {
+          storage.release();
+        }
       }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);
@@ -1141,7 +1162,7 @@ export function createProtectedHttp(options: {
       if (pathname === "/storage/chats" && method === "GET") {
         const items: ProtectedChatStorage["chats"] = [];
         const { personalBytes } = await measureProtectedStorage(
-          { ...options, chats },
+          storageMeasurement,
           profile.id,
           assertCurrent,
           false,
@@ -1189,6 +1210,7 @@ export function createProtectedHttp(options: {
             data.title === undefined ? undefined : text(data.title, 160),
             selectedAgentId,
           );
+          storage?.recordCreatedChat(chat.id, chats.scope(authority, chat.id).sessionKey);
           await revalidate();
           return json({ chat });
         } finally {
@@ -1285,6 +1307,7 @@ export function createProtectedHttp(options: {
             await files((owned) => removeChatFilesDirectory(owned, id));
             await revalidate();
           });
+          admitStorage?.deletedChat(profile.id, id);
           await revalidate();
           return noContent();
         } finally {
@@ -1728,7 +1751,14 @@ export function createProtectedHttp(options: {
                 }
                 failed = false;
                 if (usage && usage.provider === input.provider && usage.model === input.model) {
-                  send({ type: "usage", contextTokens: usage.contextTokens });
+                  send({
+                    type: "usage",
+                    contextTokens: usage.contextTokens,
+                    ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+                    ...(usage.outputTokens !== undefined
+                      ? { outputTokens: usage.outputTokens }
+                      : {}),
+                  });
                 }
                 send({ type: "done", chatVersion: chat.version });
                 outcome = "complete";

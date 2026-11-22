@@ -103,19 +103,24 @@ Initialization measures free space on the state volume. It reserves a 512 MiB
 free-space floor and takes at most one-sixteenth of the remaining space, capped
 at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
 that budget. The runtime counts canonical chat/transcript bytes and files in
-each chat's directory, including widgets and fetched artifacts, and conservatively
-limits growth per turn. The pilot allows one storage-growing request at a time.
-If a quota is reached, export or delete a chat to free admission; the runtime
-does not evict chats or keep backups. A volume below its floor stops accepting
-writes until space is available. Chat deletion remains available.
+each chat's directory, including widgets and fetched artifacts. It also counts
+each saved automation definition against its owner profile and the global
+budget. Automation storage uses its UTF-8 definition bytes and the same 4 KiB
+entry overhead as stored files. The runtime limits growth per operation and
+reserves quota before writes so concurrent requests stay within the configured
+limits. If a quota is reached, delete a chat or reduce a saved automation
+definition to free space, or contact the server operator. The runtime does not
+evict chats or keep backups. A volume below its floor stops accepting writes
+until space is available. Chat deletion remains available.
 
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
-and overhead charges as the quota. `usedBytes` also counts transient child work,
-which is not a separate cleanup item. `limitBytes` is the member's configured
-limit, not the host's free disk space. To delete a reviewed chat, send its
-`version` in `If-Match` to the existing `DELETE /api/protected/v1/chats/:id`
-route. Read storage again after deletion to show the new total.
+and overhead charges as the quota. `usedBytes` also counts saved automation
+definitions and transient child work. Neither is listed as a chat. `limitBytes`
+is the member's configured limit, not the host's free disk space. To delete a
+reviewed chat, send its `version` in `If-Match` to the existing
+`DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
+show the new total.
 
 ## Automation discovery and draft validation
 
@@ -125,8 +130,10 @@ its supported reasoning levels/default, and capabilities. `/me` remains
 unchanged for strict older clients. If Sparky or its reasoning catalog is
 unavailable, the automation catalog route returns 404; older servers also
 return 404, so clients can keep the feature unavailable without breaking sign-in.
-`catalog`, `draftValidation`, `list`, and `create` are true. Schedule control,
-run, sharing, and notification capabilities remain false. The catalog advertises
+`catalog` and `draftValidation` are true when the model catalog is available.
+`list` and `create` are true only when the protected storage budget is
+configured. Without it, list and write routes return 404. Schedule control, run,
+sharing, and notification capabilities remain false. The catalog advertises
 interval and fixed calendar schedules for draft validation only; those schedules
 are not active jobs.
 
@@ -164,7 +171,11 @@ canonical optional `enabled` boolean, and requires the current `version` in
 request to enable an automation returns `503 scheduler_unavailable` without
 changing the record because no native Cron control bridge is wired yet. Thus
 `scheduleControl` remains false and no saved automation can run on a schedule.
-The PATCH route is not a substitute scheduler.
+The existing per-profile and global storage budgets cover both operations.
+Creation charges the definition's stored UTF-8 bytes and the existing per-entry
+overhead. An edit charges only positive definition growth, so an edit that
+reduces storage can free budget. A quota refusal returns `413 quota_exceeded`
+before the state worker writes. The PATCH route is not a substitute scheduler.
 
 The internal state owner stores automation definitions, owners, followers,
 visibility, the paused/enabled state, and native Cron job bindings in the

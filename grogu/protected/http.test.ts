@@ -632,7 +632,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     draft: { ...calendarDraft, thinking: "ultra" },
   });
   assert.equal(first.observedAgents.length, 0);
-  assert.equal((await (await first.call("alice", "/storage/chats")).json()).usedBytes, 0);
+  const automationStorage = await (await first.call("alice", "/storage/chats")).json();
+  assert.ok(automationStorage.usedBytes > 0);
+  assert.deepEqual(automationStorage.chats, []);
   const catalogResponse = await first.call("alice", "/agents");
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
@@ -701,7 +703,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       title: "Alice private",
       version: selectedChat.version,
       updatedAt: selectedChat.updatedAt,
-      approximateBytes: storage.usedBytes,
+      approximateBytes: storage.usedBytes - automationStorage.usedBytes,
     },
   ]);
   assert.deepEqual(await (await first.call("bob", "/storage/chats")).json(), {
@@ -2110,9 +2112,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line));
-      assert.deepEqual(usageEvents.at(-2), { type: "usage", contextTokens: 3 });
+      assert.deepEqual(usageEvents.at(-2), {
+        type: "usage",
+        contextTokens: 3,
+        inputTokens: 3,
+        outputTokens: 1,
+      });
       assert.deepEqual(transcript.usage, {
         contextTokens: 3,
+        inputTokens: 3,
+        outputTokens: 1,
         provider: "anthropic",
         model: "claude-sonnet-4-6",
       });
@@ -2395,4 +2404,147 @@ void test("An in-flight session capability stops when its profile is merged", as
   assert.equal(staleAuthorityAccepted, false);
   assert.match(events, /"type":"error"/);
   assert.doesNotMatch(events, /Must not cross the profile merge|"type":"done"/);
+});
+
+void test("automation definitions consume member and global storage quota", async (t) => {
+  const stateDir = path.resolve(".artifacts", `automation-quota-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://quota.example";
+  const expiresAt = Date.now() + 120_000;
+  const options = {
+    origin,
+    stateDir,
+    accessIssuer: "https://identity.example",
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer: "https://identity.example",
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run() {
+        assert.fail("Automation quota proof does not run an agent.");
+      },
+      async steer() {
+        assert.fail("Automation quota proof does not steer an agent.");
+      },
+    },
+  };
+  const app = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 12_000, userBytes: 8_000, freeFloorBytes: 1 },
+  });
+  t.after(() => app.shutdown());
+  const call = (subject: string, route: string, init?: RequestInit) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  await call("alice", "/me");
+  await call("bob", "/me");
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://identity.example", subject }),
+      "added",
+    );
+  }
+  const draft = {
+    name: "Synthetic quota test",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const firstCreated = await call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(firstCreated.status, 201);
+  const firstAutomation = (await firstCreated.json()).automation;
+
+  const secondAliceCreate = await call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(secondAliceCreate.status, 413);
+  assert.equal((await secondAliceCreate.json()).error.code, "quota_exceeded");
+
+  const firstBobCreate = await call("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(firstBobCreate.status, 201);
+
+  const secondBobCreate = await call("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(secondBobCreate.status, 413);
+  assert.equal((await secondBobCreate.json()).error.code, "quota_exceeded");
+
+  const oversizedPatch = await call("alice", `/automations/${firstAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": firstAutomation.version },
+    body: JSON.stringify({ instructions: "x".repeat(6_000) }),
+  });
+  assert.equal(oversizedPatch.status, 413);
+  assert.equal((await oversizedPatch.json()).error.code, "quota_exceeded");
+  const unchanged = await call("alice", `/automations/${firstAutomation.id}`);
+  const unchangedAutomation = (await unchanged.json()).automation;
+  assert.equal(unchangedAutomation.version, firstAutomation.version);
+  assert.equal(unchangedAutomation.instructions, draft.instructions);
+
+  const withoutStorageLimits = createProtectedHttp(options);
+  t.after(() => withoutStorageLimits.shutdown());
+  const catalogWithoutLimits = await withoutStorageLimits.fetch(
+    new Request(`${origin}/api/protected/v1/automations/catalog`, {
+      headers: { origin, cookie: "synthetic=alice" },
+    }),
+  );
+  const disabledCatalog = await catalogWithoutLimits.json();
+  assert.equal(disabledCatalog.capabilities.automations.list, false);
+  assert.equal(disabledCatalog.capabilities.automations.create, false);
+  const disabledCreate = await withoutStorageLimits.fetch(
+    new Request(`${origin}/api/protected/v1/automations`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie: "synthetic=alice",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(draft),
+    }),
+  );
+  assert.equal(disabledCreate.status, 404);
 });

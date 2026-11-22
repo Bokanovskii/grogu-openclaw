@@ -17,16 +17,18 @@ const limits = {
   doneWhenCodeUnits: 2_000,
 } as const;
 
-const capabilities = {
-  catalog: true,
-  draftValidation: true,
-  list: true,
-  create: true,
-  scheduleControl: false,
-  run: false,
-  sharing: false,
-  notifications: false,
-} as const;
+function capabilities(persistenceAvailable: boolean) {
+  return {
+    catalog: true,
+    draftValidation: true,
+    list: persistenceAvailable,
+    create: persistenceAvailable,
+    scheduleControl: false,
+    run: false,
+    sharing: false,
+    notifications: false,
+  } as const;
+}
 const cronCatalog: NonNullable<ProtectedAutomationCatalog["schedule"]["cron"]> = {
   format: "5-field",
   repeats: ["daily", "weekdays", "saturday"],
@@ -76,6 +78,7 @@ export function createProtectedAutomationCatalog(input: {
   agents: ProtectedAgentCatalogDto;
   models: readonly ProtectedModel[];
   calendarDraftValidationAvailable?: boolean;
+  persistenceAvailable?: boolean;
 }): ProtectedAutomationCatalog | undefined {
   const sparky = input.models.find((model) => model.provider === "sparky");
   if (
@@ -86,7 +89,7 @@ export function createProtectedAutomationCatalog(input: {
     return undefined;
   }
   return {
-    capabilities: { automations: capabilities },
+    capabilities: { automations: capabilities(input.persistenceAvailable ?? true) },
     defaultAgentId: input.agents.defaultAgentId,
     agents: input.agents.agents,
     models: [sparky],

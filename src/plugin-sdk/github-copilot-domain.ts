@@ -47,3 +47,40 @@ export function normalizeGithubCopilotDomain(raw: string | undefined | null): st
   }
   return DEFAULT_GITHUB_COPILOT_DOMAIN;
 }
+
+// A device-flow token carries the host that minted it, so ambient domain
+// settings cannot redirect it. Both Copilot plugins read this one format.
+const BOUND_TOKEN_PREFIX = "openclaw-github-copilot-token:v1:";
+
+export function bindGithubCopilotToken(token: string, githubDomain: string): string {
+  return `${BOUND_TOKEN_PREFIX}${JSON.stringify({ token, githubDomain: normalizeGithubCopilotDomain(githubDomain) })}`;
+}
+
+/** Returns undefined for an unbound token; throws for a malformed bound token. */
+export function parseGithubCopilotBoundToken(
+  value: string,
+): { token: string; githubDomain: string } | undefined {
+  if (!value.startsWith(BOUND_TOKEN_PREFIX)) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.slice(BOUND_TOKEN_PREFIX.length));
+  } catch {
+    parsed = undefined;
+  }
+  const { token, githubDomain } = (parsed && typeof parsed === "object" ? parsed : {}) as Record<
+    string,
+    unknown
+  >;
+  if (
+    typeof token !== "string" ||
+    !token.trim() ||
+    typeof githubDomain !== "string" ||
+    !githubDomain.trim() ||
+    !isSupportedGithubCopilotDomain(githubDomain)
+  ) {
+    throw new Error("Invalid GitHub Copilot bound token; reconnect the account.");
+  }
+  return { token, githubDomain: normalizeGithubCopilotDomain(githubDomain) };
+}

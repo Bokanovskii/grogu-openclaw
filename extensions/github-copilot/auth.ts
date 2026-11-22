@@ -25,6 +25,7 @@ export async function resolveFirstGithubToken(params: {
 }): Promise<{
   githubToken: string;
   githubDomain?: string;
+  boundGithubDomain?: string;
   hasProfile: boolean;
   profileId?: string;
 }> {
@@ -112,5 +113,9 @@ export async function resolveFirstGithubToken(params: {
     value: profile.tokenRef,
     path: `providers.github-copilot.authProfiles.${profileId ?? "default"}.tokenRef`,
   });
-  return { githubToken: (resolved ?? profile.token ?? "").trim(), hasProfile, profileId };
+  return {
+    ...parseGithubCopilotApiKey((resolved ?? profile.token ?? "").trim()),
+    hasProfile,
+    profileId,
+  };
 }

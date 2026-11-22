@@ -1,6 +1,9 @@
 import { MAX_DATE_TIMESTAMP_MS } from "openclaw/plugin-sdk/number-runtime";
 import type { ProviderAuthDoctorHintContext } from "openclaw/plugin-sdk/plugin-entry";
-import type { OAuthCredential } from "openclaw/plugin-sdk/provider-auth";
+import {
+  parseGithubCopilotBoundToken,
+  type OAuthCredential,
+} from "openclaw/plugin-sdk/provider-auth";
 import type {
   OAuthCredentials,
   OAuthLoginCallbacks,
@@ -94,7 +97,17 @@ export function formatGithubCopilotApiKey(credential: {
 export function parseGithubCopilotApiKey(value: string): {
   githubToken: string;
   githubDomain?: string;
+  /** Host the credential was minted on; outranks env and config domains. */
+  boundGithubDomain?: string;
 } {
+  const bound = parseGithubCopilotBoundToken(value);
+  if (bound) {
+    return {
+      githubToken: bound.token,
+      githubDomain: bound.githubDomain,
+      boundGithubDomain: bound.githubDomain,
+    };
+  }
   if (!value.startsWith(LEGACY_OAUTH_KEY_PREFIX)) {
     return { githubToken: value };
   }

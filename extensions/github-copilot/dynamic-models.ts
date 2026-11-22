@@ -67,6 +67,7 @@ export function createGithubCopilotDynamicModelHooks() {
         explicit: auth.githubDomain,
         config: ctx.config,
       }),
+      ...(auth.boundGithubDomain ? { boundGithubDomain: auth.boundGithubDomain } : {}),
     }).catch((error: unknown) => {
       if (error instanceof CopilotRuntimeAuthError && error.status !== undefined) {
         throw new LiveModelCatalogHttpError(PROVIDER_ID, error.status);

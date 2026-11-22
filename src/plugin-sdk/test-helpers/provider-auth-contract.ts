@@ -1,6 +1,7 @@
 // Provider auth contract helpers define reusable tests for provider auth implementations.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRuntimeAuthProfileStoreSnapshots, type AuthProfileStore } from "../agent-runtime.js";
+import { bindGithubCopilotToken } from "../github-copilot-domain.js";
 import { createNonExitingRuntime } from "../runtime.js";
 import type {
   WizardMultiSelectParams,
@@ -513,7 +514,7 @@ export function describeGithubCopilotProviderAuthContract(
             credential: {
               type: "token",
               provider: "github-copilot",
-              token: "github-device-token",
+              token: bindGithubCopilotToken("github-device-token", "github.com"),
             },
             secretStorage: {
               kind: "store",
@@ -569,7 +570,7 @@ export function describeGithubCopilotProviderAuthContract(
             credential: {
               type: "token",
               provider: "github-copilot",
-              token: "rpc-client-token",
+              token: bindGithubCopilotToken("rpc-client-token", "github.com"),
             },
             secretStorage: {
               kind: "store",

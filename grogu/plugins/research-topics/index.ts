@@ -1,14 +1,8 @@
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { withFileLock } from "openclaw/plugin-sdk/file-lock";
 import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { isCronSessionKey, isIncognitoSessionKey } from "openclaw/plugin-sdk/routing";
-import {
-  openSqliteWorkerStore,
-  runSqliteWorkerStoreWrite,
-  type SqliteWorkerStore,
-} from "openclaw/plugin-sdk/sqlite-runtime";
 import { createDelivery } from "./delivery.js";
+import { isResearchMemberBinding, ResearchLedger } from "./ledger.js";
 import { type LedgerOperations, parseRequest, toolSchema, toolDescription } from "./schema.js";
 
 export default definePluginEntry({
@@ -17,6 +11,7 @@ export default definePluginEntry({
   description: "Private research briefs with fair rounds and shared source limits.",
   register(api) {
     const delivery = createDelivery(api);
+    const memberScoped = api.pluginConfig?.ledgerMode === "member";
     const sending = new Map<
       string,
       {
@@ -27,56 +22,29 @@ export default definePluginEntry({
     >();
     const callKey = (sessionKey: string, sessionId: string, toolCallId: string) =>
       JSON.stringify([sessionKey, sessionId, toolCallId]);
-    let opening: Promise<SqliteWorkerStore<LedgerOperations>> | undefined;
     let retired = false;
-    const databasePath = path.join(
-      api.runtime.state.resolveStateDir(),
-      "research-topics",
-      "ledger.sqlite",
-    );
+    let personalLedger: ResearchLedger | undefined;
     const assertActive = () => {
       if (retired) {
         throw new Error("Research Topics plugin stopped. Retry after the plugin starts.");
       }
     };
     const readActions = new Set(["get", "lookup", "list", "due", "source_list"]);
-    const withMutationLock = <T>(operation: () => Promise<T>) =>
-      withFileLock(
-        databasePath,
-        {
-          retries: { retries: 120, factor: 1.5, minTimeout: 50, maxTimeout: 1_000 },
-          stale: 60_000,
-          staleRecovery: "remove-if-definitely-stale",
-        },
-        () => {
-          assertActive();
-          return operation();
-        },
-      );
-    const open = () => {
+    const personal = () => {
       assertActive();
       if (!api.runtimeSource) {
         throw new Error("Research Topics requires plugin runtimeSource metadata.");
       }
-      opening ??= openSqliteWorkerStore<LedgerOperations>({
-        databasePath,
-        moduleUrl: new URL(
-          `./store.worker${path.extname(api.runtimeSource)}`,
-          pathToFileURL(api.runtimeSource),
-        ),
-        input: {},
-      }).catch((error: unknown) => {
-        opening = undefined;
-        throw error;
-      });
-      return opening;
+      personalLedger ??= new ResearchLedger(
+        path.join(api.runtime.state.resolveStateDir(), "research-topics", "ledger.sqlite"),
+        api.runtimeSource,
+      );
+      return personalLedger;
     };
     const stop = async () => {
       retired = true;
       sending.clear();
-      if (opening) {
-        await (await opening).close();
-      }
+      await personalLedger?.close();
     };
     api.lifecycle.registerRuntimeLifecycle({
       id: "research-topics",
@@ -97,6 +65,7 @@ export default definePluginEntry({
     api.on("before_tool_call", async (event, context) => {
       const toolCallId = event.toolCallId ?? context.toolCallId;
       if (
+        memberScoped ||
         !delivery ||
         event.toolName !== "message" ||
         event.params.action !== "send" ||
@@ -112,16 +81,14 @@ export default definePluginEntry({
         return;
       }
       const ownerText = event.params.message;
-      const store = await open();
-      const completion = await runSqliteWorkerStoreWrite(
-        store,
+      const completion = await personal().run(
         (scope) =>
           scope.execute({
             type: "matchMessage",
             input: { ownerText, caller },
           }),
         assertActive,
-        [databasePath],
+        false,
       );
       assertActive();
       if (completion) {
@@ -135,6 +102,7 @@ export default definePluginEntry({
     api.on("after_tool_call", async (event, context) => {
       const toolCallId = event.toolCallId ?? context.toolCallId;
       if (
+        memberScoped ||
         !delivery ||
         event.toolName !== "message" ||
         !context.sessionKey ||
@@ -158,165 +126,167 @@ export default definePluginEntry({
       if (main.sessionId !== caller.sessionId) {
         throw new Error("Main changed before its completion receipt was recorded.");
       }
-      const store = await open();
-      await withMutationLock(() =>
-        runSqliteWorkerStoreWrite(
-          store,
-          (scope) =>
-            scope.execute({
-              type: "request",
-              input: {
-                request: {
-                  action: "confirm_completion",
-                  ...pending.completion,
-                  toolCallId,
-                },
-                caller,
-                now: Date.now(),
-                verifiedReceipt: receipt,
+      await personal().run(
+        (scope) =>
+          scope.execute({
+            type: "request",
+            input: {
+              request: {
+                action: "confirm_completion",
+                ...pending.completion,
+                toolCallId,
               },
-            }),
-          assertActive,
-          [databasePath],
-        ),
+              caller,
+              now: Date.now(),
+              verifiedReceipt: receipt,
+            },
+          }),
+        assertActive,
+        true,
       );
     });
     api.registerTool(
       {
         contextVersion: 2,
-        create: (context): AnyAgentTool | null =>
-          context.sessionKey && isIncognitoSessionKey(context.sessionKey)
-            ? null
-            : {
-                name: "research_topics",
-                label: "Research topics",
-                description: toolDescription,
-                parameters: toolSchema,
-                execute: async (_callId, value) => {
-                  let request = parseRequest(value);
-                  const assertCurrent = () => {
-                    assertActive();
-                    context.assertInvocationCurrent();
-                    context.assertInputCommitAllowed?.();
-                  };
-                  assertCurrent();
-                  const caller =
-                    context.sessionKey && context.sessionId
-                      ? { sessionKey: context.sessionKey, sessionId: context.sessionId }
-                      : undefined;
-                  if (
-                    request.action === "add" &&
-                    context.sessionKey &&
-                    isCronSessionKey(context.sessionKey) &&
-                    request.sessionRefs === undefined
-                  ) {
-                    request = { ...request, origin: "automation", sessionRefs: [] };
-                  }
-                  if (
-                    request.action === "link_session" &&
-                    context.sessionKey &&
-                    isCronSessionKey(context.sessionKey)
-                  ) {
-                    throw new Error(
-                      "Scheduled runs are not conversations and cannot link. Use post_update for recorded conversations.",
-                    );
-                  }
-                  const needsDelivery = [
-                    "complete",
-                    "post_update",
-                    "notify_main",
-                    "prepare_text",
-                    "confirm_completion",
-                  ].includes(request.action);
-                  const requireDelivery = () => {
-                    if (!delivery) {
-                      throw new Error(
-                        "Configure Research Topics delivery before using thread updates or Main handoffs.",
+        create: (context): AnyAgentTool | null => {
+          if (context.sessionKey && isIncognitoSessionKey(context.sessionKey)) {
+            return null;
+          }
+          const binding = context.toolBindings?.research_topics;
+          if (memberScoped && !isResearchMemberBinding(binding)) {
+            return null;
+          }
+          const member = memberScoped && isResearchMemberBinding(binding) ? binding : undefined;
+          const selectedDelivery = member ? member.delivery : delivery;
+          return {
+            name: "research_topics",
+            label: "Research topics",
+            description: toolDescription,
+            parameters: toolSchema,
+            execute: async (_callId, value) => {
+              let request = parseRequest(value);
+              const assertCurrent = () => {
+                assertActive();
+                context.assertInvocationCurrent();
+                context.assertInputCommitAllowed?.();
+                member?.assertCurrent();
+              };
+              assertCurrent();
+              const caller =
+                context.sessionKey && context.sessionId
+                  ? { sessionKey: context.sessionKey, sessionId: context.sessionId }
+                  : undefined;
+              if (
+                request.action === "add" &&
+                context.sessionKey &&
+                isCronSessionKey(context.sessionKey) &&
+                request.sessionRefs === undefined
+              ) {
+                request = { ...request, origin: "automation", sessionRefs: [] };
+              }
+              if (
+                request.action === "link_session" &&
+                context.sessionKey &&
+                isCronSessionKey(context.sessionKey)
+              ) {
+                throw new Error(
+                  "Scheduled runs are not conversations and cannot link. Use post_update for recorded conversations.",
+                );
+              }
+              const needsDelivery = [
+                "complete",
+                "post_update",
+                "notify_main",
+                "prepare_text",
+                "confirm_completion",
+              ].includes(request.action);
+              const requireDelivery = () => {
+                if (!selectedDelivery) {
+                  throw new Error(
+                    "Configure Research Topics delivery before using thread updates or Main handoffs.",
+                  );
+                }
+                selectedDelivery.authorize(caller);
+                return selectedDelivery;
+              };
+              if (needsDelivery) {
+                requireDelivery();
+              }
+              if (
+                (request.action === "prepare_text" || request.action === "confirm_completion") &&
+                !requireDelivery().isMain(caller)
+              ) {
+                throw new Error("Only configured Main can prepare or confirm completion texts.");
+              }
+              const mainSession =
+                request.action === "complete"
+                  ? await requireDelivery().mainSession(assertCurrent)
+                  : undefined;
+              const mutation = !readActions.has(request.action);
+              const executeWithAdmission = (assertAdmission: () => void) =>
+                (member?.ledger ?? personal()).run(
+                  async (scope) => {
+                    const execute = (input: Partial<LedgerOperations["request"]["input"]> = {}) =>
+                      scope.execute({
+                        type: "request",
+                        input: {
+                          request,
+                          now: Date.now(),
+                          caller,
+                          mainSession,
+                          ...input,
+                        },
+                      });
+                    if (
+                      request.action === "post_update" ||
+                      request.action === "notify_main" ||
+                      request.action === "confirm_completion"
+                    ) {
+                      const topic = await scope.execute({
+                        type: "publication",
+                        input: { id: request.id, expectedRevision: request.expectedRevision },
+                      });
+                      assertCurrent();
+                      if (request.action === "notify_main") {
+                        return requireDelivery().notify(request, topic, assertCurrent);
+                      }
+                      if (request.action === "confirm_completion") {
+                        const verifiedReceipt = await requireDelivery().recoverReceipt(
+                          caller,
+                          topic,
+                          request.toolCallId,
+                          assertCurrent,
+                        );
+                        return execute({ verifiedReceipt });
+                      }
+                      const verifiedReceipt = await requireDelivery().post(
+                        request,
+                        topic,
+                        assertCurrent,
                       );
+                      return topic.status === "completion_pending"
+                        ? execute({ verifiedReceipt })
+                        : verifiedReceipt;
                     }
-                    delivery.authorize(caller);
-                    return delivery;
-                  };
-                  if (needsDelivery) {
-                    requireDelivery();
-                  }
-                  if (
-                    (request.action === "prepare_text" ||
-                      request.action === "confirm_completion") &&
-                    !requireDelivery().isMain(caller)
-                  ) {
-                    throw new Error(
-                      "Only configured Main can prepare or confirm completion texts.",
-                    );
-                  }
-                  const mainSession =
-                    request.action === "complete"
-                      ? await requireDelivery().mainSession(assertCurrent)
-                      : undefined;
-                  const store = await open();
-                  assertCurrent();
-                  const run = () =>
-                    runSqliteWorkerStoreWrite(
-                      store,
-                      async (scope) => {
-                        const execute = (
-                          input: Partial<LedgerOperations["request"]["input"]> = {},
-                        ) =>
-                          scope.execute({
-                            type: "request",
-                            input: {
-                              request,
-                              now: Date.now(),
-                              caller,
-                              mainSession,
-                              ...input,
-                            },
-                          });
-                        if (
-                          request.action === "post_update" ||
-                          request.action === "notify_main" ||
-                          request.action === "confirm_completion"
-                        ) {
-                          const topic = await scope.execute({
-                            type: "publication",
-                            input: { id: request.id, expectedRevision: request.expectedRevision },
-                          });
-                          assertCurrent();
-                          if (request.action === "notify_main") {
-                            return requireDelivery().notify(request, topic, assertCurrent);
-                          }
-                          if (request.action === "confirm_completion") {
-                            const verifiedReceipt = await requireDelivery().recoverReceipt(
-                              caller,
-                              topic,
-                              request.toolCallId,
-                              assertCurrent,
-                            );
-                            return execute({ verifiedReceipt });
-                          }
-                          const verifiedReceipt = await requireDelivery().post(
-                            request,
-                            topic,
-                            assertCurrent,
-                          );
-                          return topic.status === "completion_pending"
-                            ? execute({ verifiedReceipt })
-                            : verifiedReceipt;
-                        }
-                        const result = await execute();
-                        return request.action === "prepare_text"
-                          ? { topic: result, route: requireDelivery().route }
-                          : result;
-                      },
-                      assertCurrent,
-                      [databasePath],
-                    );
-                  const details = await (readActions.has(request.action)
-                    ? run()
-                    : withMutationLock(run));
-                  return { content: [{ type: "text", text: JSON.stringify(details) }], details };
-                },
-              },
+                    const result = await execute();
+                    return request.action === "prepare_text"
+                      ? { topic: result, route: requireDelivery().route }
+                      : result;
+                  },
+                  () => {
+                    assertCurrent();
+                    assertAdmission();
+                  },
+                  mutation,
+                );
+              const details =
+                mutation && member
+                  ? await member.withMutationAdmission(executeWithAdmission)
+                  : await executeWithAdmission(() => {});
+              return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+            },
+          };
+        },
       },
       { optional: true },
     );

@@ -77,6 +77,13 @@ denied model fails the handoff visibly.
 Without delivery configuration, ledger operations remain available, but handoffs
 and completion fail explicitly. Incognito conversations do not receive the tool.
 
+For a member-scoped host, set `ledgerMode` to `member`. The host must bind a
+`ResearchMemberBinding` to each authorized turn. The binding supplies that
+member's ledger, delivery, live authority, and storage admission. A turn without
+a valid binding does not receive the tool. The host must revoke access and await
+the ledger's `close()` before deleting that member's ledger. The default mode
+continues to use the personal ledger and configured Main delivery.
+
 For a development load path, first run `npm run build` in this directory. Keep
 the entire `dist/` directory. Remove the superseded development path when switching
 to the managed package. Do not run schema-1 and schema-2 workers together.

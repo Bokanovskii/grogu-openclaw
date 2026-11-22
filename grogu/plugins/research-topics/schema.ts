@@ -174,7 +174,7 @@ export const toolSchema = Type.Intersect([Type.Object({}), requestSchema], { typ
 export type Request = Static<typeof requestSchema>;
 export type SessionRef = Static<typeof sessionRef>;
 export type CompletionReceipt = Pick<SessionRef, "sessionKey" | "sessionId"> & {
-  kind: "session_message" | "owner_text";
+  kind: "session_message" | "owner_text" | "owner_inbox";
   messageId: string;
   completedAtMs: number;
   toolCallId?: string;

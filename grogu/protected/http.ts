@@ -1026,6 +1026,7 @@ export function createProtectedHttp(options: {
             data.title === undefined ? undefined : text(data.title, 160),
             selectedAgentId,
           );
+          storage?.recordCreatedChat(chat.id, chats.scope(authority, chat.id).sessionKey);
           await revalidate();
           return json({ chat });
         } finally {
@@ -1122,6 +1123,7 @@ export function createProtectedHttp(options: {
             await files((owned) => removeChatFilesDirectory(owned, id));
             await revalidate();
           });
+          admitStorage?.deletedChat(profile.id, id);
           await revalidate();
           return noContent();
         } finally {

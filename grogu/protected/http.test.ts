@@ -196,6 +196,86 @@ void test("protected responses use neutral service wording", async (t) => {
   );
 });
 
+void test("deleting another member's chat frees quota for a running turn", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-quota-http-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const started = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  const written = Promise.withResolvers<void>();
+  t.after(() => proceed.resolve());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot: await root(stateDir),
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 60_000,
+    storageLimits: { globalBytes: 130_000, userBytes: 130_000, freeFloorBytes: 1 },
+    turns: {
+      models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+      async run(turn) {
+        started.resolve();
+        await proceed.promise;
+        try {
+          await turn.files.write(`chats/${turn.id}/output.txt`, "x".repeat(55_000));
+          written.resolve();
+        } catch (error) {
+          written.reject(error);
+          throw error;
+        }
+      },
+      async steer() {
+        assert.fail("Steering is not used by this fixture.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", user);
+    headers.set("content-type", "application/json");
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const createChat = async (user: string) => {
+    const response = await call(user, "/chats", { method: "POST", body: "{}" });
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body.chat;
+  };
+  const aliceChat = await createChat("alice");
+  const bobChat = await createChat("bob");
+  const running = await call("alice", `/chats/${aliceChat.id}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": alice.id },
+    body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
+  });
+  assert.equal(running.status, 200);
+  await started.promise;
+  const deleted = await call("bob", `/chats/${bobChat.id}`, {
+    method: "DELETE",
+    headers: { "if-match": bobChat.version },
+  });
+  assert.equal(deleted.status, 204);
+  proceed.resolve();
+  await written.promise;
+  await running.text();
+});
+
 void test("fixture blocks egress from work that outlives its test", () => {
   const script = `
     import { test } from "node:test";

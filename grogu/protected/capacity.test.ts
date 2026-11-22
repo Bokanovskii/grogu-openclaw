@@ -21,6 +21,603 @@ import { createStorageAdmission, measureProtectedStorage } from "./capacity.js";
 import { createProtectedChats } from "./chats.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
 
+void test("concurrent members share storage quota without blocking each other", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 49_152, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    first.charge(16_384);
+    second.charge(16_384);
+    await assert.rejects(
+      admit("third", () => {}, "create"),
+      { code: "quota_exceeded" },
+    );
+    assert.throws(() => first.charge(1), { code: "quota_exceeded" });
+  } finally {
+    first.release();
+    second.release();
+  }
+  const next = await admit("third", () => {}, "create");
+  next.release();
+  const [sameFirst, sameSecond] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("first", () => {}, "turn"),
+  ]);
+  try {
+    sameFirst.charge(16_384);
+    assert.throws(() => sameSecond.charge(1), { code: "quota_exceeded" });
+  } finally {
+    sameFirst.release();
+    sameSecond.release();
+  }
+});
+
+void test("deleted chats free quota while another member is still running", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  let present = true;
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 65_536, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return present
+          ? [
+              {
+                profileId: "first",
+                id: "one",
+                sessionKey: "synthetic",
+                updatedAt: 1,
+                transient: false,
+              },
+            ]
+          : [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  try {
+    present = false;
+    admit.deletedChat("first", "one");
+    first.charge(20_000);
+  } finally {
+    first.release();
+  }
+  const second = await admit("second", () => {}, "create");
+  second.release();
+});
+
+void test("deleting a newly created chat frees its reservation during another turn", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 70_000, globalBytes: 70_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  const created = await admit("second", () => {}, "create");
+  created.recordCreatedChat("new", "new-session");
+  created.release();
+  try {
+    admit.deletedChat("second", "new");
+    first.charge(25_000);
+  } finally {
+    first.release();
+  }
+});
+
+void test("deletion during the initial scan does not leave a stale charge", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const started = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 32_768, globalBytes: 32_768, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          { profileId: "first", id: "one", sessionKey: "one", updatedAt: 1, transient: false },
+        ];
+      },
+      async transcriptBytes() {
+        started.resolve();
+        await finish.promise;
+        return 0;
+      },
+    },
+  });
+  const admission = admit("second", () => {}, "create");
+  await started.promise;
+  admit.deletedChat("first", "one");
+  finish.resolve();
+  (await admission).release();
+});
+
+void test("quota rescans do not double-charge a running turn's persisted transcript", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  let present = true;
+  let transcriptBytes = 0;
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 95_000, globalBytes: 95_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          { profileId: "first", id: "one", sessionKey: "one", updatedAt: 1, transient: false },
+          ...(present
+            ? [
+                {
+                  profileId: "second",
+                  id: "two",
+                  sessionKey: "two",
+                  updatedAt: 1,
+                  transient: false,
+                },
+              ]
+            : []),
+        ];
+      },
+      async transcriptBytes(id) {
+        return id === "one" ? transcriptBytes : 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  try {
+    first.charge(10_000);
+    transcriptBytes = 10_000;
+    present = false;
+    const second = await admit("second", () => {}, "create");
+    second.release();
+  } finally {
+    first.release();
+  }
+});
+
+void test("quota rescan restarts when the last running turn finishes during the scan", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  let scanStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    scanStarted = resolve;
+  });
+  let finishScan!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    finishScan = resolve;
+  });
+  let scans = 0;
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 32_768, globalBytes: 32_768, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        if (++scans === 2) {
+          scanStarted();
+          await blocked;
+        }
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  const next = admit("second", () => {}, "create");
+  await started;
+  first.release();
+  finishScan();
+  (await next).release();
+});
+
+void test("failed file writes do not consume another member's quota", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 65_536, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  try {
+    await assert.rejects(first.files(files).create("../invalid", "x".repeat(20_000)), {
+      code: "invalid-path",
+    });
+    const second = await admit("second", () => {}, "create");
+    second.release();
+  } finally {
+    first.release();
+  }
+});
+
+void test("failed file writes do not block an already-admitted member", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 65_536, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    await assert.rejects(first.files(files).create("../invalid", "x".repeat(20_000)), {
+      code: "invalid-path",
+    });
+    second.charge(10_000);
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
+void test("file replacements do not consume another member's quota twice", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const data = "x".repeat(20_000);
+  await files.create("chats/one/file.bin", data);
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 130_000, globalBytes: 130_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          {
+            profileId: "first",
+            id: "one",
+            sessionKey: "synthetic",
+            updatedAt: 1,
+            transient: false,
+          },
+        ];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    await first.files(files).write("chats/one/file.bin", data);
+    second.charge(15_000);
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
+void test("nested file creation reserves the directories counted by storage scans", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 1024,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 1024,
+    limits: { userBytes: 80_000, globalBytes: 80_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          { profileId: "first", id: "one", sessionKey: "one", updatedAt: 1, transient: false },
+        ];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    await assert.rejects(first.files(files).create("chats/one/a/b/file", ""), {
+      code: "quota_exceeded",
+    });
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
+void test("a quota rescan during a replacement does not block an admitted turn", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const data = "x".repeat(20_000);
+  await files.create("chats/one/file.bin", data);
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 130_000, globalBytes: 130_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          {
+            profileId: "first",
+            id: "one",
+            sessionKey: "synthetic",
+            updatedAt: 1,
+            transient: false,
+          },
+        ];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  let startWrite!: () => void;
+  const writing = new Promise<void>((resolve) => {
+    startWrite = resolve;
+  });
+  let finishWrite!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    finishWrite = resolve;
+  });
+  const write = first
+    .files({
+      ...files,
+      async write(name, contents) {
+        startWrite();
+        await blocked;
+        await files.write(name, contents);
+      },
+    })
+    .write("chats/one/file.bin", data);
+  try {
+    await writing;
+    await assert.rejects(
+      admit("third", () => {}, "create"),
+      { code: "quota_exceeded" },
+    );
+    finishWrite();
+    await write;
+    second.charge(15_000);
+  } finally {
+    finishWrite();
+    await write;
+    first.release();
+    second.release();
+  }
+});
+
+void test("a failed file operation still charges data committed before the error", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 110_000, globalBytes: 110_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [
+          {
+            profileId: "first",
+            id: "one",
+            sessionKey: "synthetic",
+            updatedAt: 1,
+            transient: false,
+          },
+        ];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    await assert.rejects(
+      first
+        .files({
+          ...files,
+          async create(name, data) {
+            await files.create(name, data);
+            throw new Error("write completed before failure");
+          },
+        })
+        .create("chats/one/file.bin", "x".repeat(20_000)),
+      /write completed before failure/,
+    );
+    assert.throws(() => second.charge(22_000), { code: "quota_exceeded" });
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
+void test("quota rescans keep in-flight file writes reserved", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    maxBytes: 25_000,
+    assertCurrent() {},
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    maxFileBytes: 25_000,
+    limits: { userBytes: 65_536, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const first = await admit("first", () => {}, "turn");
+  let finishWrite!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    finishWrite = resolve;
+  });
+  const write = first
+    .files({
+      ...files,
+      async create(name, data) {
+        await blocked;
+        return files.create(name, data);
+      },
+    })
+    .create("pending.bin", "x".repeat(20_000));
+  try {
+    first.release();
+    await assert.rejects(
+      admit("second", () => {}, "create"),
+      { code: "quota_exceeded" },
+    );
+  } finally {
+    finishWrite();
+    await write;
+    first.release();
+  }
+});
+
 void test("Family capacity charges encrypted bytes for existing files and new writes", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
@@ -61,7 +658,7 @@ void test("Family capacity charges encrypted bytes for existing files and new wr
         },
       },
     })(profileId, () => {}, "turn");
-  const tooSmall = await admission(16_384 + 4096 + data.length);
+  const tooSmall = await admission(16_384 + 3 * 4096 + data.length);
   try {
     await assert.rejects(async () => tooSmall.files(files).create("chats/one/file.bin", data), {
       code: "quota_exceeded",
@@ -71,7 +668,7 @@ void test("Family capacity charges encrypted bytes for existing files and new wr
   } finally {
     tooSmall.release();
   }
-  const exactWrite = await admission(16_384 + 4096 + physicalBytes);
+  const exactWrite = await admission(16_384 + 3 * 4096 + physicalBytes);
   try {
     await exactWrite.files(files).create("chats/one/file.bin", data);
   } finally {

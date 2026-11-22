@@ -24,13 +24,17 @@ class FakeCloudflare:
         self.writes = []
         self.failure = None
         self.after_write = None
+        self.account_override = {}
 
     def send(self, method, path, token, payload=None):
         app_path = "/client/v4/accounts/account-id/access/apps/app-id/policies/policy-id"
         reusable_path = "/client/v4/accounts/account-id/access/policies/policy-id"
-        expected = reusable_path if method == "PUT" and self.policy.get("reusable") is True else app_path
-        if path != expected:
+        if path not in (app_path, reusable_path):
             return {"success": False}
+        if method == "PUT" and path != (
+            reusable_path if self.policy.get("reusable") is True else app_path
+        ):
+            raise AssertionError("Unexpected policy write target")
         if token != "synthetic-token":
             raise AssertionError("Unexpected credential")
         if method == "PUT":
@@ -41,7 +45,14 @@ class FakeCloudflare:
                     self.after_write(self.policy)
             if self.failure:
                 raise OSError("Synthetic disconnected write")
-        return {"success": True, "result": copy.deepcopy(self.policy)}
+        result = copy.deepcopy(self.policy)
+        if result.get("reusable") is True:
+            if path == app_path:
+                result.pop("app_count", None)
+            else:
+                result.pop("precedence", None)
+                result.update(copy.deepcopy(self.account_override))
+        return {"success": True, "result": result}
 
 
 class ProtectedPolicyHelperTest(unittest.TestCase):
@@ -128,6 +139,16 @@ class ProtectedPolicyHelperTest(unittest.TestCase):
             self.sync(["member@example.invalid"])
         self.assertEqual(self.cloudflare.writes, [])
 
+    def test_reusable_policy_rejects_account_snapshot_disagreement(self):
+        self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+        self.cloudflare.account_override["include"] = [
+            {"email": {"email": "owner@example.invalid"}},
+            {"email": {"email": "unexpected@example.invalid"}},
+        ]
+        with self.assertRaises(helper.PolicyError):
+            self.sync(["member@example.invalid"])
+        self.assertEqual(self.cloudflare.writes, [])
+
     def test_reusable_policy_reports_unknown_when_readback_is_unsafe_or_mismatched(self):
         for field, value in (("app_count", 2), ("reusable", False),
                              ("include", [{"email": {"email": "owner@example.invalid"}}])):
@@ -137,6 +158,11 @@ class ProtectedPolicyHelperTest(unittest.TestCase):
                 self.cloudflare.after_write = lambda policy: policy.update({field: value})
                 self.assertEqual(self.sync(["member@example.invalid"]), {"revision": 7, "status": "unknown"})
                 self.assertEqual(len(self.cloudflare.writes), 1)
+        self.cloudflare = FakeCloudflare()
+        self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+        self.cloudflare.after_write = lambda _: self.cloudflare.account_override.update({"app_count": 2})
+        self.assertEqual(self.sync(["member@example.invalid"]), {"revision": 7, "status": "unknown"})
+        self.assertEqual(len(self.cloudflare.writes), 1)
 
 
 if __name__ == "__main__":

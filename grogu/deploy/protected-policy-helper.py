@@ -80,7 +80,7 @@ def target_path(config):
     return "/client/v4/accounts/{}/access/apps/{}/policies/{}".format(account, app, policy)
 
 
-def policy_snapshot(response, config):
+def policy_snapshot(response, config, require_app_count=False):
     if not isinstance(response, dict) or response.get("success") is not True:
         raise PolicyError()
     policy = response.get("result")
@@ -91,8 +91,11 @@ def policy_snapshot(response, config):
         or policy.get("name") != config["policyName"]
         or policy.get("decision") != "allow"
         or ("reusable" in policy and type(policy["reusable"]) is not bool)
-        or (policy.get("reusable") is True and (
+        or (require_app_count and (
             type(policy.get("app_count")) is not int or policy["app_count"] != 1
+        ))
+        or (policy.get("reusable") is True and "app_count" in policy and (
+            type(policy["app_count"]) is not int or policy["app_count"] != 1
         ))
         or ("uid" in policy and (
             not isinstance(policy["uid"], str) or not IDENTIFIER.fullmatch(policy["uid"])
@@ -122,6 +125,18 @@ def policy_snapshot(response, config):
     return payload, sorted(set(current)), reusable
 
 
+def read_policy(send, path, account_path, token, config):
+    payload, emails, reusable = policy_snapshot(send("GET", path, token), config)
+    if reusable:
+        account_payload, account_emails, account_reusable = policy_snapshot(
+            send("GET", account_path, token), config, require_app_count=True
+        )
+        if not account_reusable or account_payload != payload or account_emails != emails:
+            raise PolicyError()
+        return account_payload, account_emails, reusable
+    return payload, emails, reusable
+
+
 def send_cloudflare(method, path, token, payload=None):
     # This direct connection neither follows redirects nor consults proxy variables.
     connection = http.client.HTTPSConnection(API_HOST, timeout=15)
@@ -147,6 +162,10 @@ def synchronize(config, value, send):
         raise PolicyError()
     revision, additions, removals = validate_request(value, owner_email)
     path = target_path(config)
+    account_path = "/client/v4/accounts/{}/access/policies/{}".format(
+        urllib.parse.quote(config["accountId"], safe=""),
+        urllib.parse.quote(config["policyId"], safe=""),
+    )
     token = config.get("token")
     if (
         not isinstance(token, str)
@@ -157,22 +176,18 @@ def synchronize(config, value, send):
         or not config["policyName"]
     ):
         raise PolicyError()
-    payload, current, reusable = policy_snapshot(send("GET", path, token), config)
+    payload, current, reusable = read_policy(send, path, account_path, token, config)
     emails = sorted((set(current) | additions) - removals)
     payload["include"] = [{"email": {"email": email}} for email in emails]
     if current == emails:
         return {"revision": revision, "status": "synced"}
     try:
-        write_path = path if not reusable else "/client/v4/accounts/{}/access/policies/{}".format(
-            urllib.parse.quote(config["accountId"], safe=""),
-            urllib.parse.quote(config["policyId"], safe=""),
-        )
-        send("PUT", write_path, token, payload)
+        send("PUT", account_path if reusable else path, token, payload)
     except Exception:
         # A failed response can follow a committed remote write. Read before any retry.
         pass
     try:
-        _, observed, observed_reusable = policy_snapshot(send("GET", path, token), config)
+        _, observed, observed_reusable = read_policy(send, path, account_path, token, config)
     except Exception:
         return {"revision": revision, "status": "unknown"}
     return {

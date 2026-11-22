@@ -99,7 +99,7 @@ if [ "$mode" = install-policy-helper ] || [ "$mode" = update-policy-helper ]; th
         exit 77
       }
   done
-  echo "6afd4d64ff2c1209cd92f6f61b3ea3500ebd1061a096d459dede2d6d930e9f06  $helper_input" |
+  echo "8b1876aaa8bd11e5a18592bc6369b95f1d55184c29bcb9960a8acbe692a3d4d8  $helper_input" |
     /usr/bin/shasum -a 256 -c - >/dev/null || {
       echo "Policy helper source does not match the reviewed installer." >&2; exit 65;
     }
@@ -127,7 +127,7 @@ if [ "$mode" = install-policy-helper ] || [ "$mode" = update-policy-helper ]; th
     staged_helper="$(mktemp "$helpers/.grogu-policy-update.XXXXXX")"
     trap '/bin/rm -f "$staged_helper"' EXIT
     /usr/bin/install -o root -g wheel -m 644 "$helper_input" "$staged_helper"
-    echo "6afd4d64ff2c1209cd92f6f61b3ea3500ebd1061a096d459dede2d6d930e9f06  $staged_helper" |
+    echo "8b1876aaa8bd11e5a18592bc6369b95f1d55184c29bcb9960a8acbe692a3d4d8  $staged_helper" |
       /usr/bin/shasum -a 256 -c - >/dev/null || {
         echo "Policy helper source changed during staging." >&2; exit 65;
       }

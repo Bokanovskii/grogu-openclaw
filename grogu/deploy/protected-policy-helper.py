@@ -34,7 +34,7 @@ WRITABLE_FIELDS = frozenset(
     )
 )
 READ_ONLY_FIELDS = frozenset(
-    ("id", "account_id", "created_at", "updated_at", "app_count", "reusable")
+    ("id", "uid", "account_id", "created_at", "updated_at", "app_count", "reusable")
 )
 
 
@@ -90,7 +90,13 @@ def policy_snapshot(response, config):
         policy.get("id") != config["policyId"]
         or policy.get("name") != config["policyName"]
         or policy.get("decision") != "allow"
-        or ("reusable" in policy and policy["reusable"] is not False)
+        or ("reusable" in policy and type(policy["reusable"]) is not bool)
+        or (policy.get("reusable") is True and (
+            type(policy.get("app_count")) is not int or policy["app_count"] != 1
+        ))
+        or ("uid" in policy and (
+            not isinstance(policy["uid"], str) or not IDENTIFIER.fullmatch(policy["uid"])
+        ))
         or set(policy) - WRITABLE_FIELDS - READ_ONLY_FIELDS
     ):
         raise PolicyError()
@@ -110,7 +116,10 @@ def policy_snapshot(response, config):
     if config["ownerEmail"] not in current:
         raise PolicyError()
     payload = {key: value for key, value in policy.items() if key in WRITABLE_FIELDS}
-    return payload, sorted(set(current))
+    reusable = policy.get("reusable") is True
+    if reusable:
+        payload.pop("precedence", None)
+    return payload, sorted(set(current)), reusable
 
 
 def send_cloudflare(method, path, token, payload=None):
@@ -148,23 +157,27 @@ def synchronize(config, value, send):
         or not config["policyName"]
     ):
         raise PolicyError()
-    payload, current = policy_snapshot(send("GET", path, token), config)
+    payload, current, reusable = policy_snapshot(send("GET", path, token), config)
     emails = sorted((set(current) | additions) - removals)
     payload["include"] = [{"email": {"email": email}} for email in emails]
     if current == emails:
         return {"revision": revision, "status": "synced"}
     try:
-        send("PUT", path, token, payload)
+        write_path = path if not reusable else "/client/v4/accounts/{}/access/policies/{}".format(
+            urllib.parse.quote(config["accountId"], safe=""),
+            urllib.parse.quote(config["policyId"], safe=""),
+        )
+        send("PUT", write_path, token, payload)
     except Exception:
         # A failed response can follow a committed remote write. Read before any retry.
         pass
     try:
-        _, observed = policy_snapshot(send("GET", path, token), config)
+        _, observed, observed_reusable = policy_snapshot(send("GET", path, token), config)
     except Exception:
         return {"revision": revision, "status": "unknown"}
     return {
         "revision": revision,
-        "status": "synced" if observed == emails else "unknown",
+        "status": "synced" if observed == emails and observed_reusable == reusable else "unknown",
     }
 
 

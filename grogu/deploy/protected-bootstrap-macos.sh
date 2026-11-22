@@ -8,6 +8,7 @@ usage() {
   echo "       /bin/bash $0 --operator USER --verify"
   echo "       /bin/bash $0 --operator USER --add-subject UUID"
   echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --install-policy-helper"
+  echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --update-policy-helper"
   echo "Creates isolated service ownership. It does not activate either service."
 }
 
@@ -31,6 +32,7 @@ while [ "$#" -gt 0 ]; do
     --help) usage; exit 0 ;;
     --verify) mode="verify"; shift ;;
     --install-policy-helper) mode="install-policy-helper"; shift ;;
+    --update-policy-helper) mode="update-policy-helper"; shift ;;
     *) usage >&2; exit 64 ;;
   esac
 done
@@ -82,11 +84,13 @@ staging_dir="${staging_dir:-/Users/$operator/.config/grogu-protected/staging}"
   [ "$(stat -f '%Lp' "$staging_dir")" = 700 ] || {
     echo "The staging directory must be operator-owned, private, and not a link." >&2; exit 77;
   }
-if [ "$mode" = install-policy-helper ]; then
+if [ "$mode" = install-policy-helper ] || [ "$mode" = update-policy-helper ]; then
   id "$service_user" >/dev/null
   helper_input="$staging_dir/protected-policy-helper.py"
   policy_input="$staging_dir/protected-policy-config.json"
-  for input in "$helper_input" "$policy_input"; do
+  inputs=("$helper_input")
+  if [ "$mode" = install-policy-helper ]; then inputs+=("$policy_input"); fi
+  for input in "${inputs[@]}"; do
     [ -f "$input" ] && [ ! -L "$input" ] && [ -s "$input" ] &&
       [ "$(stat -f '%u' "$input")" = "$operator_uid" ] &&
       [ "$(stat -f '%Lp' "$input")" = 600 ] &&
@@ -95,15 +99,10 @@ if [ "$mode" = install-policy-helper ]; then
         exit 77
       }
   done
-  echo "76a94aa66caea08759a535a2e9c4e594dc4574c30d703e49016108fd5ab04b4b  $helper_input" |
+  echo "6afd4d64ff2c1209cd92f6f61b3ea3500ebd1061a096d459dede2d6d930e9f06  $helper_input" |
     /usr/bin/shasum -a 256 -c - >/dev/null || {
       echo "Policy helper source does not match the reviewed installer." >&2; exit 65;
     }
-  /usr/bin/plutil -convert xml1 -o /dev/null "$policy_input"
-  for field in accountId appId policyId policyName ownerEmail token; do
-    /usr/bin/plutil -extract "$field" raw -expect string -o - "$policy_input" |
-      /usr/bin/grep -q . || { echo "Policy configuration is incomplete." >&2; exit 65; }
-  done
   policy_dir="/private/var/db/ai.grogu.protected"
   policy_sudoers="/private/etc/sudoers.d/ai-grogu-protected-policy"
   for directory in "$helpers" /private/etc/sudoers.d /private/var/db; do
@@ -112,6 +111,34 @@ if [ "$mode" = install-policy-helper ]; then
       [ "$(stat -f '%Lp' "$directory")" = 755 ] || {
         echo "The policy helper requires root-owned system directories." >&2; exit 77;
       }
+  done
+  if [ "$mode" = update-policy-helper ]; then
+    installed="$helpers/$label-policy.py"
+    [ -f "$installed" ] && [ ! -L "$installed" ] &&
+      [ "$(stat -f '%u' "$installed")" = 0 ] &&
+      [ "$(stat -f '%Lp' "$installed")" = 644 ] &&
+      [ "$(stat -f '%l' "$installed")" = 1 ] || {
+        echo "The installed policy helper is not the expected root-owned file." >&2; exit 77;
+      }
+    echo "76a94aa66caea08759a535a2e9c4e594dc4574c30d703e49016108fd5ab04b4b  $installed" |
+      /usr/bin/shasum -a 256 -c - >/dev/null || {
+        echo "The installed policy helper does not match the previous release." >&2; exit 65;
+      }
+    staged_helper="$(mktemp "$helpers/.grogu-policy-update.XXXXXX")"
+    trap '/bin/rm -f "$staged_helper"' EXIT
+    /usr/bin/install -o root -g wheel -m 644 "$helper_input" "$staged_helper"
+    echo "6afd4d64ff2c1209cd92f6f61b3ea3500ebd1061a096d459dede2d6d930e9f06  $staged_helper" |
+      /usr/bin/shasum -a 256 -c - >/dev/null || {
+        echo "Policy helper source changed during staging." >&2; exit 65;
+      }
+    /bin/mv -f "$staged_helper" "$installed"
+    echo "Updated the root-owned policy helper. No Cloudflare request was made."
+    exit 0
+  fi
+  /usr/bin/plutil -convert xml1 -o /dev/null "$policy_input"
+  for field in accountId appId policyId policyName ownerEmail token; do
+    /usr/bin/plutil -extract "$field" raw -expect string -o - "$policy_input" |
+      /usr/bin/grep -q . || { echo "Policy configuration is incomplete." >&2; exit 65; }
   done
   for output in "$helpers/$label-policy" "$helpers/$label-policy.py" "$policy_sudoers" "$policy_dir"; do
     [ ! -e "$output" ] && [ ! -L "$output" ] || {

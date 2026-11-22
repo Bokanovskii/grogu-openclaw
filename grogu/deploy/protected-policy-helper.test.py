@@ -23,16 +23,22 @@ class FakeCloudflare:
         }
         self.writes = []
         self.failure = None
+        self.after_write = None
 
     def send(self, method, path, token, payload=None):
-        if path != "/client/v4/accounts/account-id/access/apps/app-id/policies/policy-id":
-            raise AssertionError("Unexpected policy target")
+        app_path = "/client/v4/accounts/account-id/access/apps/app-id/policies/policy-id"
+        reusable_path = "/client/v4/accounts/account-id/access/policies/policy-id"
+        expected = reusable_path if method == "PUT" and self.policy.get("reusable") is True else app_path
+        if path != expected:
+            return {"success": False}
         if token != "synthetic-token":
             raise AssertionError("Unexpected credential")
         if method == "PUT":
             self.writes.append(copy.deepcopy(payload))
             if self.failure != "before":
-                self.policy = {"id": self.policy["id"], **copy.deepcopy(payload)}
+                self.policy.update(copy.deepcopy(payload))
+                if self.after_write:
+                    self.after_write(self.policy)
             if self.failure:
                 raise OSError("Synthetic disconnected write")
         return {"success": True, "result": copy.deepcopy(self.policy)}
@@ -97,11 +103,40 @@ class ProtectedPolicyHelperTest(unittest.TestCase):
         with self.assertRaises(helper.PolicyError):
             self.sync()
         self.assertEqual(self.cloudflare.writes, [])
-        self.cloudflare.policy["include"] = [{"email": {"email": "owner@example.invalid"}}]
-        self.cloudflare.policy["reusable"] = True
+
+    def test_reusable_policy_updates_only_account_policy_without_precedence(self):
+        self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+        self.assertEqual(self.sync(["member@example.invalid"]), {"revision": 7, "status": "synced"})
+        self.assertNotIn("precedence", self.cloudflare.writes[0])
+        self.assertEqual(self.cloudflare.policy["precedence"], 3)
+
+    def test_reusable_policy_rejects_wrong_target_or_consumer_count(self):
+        for field, value in (("app_count", 0), ("app_count", 2), ("app_count", True),
+                             ("app_count", None), ("id", "other"), ("name", "other"),
+                             ("decision", "deny")):
+            with self.subTest(field=field, value=value):
+                self.cloudflare = FakeCloudflare()
+                self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+                self.cloudflare.policy[field] = value
+                with self.assertRaises(helper.PolicyError):
+                    self.sync(["member@example.invalid"])
+                self.assertEqual(self.cloudflare.writes, [])
+        self.cloudflare = FakeCloudflare()
+        self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+        self.config["appId"] = "other-app"
         with self.assertRaises(helper.PolicyError):
-            self.sync()
+            self.sync(["member@example.invalid"])
         self.assertEqual(self.cloudflare.writes, [])
+
+    def test_reusable_policy_reports_unknown_when_readback_is_unsafe_or_mismatched(self):
+        for field, value in (("app_count", 2), ("reusable", False),
+                             ("include", [{"email": {"email": "owner@example.invalid"}}])):
+            with self.subTest(field=field):
+                self.cloudflare = FakeCloudflare()
+                self.cloudflare.policy.update(reusable=True, app_count=1, uid="policy-id")
+                self.cloudflare.after_write = lambda policy: policy.update({field: value})
+                self.assertEqual(self.sync(["member@example.invalid"]), {"revision": 7, "status": "unknown"})
+                self.assertEqual(len(self.cloudflare.writes), 1)
 
 
 if __name__ == "__main__":

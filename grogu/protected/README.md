@@ -25,8 +25,9 @@ operator-owned staging directory (mode 0700), place the reviewed
 `protected-policy-helper.py` and `protected-policy-config.json` as regular,
 operator-owned files with mode 0600. The JSON configuration contains exactly
 `accountId`, `appId`, `policyId`, `policyName`, `ownerEmail`, and `token`.
-Choose an application-specific allow policy dedicated to this app; the token
-needs Cloudflare's `Access: Policies Write` permission. The token's Cloudflare
+Choose an allow policy dedicated to this app. A reusable policy must be attached
+only to this app. The token needs Cloudflare's `Access: Policies Write`
+permission. The token's Cloudflare
 scope is not restricted to one application: the fixed helper supplies that
 restriction. Never put the token in command arguments or logs.
 
@@ -41,7 +42,21 @@ sudo /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
 The installer checks the helper's pinned digest, installs root-owned code and
 root-only configuration, and removes the staged configuration after verifying
 the copy. It makes no Cloudflare request. Existing helper paths require
-inspection instead of being overwritten. Before each policy write, the app
+inspection instead of being overwritten.
+
+To update the previously installed helper, place the reviewed new
+`protected-policy-helper.py` in the same private staging directory. Run:
+
+```sh
+sudo /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
+  --operator USER --staging-dir /absolute/private/staging --update-policy-helper
+```
+
+The update replaces only the Python helper when the installed and staged
+digests match the installer's pins. It preserves the wrapper, configuration,
+and sudoers file. It makes no Cloudflare request.
+
+Before each policy write, the app
 records a recovery barrier in its state database. A crash or an unknown outcome
 blocks later policy writes until the owner requests reconciliation. The helper
 reads the policy before it applies the current admission. Cloudflare does not

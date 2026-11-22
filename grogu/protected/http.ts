@@ -63,6 +63,7 @@ import {
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
+import { listProtectedArtifacts, validFilename, validGeneratedFilename } from "./artifacts.js";
 import {
   createProtectedAutomationRecord,
   listProtectedAutomationRecords,
@@ -77,6 +78,7 @@ import {
 import { createStorageAdmission, measureProtectedStorage, type StorageLimits } from "./capacity.js";
 import {
   chatArtifactsDirectory,
+  chatGeneratedArtifactsDirectory,
   chatWidgetsDirectory,
   removeChatFilesDirectory,
 } from "./chat-files.js";
@@ -136,9 +138,6 @@ function invalid(): never {
 }
 function noContent() {
   return new Response(null, { status: 204, headers: commonHeaders });
-}
-function validFilename(name: string) {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(name);
 }
 async function body(request: Request) {
   if (
@@ -1475,6 +1474,20 @@ export function createProtectedHttp(options: {
         await revalidate();
         return json({ chats: result });
       }
+      if (pathname === "/artifacts" && method === "GET") {
+        requireProfile();
+        const ownedChats = await chats.list(authority);
+        return await files(async (owned) => {
+          const result = await listProtectedArtifacts({
+            files: owned,
+            chats: ownedChats,
+            cursor: new URL(request.url).searchParams.get("cursor"),
+            maxFileBytes: options.maxFileBytes,
+          });
+          await revalidate();
+          return json(result);
+        });
+      }
       if (pathname === "/files" && method === "GET") {
         try {
           return await files(async (owned) => {
@@ -1505,13 +1518,28 @@ export function createProtectedHttp(options: {
           throw error;
         }
       }
+      const generatedFileId = /^\/files\/generated~([^/~]+)~([^/~]+)$/u.exec(pathname);
       const fileId = /^\/files\/([^/~]+)~([^/~]+)$/u.exec(pathname);
-      if (fileId?.[1] && fileId[2] && validFilename(fileId[2]) && method === "GET") {
-        const [, chatId, filename] = fileId;
+      const selectedFile = generatedFileId ?? fileId;
+      if (
+        selectedFile?.[1] &&
+        selectedFile[2] &&
+        (generatedFileId
+          ? validGeneratedFilename(selectedFile[2])
+          : validFilename(selectedFile[2])) &&
+        method === "GET"
+      ) {
+        if (request.headers.has("x-grogu-profile")) {
+          requireProfile();
+        }
+        const [, chatId, filename] = selectedFile;
         await chats.readEntry(authority, chatId);
         await revalidate();
-        return files(async (owned) => {
-          const bytes = await owned.read(`${chatArtifactsDirectory(chatId)}/${filename}`);
+        return await files(async (owned) => {
+          const directory = generatedFileId
+            ? chatGeneratedArtifactsDirectory(chatId)
+            : chatArtifactsDirectory(chatId);
+          const bytes = await owned.read(`${directory}/${filename}`);
           await revalidate();
           return new Response(new Uint8Array(bytes), {
             headers: {
@@ -1622,6 +1650,9 @@ export function createProtectedHttp(options: {
       }
       const widgetId = rest?.startsWith("widgets/") ? rest.slice("widgets/".length) : undefined;
       if (widgetId && widgetIdPattern.test(widgetId) && method === "GET") {
+        if (request.headers.has("x-grogu-profile")) {
+          requireProfile();
+        }
         return files(async (owned) => {
           const storage = { files: owned, directory: chatWidgetsDirectory(id) };
           const { html } = await readCanvasDocumentHtmlSource(widgetId, { storage });

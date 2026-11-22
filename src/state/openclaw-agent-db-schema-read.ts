@@ -69,6 +69,7 @@ function assertProtectedEncryptionAdmission(
       `Protected agent database ${pathname} has an invalid encryption marker; keep it stopped and repair it with a supporting build.`,
     );
   }
+  setSqliteStorageValueEncryptionStrict(db, true);
   let keyCheck: string;
   try {
     keyCheck = openSqliteStorageText(db, row.key_check, PROTECTED_ENCRYPTION_KEY_CHECK);
@@ -82,7 +83,6 @@ function assertProtectedEncryptionAdmission(
       `Protected agent database ${pathname} has an invalid encryption key check; verify the protected key file and restart the service.`,
     );
   }
-  setSqliteStorageValueEncryptionStrict(db, true);
 }
 
 export function assertSupportedAgentSchemaVersion(db: DatabaseSync, pathname: string): number {

@@ -6,6 +6,7 @@ import {
   replaceSessionEntrySync,
 } from "../config/sessions/session-accessor.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { withFreshOpenClawAgentDatabaseReadOnly } from "./openclaw-agent-db-readonly-open.js";
 import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabasesForTest,
@@ -97,6 +98,44 @@ it("admits a protected physical store and refuses a missing or wrong key", async
       await fs.writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
       admitProtectedPhysicalAgentStorage(() => undefined);
       expect(loadExactSessionEntryReadOnly(scope)?.entry.label).toBe("updated label");
+    },
+  );
+});
+
+it("refuses a plaintext key check even when it contains the expected value", async () => {
+  await withOpenClawTestState(
+    {
+      label: "protected-admission-marker",
+      env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined },
+    },
+    async (state) => {
+      const keyPath = state.path("storage-key");
+      await fs.writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+      state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+      state.applyEnv();
+      const options = { agentId: "protected", env: state.env };
+      const pathname = resolveOpenClawAgentSqlitePath(options);
+      runOpenClawAgentWriteTransaction(() => undefined, options);
+      closeOpenClawAgentDatabaseByPath(pathname);
+      const { DatabaseSync } = await import("node:sqlite");
+      const database = new DatabaseSync(pathname);
+      try {
+        database
+          .prepare("UPDATE grogu_protected_storage SET key_check = ? WHERE id = 1")
+          .run("protected-storage-key-v1");
+      } finally {
+        database.close();
+      }
+      await fs.writeFile(keyPath, Buffer.alloc(32, 8), { mode: 0o600 });
+      expect(() =>
+        withFreshOpenClawAgentDatabaseReadOnly(
+          ({ db }) => db.prepare("SELECT count(*) AS count FROM session_nodes").get(),
+          options,
+        ),
+      ).toThrow(/configured storage key/iu);
+      expect(() => admitProtectedPhysicalAgentStorage(() => undefined)).toThrow(
+        /configured storage key/iu,
+      );
     },
   );
 });

@@ -184,14 +184,13 @@ for (const saveDrafts of [false, true]) {
     if (!saveDrafts) {
       const legacy = new DatabaseSync(databasePath);
       try {
-        legacy.exec(
-          "DROP TABLE protected_automation_job_bindings; DROP TABLE protected_automation_members; DROP TABLE protected_automations;",
-        );
-        assert.equal(
+        assert.deepEqual(
           legacy
-            .prepare("SELECT name FROM sqlite_master WHERE name = 'protected_automations'")
-            .get(),
-          undefined,
+            .prepare(
+              "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('protected_automations', 'protected_automation_members', 'protected_automation_job_bindings')",
+            )
+            .all(),
+          [],
         );
       } finally {
         legacy.close();

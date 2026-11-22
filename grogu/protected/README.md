@@ -394,8 +394,16 @@ children with fewer tools, so their prefix differs from main turns.
 The service sets `agents.defaults.skipBootstrap`, so child runs do not create
 `BOOTSTRAP.md` in the shared workspace. Members cannot finish that onboarding.
 An existing `workspace/BOOTSTRAP.md` from an older version adds a "Bootstrap
-Pending" section to every member's main-turn prompt. Delete that file while the
-service is stopped.
+Pending" section to every member's main-turn prompt. To remove it, stop the
+service and run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run retire-bootstrap
+```
+
+The command removes the file only if it is the generated default. It keeps an
+edited or linked file and refuses without printing its content. If the file is
+missing, the command does nothing. It refuses while the listener is running.
 
 Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
 `name` and `description`. A `{{template}}` marker is replaced with that

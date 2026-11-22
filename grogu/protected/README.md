@@ -235,6 +235,10 @@ An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
+Both include optional `inputTokens` and `outputTokens` for the latest parent
+turn, summed from its saved provider calls. The existing `contextTokens` remains
+the latest call's context size. Unknown counters and adapter-default zeros are
+omitted, as in native run usage. Admin usage totals do not change.
 
 Reasoning is streamed as append-only `reasoning` text events when the provider
 exposes it. Tool activity uses `activity` events with a safe label and a running,
@@ -285,6 +289,11 @@ The record has no content, credentials, provider/model names, or user/session/ru
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not
 change the model or its reasoning defaults.
+
+On the macOS host, the operator can read up to 20 recent timing records with
+`sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run turn-timings`.
+The command returns only the numeric timing fields. It prints nothing when no
+recent records are available.
 
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read

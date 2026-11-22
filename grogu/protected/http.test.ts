@@ -86,7 +86,14 @@ function providerSse(events: Array<{ type: string; [field: string]: unknown }>, 
   );
 }
 
-function responsesReply(text: string) {
+function responsesReply(
+  text: string,
+  usage: { input_tokens?: number; output_tokens?: number; total_tokens?: number } | null = {
+    input_tokens: 3,
+    output_tokens: 1,
+    total_tokens: 4,
+  },
+) {
   const content = { type: "output_text", text, annotations: [] };
   const message = { type: "message", id: "msg_family", role: "assistant", content: [content] };
   return providerSse([
@@ -105,7 +112,7 @@ function responsesReply(text: string) {
         id: "resp_family",
         status: "completed",
         output: [message],
-        usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
+        ...(usage ? { usage } : {}),
       },
     },
   ]);
@@ -190,6 +197,86 @@ void test("protected responses use neutral service wording", async (t) => {
       "A file exceeds the file size limit.",
     ],
   );
+});
+
+void test("deleting another member's chat frees quota for a running turn", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-quota-http-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const started = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  const written = Promise.withResolvers<void>();
+  t.after(() => proceed.resolve());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot: await root(stateDir),
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 60_000,
+    storageLimits: { globalBytes: 130_000, userBytes: 130_000, freeFloorBytes: 1 },
+    turns: {
+      models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+      async run(turn) {
+        started.resolve();
+        await proceed.promise;
+        try {
+          await turn.files.write(`chats/${turn.id}/output.txt`, "x".repeat(55_000));
+          written.resolve();
+        } catch (error) {
+          written.reject(error);
+          throw error;
+        }
+      },
+      async steer() {
+        assert.fail("Steering is not used by this fixture.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", user);
+    headers.set("content-type", "application/json");
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const createChat = async (user: string) => {
+    const response = await call(user, "/chats", { method: "POST", body: "{}" });
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body.chat;
+  };
+  const aliceChat = await createChat("alice");
+  const bobChat = await createChat("bob");
+  const running = await call("alice", `/chats/${aliceChat.id}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": alice.id },
+    body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
+  });
+  assert.equal(running.status, 200);
+  await started.promise;
+  const deleted = await call("bob", `/chats/${bobChat.id}`, {
+    method: "DELETE",
+    headers: { "if-match": bobChat.version },
+  });
+  assert.equal(deleted.status, 204);
+  proceed.resolve();
+  await written.promise;
+  await running.text();
 });
 
 void test("fixture blocks egress from work that outlives its test", () => {
@@ -1225,6 +1312,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     key: string | null;
   }> = [];
   const copilotBodies: Array<{ model?: string; reasoning?: { effort?: string } }> = [];
+  let copilotUsage: Parameters<typeof responsesReply>[1] = {
+    input_tokens: 3,
+    output_tokens: 1,
+    total_tokens: 4,
+  };
   const originalFetch = globalThis.fetch;
   let fixtureCompleted = false;
   const opened: Array<() => Promise<void>> = [];
@@ -1290,7 +1382,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
             });
           case "https://api.business.githubcopilot.com/responses":
             copilotBodies.push(await new Request(input, init).json());
-            return responsesReply("Canonical Copilot reply.");
+            return responsesReply("Canonical Copilot reply.", copilotUsage);
           case "https://chatgpt.com/backend-api/codex/responses":
             return responsesReply("Canonical OpenAI reply.");
           case "https://api.anthropic.com/v1/messages":
@@ -1722,6 +1814,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "the canonical web_fetch result reaches the HTTP stream",
   );
   assert.equal(seen.length, 2);
+  assert.deepEqual(events.at(-2), {
+    type: "usage",
+    contextTokens: 3,
+    inputTokens: 6,
+    outputTokens: 4,
+  });
   assert.equal(seen[0]?.auth, "Bearer synthetic-request-only-key");
   const tools = seen[0]?.body.tools?.map((tool) => tool.function.name) ?? [];
   assert.deepEqual([...tools].toSorted(), [
@@ -1734,6 +1832,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.ok(tools.includes("show_widget"));
   const { call: reopened } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
+  assert.deepEqual(read.usage, {
+    contextTokens: 3,
+    inputTokens: 6,
+    outputTokens: 4,
+    provider: "sparky",
+    model: "synthetic",
+  });
   assert.match(JSON.stringify(read), /Committed synthetic answer\./);
   assert.equal(read.chat.messages.at(-1).reasoning, "Check the source. Prepare the widget.");
   assert.deepEqual(
@@ -2163,6 +2268,50 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     ],
   );
   assert.ok(!JSON.stringify(providerRequests).includes(fallback));
+  await t.test("latest run tokens survive reload and omit unreported counters", async () => {
+    for (const [reported, expected] of [
+      [
+        { input_tokens: 9, output_tokens: 3700 },
+        { inputTokens: 9, outputTokens: 3700 },
+      ],
+      [{ input_tokens: 4, output_tokens: 0 }, { inputTokens: 4 }],
+      [null, {}],
+    ] as const) {
+      copilotUsage = reported;
+      const result = await call(`${route}/turns`, {
+        method: "POST",
+        headers: { "x-grogu-profile": user.id },
+        body: JSON.stringify({
+          provider: "github-copilot",
+          text: "Report this run's tokens",
+          credential: { accessToken: githubToken },
+        }),
+      });
+      assert.equal(result.status, 200);
+      const usageEvents = (await result.text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(usageEvents.at(-1)?.type, "done");
+      const saved = await (await reopened(route)).json();
+      if (reported) {
+        assert.deepEqual(usageEvents.at(-2), {
+          type: "usage",
+          contextTokens: reported.input_tokens,
+          ...expected,
+        });
+        assert.deepEqual(saved.usage, {
+          contextTokens: reported.input_tokens,
+          ...expected,
+          provider: "github-copilot",
+          model: "gpt-5.3-codex",
+        });
+      } else {
+        assert.ok(!usageEvents.some((event) => event.type === "usage"));
+        assert.equal(saved.usage, undefined);
+      }
+    }
+  });
   const active = await call(`${route}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Hold the provider response open"}',

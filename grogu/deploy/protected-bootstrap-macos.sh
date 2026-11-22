@@ -288,6 +288,15 @@ case "$1" in
   restart)
     if /bin/launchctl print "system/$target" >/dev/null 2>&1; then
       /bin/launchctl bootout "system/$target"
+      attempts=0
+      while /bin/launchctl print "system/$target" >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 30 ]; then
+          echo "The service did not unload after 30 seconds; restart stopped." >&2
+          exit 75
+        fi
+        sleep 1
+      done
     fi
     /bin/launchctl bootstrap system "$plist"
     ;;

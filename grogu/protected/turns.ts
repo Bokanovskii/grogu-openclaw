@@ -6,11 +6,13 @@ import type {
   ProtectedTurnEvent,
   ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
+import { safeParseJsonRecord } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   createOperationalRunInstanceRef,
   prepareAgentRunAdmission,
 } from "../../src/agents/admitted-run-context.js";
+import type { ClientToolDefinition } from "../../src/agents/command/shared-types.js";
 import { runEmbeddedAgent } from "../../src/agents/embedded-agent-runner/run.js";
 import { queueGuardedEmbeddedAgentMessageWithOutcomeAsync } from "../../src/agents/embedded-agent-runner/runs.js";
 import { withoutModelRequestTelemetry } from "../../src/agents/model-request-telemetry.js";
@@ -83,6 +85,12 @@ export type ProtectedTurn = {
   input: TurnInput;
   mentionedAgents: readonly Readonly<ProtectedAgentDefinition>[];
   agent: Readonly<ProtectedAgentDefinition>;
+  /** The chat agent may hand the request to one other selectable agent. */
+  routing: {
+    tool: ClientToolDefinition;
+    briefMaxChars: number;
+    resolve: (agentId: string) => Readonly<ProtectedAgentDefinition> | undefined;
+  };
   sessionAccess: HostSessionAccess;
   files: AuthorizedUserFiles;
   signal: AbortSignal;
@@ -114,6 +122,7 @@ async function runMentionedAgent(
   agent: Readonly<ProtectedAgentDefinition>,
   credential: ReturnType<typeof createRequestModelCredential>,
   recordUsage: (usage: NormalizedUsage | undefined) => void,
+  task = turn.input.text,
 ) {
   const children = new Map<
     string,
@@ -174,7 +183,7 @@ async function runMentionedAgent(
         },
         toolsAllow: [...agent.tools],
         toolExecutionAllow: agent.tools,
-        extraSystemPrompt: agent.instructions,
+        extraSystemPrompt: agent.systemPrompt,
         clientCaps: ["inline-widgets"],
       };
     },
@@ -188,7 +197,7 @@ async function runMentionedAgent(
     const result = await withRequestScopedChildExecution(scope, () =>
       spawnSubagentDirect(
         {
-          task: turn.input.text,
+          task,
           label: `protected-${agent.id}`,
           agentId: turn.target.agentId,
           mode: "run",
@@ -316,6 +325,35 @@ async function runMentionedAgent(
       recordUsage(undefined);
     }
   });
+}
+
+function readRoute(
+  turn: ProtectedTurn,
+  calls: readonly { name: string; arguments: string }[] | undefined,
+) {
+  if (!calls?.length) {
+    return undefined;
+  }
+  const call = calls.length === 1 ? calls[0] : undefined;
+  const params =
+    call?.name === turn.routing.tool.function.name && safeParseJsonRecord(call.arguments);
+  const agent =
+    params && typeof params.agentId === "string" ? turn.routing.resolve(params.agentId) : undefined;
+  const brief = params && typeof params.brief === "string" ? params.brief.trim() : "";
+  if (!agent || agent.id === turn.agent.id || !brief || brief.length > turn.routing.briefMaxChars) {
+    throw new ProtectedError(
+      502,
+      "agent_failed",
+      `${turn.agent.name} could not hand this request to another agent.`,
+    );
+  }
+  if (turn.mentionedAgents.some((mentioned) => mentioned.id === agent.id)) {
+    return undefined;
+  }
+  return {
+    agent,
+    task: `The member asked ${turn.agent.name}:\n${turn.input.text}\n\n${turn.agent.name} handed it to you with this brief:\n${brief}`,
+  };
 }
 
 async function withProtectedGatewayAuthority<T>(
@@ -586,7 +624,7 @@ export function createCanonicalProtectedTurns(options: {
                   agentDir: options.agentDir,
                   prompt: turn.input.text,
                   transcriptPrompt: turn.input.text,
-                  extraSystemPrompt: turn.agent.instructions,
+                  extraSystemPrompt: turn.agent.systemPrompt,
                   trigger: "user",
                   provider,
                   model,
@@ -605,8 +643,9 @@ export function createCanonicalProtectedTurns(options: {
                   disableToolSearch: true,
                   disableTrajectory: true,
                   codeModeOverride: false,
-                  toolsAllow: [...turn.agent.tools],
+                  toolsAllow: [...turn.agent.tools, turn.routing.tool.function.name],
                   toolExecutionAllow: turn.agent.tools,
+                  clientTools: [turn.routing.tool],
                   clientCaps: ["inline-widgets"],
                   userFileScope: {
                     files: turn.files,
@@ -689,12 +728,24 @@ export function createCanonicalProtectedTurns(options: {
             );
           }
         }
-        if (turn.mentionedAgents.length) {
+        const route = readRoute(turn, result.meta.pendingToolCalls);
+        if (turn.mentionedAgents.length || route) {
           await withoutModelRequestTelemetry(() =>
             withHostSessionAccess(turn.sessionAccess, async () => {
               for (const agent of turn.mentionedAgents) {
                 turn.assertCurrent();
                 await runMentionedAgent(config, turn, agent, requestCredential, recordUsage);
+              }
+              if (route) {
+                turn.assertCurrent();
+                await runMentionedAgent(
+                  config,
+                  turn,
+                  route.agent,
+                  requestCredential,
+                  recordUsage,
+                  route.task,
+                );
               }
             }),
           );

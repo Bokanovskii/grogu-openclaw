@@ -155,7 +155,8 @@ show the new total.
 ## Automation discovery and draft validation
 
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.
-It returns the public protected-agent catalog, the configured Sparky model and
+It returns the public protected-agent catalog (in the `agents-v1` shape when
+the request asks for it, as for `/agents`), the configured Sparky model and
 its supported reasoning levels/default, and capabilities. `/me` remains
 unchanged for strict older clients. If Sparky or its reasoning catalog is
 unavailable, the automation catalog route returns 404; older servers also
@@ -357,34 +358,90 @@ encrypted file scope at existing plaintext files.
 
 ## Protected chat agents
 
-`GET /api/protected/v1/agents` returns the runtime-owned catalog. `travel` is the
-default for new chats and for older chat entries without a selection. Choose
-`general` ("Just chat") for a generic conversation with the same protected tool
-ceiling; this does not change existing selections or the Travel default. The
-catalog also includes the narrow `research` role, which can search, fetch, and
-summarize sources. The response includes public names, descriptions, and
-tool ceilings, never the server-owned instructions. The service owner can add
-entries through the `agentExtensions` option to `createProtectedHttp`; extension
-IDs must be unique, and their tools can only be chosen from the protected
-runtime's existing tool ceiling.
+`grogu/protected/agents.ts` owns the agent catalog. Every agent gets the same
+native tools, the same member-scoped access, and the same prompt header. Agents
+differ only in their intent instructions, packaged skills, example prompts, and
+presentation hints for the client.
+
+- **Grogu** (`grogu`) is the default for new chats. It is the generic Alcove
+  agent with no specialty. Its prompt lists the other selectable agents, and it
+  can hand a request to one of them (see routing below).
+- **Travel** (`travel`) plans trips. Its `travel-dashboard` skill gives planning
+  guidance and an HTML dashboard template for `show_widget`.
+- `general` ("Just chat") and `research` are retired. They are not selectable
+  for new chats, mentions, or routing, but saved chats that use them keep
+  working. Chats saved before agent selection was recorded still use Travel.
+
+Shared tools are `web_search`, `web_fetch`, `show_widget`, `sessions_list`,
+`sessions_history`, `sessions_search`, and `sessions_send`. They reach only the
+signed-in member's own chats, the public web, and widgets in the current chat.
+Session tools recheck the profile and exact chat incarnation, so another
+member's chats are unavailable. `sessions_send` can steer only an active
+permitted chat while the current request remains authorized; it cannot start an
+idle or detached run. Tools that need credentials the service does not hold,
+such as image, PDF, speech, video, and music generation, stay off.
+
+Protected turns restrict their tools, so OpenClaw builds its minimal system
+prompt and puts the shared Alcove header in its `## Subagent Context` section.
+Then it adds `## Current agent:` with the agent's intent, then each `## Skill:`
+with its guidance. Main-turn requests with the same date and reasoning level
+have the same tool list and the same system text up to `## Current agent:`, for
+every member and agent. That makes the header part of a shared prefix that
+providers can cache. A shared prefix does not guarantee a cache hit; check
+provider usage metrics for that. Mentioned and routed agents run as native
+children with fewer tools, so their prefix differs from main turns.
+
+The service sets `agents.defaults.skipBootstrap`, so child runs do not create
+`BOOTSTRAP.md` in the shared workspace. Members cannot finish that onboarding.
+An existing `workspace/BOOTSTRAP.md` from an older version adds a "Bootstrap
+Pending" section to every member's main-turn prompt. Delete that file while the
+service is stopped.
+
+Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
+`name` and `description`. A `{{template}}` marker is replaced with that
+directory's `template.html`. The runtime archive must include
+`grogu/protected/agent-skills/`; the catalog fails to load without it. The
+service owner can add agents through the `agentExtensions` option to
+`createProtectedHttp`. Extension IDs must be unique.
+
+`GET /api/protected/v1/agents` returns the catalog. Its shape depends on the
+`X-Alcove-Capabilities` request header, parsed by `client-capabilities.ts`:
+
+- Without `agents-v1`, the response keeps the exact legacy shape for shipped
+  strict clients: only selectable agents, each with `id`, `name`,
+  `description`, and the legacy tool list.
+- With `agents-v1`, it returns every agent with `selectable`, `examplePrompts`,
+  public skill names and descriptions, and `presentation` (`icon`,
+  `reasoningIndicator`, and `widgetWidth`). Grogu uses the `grogu-eater`
+  reasoning indicator; Travel uses wide widgets.
+
+Both shapes send `Vary: X-Alcove-Capabilities` and never include instructions
+or skill guidance. The capability header changes only the response shape; it
+grants no access.
 
 `POST /api/protected/v1/chats` accepts an optional `selectedAgentId`.
 `PATCH /api/protected/v1/chats/:id/agent` accepts the same field and requires
-the current chat version in `If-Match`. Selection changes are rejected while
+the current chat version in `If-Match`. Both accept only selectable agents and
+otherwise return 422 `agent_unavailable`. Selection changes are rejected while
 the chat is running. The selected ID is persisted in the canonical session
 entry and returned as `selectedAgentId`; changing it updates the chat version.
-If a later deployment removes an extension that a chat selected, turns fail
-closed until the user selects an agent still present in the catalog.
-The selection supplies only server-owned prompt instructions and a restrictive
-tool ceiling. It does not change the protected OpenClaw agent identity or grant
-permissions beyond the protected runtime's existing policy. Travel can also
-list and read chats owned by the same profile, and steer an active permitted
-chat while the current request remains authorized. Session tools recheck the
-profile and exact chat incarnation; another profile's chats are unavailable.
-Steering cannot start an idle or detached run.
+If a later deployment removes an agent that a chat selected, turns fail closed
+until the user selects an agent still present in the catalog. The selection
+does not change the protected OpenClaw agent identity or grant permissions
+beyond the protected runtime's existing policy.
+
+A main turn also offers the client tool `route_to_agent` with a selectable
+`agentId` and a `brief` of at most 2,000 characters. When the agent calls it
+once, its reply ends and the chosen agent runs as a native child with the
+member's request and the brief, like a mention. That result is saved below the
+reply with the chosen agent's ID. More than one call, an unknown or retired
+agent, a route to itself, or an empty or oversized brief fails the turn with
+502 `agent_failed`. A routed or mentioned child cannot route again, and core
+child policy withholds `sessions_send` from it, so only the chat's own agent
+can add messages to another chat.
 
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
-up to four distinct, available agent IDs other than the selected agent. Each
+up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
 provider credential, file boundary, and deadline. Child work is not detached:
 child transcript and file bytes count against the initiating profile while

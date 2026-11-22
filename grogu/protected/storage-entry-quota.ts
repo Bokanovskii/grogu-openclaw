@@ -1,6 +1,12 @@
 export type StoredDataEntry = { id: string; profileId: string; bytes: number };
 export type StoredDataRetirement = { removed: StoredDataEntry; retained?: StoredDataEntry };
 export type StoredDataTransfer = { previous: StoredDataEntry; current: StoredDataEntry };
+export type StoredDataReplacement = { previous: StoredDataEntry; current: StoredDataEntry };
+export type StoredDataReplacementReservation = {
+  settle(committed: StoredDataEntry): void;
+  // Supply the exact restored entry only after the producer proves rollback.
+  release(rolledBack: StoredDataEntry): void;
+};
 export type StoredDataReservation = {
   settle(result: { created: boolean; entries: readonly StoredDataEntry[] }): void;
   // Only release after a proven abort. An uncertain commit keeps its reservation.
@@ -108,7 +114,7 @@ export function transferStoredData(account: StoredDataLedger, change: StoredData
   }
 }
 
-export function createStoredDataReservation(options: {
+type StoredDataReservationOptions = {
   account: StoredDataLedger;
   profileId: string;
   bytes: number;
@@ -116,7 +122,84 @@ export function createStoredDataReservation(options: {
   refund(bytes: number): void;
   begin(): void;
   finish(): void;
-}): StoredDataReservation {
+};
+
+// Producers authorize the slot and serialize its writes, retirement and transfer
+// through commit/rollback. Entry IDs are opaque; this ledger is not a writer fence.
+export function createStoredDataReplacementReservation(
+  options: Omit<StoredDataReservationOptions, "bytes"> & { change: StoredDataReplacement },
+): StoredDataReplacementReservation {
+  const previous = { ...options.change.previous };
+  const current = { ...options.change.current };
+  const previousKey = storedDataEntryKey(previous);
+  const currentKey = storedDataEntryKey(current);
+  if (previous.profileId !== options.profileId || current.profileId !== options.profileId) {
+    throw new Error("Stored data replacement cannot change the accounting owner.");
+  }
+  const baseline = options.account.storedEntries.get(previousKey);
+  const assertBaseline = () => {
+    if (
+      !baseline ||
+      options.account.storedEntries.get(previousKey) !== baseline ||
+      storedDataEntryKey(baseline) !== previousKey ||
+      baseline.bytes !== previous.bytes ||
+      options.account.retiredStoredEntries.has(previousKey)
+    ) {
+      throw new Error("Stored data replacement disagrees with the measured entry.");
+    }
+    if (
+      options.account.retiredStoredEntries.has(currentKey) ||
+      (currentKey !== previousKey && options.account.storedEntries.has(currentKey))
+    ) {
+      throw new Error("Stored data replacement target is occupied or retired.");
+    }
+  };
+  const assertReceipt = (entry: StoredDataEntry, expected: StoredDataEntry) => {
+    if (
+      storedDataEntryKey(entry) !== storedDataEntryKey(expected) ||
+      entry.bytes !== expected.bytes
+    ) {
+      throw new Error("Stored data replacement receipt disagrees with its reservation.");
+    }
+  };
+  assertBaseline();
+  const growth = Math.max(0, current.bytes - previous.bytes);
+  if (growth > 0) {
+    options.charge(growth);
+  }
+  options.begin();
+  let closed = false;
+  return {
+    settle(committed) {
+      if (closed) {
+        throw new Error("Stored data replacement already settled.");
+      }
+      assertReceipt(committed, current);
+      assertBaseline();
+      if (currentKey !== previousKey) {
+        options.account.storedEntries.delete(previousKey);
+        options.account.retiredStoredEntries.set(previousKey, null);
+      }
+      options.account.storedEntries.set(currentKey, current);
+      options.refund(Math.max(0, previous.bytes - current.bytes));
+      closed = true;
+      options.finish();
+    },
+    release(rolledBack) {
+      if (closed) {
+        return;
+      }
+      assertReceipt(rolledBack, previous);
+      options.refund(growth);
+      closed = true;
+      options.finish();
+    },
+  };
+}
+
+export function createStoredDataReservation(
+  options: StoredDataReservationOptions,
+): StoredDataReservation {
   if (!Number.isSafeInteger(options.bytes) || options.bytes < 0) {
     throw new Error("Invalid stored data reservation size.");
   }

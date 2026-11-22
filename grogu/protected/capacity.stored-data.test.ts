@@ -255,3 +255,171 @@ void test("late old-owner retirement during a scan cannot credit transferred dat
     holder.release();
   }
 });
+
+void test("held replacement reserves only growth and charges matching committed bytes without rescanning", async (t) => {
+  const previous = { id: "session:one", profileId: "owner", bytes: 80 };
+  const current = { ...previous, bytes: 100 };
+  let scans = 0;
+  const admit = await createFixture(t, 100, async () => {
+    scans++;
+    return [previous];
+  });
+  const holder = await admit("owner", () => {}, "stored-data");
+  const replacement = holder.reserveStoredDataReplacement({ previous, current });
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  replacement.settle(current);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  assert.throws(() => replacement.settle(current), /already settled/);
+  assert.equal(scans, 1);
+  holder.release();
+});
+
+void test("replacement frees shrink only on commit, including cleanup while over quota", async (t) => {
+  const previous = { id: "session:one", profileId: "owner", bytes: 100 };
+  const current = { ...previous, bytes: 60 };
+  const admit = await createFixture(t, 80, async () => [previous]);
+  const holder = await admit("owner", () => {}, "stored-data");
+  const aborted = holder.reserveStoredDataReplacement({ previous, current });
+  aborted.release(previous);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  const replacement = holder.reserveStoredDataReplacement({ previous, current });
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  replacement.settle(current);
+  const available = holder.reserveStoredData(20);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  available.release();
+  holder.release();
+  assert.throws(
+    () => holder.reserveStoredDataReplacement({ previous: current, current }),
+    /admission closed/,
+  );
+});
+
+void test("replacement cleanup preserves the admission growth budget and current authority guard", async (t) => {
+  const previous = { id: "session:one", profileId: "owner", bytes: 12 * 1024 * 1024 };
+  const current = { ...previous, bytes: 0 };
+  const admit = await createFixture(t, 20 * 1024 * 1024, async () => [previous]);
+  let authorized = true;
+  const holder = await admit(
+    "owner",
+    () => {
+      assert.ok(authorized, "authority revoked");
+    },
+    "stored-data",
+  );
+  authorized = false;
+  assert.throws(
+    () => holder.reserveStoredDataReplacement({ previous, current }),
+    /authority revoked/,
+  );
+  authorized = true;
+  const replacement = holder.reserveStoredDataReplacement({ previous, current });
+  replacement.settle(current);
+  const available = holder.reserveStoredData(8 * 1024 * 1024);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  available.release();
+  holder.release();
+});
+
+void test("unknown or mismatching replacement retains charge and admission until exact rollback", async (t) => {
+  const previous = { id: "session:one", profileId: "owner", bytes: 80 };
+  const current = { ...previous, bytes: 100 };
+  let scans = 0;
+  const admit = await createFixture(t, 100, async () => {
+    scans++;
+    return [previous];
+  });
+  const holder = await admit("owner", () => {}, "stored-data");
+  const replacement = holder.reserveStoredDataReplacement({ previous, current });
+  holder.release();
+  const observer = await admit("owner", () => {}, "stored-data");
+  for (const bad of [
+    { ...current, bytes: 99 },
+    { ...current, id: "wrong" },
+    { ...current, profileId: "other" },
+    { ...current, bytes: Number.NaN },
+  ]) {
+    assert.throws(() => replacement.settle(bad));
+    assert.throws(() => observer.reserveStoredData(1), { code: "quota_exceeded" });
+  }
+  assert.throws(() => replacement.release(current));
+  assert.throws(() => observer.reserveStoredData(1), { code: "quota_exceeded" });
+  replacement.release(previous);
+  replacement.release(previous);
+  const available = observer.reserveStoredData(20);
+  assert.throws(() => observer.reserveStoredData(1), { code: "quota_exceeded" });
+  available.release();
+  assert.equal(scans, 1);
+  observer.release();
+});
+
+void test("replacement rejects invalid baselines and targets before charging, and tombstones rotated identities", async (t) => {
+  const previous = { id: "session:one", profileId: "owner", bytes: 80 };
+  const occupied = { id: "session:occupied", profileId: "owner", bytes: 10 };
+  const retired = { id: "session:retired", profileId: "owner", bytes: 0 };
+  const current = { ...previous, id: "session:two", bytes: 90 };
+  const admit = await createFixture(t, 100, async () => [previous, occupied]);
+  const holder = await admit("owner", () => {}, "stored-data");
+  admit.retiredStoredData([{ removed: retired }]);
+  for (const change of [
+    { previous: { ...previous, bytes: 79 }, current },
+    { previous: { ...previous, id: "absent" }, current },
+    { previous, current: { ...current, profileId: "other" } },
+    { previous, current: occupied },
+    { previous, current: retired },
+    ...[-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1].map((bytes) => ({
+      previous,
+      current: { ...current, bytes },
+    })),
+  ]) {
+    assert.throws(() => holder.reserveStoredDataReplacement(change));
+  }
+  const replacement = holder.reserveStoredDataReplacement({ previous, current });
+  replacement.settle(current);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  assert.throws(() =>
+    holder.reserveStoredDataReplacement({ previous: current, current: previous }),
+  );
+  assert.throws(() => holder.reserveStoredDataReplacement({ previous, current }));
+  admit.retiredStoredData([{ removed: previous }]);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  holder.release();
+});
+
+void test("late retirement or overlapping replacement rejects settlement atomically without resurrecting data", async (t) => {
+  for (const conflict of [
+    "retirement",
+    "replacement",
+    "target",
+    "target-retirement",
+    "transfer",
+  ] as const) {
+    const previous = { id: "session:one", profileId: "owner", bytes: 80 };
+    const current = { ...previous, id: "session:two", bytes: 100 };
+    const admit = await createFixture(t, 130, async () => [previous]);
+    const holder = await admit("owner", () => {}, "stored-data");
+    const replacement = holder.reserveStoredDataReplacement({ previous, current });
+    if (conflict === "retirement") {
+      admit.retiredStoredData([{ removed: previous, retained: { ...previous, bytes: 60 } }]);
+    } else if (conflict === "replacement") {
+      const sameBytes = holder.reserveStoredDataReplacement({ previous, current: previous });
+      sameBytes.settle(previous);
+    } else if (conflict === "target") {
+      const target = holder.reserveStoredData(10);
+      target.settle({ created: true, entries: [{ ...current, bytes: 10 }] });
+    } else if (conflict === "target-retirement") {
+      admit.retiredStoredData([{ removed: current }]);
+    } else {
+      admit.transferredStoredData([{ previous, current: { ...previous, profileId: "other" } }]);
+    }
+    assert.throws(() => replacement.settle(current));
+    const expectedFree = conflict === "retirement" ? 50 : conflict === "target" ? 20 : 30;
+    const available = holder.reserveStoredData(expectedFree);
+    assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+    available.release();
+    replacement.release(previous);
+    const rolledBack = holder.reserveStoredData(expectedFree + 20);
+    rolledBack.release();
+    holder.release();
+  }
+});

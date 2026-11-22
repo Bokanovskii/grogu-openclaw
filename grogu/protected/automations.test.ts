@@ -86,3 +86,21 @@ void test("rejects ambiguous, unsupported, or invalid calendar schedules", () =>
     }
   }
 });
+
+void test("retains only the saved resolvable agent when it leaves new-agent discovery", () => {
+  const catalog = createProtectedAutomationCatalog({ agents, models: [model] });
+  assert.ok(catalog);
+  const draft = { ...baseDraft, schedule: { kind: "every", everyMs: 60_000 } };
+  for (const [agentId, retainedAgent, valid] of [
+    ["general", undefined, false],
+    ["general", { id: "general" }, true],
+    ["research", { id: "general" }, false],
+    ["travel", { id: "general" }, true],
+  ] as const) {
+    const result = validateProtectedAutomationDraft({ ...draft, agentId }, catalog, retainedAgent);
+    assert.equal(result.valid, valid, `${agentId} with saved ${retainedAgent?.id ?? "none"}`);
+    if (!result.valid) {
+      assert.ok(result.errors.some((entry) => entry.code === "unsupported_agent"));
+    }
+  }
+});

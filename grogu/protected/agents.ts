@@ -8,6 +8,15 @@ export type ProtectedAgentDefinition = Omit<ProtectedAgent, "tools"> & {
 export type ProtectedAgentExtension = ProtectedAgentDefinition;
 
 const allowedTools = new Set<ProtectedAgentTool>([
+  "web_search",
+  "web_fetch",
+  "show_widget",
+  "sessions_list",
+  "sessions_history",
+  "sessions_send",
+]);
+// Shipped clients validate catalogs strictly and reject tool names they do not know yet.
+const advertisedTools = new Set<ProtectedAgentTool>([
   "web_fetch",
   "show_widget",
   "sessions_list",
@@ -20,7 +29,14 @@ const travelAgent: ProtectedAgentDefinition = {
   description: "Plan trips using sources the user selects.",
   instructions:
     "Help the user plan travel. Use only the tools available in this chat. Session tools are limited to chats owned by this profile; sessions_send can only steer an active permitted chat. Do not book, purchase, or claim to make arrangements on the user's behalf.",
-  tools: ["web_fetch", "show_widget", "sessions_list", "sessions_history", "sessions_send"],
+  tools: [
+    "web_search",
+    "web_fetch",
+    "show_widget",
+    "sessions_list",
+    "sessions_history",
+    "sessions_send",
+  ],
 };
 const generalAgent: ProtectedAgentDefinition = {
   id: "general",
@@ -36,7 +52,7 @@ export const protectedResearchAgent: ProtectedAgentExtension = {
   name: "Research",
   description: "Summarize sources the user selects.",
   instructions: "Use concise, evidence-based summaries.",
-  tools: ["web_fetch"],
+  tools: ["web_search", "web_fetch"],
 };
 
 export const defaultProtectedAgentId = travelAgent.id;
@@ -74,7 +90,7 @@ export function createProtectedAgentCatalog(extensions: readonly ProtectedAgentE
         id,
         name,
         description,
-        tools: [...tools],
+        tools: tools.filter((tool) => advertisedTools.has(tool)),
       }));
     },
   };

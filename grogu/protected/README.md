@@ -247,12 +247,14 @@ that rule and `thinking: null` resets to the catalog default. Start, run, and
 pause of active schedules remain unavailable until the protected-to-Gateway
 trust boundary reaches the native Cron owner.
 
-The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
-and display the resulting sources. It does not have a search provider;
-`web_search` is disabled. Managed search would require a separately approved
-search plugin and isolated credential or endpoint (for example, Brave with its
-own `BRAVE_API_KEY`). The Sparky key is not a search credential, and Alcove does
-not inherit provider keys or configuration from personal Grogu.
+Chat agents can search the public web with OpenClaw's `web_search` and fetch
+public URLs with `web_fetch`; the stream shows the resulting sources. Search
+uses only the keyless bundled DuckDuckGo provider. It needs no credential, and
+no other search provider is enabled. The runtime loads that plugin from the
+packaged `extensions/duckduckgo` source because it has no bundled build, so the
+runtime archive must include that directory; startup stops without it. The
+Sparky key is not a search credential, and Alcove does not inherit provider keys
+or configuration from personal Grogu.
 
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
 levels. A signed-in profile can send its Copilot access token to
@@ -359,8 +361,8 @@ encrypted file scope at existing plaintext files.
 default for new chats and for older chat entries without a selection. Choose
 `general` ("Just chat") for a generic conversation with the same protected tool
 ceiling; this does not change existing selections or the Travel default. The
-catalog also includes the narrow `research` role, which can fetch and summarize
-user-selected sources. The response includes public names, descriptions, and
+catalog also includes the narrow `research` role, which can search, fetch, and
+summarize sources. The response includes public names, descriptions, and
 tool ceilings, never the server-owned instructions. The service owner can add
 entries through the `agentExtensions` option to `createProtectedHttp`; extension
 IDs must be unique, and their tools can only be chosen from the protected

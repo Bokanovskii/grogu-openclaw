@@ -1,5 +1,6 @@
 import { open } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { writeJsonAtomic } from "../../src/infra/json-files.js";
@@ -105,7 +106,10 @@ async function main() {
     const storageLimits = measureStorageLimits(stateDir);
     const configRoot = await root(configDir);
     // Install each file once; never silently replace an existing allowlist.
-    const config = protectedOpenClawConfig(stateDir);
+    const config = protectedOpenClawConfig(
+      stateDir,
+      fileURLToPath(new URL("../..", import.meta.url)),
+    );
     const provider = config.models?.providers?.sparky;
     if (!provider) {
       throw new Error("Missing isolated Sparky configuration.");

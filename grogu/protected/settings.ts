@@ -103,9 +103,10 @@ export function parseRuntimeSettings(value: unknown) {
   };
 }
 
-export function protectedOpenClawConfig(stateDir: string): OpenClawConfig {
+export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): OpenClawConfig {
   return {
-    tools: { web: { search: { enabled: false } } },
+    // Keyless public search only; the plugin is shipped as source because it has no bundled dist.
+    tools: { web: { search: { enabled: true, provider: "duckduckgo" } } },
     agents: {
       ownership: "explicit",
       entries: {
@@ -117,9 +118,11 @@ export function protectedOpenClawConfig(stateDir: string): OpenClawConfig {
       },
     },
     plugins: {
-      allow: ["anthropic", "github-copilot", "openai"],
+      allow: ["anthropic", "duckduckgo", "github-copilot", "openai"],
+      load: { paths: [path.join(serviceRoot, "extensions", "duckduckgo")] },
       entries: {
         anthropic: { enabled: true },
+        duckduckgo: { enabled: true },
         "github-copilot": { enabled: true },
         openai: { enabled: true },
       },

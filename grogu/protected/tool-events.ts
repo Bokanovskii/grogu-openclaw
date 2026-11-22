@@ -24,6 +24,18 @@ export function projectActivity(
   return { id, kind, label, status };
 }
 
+// Web tools frame untrusted titles for the model; show members only the framed text.
+const framedTitle =
+  /^\n?<<<EXTERNAL_UNTRUSTED_CONTENT id="([a-f0-9]{16})">>>\nSource: Web (?:Search|Fetch)\n---\n([\s\S]*?)\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="\1">>>$/u;
+
+function sourceTitle(value: unknown, fallback: string) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const title = (framedTitle.exec(value)?.[2] ?? value).replace(/\s+/gu, " ").trim();
+  return title.slice(0, 256) || fallback;
+}
+
 function source(value: unknown): Source[] {
   if (!isRecord(value) || typeof value.url !== "string" || value.url.length > 2048) {
     return [];
@@ -40,7 +52,7 @@ function source(value: unknown): Source[] {
   return [
     {
       url: parsed.href,
-      title: typeof value.title === "string" ? value.title.slice(0, 256) : parsed.hostname,
+      title: sourceTitle(value.title, parsed.hostname),
     },
   ];
 }

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { protectedResearchAgent } from "./agents.js";
@@ -42,7 +43,13 @@ async function main() {
   ) {
     throw new Error("Protected runtime requires isolated process state and an unprivileged user");
   }
-  await configureProtectedRuntimeWorkers(fileURLToPath(new URL("../..", import.meta.url)));
+  const serviceRoot = fileURLToPath(new URL("../..", import.meta.url));
+  if (!existsSync(path.join(serviceRoot, "extensions", "duckduckgo", "openclaw.plugin.json"))) {
+    throw new ProtectedStartupError(
+      "The runtime archive is missing extensions/duckduckgo, which web search needs. Repackage it.",
+    );
+  }
+  await configureProtectedRuntimeWorkers(serviceRoot);
   const { acquireProtectedStateOwner } = await import("./state-owner.js");
   const stateOwner = await acquireProtectedStateOwner(stateDir);
   if (!stateOwner) {
@@ -63,7 +70,7 @@ async function main() {
   const usersRoot = await root(path.join(stateRoot.rootReal, "users"));
   const workspaceDir = path.join(stateRoot.rootReal, "workspace");
   const agentDir = path.join(stateRoot.rootReal, "agents", "protected", "agent");
-  const config = protectedOpenClawConfig(stateRoot.rootReal);
+  const config = protectedOpenClawConfig(stateRoot.rootReal, serviceRoot);
   const { publishConfiguredModelRuntimeSnapshots } =
     await import("../../src/gateway/server-startup-model-runtime.js");
   await publishConfiguredModelRuntimeSnapshots({

@@ -6,6 +6,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
 import { before as beforeTests, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   ProtectedAutomationCatalogSchema,
   ProtectedAutomationDraftValidationSchema,
@@ -177,7 +178,7 @@ void test("protected responses use neutral service wording", async (t) => {
   assert.equal(user.setupRequired, true);
   assert.equal(
     disclosure,
-    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
   );
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
@@ -731,6 +732,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
   assert.equal(catalog.defaultAgentId, "travel");
+  // Shipped strict clients do not know web_search, so the legacy catalog leaves it out.
   assert.deepEqual(catalog.agents.find((agent: { id: string }) => agent.id === "travel")?.tools, [
     "web_fetch",
     "show_widget",
@@ -1838,7 +1840,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   t.after(() => close(provider));
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
-  const serviceConfig = protectedOpenClawConfig(stateDir);
+  const serviceConfig = protectedOpenClawConfig(
+    stateDir,
+    fileURLToPath(new URL("../..", import.meta.url)),
+  );
   const encryption = createStorageValueEncryption(randomBytes(32));
   t.after(() => encryption.dispose());
   const protectedConfig: OpenClawConfig = {
@@ -2030,6 +2035,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "sessions_send",
     "show_widget",
     "web_fetch",
+    "web_search",
   ]);
   assert.ok(tools.includes("show_widget"));
   const { call: reopened } = await open();
@@ -2213,10 +2219,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       JSON.stringify(body.messages).includes("Use concise, evidence-based summaries."),
     );
   assert.ok(researchRequest, "the selected research agent reaches the synthetic provider");
-  assert.deepEqual(
-    researchRequest.body.tools?.map((tool) => tool.function.name),
-    ["web_fetch"],
-  );
+  assert.deepEqual(researchRequest.body.tools?.map((tool) => tool.function.name).toSorted(), [
+    "web_fetch",
+    "web_search",
+  ]);
   assert.match(
     JSON.stringify(researchRequest.body.messages),
     /Use concise, evidence-based summaries/,

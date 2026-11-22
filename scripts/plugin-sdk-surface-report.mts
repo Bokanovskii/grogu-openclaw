@@ -216,7 +216,8 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // -8: retired Skill Workshop proposal hook types.
       // +3: approved async session entry reads and typed incognito refusal on the existing subpath.
       // +1: deprecated createSessionHeaderLink retained from shipped 2026.10.1.
-      3645,
+      // +2: Grogu bound GitHub Copilot token bind/parse shared by both Copilot plugins.
+      3647,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -231,7 +232,8 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
       // +2: approved async upstream-link writes with released sync compatibility.
       // +3: approved async session entry reads and typed incognito refusal on the existing subpath.
       // +1: the same deprecated createSessionHeaderLink.
-      2115,
+      // +2: the same Grogu bound GitHub Copilot token bind/parse.
+      2117,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(

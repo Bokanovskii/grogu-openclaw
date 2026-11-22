@@ -25,9 +25,100 @@ import {
   setProtectedRequestStatus,
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
+import { readProtectedAutomationStorageUsage } from "./automations-store.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import { createProtectedStaticClient } from "./static-client.js";
+
+void test("startup admits pre-automation state before creating automation storage", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-automation-upgrade-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const env = { OPENCLAW_STATE_DIR: stateDir };
+  const databasePath = resolveOpenClawStateSqlitePath(env);
+  t.after(async () => {
+    await closeOpenClawStateDatabaseByPathAsync(databasePath);
+    await rm(stateDir, { recursive: true, force: true });
+  });
+  openOpenClawStateDatabase({ env });
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+
+  const { DatabaseSync } = requireNodeSqlite();
+  const prior = new DatabaseSync(databasePath);
+  try {
+    // The d4c527a0 schema differs from this release only by these three tables and indexes.
+    prior.exec(`
+      DROP TABLE IF EXISTS protected_automation_job_bindings;
+      DROP TABLE IF EXISTS protected_automation_members;
+      DROP TABLE IF EXISTS protected_automations;
+      INSERT INTO diagnostic_events (scope, event_key, payload_json, created_at)
+      VALUES ('automation-upgrade-test', 'retained', '{"synthetic":true}', 1);
+    `);
+  } finally {
+    prior.close();
+  }
+
+  const issuer = "https://access.example";
+  const subject = "synthetic-automation-upgrade-subject";
+  assert.deepEqual(
+    await executeOpenClawStateWorker(captureOpenClawStateWorkerContext({ env }), {
+      type: "userProfiles.verifiedDirectory",
+      input: {
+        issuer,
+        subjects: [subject],
+        preferenceKey: "grogu.protected.directory",
+        after: null,
+        limit: 10,
+      },
+    }),
+    { people: [], nextCursor: null },
+  );
+  assert.equal(await migrateProtectedSubjects(stateDir, { issuer, subjects: [subject] }), 1);
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+  const beforeFirstUse = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.equal(
+      beforeFirstUse
+        .prepare(
+          "SELECT payload_json FROM diagnostic_events WHERE scope = 'automation-upgrade-test'",
+        )
+        .get()?.payload_json,
+      '{"synthetic":true}',
+    );
+    assert.deepEqual(
+      beforeFirstUse
+        .prepare("SELECT name FROM sqlite_schema WHERE name LIKE 'protected_automation%'")
+        .all(),
+      [],
+    );
+  } finally {
+    beforeFirstUse.close();
+  }
+
+  const usage = await readProtectedAutomationStorageUsage(stateDir, "synthetic-profile", () => {});
+  assert.equal(usage.totalRecords, 0);
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+  const afterFirstUse = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.deepEqual(
+      afterFirstUse
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE name LIKE 'protected_automation%' OR name LIKE 'idx_protected_automation%' ORDER BY name",
+        )
+        .all()
+        .map((row) => row.name),
+      [
+        "idx_protected_automation_job_bindings_owner",
+        "idx_protected_automation_members_profile_role",
+        "idx_protected_automations_owner",
+        "protected_automation_job_bindings",
+        "protected_automation_members",
+        "protected_automations",
+      ],
+    );
+  } finally {
+    afterFirstUse.close();
+  }
+});
 
 void test("startup migrates subjects through the worker on pre-access-workflow state", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-upgrade-test-${randomUUID()}`);

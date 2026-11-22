@@ -23,6 +23,7 @@ import { FailoverError } from "../../src/agents/failover/error.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
+import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
 import {
   getCanonicalUserPreferences,
@@ -1049,7 +1050,11 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     );
     assert.deepEqual(providerCalls, []);
     for (const [provider, verificationUrl, accessToken] of [
-      ["github-copilot", "https://github.com/login/device", "synthetic-github"],
+      [
+        "github-copilot",
+        "https://github.com/login/device",
+        bindGithubCopilotToken("synthetic-github", "github.com"),
+      ],
       ["openai", "https://auth.openai.com/codex/device", openaiAccess],
     ]) {
       const connect = `/providers/${provider}/connect`;
@@ -1579,7 +1584,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const selfRoutePrompt = "Hand this request back to yourself.";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
-  const githubToken = `gho_family_${suffix}`;
+  const rawGithubToken = `gho_family_${suffix}`;
+  // Clients hold the relay producer's github.com-bound credential.
+  const githubToken = bindGithubCopilotToken(rawGithubToken, "github.com");
+  const hostTenant = "host-tenant.ghe.com";
   const anthropicKey = `sk-ant-family-${suffix}`;
   const openaiRefresh = `family-refresh-${suffix}`;
   const accountId = "family-synthetic-account";
@@ -1589,10 +1597,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     }),
   ).toString("base64url")}.family-${suffix}`;
   const fallback = `host-fallback-${suffix}`;
-  const ambient = ["COPILOT_GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
+  const ambient = [
+    "COPILOT_GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "COPILOT_GITHUB_DOMAIN",
+  ];
   const prior = ambient.map((key) => process.env[key]);
   for (const key of ambient) {
-    process.env[key] = fallback;
+    process.env[key] = key === "COPILOT_GITHUB_DOMAIN" ? hostTenant : fallback;
   }
   t.after(() =>
     ambient.forEach((key, index) => {
@@ -1638,6 +1651,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
           key: headers.get("x-api-key"),
         });
         switch (endpoint) {
+          case `https://api.${hostTenant}/copilot_internal/user`:
+            return new Response(null, { status: 401 });
           case "https://api.github.com/copilot_internal/user":
             if (headers.get("authorization") === "Bearer denied-synthetic") {
               return new Response(null, { status: 401 });
@@ -1995,6 +2010,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     models: {
       mode: "replace" as const,
       providers: {
+        // Conflicting ambient tenant config; bound relay credentials must ignore it.
+        "github-copilot": {
+          baseUrl: `https://copilot-api.${hostTenant}`,
+          params: { githubDomain: hostTenant },
+          models: [],
+        },
         sparky: {
           baseUrl: `${providerOrigin}/v1`,
           api: "openai-completions",
@@ -2665,6 +2686,35 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.deepEqual(models[2].thinking.orchestrationLevels, ["ultra"]);
     assert.equal(models[2].thinking.default, "off");
   });
+  await t.test("unbound legacy credentials still follow the ambient tenant", async () => {
+    const before = providerRequests.length;
+    const legacy = await call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({ credential: { accessToken: rawGithubToken } }),
+    });
+    assert.equal(legacy.status, 401);
+    assert.equal((await legacy.json()).error.code, "provider_auth_failed");
+    assert.deepEqual(
+      providerRequests
+        .slice(before)
+        .map(({ endpoint, authorization }) => [endpoint, authorization]),
+      [[`https://api.${hostTenant}/copilot_internal/user`, `Bearer ${rawGithubToken}`]],
+    );
+  });
+  await t.test("rejects malformed bound credentials", async () => {
+    const before = providerRequests.length;
+    const malformed = await call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({
+        credential: { accessToken: "openclaw-github-copilot-token:v1:{" },
+      }),
+    });
+    assert.equal(malformed.status, 401);
+    assert.equal((await malformed.json()).error.code, "provider_auth_failed");
+    assert.equal(providerRequests.length, before);
+  });
   await t.test("rejects unavailable Copilot thinking levels", async () => {
     const rejected = await copilotTurn("max");
     assert.equal(rejected.status, 422);
@@ -2780,19 +2830,19 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     [
       {
         endpoint: "https://api.github.com/copilot_internal/user",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },
       {
         endpoint: "https://api.github.com/copilot_internal/user",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },
       {
         endpoint: "https://api.business.githubcopilot.com/responses",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },

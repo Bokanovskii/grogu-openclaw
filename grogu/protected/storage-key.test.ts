@@ -60,12 +60,11 @@ void test("the predecessor maintenance environment provisions and migrates witho
     );
   const seeded = run(
     `
-      const { runOpenClawAgentWriteTransaction } = await import("./src/state/openclaw-agent-db.js");
-      runOpenClawAgentWriteTransaction(({ db }) => {
-        db.prepare(
-          "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?, ?, ?, ?)",
-        ).run(${JSON.stringify(sessionKey)}, "storage-migration-session", JSON.stringify({ title: ${JSON.stringify(plaintext)} }), Date.now());
-      }, { agentId: "protected", env: process.env });
+      const { replaceSessionEntrySync } = await import("./src/config/sessions/session-accessor.js");
+      replaceSessionEntrySync(
+        { agentId: "protected", env: process.env, sessionKey: ${JSON.stringify(sessionKey)} },
+        { sessionId: "storage-migration-session", updatedAt: 1, label: ${JSON.stringify(plaintext)} },
+      );
       const { runOpenClawStateWriteTransaction } = await import("./src/state/openclaw-state-db.js");
       const { ensureSecretStoreSchema } = await import("./src/state/openclaw-state-db-schema-additive.js");
       runOpenClawStateWriteTransaction(({ db }) => {
@@ -82,6 +81,26 @@ void test("the predecessor maintenance environment provisions and migrates witho
   const migrated = run("provision-storage-key");
   assert.equal(migrated.status, 0, migrated.stderr);
   assert.match(migrated.stdout, /shared state, the agent store, and user files are encrypted/u);
+  const admitted = run(
+    `
+      const { resolveProtectedStorageKeyFile } = await import("./grogu/protected/storage-key.js");
+      const { acquireProtectedStateOwner } = await import("./grogu/protected/state-owner.js");
+      const { admitProtectedPhysicalAgentStorage } = await import("./grogu/protected/agent-storage.js");
+      const { loadExactSessionEntryReadOnly } = await import("./src/config/sessions/session-accessor.js");
+      resolveProtectedStorageKeyFile();
+      const owner = await acquireProtectedStateOwner(process.env.OPENCLAW_STATE_DIR);
+      if (!owner) throw new Error("Could not acquire state owner");
+      try {
+        admitProtectedPhysicalAgentStorage(() => owner.assertCurrent());
+        const row = loadExactSessionEntryReadOnly({ agentId: "protected", env: process.env, sessionKey: ${JSON.stringify(sessionKey)} });
+        if (row?.entry.label !== ${JSON.stringify(plaintext)}) throw new Error("Migrated session did not survive admission");
+      } finally {
+        owner.release();
+      }
+    `,
+    true,
+  );
+  assert.equal(admitted.status, 0, admitted.stderr);
   const originalKey = await readFile(keyPath);
   const keyStat = await lstat(keyPath, { bigint: true });
   assert.equal(keyStat.size, 32n);

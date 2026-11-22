@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { closeSessionTranscriptReconcileWorkerPool } from "../../src/config/sessions/session-transcript-reconcile-pool.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../src/state/openclaw-agent-db-lifecycle.js";
@@ -12,6 +12,33 @@ import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-d
 import { migrateProtectedSubjects } from "./admission-store.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
+
+const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+const originalStorageKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+const encryptionStateDir = path.resolve(".artifacts", `protected-revocation-key-${randomUUID()}`);
+const encryptionKeyFile = `${encryptionStateDir}.key`;
+
+before(async () => {
+  await mkdir(encryptionStateDir, { recursive: true, mode: 0o700 });
+  await writeFile(encryptionKeyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
+  process.env.OPENCLAW_STATE_DIR = encryptionStateDir;
+  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = encryptionKeyFile;
+});
+
+after(async () => {
+  await rm(encryptionKeyFile, { force: true });
+  await rm(encryptionStateDir, { recursive: true, force: true });
+  if (originalStateDir === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR;
+  } else {
+    process.env.OPENCLAW_STATE_DIR = originalStateDir;
+  }
+  if (originalStorageKeyFile === undefined) {
+    delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+  } else {
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = originalStorageKeyFile;
+  }
+});
 
 for (const saveDrafts of [false, true]) {
   void test(`removal denies and interrupts the person (${saveDrafts ? "saved drafts" : "legacy store"})`, async (t) => {

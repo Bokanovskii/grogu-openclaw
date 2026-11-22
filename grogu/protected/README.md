@@ -384,6 +384,10 @@ cleanup is interrupted, startup resumes it before admitting readers.
 Secret-store values must fit the existing 64 KiB limit after encryption. A
 large plaintext value can prevent migration; the transaction rolls back without
 removing it. Reduce the value before retrying.
+Protected runtime startup requires an existing encrypted agent database with a
+valid key and encryption marker. It refuses a missing or plaintext database
+instead of creating or migrating it. Stop the listener and use the maintenance
+command below to provision or migrate plaintext state.
 Protected encrypted agent databases use schema version 26 so older builds
 refuse them. Protected shared-state databases use schema version 21. Ordinary
 personal Grogu databases keep the upstream schemas and versions. When merging

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { root } from "../../src/infra/fs-safe.js";
 import { requireNodeSqlite } from "../../src/infra/node-sqlite.js";
+import { createDeferredCore } from "../../src/shared/deferred.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import {
   openOpenClawStateDatabase,
@@ -28,6 +29,7 @@ import {
 import { readProtectedAutomationStorageUsage } from "./automations-store.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
+import { createProtectedPolicySync, type ProtectedPolicyResult } from "./policy-sync.js";
 import { createProtectedStaticClient } from "./static-client.js";
 
 void test("startup admits pre-automation state before creating automation storage", async (t) => {
@@ -247,10 +249,37 @@ void test("only the current owner can approve and the owner cannot be removed", 
   const stateDir = path.resolve(".artifacts", `protected-access-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
+  const keyFile = `${stateDir}.key`;
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  const previousKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+  await writeFile(keyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyFile;
+  t.after(async () => {
+    result.resolve("unknown");
+    await policySync.stop();
+    await rm(keyFile, { force: true });
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
+    if (previousKeyFile === undefined) {
+      delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    } else {
+      process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = previousKeyFile;
+    }
+  });
   const issuer = "https://access.example";
   const ownerSubject = "00000000-0000-4000-8000-000000000001";
   const otherSubject = "00000000-0000-4000-8000-000000000002";
   const expiresAt = Date.now() + 60_000;
+  const started = createDeferredCore<void>();
+  const result = createDeferredCore<ProtectedPolicyResult>();
+  const policySync = createProtectedPolicySync(stateDir, async () => {
+    started.resolve();
+    return result.promise;
+  });
   await migrateProtectedSubjects(stateDir, { issuer, subjects: [ownerSubject] });
   assert.equal((await listProtectedAdmissions(stateDir))[0]?.email, null);
   assert.equal(
@@ -265,6 +294,9 @@ void test("only the current owner can approve and the owner cannot be removed", 
     directory: { issuer, allowedSubjects: [ownerSubject, otherSubject] },
     ownerSubject,
     stateDir,
+    onPolicyChanged: policySync.trigger,
+    isPolicyInFlight: policySync.isInFlight,
+    getPolicyStatus: policySync.getStatus,
     usersRoot: await root(usersDir),
     verifyIdentity: async (request) => ({
       issuer,
@@ -325,6 +357,15 @@ void test("only the current owner can approve and the owner cannot be removed", 
   );
   assert.equal(approve.status, 200);
   assert.equal((await approve.json()).policy, "sync_pending");
+  await started.promise;
+  const duringSync = await call("/api/protected/v1/admin/requests", "GET", ownerSubject);
+  assert.equal((await duringSync.json()).policyBlocked, false);
+  result.resolve("unknown");
+  await policySync.stop();
+  const uncertain = await call("/api/protected/v1/admin/requests", "GET", ownerSubject);
+  const uncertainStatus = await uncertain.json();
+  assert.equal(uncertainStatus.policyBlocked, true);
+  assert.ok(uncertainStatus.blockedPersonId);
   assert.equal(
     await bindProtectedAdmission(
       stateDir,

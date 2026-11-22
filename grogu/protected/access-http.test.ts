@@ -124,6 +124,8 @@ void test("the public page has a separate static asset tree", async (t) => {
     writeFile(path.join(bundleDir, "assets", "style-compiled.css"), "shared style"),
     writeFile(path.join(bundleDir, "request-access", "index.html"), "Public request"),
     writeFile(path.join(bundleDir, "request-access", "assets", "access-public.js"), "public"),
+    writeFile(path.join(bundleDir, "alcove-192.png"), "icon"),
+    writeFile(path.join(bundleDir, "other.png"), "unlisted"),
   ]);
   t.after(() => rm(bundleDir, { recursive: true, force: true }));
   const serve = await createProtectedStaticClient(await root(bundleDir));
@@ -139,6 +141,10 @@ void test("the public page has a separate static asset tree", async (t) => {
     assert.equal(await (await get(`/assets/${name}`))?.text(), content);
   }
   assert.equal(await (await get("/request-access/assets/access-public.js"))?.text(), "public");
+  const icon = await get("/alcove-192.png");
+  assert.equal(icon?.headers.get("content-type"), "image/png");
+  assert.equal(await icon?.text(), "icon");
+  assert.equal(await get("/other.png"), undefined);
   assert.equal(await get("/assets/private.json"), undefined);
   assert.equal(await get("/assets/privateApp.js"), undefined);
   assert.equal(await get("/request-access/index.html"), undefined);

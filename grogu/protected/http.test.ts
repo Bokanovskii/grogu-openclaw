@@ -9,6 +9,8 @@ import { before as beforeTests, test } from "node:test";
 import {
   ProtectedAutomationCatalogSchema,
   ProtectedAutomationDraftValidationSchema,
+  ProtectedAutomationListResponseSchema,
+  ProtectedAutomationResponseSchema,
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
@@ -28,6 +30,7 @@ import {
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
+import { addProtectedSubject } from "./admission-store.js";
 import { protectedResearchAgent, type ProtectedAgentExtension } from "./agents.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
@@ -401,8 +404,8 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.deepEqual(automationCatalog.capabilities.automations, {
     catalog: true,
     draftValidation: true,
-    list: false,
-    create: false,
+    list: true,
+    create: true,
     scheduleControl: false,
     run: false,
     sharing: false,
@@ -450,6 +453,85 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     valid: true,
     draft: { ...automationDraft, thinking: "ultra" },
   });
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://synthetic.example", subject }),
+      "added",
+    );
+  }
+  const invalidEnabledCreate = await first.call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, enabled: true }),
+  });
+  assert.equal(invalidEnabledCreate.status, 422);
+  const createdAutomationResponse = await first.call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(automationDraft),
+  });
+  assert.equal(createdAutomationResponse.status, 201);
+  const createdAutomationBody = await createdAutomationResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationResponseSchema, createdAutomationBody), true);
+  const createdAutomation = createdAutomationBody.automation;
+  assert.equal(createdAutomation.enabled, false);
+  assert.equal(createdAutomation.state, "paused");
+  assert.equal(createdAutomation.version, "1");
+  assert.equal(createdAutomation.nextCheckAt, null);
+  const automationListResponse = await first.call("alice", "/automations");
+  assert.equal(automationListResponse.status, 200);
+  const automationList = await automationListResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationListResponseSchema, automationList), true);
+  assert.deepEqual(
+    automationList.automations.map((automation: { id: string }) => automation.id),
+    [createdAutomation.id],
+  );
+  const updatedAutomationResponse = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+    {
+      method: "PATCH",
+      headers: { "if-match": createdAutomation.version },
+      body: JSON.stringify({ enabled: false, name: "Updated synthetic morning summary" }),
+    },
+  );
+  assert.equal(updatedAutomationResponse.status, 200);
+  const updatedAutomationBody = await updatedAutomationResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationResponseSchema, updatedAutomationBody), true);
+  assert.equal(updatedAutomationBody.automation.name, "Updated synthetic morning summary");
+  assert.equal(updatedAutomationBody.automation.enabled, false);
+  assert.equal(updatedAutomationBody.automation.state, "paused");
+  assert.equal(updatedAutomationBody.automation.version, "2");
+  const staleAutomationPatch = await first.call("alice", `/automations/${createdAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": createdAutomation.version },
+    body: JSON.stringify({ name: "Stale update" }),
+  });
+  assert.equal(staleAutomationPatch.status, 412);
+  const unavailableAutomationStart = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+    {
+      method: "PATCH",
+      headers: { "if-match": updatedAutomationBody.automation.version },
+      body: JSON.stringify({ enabled: true }),
+    },
+  );
+  assert.equal(unavailableAutomationStart.status, 503);
+  assert.equal((await unavailableAutomationStart.json()).error.code, "scheduler_unavailable");
+  const bobAutomationRead = await first.call("bob", `/automations/${createdAutomation.id}`);
+  assert.equal(bobAutomationRead.status, 404);
+  const bobAutomationPatch = await first.call("bob", `/automations/${createdAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": updatedAutomationBody.automation.version },
+    body: JSON.stringify({ name: "Bob's update" }),
+  });
+  assert.equal(bobAutomationPatch.status, 404);
+  const unchangedAfterRejectedStart = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+  );
+  const unchangedAutomation = await unchangedAfterRejectedStart.json();
+  assert.equal(unchangedAutomation.automation.version, "2");
+  assert.equal(unchangedAutomation.automation.enabled, false);
   const maximumName = "😀".repeat(40);
   const maximumNameResponse = await first.call("alice", "/automations/drafts/validate", {
     method: "POST",

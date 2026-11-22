@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
 import {
   isProtectedAgentSelection,
+  isProtectedAutomationPatchRequest,
   isProtectedCreateChat,
   isProtectedAccountName,
   isProtectedDirectorySettings,
@@ -11,6 +12,8 @@ import {
   isProtectedTurnRequest,
   type ProtectedAgentCatalogDto,
   type ProtectedAgentSelectionResponse,
+  type ProtectedAutomationListResponse,
+  type ProtectedAutomationResponse,
   type ProtectedChatStorage,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
@@ -45,6 +48,12 @@ import {
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
+import {
+  createProtectedAutomationRecord,
+  listProtectedAutomationRecords,
+  patchProtectedAutomationRecord,
+  readProtectedAutomationRecord,
+} from "./automations-store.js";
 import {
   createProtectedAutomationCatalog,
   validateProtectedAutomationDraft,
@@ -878,6 +887,160 @@ export function createProtectedHttp(options: {
         const result = validateProtectedAutomationDraft(draft, automationCatalog);
         await revalidate();
         assertCurrent();
+        return json(result);
+      }
+      if (pathname === "/automations" && method === "GET") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        await revalidate();
+        const automations = await listProtectedAutomationRecords(options.stateDir, authority);
+        assertCurrent();
+        const result: ProtectedAutomationListResponse = { automations };
+        return json(result);
+      }
+      if (pathname === "/automations" && method === "POST") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        const draft = await body(request);
+        assertCurrent();
+        const validation = validateProtectedAutomationDraft(draft, automationCatalog);
+        if (!validation.valid) {
+          return json(validation, 422);
+        }
+        await revalidate();
+        const automation = await createProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, definition: validation.draft, now: Date.now() },
+          authority,
+        );
+        if (!automation) {
+          unauthorized();
+        }
+        assertCurrent();
+        const result: ProtectedAutomationResponse = { automation };
+        return json(result, 201);
+      }
+      const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
+      if (automationMatch && method === "GET") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        await revalidate();
+        const automation = await readProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, automationId: automationMatch[1]! },
+          authority,
+        );
+        if (!automation) {
+          return notFound();
+        }
+        assertCurrent();
+        const result: ProtectedAutomationResponse = { automation };
+        return json(result);
+      }
+      if (automationMatch && method === "PATCH") {
+        if (!automationCatalog) {
+          return notFound();
+        }
+        const patch = await body(request);
+        if (!isProtectedAutomationPatchRequest(patch) || Object.keys(patch).length === 0) {
+          return invalid();
+        }
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(
+            428,
+            "version_required",
+            "Reload the automation before saving changes.",
+          );
+        }
+        if (!/^[1-9]\d*$/u.test(version) || !Number.isSafeInteger(Number(version))) {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before saving.",
+          );
+        }
+        await revalidate();
+        const automationId = automationMatch[1]!;
+        const current = await readProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, automationId },
+          authority,
+        );
+        if (!current) {
+          return notFound();
+        }
+        if (current.version !== version) {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before saving.",
+          );
+        }
+        if (patch.enabled === true || current.enabled) {
+          throw new ProtectedError(
+            503,
+            "scheduler_unavailable",
+            "Automation scheduling is not available yet. Your changes were not saved.",
+          );
+        }
+        const definition: Record<string, unknown> = { ...current };
+        delete definition.id;
+        delete definition.version;
+        delete definition.enabled;
+        delete definition.state;
+        delete definition.nextCheckAt;
+        for (const [key, value] of Object.entries(patch)) {
+          if (key === "enabled") {
+            continue;
+          }
+          if (value === null) {
+            delete definition[key];
+          } else {
+            definition[key] = value;
+          }
+        }
+        const validation = validateProtectedAutomationDraft(definition, automationCatalog);
+        if (!validation.valid) {
+          return json(validation, 422);
+        }
+        await revalidate();
+        const updated = await patchProtectedAutomationRecord(
+          options.stateDir,
+          {
+            profileId: profile.id,
+            automationId,
+            expectedRevision: Number(version),
+            definition: validation.draft,
+            now: Date.now(),
+          },
+          authority,
+        );
+        if (updated && "status" in updated) {
+          if (updated.status === "member_inactive") {
+            unauthorized();
+          }
+          if (updated.status === "version_mismatch") {
+            throw new ProtectedError(
+              412,
+              "version_mismatch",
+              "This automation changed. Reload it before saving.",
+            );
+          }
+          if (updated.status === "scheduler_required") {
+            throw new ProtectedError(
+              503,
+              "scheduler_unavailable",
+              "Automation scheduling is not available yet. Your changes were not saved.",
+            );
+          }
+          return notFound();
+        }
+        assertCurrent();
+        const result: ProtectedAutomationResponse = { automation: updated };
         return json(result);
       }
       if (pathname === "/logout" && method === "POST") {

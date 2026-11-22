@@ -20,8 +20,8 @@ const limits = {
 const capabilities = {
   catalog: true,
   draftValidation: true,
-  list: false,
-  create: false,
+  list: true,
+  create: true,
   scheduleControl: false,
   run: false,
   sharing: false,

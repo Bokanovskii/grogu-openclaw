@@ -137,6 +137,46 @@ it("uses the resolved entrypoint for relative spellings and launcher targets", (
   }
 });
 
+it.each(["openclaw", "unrelated-service"])(
+  "resolves extensionless Node main files against their %s package",
+  (packageName) => {
+    const fixture = scriptFixture("out/bootstrap-fork.js", packageName);
+    expect(
+      classifyOpenClawArgv(["node", "out/bootstrap-fork"], {
+        cwd: fixture.root,
+        inspectPackage: true,
+      }),
+    ).toEqual(packageName === "openclaw" ? { kind: "openclaw", entryIndex: 1 } : { kind: "other" });
+  },
+);
+
+it("keeps missing and unreadable extensionless Node entrypoints unresolved", () => {
+  const fixture = scriptFixture("out/bootstrap-fork.mjs", "unrelated-service");
+  const script = fixture.script.slice(0, -4);
+  expect(classifyOpenClawArgv(["node", script], { inspectPackage: true })).toEqual({
+    kind: "unclassified",
+    cause: "script",
+    reason: "could not resolve script",
+  });
+  fs.writeFileSync(`${script}.js`, "");
+  const realpath = fs.realpathSync;
+  const denied = vi.spyOn(fs, "realpathSync").mockImplementation((file) => {
+    if (file === script) {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    }
+    return realpath(file);
+  });
+  try {
+    expect(classifyOpenClawArgv(["node", script], { inspectPackage: true })).toEqual({
+      kind: "unclassified",
+      cause: "script",
+      reason: "could not resolve script",
+    });
+  } finally {
+    denied.mockRestore();
+  }
+});
+
 it("preserves uncertainty when cwd, script, or package identity cannot be inspected", () => {
   const owned = scriptFixture("dist/index.js");
   expect(classifyOpenClawArgv(["node", "dist/index.js"])).toEqual({

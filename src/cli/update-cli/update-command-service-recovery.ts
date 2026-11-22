@@ -261,12 +261,17 @@ export async function admitInstalledGatewayRecovery(
         root,
         nodeRunner: params.packageUpdateNodeRunner,
         timeoutMs: params.updateStepTimeoutMs,
+        inspectOwnProtectedFormats: true,
       });
       assertCurrent();
       return databases.flatMap((database) => {
         const observed = resolveUpdateStateContentVersion(database);
-        const expected = database.path === sharedPath ? candidate.state : candidate.agent;
-        return observed !== null && observed !== expected
+        const kind = database.path === sharedPath ? "state" : "agent";
+        const expected = candidate[kind];
+        const protectedFormat =
+          database.ownProtectedFormat?.kind === kind &&
+          database.ownProtectedFormat.personalVersion === expected;
+        return observed !== null && observed !== expected && !protectedFormat
           ? [{ ...database, observed, expected }]
           : [];
       });

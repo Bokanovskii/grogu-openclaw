@@ -6,15 +6,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import packageJson from "../../package.json" with { type: "json" };
 import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { requireNodeSqlite } from "../infra/node-sqlite.js";
+import { openNodeSqliteDatabase, requireNodeSqlite } from "../infra/node-sqlite.js";
 import { SQLITE_STAGING_TOKEN_FILES } from "../infra/sqlite-staging-token.js";
 import { createUpdateRun } from "../infra/update-run-ledger.js";
+import { withEnvAsync } from "../test-utils/env.js";
+import { withAgentDatabaseStartupAdmission } from "./agent-database-startup.js";
 import { OpenClawAgentDatabaseMediaMigrationRequiredError } from "./openclaw-agent-db-migration-required.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   OPENCLAW_AGENT_SCHEMA_VERSION,
   openOpenClawAgentDatabase,
 } from "./openclaw-agent-db.js";
+import { inspectAgentDatabaseSchema } from "./openclaw-agent-schema-inspection.js";
 import {
   assertOpenClawDatabasesReady,
   preflightOpenClawStateDatabasePath,
@@ -33,6 +36,8 @@ import {
   openOpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
+import { cleanupProtectedSharedStateAfterMigration } from "./openclaw-state-protected-cleanup.js";
+import { migrateProtectedSharedStateInTransaction } from "./openclaw-state-protected-migration.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -59,6 +64,78 @@ function createState() {
 }
 
 describe("OpenClaw database schema preflight", () => {
+  it("admits authenticated protected storage through startup readiness and compatibility preflight", async () => {
+    const root = tempDirs.make("protected-startup-admission-");
+    const stateDir = path.join(root, "state");
+    const keyPath = path.join(root, "key");
+    fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    await withEnvAsync(
+      { OPENCLAW_STATE_DIR: stateDir, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath },
+      async () => {
+        const env = { ...process.env };
+        const agent = openOpenClawAgentDatabase({ agentId: "main", env });
+        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+        closeDatabases();
+        const config = { agents: { ownership: "explicit" as const, entries: { main: {} } } };
+        const startup = () =>
+          withAgentDatabaseStartupAdmission(
+            async () => {
+              await assertOpenClawDatabasesReady({ env, operation: "gateway-startup", config });
+              const result = await preflightOpenClawDatabaseSchemas({
+                env,
+                reuseStartupSchemaPreparation: true,
+                agentAdmissionConfig: config,
+                inspectOwnProtectedFormats: true,
+              });
+              expect(result.incompatible).toEqual([]);
+              expect(result.indeterminate).toEqual([]);
+              expect(result.agentRefusals ?? []).toEqual([]);
+            },
+            { deferInspections: false },
+          );
+        await startup();
+        await withEnvAsync({ OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined }, async () => {
+          await expect(
+            assertOpenClawDatabasesReady({
+              env: { ...env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined },
+              operation: "gateway-startup",
+              config,
+            }),
+          ).rejects.toThrow();
+        });
+        {
+          using shared = openNodeSqliteDatabase(resolveOpenClawStateSqlitePath(env));
+          shared.exec("PRAGMA secure_delete = ON; BEGIN IMMEDIATE");
+          migrateProtectedSharedStateInTransaction(shared);
+          shared.exec("COMMIT");
+          cleanupProtectedSharedStateAfterMigration(shared, () => {});
+        }
+        await startup();
+        withDatabase(agent.path, (database) => {
+          database.exec("DROP INDEX idx_agent_session_nodes_active");
+        });
+        {
+          using database = openNodeSqliteDatabase(agent.path, { readOnly: true });
+          expect(
+            inspectAgentDatabaseSchema(database, {
+              pathname: agent.path,
+              agentId: "main",
+              supportedVersion: OPENCLAW_AGENT_SCHEMA_VERSION,
+              inspectOwnProtectedFormats: true,
+              inspectOwnership: true,
+              verifyCurrentSchemaShape: true,
+              requireStartupMigrationReadiness: true,
+            }),
+          ).toMatchObject({ ownProtectedFormat: true, preparationPending: true });
+        }
+        withDatabase(agent.path, (database) => {
+          database.exec("PRAGMA user_version = 27");
+        });
+        await expect(startup()).rejects.toThrow(/newer than this build/);
+      },
+    );
+  });
+
   it("keeps package schema support metadata aligned", () => {
     expect(packageJson.openclaw.schemaVersions).toEqual({
       state: OPENCLAW_STATE_SCHEMA_VERSION,

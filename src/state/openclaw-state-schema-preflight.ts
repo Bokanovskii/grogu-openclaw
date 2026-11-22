@@ -23,8 +23,12 @@ import {
 } from "./openclaw-state-db-maintenance.js";
 import { normalizeOpenClawStateSchemaReadError } from "./openclaw-state-db-schema-migration-required.js";
 import { assertCanonicalStateSchemaShape } from "./openclaw-state-db-schema-repair.js";
-import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
+import {
+  assertSupportedStateSchemaVersion,
+  readStateSchemaContentVersion,
+} from "./openclaw-state-db-schema-version.js";
 import { inspectOpenClawStateOwnershipFromDatabase } from "./openclaw-state-ownership.js";
+import { PROTECTED_SHARED_STATE_SCHEMA_VERSION } from "./openclaw-state-protected-marker.js";
 import { inspectCurrentStateStartupSchema } from "./openclaw-state-schema-inspection.js";
 import { readStateSchemaPublicationBlocker } from "./openclaw-state-schema-publication.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
@@ -32,6 +36,7 @@ import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 export type StateSchemaInspectionInput = {
   pathname: string;
   supportedVersion: number;
+  inspectOwnProtectedFormats?: boolean;
   requireStartupMigrationReadiness?: boolean;
   verifyCurrentSchemaShape?: boolean;
   scope?: "state";
@@ -49,6 +54,15 @@ export type StateSchemaInspection = {
 
 const canonicalStateInspectionSchemas = [OPENCLAW_STATE_SCHEMA_SQL];
 
+function assertStartupSchemaValid(database: DatabaseSync, pathname: string, version: number): void {
+  const { blockingIssues } = inspectCurrentStateStartupSchema(database, pathname, version);
+  if (blockingIssues.length > 0) {
+    throw new SqliteSchemaMismatchError(
+      `OpenClaw state database ${pathname} requires repair: ${blockingIssues.map((issue) => issue.message).join("; ")}; run openclaw doctor --fix.`,
+    );
+  }
+}
+
 /** Only trusted canonical definitions enter the expected-contract cache, never observed schemas. */
 export function captureStateSchemaInspectionContracts(): PreparedSqliteSchemaContract[] {
   return captureSqliteSchemaContracts(canonicalStateInspectionSchemas);
@@ -59,11 +73,23 @@ export function inspectStateDatabaseSchema(
   database: DatabaseSync,
   input: StateSchemaInspectionInput,
 ): StateSchemaInspection {
-  const { pathname, supportedVersion } = input;
+  const { pathname } = input;
   const schemas: OpenClawDatabaseSchemaPreflight = { incompatible: [], indeterminate: [] };
   const inspection: StateSchemaInspection = { schemas, inspectionErrors: [] };
   try {
     const stateVersion = readSqliteUserVersion(database);
+    let supportedVersion = input.supportedVersion;
+    const ownProtectedFormat =
+      input.inspectOwnProtectedFormats &&
+      stateVersion === PROTECTED_SHARED_STATE_SCHEMA_VERSION &&
+      stateVersion > supportedVersion;
+    if (ownProtectedFormat) {
+      assertSupportedStateSchemaVersion(database, pathname);
+      assertSqliteIntegrity(database, pathname);
+      assertCanonicalStateSchemaShape(database, pathname);
+      assertStartupSchemaValid(database, pathname, stateVersion);
+      supportedVersion = PROTECTED_SHARED_STATE_SCHEMA_VERSION;
+    }
     const contentVersion =
       stateVersion > supportedVersion
         ? stateVersion
@@ -102,21 +128,16 @@ export function inspectStateDatabaseSchema(
         ),
       ];
     }
-    if (input.requireStartupMigrationReadiness && contentVersion <= OPENCLAW_STATE_SCHEMA_VERSION) {
-      assertSqliteIntegrity(database, pathname);
-      assertCanonicalStateSchemaShape(database, pathname);
+    if (input.requireStartupMigrationReadiness && contentVersion <= supportedVersion) {
+      if (!ownProtectedFormat) {
+        assertSqliteIntegrity(database, pathname);
+        assertCanonicalStateSchemaShape(database, pathname);
+      }
       // Readiness must reject malformed ownership even when startup has no pending writes.
       inspectOpenClawStateOwnershipFromDatabase(database, pathname);
-      if (migrationVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
-        const { blockingIssues } = inspectCurrentStateStartupSchema(
-          database,
-          pathname,
-          stateVersion,
-        );
-        if (blockingIssues.length > 0) {
-          throw new SqliteSchemaMismatchError(
-            `OpenClaw state database ${pathname} requires repair: ${blockingIssues.map((issue) => issue.message).join("; ")}; run openclaw doctor --fix.`,
-          );
+      if (migrationVersion === supportedVersion) {
+        if (!ownProtectedFormat) {
+          assertStartupSchemaValid(database, pathname, stateVersion);
         }
       } else {
         openClawStateMigrationAssertions.get(migrationVersion)?.(database, { pathname });

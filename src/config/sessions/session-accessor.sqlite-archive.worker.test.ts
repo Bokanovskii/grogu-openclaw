@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recordAcpParentStreamEventsForTest as recordAcpParentStreamEvents } from "../../agents/subagents/spawn/acp-parent-stream-store.sqlite.test-support.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { listUsageCountedTranscriptStats } from "../../infra/session-cost-usage-collection.test-support.js";
+import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
 import {
   closeOpenClawAgentDatabasesAsync,
@@ -23,9 +24,14 @@ import {
   loadSessionEntry,
   loadTranscriptEvents,
   replaceSessionEntry,
+  replaceSessionEntrySync,
+  replaceTranscriptEventsSync,
 } from "./session-accessor.js";
 import { writeTranscriptArchive } from "./session-accessor.sqlite-archive-artifact.js";
-import { materializeSessionStateDeletePlans } from "./session-accessor.sqlite-archive.js";
+import {
+  materializeSessionHistoryEvictionPlan,
+  materializeSessionStateDeletePlans,
+} from "./session-accessor.sqlite-archive.js";
 import { planSessionStateDeleteIfUnreferenced } from "./session-accessor.sqlite-delete-snapshot.js";
 import { deleteMaterializedSessionStatePlans } from "./session-accessor.sqlite-lifecycle-state.js";
 import { touchTranscriptMutationInTransaction } from "./session-accessor.sqlite-transcript-state.js";
@@ -189,6 +195,91 @@ describe("SQLite transcript archive worker", () => {
     const lines = content.trim().split("\n");
     expect(lines).toHaveLength(events.length);
     expect(lines.map((line) => JSON.parse(line))).toEqual(events);
+  });
+
+  it("materializes protected retained archives without disk staging", async () => {
+    const stateDir = path.join(tempDir, "protected-state");
+    const keyPath = path.join(tempDir, "protected-storage-key");
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousKeyPath = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    await fs.promises.mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await fs.promises.writeFile(keyPath, Buffer.alloc(32, 0x52), { mode: 0o600 });
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+    try {
+      storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+      const sessionId = "protected-retained-archive";
+      const content = event(sessionId, "protected retained transcript");
+      const target = scope(sessionId);
+      replaceSessionEntrySync(target, { sessionId, updatedAt: Date.now() });
+      replaceTranscriptEventsSync(target, [content]);
+      const archiveDirectory = path.join(tempDir, "protected-archive-directory");
+      fs.writeFileSync(archiveDirectory, "keep this file");
+      const db = database();
+      const archivePlan = planSessionStateDeleteIfUnreferenced({
+        archiveDirectory,
+        database: db,
+        referencedSessionIds: new Set(),
+        sessionId,
+      });
+      if (!archivePlan) {
+        throw new Error("expected protected transcript archive plan");
+      }
+      closeOpenClawAgentDatabasesForTest(tempDir);
+
+      const [materialized] = await materializeSessionStateDeletePlans([archivePlan]);
+      const archive = materialized?.archive;
+      if (!archive) {
+        throw new Error("expected protected transcript archive bytes");
+      }
+      expect(decodeSessionArchiveBytes(archive.bytes, archive.encoding === "zstd")).toBe(
+        `${JSON.stringify(content)}\n`,
+      );
+      expect(fs.readFileSync(archiveDirectory, "utf8")).toBe("keep this file");
+
+      const historySessionId = "protected-history-eviction-archive";
+      const historyContent = event(historySessionId, "protected history transcript");
+      const historyTarget = scope(historySessionId);
+      replaceSessionEntrySync(historyTarget, {
+        sessionId: historySessionId,
+        updatedAt: Date.now(),
+      });
+      replaceTranscriptEventsSync(historyTarget, [historyContent]);
+      const historyDatabase = database();
+      const historyPlan = {
+        agentId: historyDatabase.agentId,
+        archiveDirectory,
+        archiveTranscript: true,
+        databasePath: historyDatabase.path,
+        historyEviction: {
+          expectedIdentity: readDatabasePathIdentitySync(historyDatabase.path),
+        },
+        reason: "deleted" as const,
+        sessionId: historySessionId,
+      };
+      closeOpenClawAgentDatabasesForTest(tempDir);
+      const historyMaterialized = await materializeSessionHistoryEvictionPlan(historyPlan);
+      const historyArchive = historyMaterialized?.archive;
+      if (!historyArchive) {
+        throw new Error("expected protected history eviction archive bytes");
+      }
+      expect(
+        decodeSessionArchiveBytes(historyArchive.bytes, historyArchive.encoding === "zstd"),
+      ).toBe(`${JSON.stringify(historyContent)}\n`);
+      expect(fs.readFileSync(archiveDirectory, "utf8")).toBe("keep this file");
+    } finally {
+      await closeOpenClawAgentDatabasesAsync(tempDir);
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousKeyPath === undefined) {
+        delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+      } else {
+        process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = previousKeyPath;
+      }
+    }
   });
 
   it("caps private sessions across the archive byte limit without truncating their archives", async () => {

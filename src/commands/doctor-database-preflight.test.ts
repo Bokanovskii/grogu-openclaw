@@ -2,19 +2,87 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it } from "vitest";
+import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import { readUpdateDatabaseGenerations } from "../infra/update-database-generations.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
 import {
   closeOpenClawAgentDatabasesAsync,
   openOpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import { assertOpenClawDatabasesReady } from "../state/openclaw-database-preflight.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
+import { cleanupProtectedSharedStateAfterMigration } from "../state/openclaw-state-protected-cleanup.js";
+import { migrateProtectedSharedStateInTransaction } from "../state/openclaw-state-protected-migration.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { prepareDoctorDatabasePreflight } from "./doctor-database-preflight.js";
+import { guardUpdateDoctorSchemaUpgrade } from "./doctor-update-schema-guard.js";
+
+it("admits supported protected stores during update Doctor and refuses a newer agent", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const keyPath = state.path("protected-key");
+    fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    await withEnvAsync(
+      { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath, OPENCLAW_UPDATE_IN_PROGRESS: "1" },
+      async () => {
+        await state.writeConfig({ agents: { entries: { main: {} } }, plugins: { enabled: false } });
+        const env = { ...state.env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath };
+        const statePath = openOpenClawStateDatabase({ env }).path;
+        const agent = openOpenClawAgentDatabase({ agentId: "main", env });
+        const agentPath = agent.path;
+        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+        await closeOpenClawAgentDatabasesAsync();
+        await closeStateDatabaseForTest();
+
+        const admit = async () => {
+          expect(
+            await guardUpdateDoctorSchemaUpgrade({ preserveSourceArtifacts: true }),
+          ).toMatchObject({ incompatible: [], indeterminate: [] });
+        };
+        const verifyReady = () =>
+          assertOpenClawDatabasesReady({
+            env: process.env,
+            operation: "doctor",
+            config: { agents: { entries: { main: {} } } },
+            configuredAgentDatabaseTargets: [{ agentId: "main", path: agentPath }],
+          });
+        await admit();
+        await expect(verifyReady()).resolves.toBeUndefined();
+        await withEnvAsync({ OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined }, async () => {
+          await expect(verifyReady()).rejects.toThrow();
+        });
+        {
+          using shared = openNodeSqliteDatabase(statePath);
+          shared.exec("PRAGMA secure_delete = ON; BEGIN IMMEDIATE");
+          migrateProtectedSharedStateInTransaction(shared);
+          shared.exec("COMMIT");
+          cleanupProtectedSharedStateAfterMigration(shared, () => {});
+        }
+        await admit();
+        await expect(verifyReady()).resolves.toBeUndefined();
+        {
+          using writer = new DatabaseSync(agentPath);
+          writer.exec("UPDATE schema_meta SET agent_id = 'other' WHERE meta_key = 'primary'");
+        }
+        expect(
+          (await prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true })).agentRefusals,
+        ).toEqual([expect.objectContaining({ agentId: "main" })]);
+        {
+          using writer = new DatabaseSync(agentPath);
+          writer.exec("UPDATE schema_meta SET agent_id = 'main' WHERE meta_key = 'primary'");
+          writer.exec("PRAGMA user_version = 27");
+        }
+        await expect(
+          guardUpdateDoctorSchemaUpgrade({ preserveSourceArtifacts: true }),
+        ).rejects.toThrow(/newer than this build/);
+      },
+    );
+  });
+});
 
 it.each([false, true])(
   "keeps an idle WAL agent store's update generation when preserving sources: %s",

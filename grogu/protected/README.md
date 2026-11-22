@@ -62,6 +62,8 @@ blocks later policy writes until the owner requests reconciliation. The helper
 reads the policy before it applies the current admission. Cloudflare does not
 provide an atomic cross-system commit here. Its policy can temporarily disagree
 with the app during repair. The app denies a removed person throughout.
+The owner sees a pending policy state during an active write. The blocked status
+means that the barrier needs reconciliation, not that a write is in progress.
 
 ## Entrypoint
 

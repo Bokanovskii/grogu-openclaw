@@ -195,6 +195,7 @@ export function createProtectedHttp(options: {
   onRemoveSubject?: (subject: string) => void;
   onPolicyChanged?: () => void;
   isPolicyInFlight?: (id: string) => boolean;
+  getPolicyStatus?: () => Promise<{ blocked: boolean; blockedPersonId?: string }>;
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
   answerAccessProof?: (request: Request) => Promise<Response>;
@@ -574,9 +575,9 @@ export function createProtectedHttp(options: {
         }
         await revalidate();
         const requests = await listProtectedAccessRequests(options.stateDir);
-        const { blocked: policyBlocked, blockedPersonId } = await listPendingProtectedPolicy(
-          options.stateDir,
-        );
+        const { blocked: policyBlocked, blockedPersonId } = await (options.getPolicyStatus
+          ? options.getPolicyStatus()
+          : listPendingProtectedPolicy(options.stateDir));
         assertCurrent();
         return json({ requests, policyBlocked, blockedPersonId });
       }

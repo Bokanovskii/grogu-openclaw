@@ -70,6 +70,27 @@ export function createProtectedPolicySync(
   let requested = false;
   let closing = false;
   let activeId: string | undefined;
+  let activeGeneration = 0;
+  const getStatus = async () => {
+    while (true) {
+      const generation = activeGeneration;
+      const active = activeId;
+      const queue = await listPendingProtectedPolicy(stateDir);
+      if (generation !== activeGeneration) {
+        continue;
+      }
+      if (
+        active &&
+        queue.blockedPersonId === active &&
+        queue.operations.some(
+          (operation) => operation.id === active && operation.state === "pending",
+        )
+      ) {
+        return { blocked: false };
+      }
+      return { blocked: queue.blocked, blockedPersonId: queue.blockedPersonId };
+    }
+  };
   const drain = async () => {
     while (requested) {
       if (closing) {
@@ -100,6 +121,7 @@ export function createProtectedPolicySync(
           continue;
         }
         activeId = current.id;
+        activeGeneration++;
         try {
           if (!(await beginProtectedPolicy(stateDir, current))) {
             continue;
@@ -116,6 +138,7 @@ export function createProtectedPolicySync(
           }
         } finally {
           activeId = undefined;
+          activeGeneration++;
         }
       }
     }
@@ -141,6 +164,7 @@ export function createProtectedPolicySync(
   return {
     trigger,
     isInFlight: (id: string) => activeId === id,
+    getStatus,
     stop: async () => {
       closing = true;
       await running;

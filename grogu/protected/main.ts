@@ -179,6 +179,7 @@ async function main() {
     },
     onPolicyChanged: policySync.trigger,
     isPolicyInFlight: policySync.isInFlight,
+    getPolicyStatus: policySync.getStatus,
     usersRoot,
     directory: {
       issuer: accessIssuer,

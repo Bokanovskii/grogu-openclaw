@@ -1246,7 +1246,11 @@ export function createProtectedHttp(options: {
             definition[key] = value;
           }
         }
-        const validation = validateProtectedAutomationDraft(definition, automationCatalog);
+        const validation = validateProtectedAutomationDraft(
+          definition,
+          automationCatalog,
+          agentCatalog.get(current.agentId),
+        );
         if (!validation.valid) {
           return json(validation, 422);
         }

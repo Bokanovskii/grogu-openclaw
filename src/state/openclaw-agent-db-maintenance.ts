@@ -14,6 +14,7 @@ import { normalizeAgentId } from "../routing/session-key.js";
 import {
   AGENT_MEDIA_SCHEMA_VERSION,
   OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
 } from "./openclaw-agent-db-contract.js";
 import {
   assertAgentDatabaseMaintenanceAuthority,
@@ -61,14 +62,17 @@ export function assertOpenClawAgentDatabaseForMaintenance(
   const metadata = assertOpenClawAgentDatabaseOwner(database, options);
 
   const userVersion = assertSupportedAgentSchemaVersion(database, options.pathname);
-  if (userVersion !== OPENCLAW_AGENT_SCHEMA_VERSION) {
+  if (
+    userVersion !== OPENCLAW_AGENT_SCHEMA_VERSION &&
+    userVersion !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
+  ) {
     throw new SqliteSchemaMismatchError(
       `OpenClaw agent database ${options.pathname} uses schema version ${userVersion}; run openclaw doctor --fix before compacting it.`,
     );
   }
-  if (metadata.schemaVersion !== OPENCLAW_AGENT_SCHEMA_VERSION) {
+  if (metadata.schemaVersion !== userVersion) {
     throw new SqliteSchemaMismatchError(
-      `OpenClaw agent database ${options.pathname} metadata schema version ${metadata.schemaVersion ?? "invalid"} does not match ${OPENCLAW_AGENT_SCHEMA_VERSION}; run openclaw doctor --fix before compacting it.`,
+      `OpenClaw agent database ${options.pathname} metadata schema version ${metadata.schemaVersion ?? "invalid"} does not match ${userVersion}; run openclaw doctor --fix before compacting it.`,
     );
   }
   return assertOpenClawAgentSchemaContains(
@@ -108,8 +112,9 @@ export async function migrateOpenClawAgentDatabaseForMaintenance(
     const userVersion = readSqliteUserVersion(database);
     const metadataVersion = metadata.schemaVersion;
     const hasCurrentVersion =
-      userVersion === OPENCLAW_AGENT_SCHEMA_VERSION &&
-      metadataVersion === OPENCLAW_AGENT_SCHEMA_VERSION;
+      (userVersion === OPENCLAW_AGENT_SCHEMA_VERSION ||
+        userVersion === PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION) &&
+      metadataVersion === userVersion;
     const hasSupportedOlderVersion =
       userVersion >= 1 &&
       userVersion < OPENCLAW_AGENT_SCHEMA_VERSION &&

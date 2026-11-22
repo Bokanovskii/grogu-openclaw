@@ -8,6 +8,7 @@ import * as sqlite from "../infra/node-sqlite.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../infra/runtime-process-url.js";
 import * as integrityWorker from "../infra/sqlite-integrity-worker.js";
 import { readSqliteNumberPragma } from "../infra/sqlite-pragma.test-support.js";
+import { PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
 import {
   AGENT_DATABASE_MAINTENANCE_LEASE,
   assertNoOpenClawAgentDatabaseLeases,
@@ -22,7 +23,6 @@ import {
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
   getOpenClawAgentDatabaseIfOpen,
-  OPENCLAW_AGENT_SCHEMA_VERSION,
   openOpenClawAgentDatabase,
 } from "./openclaw-agent-db.js";
 import { runExistingOpenClawStateWriteTransaction } from "./openclaw-state-db-existing-write.js";
@@ -386,7 +386,7 @@ describe("asynchronous agent database maintenance admission", () => {
                 .prepare("UPDATE schema_meta SET agent_id=? WHERE meta_key='primary'")
                 .run("other-agent");
             } else {
-              database.exec(`PRAGMA user_version=${OPENCLAW_AGENT_SCHEMA_VERSION + 1};`);
+              database.exec(`PRAGMA user_version=${PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION + 1};`);
             }
           } finally {
             database.close();

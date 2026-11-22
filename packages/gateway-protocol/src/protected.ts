@@ -87,7 +87,12 @@ export const ProtectedTurnEventSchema = Type.Union([
   node({ type: Type.Literal("activity"), ...ProtectedActivitySchema.properties }),
   node({ type: Type.Literal("sources"), sources: Type.Array(ProtectedSourceSchema) }),
   node({ type: Type.Literal("widget"), ...ProtectedWidgetSchema.properties }),
-  node({ type: Type.Literal("usage"), contextTokens: Type.Integer({ minimum: 0 }) }),
+  node({
+    type: Type.Literal("usage"),
+    contextTokens: Type.Integer({ minimum: 0 }),
+    inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+    outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+  }),
   node({
     type: Type.Literal("widget-draft"),
     id,
@@ -471,6 +476,8 @@ export const ProtectedChatResponseSchema = node({
   usage: Type.Optional(
     node({
       contextTokens: Type.Integer({ minimum: 0 }),
+      inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+      outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
       provider: ProtectedProviderSchema,
       model: id,
     }),
@@ -571,6 +578,7 @@ export type ProtectedOwnerActionResponse = Static<typeof ProtectedOwnerActionRes
 export type ProtectedAdminPersonRemovalResponse = Static<
   typeof ProtectedAdminPersonRemovalResponseSchema
 >;
+export type ProtectedChatResponse = Static<typeof ProtectedChatResponseSchema>;
 export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>

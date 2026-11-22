@@ -5,6 +5,10 @@
  * Runtime callers import this barrel instead of storage-specific modules.
  */
 export * from "./session-history.js";
+export {
+  inspectConfiguredSqliteTranscriptArchiveResidue,
+  type SqliteTranscriptArchiveResidueReport,
+} from "./session-accessor.sqlite-archive.js";
 export { listSessionPendingInputReceipts } from "./session-accessor.sqlite-pending-input-receipts.js";
 export {
   bindSessionPendingInputSources,

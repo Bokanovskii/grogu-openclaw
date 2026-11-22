@@ -52,6 +52,7 @@ async function serviceHome(t: TestContext) {
     workspace,
     bootstrap,
     retire: () => node(["grogu/protected/maintain.ts", "retire-bootstrap"]),
+    archiveResidue: () => node(["grogu/protected/maintain.ts", "archive-residue"]),
     // Older protected releases seeded the shared workspace through this path.
     seedLegacyWorkspace: () =>
       workspaceScript("await w.ensureAgentWorkspace({ dir, ensureBootstrapFiles: true });"),
@@ -120,4 +121,75 @@ void test("retire-bootstrap keeps customized or linked files without printing th
   assert.equal(linked.stderr, refusal);
   assert.ok((await fs.lstat(service.bootstrap)).isSymbolicLink());
   assert.equal(await fs.readFile(outside, "utf8"), generated);
+});
+
+void test("archive-residue derives configured roots and reports metadata only", async (t) => {
+  const service = await serviceHome(t);
+  const archiveRoot = path.join(service.stateDir, "agents", "protected", "sessions");
+  const coldRoot = path.join(archiveRoot, "cold");
+  const retainedStage = path.join(archiveRoot, "interrupted.jsonl-stage");
+  const coldStage = path.join(coldRoot, "interrupted.tmp.zst");
+  await fs.mkdir(coldRoot, { recursive: true, mode: 0o700 });
+  await fs.writeFile(retainedStage, "retained-payload-must-not-be-read");
+  await fs.writeFile(coldStage, "cold-payload-must-not-be-read");
+  await fs.chmod(retainedStage, 0);
+  await fs.chmod(coldStage, 0);
+
+  const listener = await acquireProtectedStateOwner(service.stateDir);
+  assert.ok(listener);
+  try {
+    const refused = service.archiveResidue();
+    assert.notEqual(refused.status, 0);
+    assert.equal(
+      refused.stderr,
+      "Protected state is busy; stop the listener or wait for maintenance to finish.\n",
+    );
+    assert.equal(refused.stdout, "");
+  } finally {
+    listener.release();
+  }
+
+  const result = service.archiveResidue();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.ok(!result.stdout.includes("payload-must-not-be-read"));
+  const report = JSON.parse(result.stdout) as {
+    writerQuiescence: string;
+    candidates: Array<{ root: string; name: string; status: string }>;
+    aliases: Array<{
+      root: string;
+      physicalRoot: string;
+      reason: "resolved-path" | "duplicate-physical-root";
+      aliasOf?: string;
+    }>;
+    races: unknown[];
+    errors: unknown[];
+    truncations: unknown[];
+  };
+  assert.equal(report.writerQuiescence, "not-established");
+  assert.deepEqual(
+    report.candidates
+      .map((candidate) => [candidate.root, candidate.name, candidate.status])
+      .toSorted((left, right) => left[1]!.localeCompare(right[1]!)),
+    [
+      [archiveRoot, "interrupted.jsonl-stage", "unknown"],
+      [coldRoot, "interrupted.tmp.zst", "unknown"],
+    ],
+  );
+  const expectedAliases = (
+    await Promise.all(
+      [archiveRoot, coldRoot].map(async (root) => ({
+        root,
+        physicalRoot: await fs.realpath(root),
+        reason: "resolved-path" as const,
+      })),
+    )
+  ).filter(({ root, physicalRoot }) => root !== physicalRoot);
+  assert.deepEqual(
+    report.aliases.toSorted((left, right) => left.root.localeCompare(right.root)),
+    expectedAliases.toSorted((left, right) => left.root.localeCompare(right.root)),
+  );
+  assert.deepEqual(report.races, []);
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.truncations, []);
 });

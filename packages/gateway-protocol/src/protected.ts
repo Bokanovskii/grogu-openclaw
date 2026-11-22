@@ -24,6 +24,29 @@ export const ProtectedAgentCatalogSchema = node({
   defaultAgentId: protectedAgentId,
   agents: Type.Array(ProtectedAgentSchema),
 });
+// agents-v1 shapes are sent only to requests that list that capability; the legacy shapes above stay exact.
+export const ProtectedAgentSkillSchema = node({
+  id: protectedAgentId,
+  name: Type.String({ minLength: 1, maxLength: 80 }),
+  description: Type.String({ minLength: 1, maxLength: 240 }),
+});
+export const ProtectedAgentPresentationSchema = node({
+  icon: Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" }),
+  reasoningIndicator: Type.Union([Type.Literal("grogu-eater"), Type.Literal("standard")]),
+  widgetWidth: Type.Union([Type.Literal("standard"), Type.Literal("wide")]),
+});
+export const ProtectedAgentV1Schema = node({
+  ...ProtectedAgentSchema.properties,
+  tools: Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), { uniqueItems: true }),
+  selectable: Type.Boolean(),
+  examplePrompts: Type.Array(Type.String({ minLength: 1, maxLength: 160 }), { maxItems: 4 }),
+  skills: Type.Array(ProtectedAgentSkillSchema, { maxItems: 8 }),
+  presentation: ProtectedAgentPresentationSchema,
+});
+export const ProtectedAgentCatalogV1Schema = node({
+  defaultAgentId: protectedAgentId,
+  agents: Type.Array(ProtectedAgentV1Schema),
+});
 export const ProtectedAgentSelectionSchema = node({
   selectedAgentId: protectedAgentId,
 });
@@ -224,7 +247,7 @@ export const ProtectedAutomationCronCatalogSchema = node({
     repeatedLocalTime: Type.Literal("first"),
   }),
 });
-export const ProtectedAutomationCatalogSchema = node({
+const protectedAutomationCatalogFields = {
   capabilities: node({
     automations: ProtectedAutomationCapabilitiesSchema,
   }),
@@ -252,6 +275,11 @@ export const ProtectedAutomationCatalogSchema = node({
     whenToNotifyBytes: Type.Integer({ minimum: 1 }),
     doneWhenCodeUnits: Type.Integer({ minimum: 1 }),
   }),
+};
+export const ProtectedAutomationCatalogSchema = node(protectedAutomationCatalogFields);
+export const ProtectedAutomationCatalogV1Schema = node({
+  ...protectedAutomationCatalogFields,
+  agents: Type.Array(ProtectedAgentV1Schema),
 });
 const protectedAutomationDraftFields = {
   name: Type.String({ minLength: 1, maxLength: 80, pattern: "\\S" }),
@@ -534,6 +562,10 @@ export const ProtectedFilesSchema = node({
 export type ProtectedCredential = Static<typeof ProtectedCredentialSchema>;
 export type ProtectedAgentTool = Static<typeof ProtectedAgentToolSchema>;
 export type ProtectedAgent = Static<typeof ProtectedAgentSchema>;
+export type ProtectedAgentSkill = Static<typeof ProtectedAgentSkillSchema>;
+export type ProtectedAgentPresentation = Static<typeof ProtectedAgentPresentationSchema>;
+export type ProtectedAgentV1 = Static<typeof ProtectedAgentV1Schema>;
+export type ProtectedAgentCatalogV1 = Static<typeof ProtectedAgentCatalogV1Schema>;
 export type ProtectedAgentCatalogDto = Static<typeof ProtectedAgentCatalogSchema>;
 export type ProtectedAgentSelection = Static<typeof ProtectedAgentSelectionSchema>;
 export type ProtectedAgentSelectionResponse = Static<typeof ProtectedAgentSelectionResponseSchema>;
@@ -549,6 +581,7 @@ export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
+export type ProtectedAutomationCatalogV1 = Static<typeof ProtectedAutomationCatalogV1Schema>;
 export type ProtectedAutomationId = Static<typeof ProtectedAutomationIdSchema>;
 export type ProtectedAutomationSchedule = Static<typeof ProtectedAutomationScheduleSchema>;
 export type ProtectedAutomationCronCatalog = Static<typeof ProtectedAutomationCronCatalogSchema>;

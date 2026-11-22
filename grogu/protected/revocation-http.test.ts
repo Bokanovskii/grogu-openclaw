@@ -119,7 +119,7 @@ for (const saveDrafts of [false, true]) {
           name,
           instructions: "Summarize synthetic test material.",
           whenToNotify: "Only when there is a meaningful update.",
-          agentId: "general",
+          agentId: "grogu",
           model: { provider: "sparky", id: "synthetic" },
           schedule: { kind: "every", everyMs: 60_000 },
         });

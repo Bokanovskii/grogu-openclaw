@@ -40,7 +40,7 @@ import {
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
   OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
-import { defaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
+import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { projectActivity, projectToolResult } from "./tool-events.js";
@@ -65,7 +65,7 @@ function summary(entry: SessionEntry): ProtectedChatSummary {
       typeof entry.protectedAgentId === "string" &&
       /^[a-z][a-z0-9-]{0,47}$/u.test(entry.protectedAgentId)
         ? entry.protectedAgentId
-        : defaultProtectedAgentId,
+        : legacyDefaultProtectedAgentId,
   };
 }
 

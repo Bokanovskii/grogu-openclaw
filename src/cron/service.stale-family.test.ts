@@ -12,7 +12,7 @@ import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-cloc
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { CronService } from "./service.js";
 import { createNoopLogger } from "./service.test-harness.js";
-import { deleteStaleCronJobFamilyRows, type CronJobFamilyIdentity } from "./store/row-codec.js";
+import { deleteStaleCronJobFamilyRows, type CronJobFamilyIdentity } from "./store/job-family.js";
 import type { CronStoredJob } from "./types.js";
 
 const family = {

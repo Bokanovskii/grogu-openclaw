@@ -4,17 +4,102 @@ import { cronRunLogEntryToDetail, cronRunStorageStatus } from "../cron/run-histo
 import { readCronRunHistoryPageForTests } from "../cron/run-history.test-support.js";
 import type { CronRunLogEntry } from "../cron/run-log-types.js";
 import { cronStoreKey } from "../cron/store/key.js";
+import { sealCronHistoryValue } from "../cron/store/run-history-encryption.js";
+import { readCronRunRecordsInDatabase } from "../cron/store/run-history.kernel.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
   repairOpenClawStateDatabaseSchema,
   prepareOpenClawStateDatabaseSchema,
 } from "../state/openclaw-state-db.js";
+import { OPENCLAW_STATE_SCHEMA_SQL } from "../state/openclaw-state-schema.js";
+import { createStorageValueEncryption } from "../storage/encryption.js";
+import {
+  disposeSqliteStorageValueEncryption,
+  registerSqliteStorageValueEncryption,
+  setSqliteStorageValueEncryptionStrict,
+} from "../storage/sqlite-encryption.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { extractSqliteTableSchema } from "./sqlite-schema-sql.js";
+import { migrateLegacyCronRunLogsToTaskRuns } from "./state-migrations.cron-run-logs.js";
 
 const CRON_RUN_LOG_TASK_IMPORT_MIGRATION_ID = "state:cron-run-logs-to-task-runs:v1";
 
 describe("cron run-log task import", () => {
+  it("imports legacy history into protected storage without duplicating encrypted records", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "task_runs"));
+      db.exec(extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "task_delivery_state"));
+      db.exec(extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "migration_runs"));
+      db.exec(`
+        CREATE TABLE cron_run_logs (
+          store_key TEXT NOT NULL, job_id TEXT NOT NULL, seq INTEGER NOT NULL,
+          ts INTEGER NOT NULL, entry_json TEXT NOT NULL
+        )
+      `);
+      registerSqliteStorageValueEncryption(db, createStorageValueEncryption(Buffer.alloc(32, 7)));
+      setSqliteStorageValueEncryptionStrict(db, true);
+      const mirrored: CronRunLogEntry = {
+        jobId: "job",
+        action: "finished",
+        ts: 100,
+        status: "ok",
+        runId: "existing-run",
+      };
+      const imported: CronRunLogEntry = {
+        jobId: "job",
+        action: "finished",
+        ts: 200,
+        status: "error",
+        runId: "new-run",
+        error: "private legacy failure",
+      };
+      const insert = db.prepare(
+        "INSERT INTO cron_run_logs (store_key, job_id, seq, ts, entry_json) VALUES (?, ?, ?, ?, ?)",
+      );
+      insert.run("store", "job", 1, mirrored.ts, JSON.stringify(mirrored));
+      insert.run("store", "job", 2, imported.ts, JSON.stringify(imported));
+      db.prepare(`
+        INSERT INTO task_runs (
+          task_id, runtime, source_id, requester_session_key, owner_key, scope_kind,
+          task, status, delivery_status, notify_policy, created_at, ended_at, detail_json
+        ) VALUES ('existing', 'cron', 'job', '', '', 'system', ?, 'succeeded',
+          'not_applicable', 'silent', 100, 100, ?)
+      `).run(
+        sealCronHistoryValue(db, "existing", "task", "job"),
+        sealCronHistoryValue(
+          db,
+          "existing",
+          "detail_json",
+          JSON.stringify(cronRunLogEntryToDetail(mirrored, { storeKey: "store" })),
+        ),
+      );
+      db.exec("BEGIN IMMEDIATE");
+      expect(migrateLegacyCronRunLogsToTaskRuns(db)).toMatchObject({
+        imported: 1,
+        alreadyMirrored: 1,
+      });
+      db.exec("COMMIT");
+      const row = db
+        .prepare(
+          "SELECT task, error, detail_json FROM task_runs WHERE task_id LIKE 'cron-runlog-import:%'",
+        )
+        .get();
+      expect(Object.values(row ?? {})).toEqual([
+        expect.stringMatching(/^OCSEAL1:/),
+        expect.stringMatching(/^OCSEAL1:/),
+        expect.stringMatching(/^OCSEAL1:/),
+      ]);
+      expect(readCronRunRecordsInDatabase(db).find((record) => record.error)).toMatchObject({
+        error: "private legacy failure",
+      });
+    } finally {
+      disposeSqliteStorageValueEncryption(db);
+      db.close();
+    }
+  });
+
   it("preserves legacy cron history on runtime refusal, then Doctor imports it once", async () => {
     await withOpenClawTestState(
       { layout: "state-only", prefix: "openclaw-cron-run-log-import-" },

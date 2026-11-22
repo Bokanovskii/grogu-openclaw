@@ -33,6 +33,7 @@ import { moveToTrash } from "../commands/cleanup-utils.js";
 import { resolveSessionTranscriptsDirForAgent } from "../config/sessions.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveCronJobConfigRevision } from "../cron/config-revision.js";
+import { openCronJobRow, openCronJobValue } from "../cron/store/job-encryption.js";
 import { loadedCronStoreFromRows } from "../cron/store/row-codec.js";
 import type { CronJobRow } from "../cron/store/schema.js";
 import { isSystemMonitorDeclaration } from "../cron/system-owned-declaration.js";
@@ -156,10 +157,10 @@ export function readAttachedCronJobs(
       .prepare(compiled.sql)
       .all(...bind(agentId)) as CronJobRow[];
   return rows.map((row) => {
-    const job = loadedCronStoreFromRows([row]).store.jobs[0];
+    const job = loadedCronStoreFromRows([openCronJobRow(db, row.store_key, row)]).store.jobs[0];
     return {
       id: row.job_id,
-      name: row.name,
+      name: openCronJobValue(db, row.store_key, row.job_id, "name", row.name),
       enabled: row.enabled === 1,
       agentId: row.agent_id,
       ownerAgentId: row.owner_agent_id,

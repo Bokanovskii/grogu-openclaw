@@ -86,6 +86,8 @@ async function main() {
       maxBytes: protectedMaxFileBytes,
       encryption: storageEncryption,
     });
+    const { prepareProtectedSharedState } = await import("./state-worker-context.js");
+    await prepareProtectedSharedState(stateDir, () => stateOwner.assertCurrent());
     const { admitProtectedPhysicalAgentStorage } = await import("./agent-storage.js");
     admitProtectedPhysicalAgentStorage(() => stateOwner.assertCurrent());
     await migrateAuthorizedUserFiles({

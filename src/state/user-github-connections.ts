@@ -5,6 +5,7 @@ import { z } from "zod";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { deferSqlitePostCommitPublication } from "../infra/sqlite-post-commit.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
+import { openSecretStoreValue } from "../secrets/store/secret-store-encryption.js";
 import {
   PersonalGitHubStateError,
   readPersonalGitHubSecret,
@@ -327,8 +328,13 @@ export function listUserGitHubConnections(): Array<{
       .where("merged_into", "is", null)
       .orderBy("scope_id"),
   ).rows.flatMap((row) => {
+    const value = openSecretStoreValue(
+      db,
+      { scope_kind: "identity", scope_id: row.scope_id, name: "github-connection" },
+      row.value,
+    );
     try {
-      return [{ owner: row.scope_id, connection: parseConnection(row.value) }];
+      return [{ owner: row.scope_id, connection: parseConnection(value) }];
     } catch {
       return [];
     }

@@ -10,11 +10,16 @@ import { fileURLToPath } from "node:url";
 import { PROTECTED_SESSION_ENTRY_TABLE } from "../../src/config/sessions/session-entry-encryption.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
+import { openSecretStoreValue } from "../../src/secrets/store/secret-store-encryption.js";
 import { resolveOpenClawAgentSqlitePath } from "../../src/state/openclaw-agent-db.paths.js";
+import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import {
+  disposeSqliteStorageValueEncryption,
   loadStorageValueEncryptionFromFile,
   PROTECTED_STORAGE_KEY_FILE_ENV,
+  registerSqliteStorageValueEncryption,
+  setSqliteStorageValueEncryptionStrict,
 } from "../../src/storage/sqlite-encryption.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -60,6 +65,14 @@ void test("the predecessor maintenance environment provisions and migrates witho
         { agentId: "protected", env: process.env, sessionKey: ${JSON.stringify(sessionKey)} },
         { sessionId: "storage-migration-session", updatedAt: 1, label: ${JSON.stringify(plaintext)} },
       );
+      const { runOpenClawStateWriteTransaction } = await import("./src/state/openclaw-state-db.js");
+      const { ensureSecretStoreSchema } = await import("./src/state/openclaw-state-db-schema-additive.js");
+      runOpenClawStateWriteTransaction(({ db }) => {
+        ensureSecretStoreSchema(db);
+        db.prepare(
+          "INSERT INTO secret_store_entries (scope_kind, scope_id, name, value, kind, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).run("identity", "synthetic-member", "model-account:synthetic", "synthetic shared credential", "secret", 1, 1);
+      }, { env: process.env });
     `,
     true,
   );
@@ -67,7 +80,7 @@ void test("the predecessor maintenance environment provisions and migrates witho
 
   const migrated = run("provision-storage-key");
   assert.equal(migrated.status, 0, migrated.stderr);
-  assert.match(migrated.stdout, /agent store and user files are encrypted/u);
+  assert.match(migrated.stdout, /shared state, the agent store, and user files are encrypted/u);
   const admitted = run(
     `
       const { resolveProtectedStorageKeyFile } = await import("./grogu/protected/storage-key.js");
@@ -128,6 +141,34 @@ void test("the predecessor maintenance environment provisions and migrates witho
     assert.match(encryptedEntry, /^OCSEAL1:/u);
   } finally {
     database.close();
+  }
+  const shared = new DatabaseSync(resolveOpenClawStateSqlitePath(env), { readOnly: true });
+  registerSqliteStorageValueEncryption(
+    shared,
+    loadStorageValueEncryptionFromFile(keyPath, stateDir),
+  );
+  try {
+    assert.equal(shared.prepare("PRAGMA user_version").get()?.user_version, 21);
+    assert.equal(
+      shared.prepare("SELECT cleanup_pending FROM grogu_protected_shared_state").get()
+        ?.cleanup_pending,
+      0,
+    );
+    const stored = shared.prepare("SELECT value FROM secret_store_entries").get()?.value;
+    assert.ok(typeof stored === "string");
+    assert.match(stored, /^OCSEAL1:/u);
+    setSqliteStorageValueEncryptionStrict(shared, true);
+    assert.equal(
+      openSecretStoreValue(
+        shared,
+        { scope_kind: "identity", scope_id: "synthetic-member", name: "model-account:synthetic" },
+        stored,
+      ),
+      "synthetic shared credential",
+    );
+  } finally {
+    disposeSqliteStorageValueEncryption(shared);
+    shared.close();
   }
   const databaseDirectory = path.dirname(databasePath);
   const databaseFiles = await readdir(databaseDirectory);
@@ -208,4 +249,61 @@ void test("refuses to create a key when user files are already encrypted", async
   await assert.rejects(lstat(keyPath));
   await assert.rejects(lstat(resolveOpenClawAgentSqlitePath({ agentId: "protected", env })));
   assert.equal((await readFile(userFilePath)).includes(plaintext), false);
+});
+
+void test("refuses to replace a missing key when shared state may be encrypted", async (t) => {
+  // openclaw-temp-dir: allow provides an isolated HOME for the real maintenance subprocess
+  const home = await mkdtemp(path.join(os.tmpdir(), "protected-shared-key-"));
+  const stateDir = path.join(home, "state");
+  const configDir = path.join(home, "config");
+  const secretsDir = path.join(home, "secrets");
+  const keyPath = path.join(secretsDir, "storage-key");
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await Promise.all([
+    mkdir(stateDir, { recursive: true, mode: 0o700 }),
+    mkdir(configDir, { recursive: true, mode: 0o700 }),
+    mkdir(secretsDir, { recursive: true, mode: 0o700 }),
+  ]);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_CONFIG_PATH: path.join(configDir, "openclaw.json"),
+  };
+  delete env[PROTECTED_STORAGE_KEY_FILE_ENV];
+  const sharedPath = resolveOpenClawStateSqlitePath(env);
+  await mkdir(path.dirname(sharedPath), { recursive: true, mode: 0o700 });
+  const shared = new DatabaseSync(sharedPath);
+  shared.exec("PRAGMA user_version = 21");
+  shared.close();
+
+  const assertRefused = async () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "./scripts/tsx.mjs", "grogu/protected/maintain.ts", "provision-storage-key"],
+      { cwd: repoRoot, env, encoding: "utf8" },
+    );
+    assert.notEqual(result.status, 0);
+    await assert.rejects(lstat(keyPath));
+    assert.match(result.stderr, /shared state.*refusing to generate a replacement key/iu);
+    await assert.rejects(lstat(resolveOpenClawAgentSqlitePath({ agentId: "protected", env })));
+  };
+  await assertRefused();
+
+  const marked = new DatabaseSync(sharedPath);
+  marked.exec(
+    "PRAGMA user_version = 20; CREATE TABLE grogu_protected_shared_state (id INTEGER PRIMARY KEY)",
+  );
+  marked.close();
+  await assertRefused();
+
+  const deferred = new DatabaseSync(sharedPath);
+  deferred.exec(`
+    DROP TABLE grogu_protected_shared_state;
+    CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT);
+    INSERT INTO config_machine_state (state_key, value_json)
+      VALUES ('state.schema.contentVersion', '21');
+  `);
+  deferred.close();
+  await assertRefused();
 });

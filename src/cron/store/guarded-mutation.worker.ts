@@ -8,14 +8,9 @@ import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contra
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { findCronRunRecoveryInDatabase } from "../service/run-history-recovery.js";
+import { fingerprintCronJobRows, fingerprintCronRuntimeRows } from "./fingerprint.js";
 import { readCronJobNamesInDatabase } from "./job-name.kernel.js";
-import {
-  deleteCronJobRowInDatabase,
-  fingerprintCronJobRows,
-  fingerprintCronRuntimeRows,
-  loadedCronStoreFromRows,
-  loadCronRows,
-} from "./row-codec.js";
+import { deleteCronJobRowInDatabase, loadedCronStoreFromRows, loadCronRows } from "./row-codec.js";
 import {
   adjudicateActiveCronRunReceiptInDatabase,
   CronRunReceiptConflictError,

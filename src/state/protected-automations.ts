@@ -20,6 +20,12 @@ import {
   ensureProtectedAdmissionSchema,
   type ProtectedAdmissionDatabase,
 } from "./protected-admission.js";
+import {
+  assertStoredDefinitionBytes,
+  readStoredDefinition,
+  storedDefinition,
+  storedDefinitionBytes,
+} from "./protected-automation-storage-codec.js";
 
 type AutomationVisibility = "private" | "shared";
 type AutomationRelation = "owner" | "follower" | "published";
@@ -90,6 +96,16 @@ export type ProtectedAutomationStorageUsage = {
   entries: Array<{ id: string; profileId: string; definitionBytes: number }>;
 };
 
+export type ProtectedAutomationStoredBytes = {
+  automationId: string;
+  currentStoredBytes: number;
+  nextStoredBytes: number;
+};
+
+export type ProtectedAutomationCommittedBytes = ProtectedAutomationStoredBytes & {
+  committedStoredBytes: number;
+};
+
 export type ProtectedAutomationJobBinding = {
   jobId: string;
   automationId: string;
@@ -147,7 +163,7 @@ function parseDefinition(definitionJson: string): ProtectedAutomationDraft {
   return definition;
 }
 
-function toStorageRecord(row: AutomationRow): ProtectedAutomationStorageRecord {
+function toStorageRecord(db: DatabaseSync, row: AutomationRow): ProtectedAutomationStorageRecord {
   const relation =
     row.member_role === "owner"
       ? "owner"
@@ -159,7 +175,7 @@ function toStorageRecord(row: AutomationRow): ProtectedAutomationStorageRecord {
     creatorProfileId: row.creator_profile_id,
     centralOwnerProfileId: row.central_owner_profile_id,
     provider: row.provider,
-    definition: parseDefinition(row.definition_json),
+    definition: parseDefinition(readStoredDefinition(db, row)),
     definitionRevision: row.definition_revision,
     visibility: row.visibility,
     publicationRevision: row.publication_revision,
@@ -276,7 +292,7 @@ function selectVisibleAutomations(
     db,
     automationId ? query.where("automation.id", "=", automationId) : query,
   ).rows;
-  return rows.map((row) => toStorageRecord(row));
+  return rows.map((row) => toStorageRecord(db, row));
 }
 
 export function createProtectedAutomation(
@@ -312,6 +328,16 @@ export function createProtectedAutomation(
       if (!activeAdmission) {
         return { status: "member_inactive" as const };
       }
+      const definitionValue = storedDefinition(db, automationId, definitionJson);
+      const storage = {
+        automationId,
+        currentStoredBytes: 0,
+        nextStoredBytes: Buffer.byteLength(definitionValue),
+      };
+      requestSqliteWorkerOperationAdmission({
+        stage: "transaction",
+        facts: { ...admissionFacts, storage },
+      });
       executeSqliteQuerySync(
         db,
         kysely.insertInto("protected_automations").values({
@@ -319,7 +345,7 @@ export function createProtectedAutomation(
           creator_profile_id: input.profileId,
           central_owner_profile_id: input.profileId,
           provider: "sparky",
-          definition_json: definitionJson,
+          definition_json: definitionValue,
           definition_revision: 1,
           visibility: "private",
           publication_revision: 0,
@@ -341,8 +367,16 @@ export function createProtectedAutomation(
       if (!automation) {
         throw new Error("Created protected automation was not visible to its owner.");
       }
+      const committedStoredBytes = assertStoredDefinitionBytes(
+        db,
+        automationId,
+        storage.nextStoredBytes,
+      );
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts: admissionFacts });
-      deferSqliteWorkerCommitReceipt(db, admissionFacts);
+      deferSqliteWorkerCommitReceipt(db, {
+        ...admissionFacts,
+        storage: { ...storage, committedStoredBytes },
+      });
       return { status: "created" as const, automation };
     },
     { path: database.path },
@@ -442,12 +476,26 @@ export function patchProtectedAutomation(
       if (currentBinding) {
         return { status: "scheduler_required" as const };
       }
+      const definitionValue = storedDefinition(
+        db,
+        input.automationId,
+        JSON.stringify(input.definition),
+      );
+      const storage = {
+        automationId: input.automationId,
+        currentStoredBytes: storedDefinitionBytes(db, input.automationId),
+        nextStoredBytes: Buffer.byteLength(definitionValue),
+      };
+      requestSqliteWorkerOperationAdmission({
+        stage: "transaction",
+        facts: { ...admissionFacts, storage },
+      });
       executeSqliteQuerySync(
         db,
         kysely
           .updateTable("protected_automations")
           .set({
-            definition_json: JSON.stringify(input.definition),
+            definition_json: definitionValue,
             definition_revision: input.expectedRevision + 1,
             enabled: 0,
             updated_at: input.now,
@@ -461,8 +509,16 @@ export function patchProtectedAutomation(
       if (!automation || automation.definitionRevision !== input.expectedRevision + 1) {
         throw new Error("Updated protected automation was not visible at its new revision.");
       }
+      const committedStoredBytes = assertStoredDefinitionBytes(
+        db,
+        input.automationId,
+        storage.nextStoredBytes,
+      );
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts: admissionFacts });
-      deferSqliteWorkerCommitReceipt(db, admissionFacts);
+      deferSqliteWorkerCommitReceipt(db, {
+        ...admissionFacts,
+        storage: { ...storage, committedStoredBytes },
+      });
       return { status: "updated" as const, automation };
     },
     { path: database.path },

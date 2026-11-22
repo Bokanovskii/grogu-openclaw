@@ -46,6 +46,7 @@ import {
 import { ensureOpenClawStatePermissions } from "./openclaw-state-db-permissions.js";
 import {
   assertSupportedStateSchemaVersion,
+  getAdmittedStateSchemaVersion,
   readStateSchemaContentVersion,
 } from "./openclaw-state-db-schema-version.js";
 import { assertOpenClawStateWriteAllowed } from "./openclaw-state-ownership.js";
@@ -70,7 +71,7 @@ function assertStateDatabaseIntegrityBeforeMutation(
       toVersion: OPENCLAW_STATE_SCHEMA_VERSION,
     });
   }
-  if (contentVersion !== OPENCLAW_STATE_SCHEMA_VERSION) {
+  if (contentVersion !== getAdmittedStateSchemaVersion(database)) {
     // Every physical open proves the full file before schema mutation or exposure.
     assertSqliteIntegrity(database, pathname);
   }

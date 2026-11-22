@@ -8,6 +8,7 @@ import {
 } from "../../infra/kysely-sync.js";
 import type { DB } from "../../state/openclaw-state-db.generated.js";
 import type { WorkerOperationHandlers } from "../../state/worker-operation-registry.js";
+import { openSecretStoreValue } from "./secret-store-encryption.js";
 import { classifyHiddenGitHubStoreName } from "./secret-store-hidden-github.js";
 import { withMissingSecretStoreFallback } from "./secret-store-sqlite.js";
 import { SECRET_STORE_VALUE_MAX_BYTES } from "./secret-store-validation-error.js";
@@ -42,6 +43,11 @@ function readExecEnvironmentRows(
       if (classifyHiddenGitHubStoreName(row.name) !== undefined || excluded.has(row.name)) {
         continue;
       }
+      const value = openSecretStoreValue(
+        sqlite,
+        { scope_kind: "team", scope_id: "", name: row.name },
+        row.value,
+      );
       bytes +=
         32 +
         Buffer.byteLength(row.name) +
@@ -53,7 +59,7 @@ function readExecEnvironmentRows(
           "Secret store exec environment exceeds its 32 MiB read limit. Reduce the stored exec environment before retrying.",
         );
       }
-      rows.push(row);
+      rows.push({ ...row, value });
     }
     return rows;
   }, []);
@@ -75,7 +81,16 @@ function readValueRow(sqlite: DatabaseSync, name: string) {
     if (row && Buffer.byteLength(row.value) > SECRET_STORE_VALUE_MAX_BYTES) {
       throw new Error("Secret store value exceeds its 64 KiB read limit.");
     }
-    return row;
+    return row
+      ? {
+          ...row,
+          value: openSecretStoreValue(
+            sqlite,
+            { scope_kind: "team", scope_id: "", name },
+            row.value,
+          ),
+        }
+      : undefined;
   }, undefined);
 }
 
@@ -91,11 +106,10 @@ function listSecretStoreRows(sqlite: DatabaseSync, params: SecretStoreListInput)
     if (!params.includeDeleted) {
       query = query.where("deleted_at_ms", "is", null);
     }
-    return executeSqliteQuerySync(sqlite, query).rows.filter(
-      (row) =>
-        classifyHiddenGitHubStoreName(row.name) === undefined &&
-        (!params.redactedOnly || isRedactedSecretValue(row.value)),
-    );
+    return executeSqliteQuerySync(sqlite, query)
+      .rows.filter((row) => classifyHiddenGitHubStoreName(row.name) === undefined)
+      .map((row) => Object.assign(row, { value: openSecretStoreValue(sqlite, row, row.value) }))
+      .filter((row) => !params.redactedOnly || isRedactedSecretValue(row.value));
   }, []);
 }
 

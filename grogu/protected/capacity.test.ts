@@ -738,6 +738,7 @@ void test("automation definitions remain charged in the shared reservation ledge
   const currentDefinition = { ...definition, instructions: "x".repeat(3_000) };
   const nextDefinition = { ...currentDefinition, instructions: "short" };
   const currentDefinitionBytes = Buffer.byteLength(JSON.stringify(currentDefinition), "utf8");
+  const nextDefinitionBytes = Buffer.byteLength(JSON.stringify(nextDefinition), "utf8");
   const createBytes = Buffer.byteLength(JSON.stringify(definition), "utf8") + 4096;
   const admission = createStorageAdmission({
     stateDir,
@@ -778,14 +779,14 @@ void test("automation definitions remain charged in the shared reservation ledge
   const automation = await admission(profileId, () => {}, "automation");
   const blockedCreate = await admission(profileId, () => {}, "automation");
   try {
-    automation.chargeAutomationPatch(currentDefinition, nextDefinition);
-    assert.throws(() => blockedCreate.chargeAutomationCreate(definition), {
+    automation.chargeAutomationPatch(currentDefinitionBytes, nextDefinitionBytes);
+    assert.throws(() => blockedCreate.chargeAutomationCreate(createBytes - 4096), {
       code: "quota_exceeded",
     });
-    automation.settleAutomationPatch(currentDefinition, nextDefinition, true);
+    automation.settleAutomationPatch(currentDefinitionBytes, nextDefinitionBytes, true);
     const admittedCreate = await admission(profileId, () => {}, "automation");
     try {
-      assert.doesNotThrow(() => admittedCreate.chargeAutomationCreate(definition));
+      assert.doesNotThrow(() => admittedCreate.chargeAutomationCreate(createBytes - 4096));
     } finally {
       admittedCreate.release();
     }
@@ -865,8 +866,8 @@ void test("retired definitions release measured and reserved bytes without doubl
   const turn = await admission("synthetic-active-profile", () => {}, "turn");
   const automation = await admission(retiredProfileId, () => {}, "automation");
   try {
-    automation.chargeAutomationCreate(postMeasurementDefinition);
-    automation.settleAutomationCreate(postMeasurementDefinition, true, created.id);
+    automation.chargeAutomationCreate(created.definitionBytes);
+    automation.settleAutomationCreate(created.definitionBytes, true, created.id);
     await assert.rejects(
       admission(thirdProfileId, () => {}, "create"),
       {

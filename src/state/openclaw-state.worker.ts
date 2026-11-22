@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { WorktreeTemplateWorkerOperations } from "../agents/worktrees/template-registry.worker.js";
 import {
   loadDeviceIdentityIfPresent,
@@ -92,6 +93,7 @@ let agentCleanup: typeof import("./openclaw-agent-execution-cleanup.worker.js") 
 let pluginState: typeof import("../plugin-state/plugin-state.worker.js") | undefined;
 let capture: typeof import("../proxy-capture/store.worker.js") | undefined;
 let runtime: typeof import("./openclaw-state-worker-runtime.js") | undefined;
+let protectedStartup: typeof import("./openclaw-state-protected-startup.worker.js") | undefined;
 
 function stateDatabaseInitializationEnvironment(): NodeJS.ProcessEnv {
   const context = getSqliteWorkerStateContext();
@@ -102,6 +104,15 @@ export function createSqliteWorkerBackend(
   _input: undefined,
   context: { databasePath: string; preparation?: OpenClawStateWorkerOpenPreparation },
 ): OpenClawStateWorkerBackend {
+  if (context.preparation?.type === "protectedSharedState") {
+    const database = existsSync(context.databasePath)
+      ? undefined
+      : openOpenClawStateDatabase({
+          path: context.databasePath,
+          env: stateDatabaseInitializationEnvironment(),
+        });
+    return createSharedStateWorkerBackend(context, database, undefined, true);
+  }
   if (context.preparation?.type === "deviceIdentity") {
     loadOrCreateDeviceIdentity({
       path: context.databasePath,
@@ -138,11 +149,13 @@ function createSharedStateWorkerBackend(
   context: { databasePath: string },
   initialDatabase?: OpenClawStateDatabase,
   existingIdentity?: string,
+  protectedPreparation = false,
 ): OpenClawStateWorkerBackend {
   let nativeDatabase = initialDatabase;
   let updateRunWriter: ExistingOpenClawStateWriter | undefined;
   let borrow = nativeDatabase ? retainOpenClawStateDatabase(nativeDatabase) : undefined;
   let closed = false;
+  let protectedPreparationAvailable = protectedPreparation;
   let secretSchemaAdmitted = false;
   const retainedDatabase = (): OpenClawStateDatabase => {
     if (!nativeDatabase) {
@@ -210,6 +223,11 @@ function createSharedStateWorkerBackend(
   };
   return {
     [SQLITE_WORKER_PREPARE_COMMAND](commandType) {
+      if (commandType === "database.prepareProtected") {
+        return import("./openclaw-state-protected-startup.worker.js").then((loaded) => {
+          protectedStartup = loaded;
+        });
+      }
       if (
         commandType.startsWith("deviceAuth.") ||
         commandType.startsWith("restartLifecycle.") ||
@@ -267,6 +285,19 @@ function createSharedStateWorkerBackend(
     execute(command) {
       if (closed) {
         throw new Error("Shared-state worker is closed");
+      }
+      if (command.type === "database.prepareProtected") {
+        if (!protectedPreparationAvailable || !protectedStartup) {
+          throw new Error("Protected shared-state startup requires a fresh prepared worker.");
+        }
+        protectedPreparationAvailable = false;
+        protectedStartup.prepareProtectedSharedStateInWorker({
+          pathname: context.databasePath,
+          env: getSqliteWorkerStateContext().environment,
+          open,
+          write,
+        });
+        return;
       }
       if (commandRegistry.has(command)) {
         return commandRegistry.execute(command, {

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { constants, DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,11 +11,14 @@ import {
 } from "../infra/kysely-sync.js";
 import { closeOpenClawStateDatabaseByPath } from "./openclaw-state-db-cache.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
+import { assertSupportedStateSchemaVersion } from "./openclaw-state-db-schema-version.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "./openclaw-state-db.js";
+import { cleanupProtectedSharedStateAfterMigration } from "./openclaw-state-protected-cleanup.js";
+import { migrateProtectedSharedStateInTransaction } from "./openclaw-state-protected-migration.js";
 import { captureOpenClawStateReadContext } from "./openclaw-state-worker-context.js";
 import {
   clearUserProfileAuthLink,
@@ -89,6 +92,61 @@ function connectToken(
 }
 
 describe("personal model accounts", () => {
+  it("lists and transfers encrypted credentials without changing their opaque token or kind", () => {
+    const stateDir = tempDirs.make("protected-model-accounts-");
+    const options = { path: join(stateDir, "openclaw.sqlite") };
+    statePaths.push(options.path);
+    const source = ensureProfileForEmail("protected-source@example.test", options);
+    const target = ensureProfileForEmail("protected-target@example.test", options);
+    const token = "synthetic-opaque-token-with-{json}:\\n";
+    const account = connectToken(source.id, options, token);
+    closeOpenClawStateDatabaseByPath(options.path);
+    const keyPath = join(tempDirs.make("protected-model-key-"), "key");
+    writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    const previousKey = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    try {
+      const { db } = openOpenClawStateDatabase(options);
+      db.exec("PRAGMA secure_delete = ON");
+      runOpenClawStateWriteTransaction(() => migrateProtectedSharedStateInTransaction(db), options);
+      cleanupProtectedSharedStateAfterMigration(db, () => {});
+      assertSupportedStateSchemaVersion(db, options.path);
+      expect(listUserModelAccounts({ profileId: source.id }, options).accounts).toContainEqual(
+        expect.objectContaining({ authProfileId: account.authProfileId }),
+      );
+      linkEmail("protected-source@example.test", target.id, options);
+      expect(listUserModelAccounts({ profileId: target.id }, options).accounts).toContainEqual(
+        expect.objectContaining({ authProfileId: account.authProfileId }),
+      );
+      expect(readUserModelAuthProfile(account.authProfileId, options)?.credential).toMatchObject({
+        token,
+      });
+      const rows = db
+        .prepare(
+          "SELECT scope_id, value, kind FROM secret_store_entries WHERE name LIKE 'model-account:%'",
+        )
+        .all();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ scope_id: target.id, kind: "secret" });
+      expect(rows[0]?.value).toMatch(/^OCSEAL1:/);
+      expect(rows[0]?.value).not.toContain(token);
+    } finally {
+      closeOpenClawStateDatabaseByPath(options.path);
+      if (previousKey === undefined) {
+        delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+      } else {
+        process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = previousKey;
+      }
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+    }
+  });
+
   it("observes foreign default-link commits on the next worker read", async () => {
     const options = stateOptions();
     const alice = ensureProfileForEmail("worker-links@example.test", options);

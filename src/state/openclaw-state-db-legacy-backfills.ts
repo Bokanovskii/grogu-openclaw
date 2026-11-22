@@ -3,10 +3,12 @@ import { safeParseJsonRecord } from "@openclaw/normalization-core";
 import { asFiniteNumber, asSafeIntegerInRange } from "@openclaw/normalization-core/number-coercion";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { estimateAcpEventRowBytes, estimateAcpSessionRowBytes } from "../acp/event-ledger-bytes.js";
+import { openCronJobValue, sealCronJobValue } from "../cron/store/job-encryption.js";
 import { buildApprovalResolutionRef } from "../infra/approval-resolution-ref.js";
 import { getNodeSqliteKysely, iterateSqliteQuerySync } from "../infra/kysely-sync.js";
 import { coerceRequiredSqliteNumber as sqliteNumber } from "../infra/sqlite-number.js";
 import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
+import { isSqliteStorageValueEncryptionStrict } from "../storage/sqlite-encryption.js";
 import { compactLegacyDeliveryQueueFailures } from "./openclaw-state-db-delivery-queue-backfill.js";
 import * as operatorApprovalMigration from "./openclaw-state-db-operator-approval-migration.js";
 import { ensureColumn, tableExists, tableHasColumn } from "./openclaw-state-db-schema-helpers.js";
@@ -297,16 +299,18 @@ export function backfillCronJobsFromJobJson(db: DatabaseSync): void {
   ) {
     return;
   }
+  const strict = isSqliteStorageValueEncryptionStrict(db);
   const rows = db
     .prepare(
-      `SELECT store_key, job_id, job_json, updated_at
+      `SELECT store_key, job_id, name, payload_kind, job_json, updated_at
          FROM cron_jobs
-        WHERE payload_kind = 'message'
-           OR name = ''`,
+         ${strict ? "" : "WHERE payload_kind = 'message' OR name = ''"}`,
     )
     .all() as Array<{
     store_key: string;
     job_id: string;
+    name: string;
+    payload_kind: string;
     job_json: string;
     updated_at: number | bigint;
   }>;
@@ -324,7 +328,12 @@ export function backfillCronJobsFromJobJson(db: DatabaseSync): void {
         AND job_id = ?`,
   );
   for (const row of rows) {
-    const job = safeParseJsonRecord(row.job_json) ?? null;
+    const name = openCronJobValue(db, row.store_key, row.job_id, "name", row.name);
+    if (row.payload_kind !== "message" && name !== "") {
+      continue;
+    }
+    const jobJson = openCronJobValue(db, row.store_key, row.job_id, "job_json", row.job_json);
+    const job = safeParseJsonRecord(jobJson) ?? null;
     if (!job) {
       continue;
     }
@@ -347,7 +356,7 @@ export function backfillCronJobsFromJobJson(db: DatabaseSync): void {
       continue;
     }
     update.run(
-      textField(job, "name") ?? row.job_id,
+      sealCronJobValue(db, row.store_key, row.job_id, "name", textField(job, "name") ?? row.job_id),
       job.enabled === false ? 0 : 1,
       textField(job, "agentId"),
       payloadKind,

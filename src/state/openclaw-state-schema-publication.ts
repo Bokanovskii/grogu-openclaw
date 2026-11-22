@@ -5,9 +5,11 @@ import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-syn
 import { invalidateSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
 import { ABANDONED_UPDATE_RUN_MS } from "../infra/update-run-timeouts.js";
-import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
-import { CONTENT_VERSION_KEY } from "./openclaw-state-db-schema-version.js";
+import {
+  CONTENT_VERSION_KEY,
+  getAdmittedStateSchemaVersion,
+} from "./openclaw-state-db-schema-version.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 
 const TERMINAL_GRACE_MS = 5 * 60_000;
@@ -85,8 +87,9 @@ export function readStateSchemaPublicationBlocker(
 /** Called inside the schema write transaction, after all content migrations succeed. */
 export function resolveStateSchemaVersionToPublish(db: DatabaseSync): number {
   const published = readSqliteUserVersion(db);
-  if (published >= OPENCLAW_STATE_SCHEMA_VERSION || !readStateSchemaPublicationBlocker(db)) {
-    return OPENCLAW_STATE_SCHEMA_VERSION;
+  const targetVersion = getAdmittedStateSchemaVersion(db);
+  if (published >= targetVersion || !readStateSchemaPublicationBlocker(db)) {
+    return targetVersion;
   }
   if (!tableExists(db, "config_machine_state")) {
     throw new Error(
@@ -99,17 +102,17 @@ export function resolveStateSchemaVersionToPublish(db: DatabaseSync): number {
       .insertInto("config_machine_state")
       .values({
         state_key: CONTENT_VERSION_KEY,
-        value_json: String(OPENCLAW_STATE_SCHEMA_VERSION),
+        value_json: String(targetVersion),
         updated_at_ms: Date.now(),
       })
       .onConflict((conflict) =>
         conflict
           .column("state_key")
           .doUpdateSet({
-            value_json: String(OPENCLAW_STATE_SCHEMA_VERSION),
+            value_json: String(targetVersion),
             updated_at_ms: Date.now(),
           })
-          .where("config_machine_state.value_json", "!=", String(OPENCLAW_STATE_SCHEMA_VERSION)),
+          .where("config_machine_state.value_json", "!=", String(targetVersion)),
       ),
   );
   invalidateSqliteSchemaFacts(db);

@@ -1,8 +1,5 @@
 import { statfsSync } from "node:fs";
-import type {
-  ProtectedAutomationDraft,
-  ProtectedChatStorage,
-} from "@openclaw/gateway-protocol/protected";
+import type { ProtectedChatStorage } from "@openclaw/gateway-protocol/protected";
 import {
   createAuthorizedUserFiles,
   type AuthorizedUserFiles,
@@ -39,16 +36,12 @@ export type StorageAdmission = {
   charge(bytes: number): void;
   chargeChatCreation(): void;
   recordCreatedChat(id: string, sessionKey: string): void;
-  chargeAutomationCreate(definition: ProtectedAutomationDraft): void;
-  settleAutomationCreate(
-    definition: ProtectedAutomationDraft,
-    created: boolean,
-    automationId?: string,
-  ): void;
-  chargeAutomationPatch(current: ProtectedAutomationDraft, next: ProtectedAutomationDraft): void;
+  chargeAutomationCreate(storedBytes: number): void;
+  settleAutomationCreate(storedBytes: number, created: boolean, automationId?: string): void;
+  chargeAutomationPatch(currentStoredBytes: number, nextStoredBytes: number): void;
   settleAutomationPatch(
-    current: ProtectedAutomationDraft,
-    next: ProtectedAutomationDraft,
+    currentStoredBytes: number,
+    nextStoredBytes: number,
     updated: boolean,
   ): void;
   assertResult(): void;
@@ -504,13 +497,13 @@ export function createStorageAdmission(
             bytes: chatBytes,
           });
         },
-        chargeAutomationCreate(definition) {
+        chargeAutomationCreate(storedBytes) {
           if (operation !== "automation") {
             throw new Error("Only automation admission can charge an automation create.");
           }
-          charge(Buffer.byteLength(JSON.stringify(definition), "utf8") + storageEntryOverheadBytes);
+          charge(storedBytes + storageEntryOverheadBytes);
         },
-        settleAutomationCreate(definition, created, automationId) {
+        settleAutomationCreate(storedBytes, created, automationId) {
           if (operation !== "automation") {
             throw new Error("Only automation admission can settle an automation create.");
           }
@@ -520,8 +513,7 @@ export function createStorageAdmission(
             }
             const key = automationKey(profileId, automationId);
             if (account.retiredAutomations.has(key)) {
-              const bytes =
-                Buffer.byteLength(JSON.stringify(definition), "utf8") + storageEntryOverheadBytes;
+              const bytes = storedBytes + storageEntryOverheadBytes;
               account.globalBytes -= bytes;
               account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
               remaining = Math.min(8 * MiB, remaining + bytes);
@@ -530,30 +522,25 @@ export function createStorageAdmission(
             account.postMeasurementAutomations.add(key);
             return;
           }
-          const bytes =
-            Buffer.byteLength(JSON.stringify(definition), "utf8") + storageEntryOverheadBytes;
+          const bytes = storedBytes + storageEntryOverheadBytes;
           account.globalBytes -= bytes;
           account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
           remaining = Math.min(8 * MiB, remaining + bytes);
         },
-        chargeAutomationPatch(current, next) {
+        chargeAutomationPatch(currentStoredBytes, nextStoredBytes) {
           if (operation !== "automation") {
             throw new Error("Only automation admission can charge an automation edit.");
           }
-          const growth =
-            Buffer.byteLength(JSON.stringify(next), "utf8") -
-            Buffer.byteLength(JSON.stringify(current), "utf8");
+          const growth = nextStoredBytes - currentStoredBytes;
           if (growth > 0) {
             charge(growth);
           }
         },
-        settleAutomationPatch(current, next, updated) {
+        settleAutomationPatch(currentStoredBytes, nextStoredBytes, updated) {
           if (operation !== "automation") {
             throw new Error("Only automation admission can settle an automation edit.");
           }
-          const delta =
-            Buffer.byteLength(JSON.stringify(next), "utf8") -
-            Buffer.byteLength(JSON.stringify(current), "utf8");
+          const delta = nextStoredBytes - currentStoredBytes;
           const freed = updated ? -delta : delta;
           if (freed > 0) {
             account.globalBytes -= freed;

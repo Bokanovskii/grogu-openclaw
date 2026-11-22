@@ -13,6 +13,7 @@ import { assertSqliteSchemaTablesPresent } from "../infra/sqlite-schema-contract
 import { migrateSqliteSchemaToStrictInTransaction } from "../infra/sqlite-strict.js";
 import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
 import { migrateLegacyCronRunLogsToTaskRuns } from "../infra/state-migrations.cron-run-logs.js";
+import { isSqliteStorageValueEncryptionStrict } from "../storage/sqlite-encryption.js";
 import { hasPreJournalStateSchema } from "./agent-deletion-journal-history.js";
 import {
   clearOpenClawDatabaseQuarantine,
@@ -62,12 +63,16 @@ import {
 } from "./openclaw-state-db-schema-repair.js";
 import { ensureOpenClawStateRuntimeSchema } from "./openclaw-state-db-schema-runtime.js";
 import { migrateSingletonStateFoldInV12 } from "./openclaw-state-db-schema-v12-foldin.js";
-import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
+import {
+  getAdmittedStateSchemaVersion,
+  readStateSchemaContentVersion,
+} from "./openclaw-state-db-schema-version.js";
 import * as sessionWatchMigration from "./openclaw-state-db-session-watch-migration.js";
 import * as retirements from "./openclaw-state-db-table-retirements.js";
 import { recoverOrphanTaskDeliveryRows } from "./openclaw-state-db-task-delivery-recovery.js";
 import { describeAgentPathMigration } from "./openclaw-state-db.paths.js";
 import { assertOpenClawStateWriteAllowed } from "./openclaw-state-ownership.js";
+import { getAdmittedSharedStateSchema } from "./openclaw-state-protected-schema.js";
 import { getOpenClawStateRuntimeSchema } from "./openclaw-state-schema-compatibility.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 import { UpdateSchemaRefusalError } from "./openclaw-update-schema-refusal.js";
@@ -196,18 +201,18 @@ export function repairStateSchema(
         if (preAuditSchema) {
           assertOpenClawStateDatabaseOwner(db, { pathname });
         }
-        if (previousVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
+        if (previousVersion === getAdmittedStateSchemaVersion(db)) {
           for (const name of verifyAndRepairCanonicalSqliteIndexes(
             db,
             pathname,
-            OPENCLAW_STATE_SCHEMA_SQL,
+            getAdmittedSharedStateSchema(db),
             { allowMissingColumns: true },
           )) {
             rebuiltIndexNames.add(name);
           }
           // Current-schema doctor repair may normalize recognized columns or
           // table options, but it must never recreate a missing table empty.
-          assertSqliteSchemaTablesPresent(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+          assertSqliteSchemaTablesPresent(db, pathname, getAdmittedSharedStateSchema(db), {
             allowedMissingTables: [...LAZY_ADDITIVE_STATE_TABLES, ...DOCTOR_OWNED_STATE_TABLES],
           });
         } else {
@@ -250,7 +255,7 @@ export function repairStateSchema(
             }
           }
           executeCanonicalStateSchema(db, {
-            includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+            includeVersionLazyAdditiveTables: previousVersion !== getAdmittedStateSchemaVersion(db),
             includeAgentDeletionJournal,
           });
           migrateLegacyCronRunLogsToTaskRuns(db);
@@ -261,8 +266,10 @@ export function repairStateSchema(
           const strictMigration = migrateSqliteSchemaToStrictInTransaction(
             db,
             getOpenClawStateRuntimeSchema({
-              includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+              includeVersionLazyAdditiveTables:
+                previousVersion !== getAdmittedStateSchemaVersion(db),
               includeAgentDeletionJournal: tableExists(db, "agent_deletion_journal"),
+              protected: isSqliteStorageValueEncryptionStrict(db),
             }),
             { databaseLabel: pathname },
           );
@@ -280,7 +287,7 @@ export function repairStateSchema(
         markCurrentStateSchemaVersion(db, {
           createMetadataIfMissing: previousVersion < OPENCLAW_STATE_SCHEMA_VERSION,
         });
-        if (readStateSchemaContentVersion(db) === OPENCLAW_STATE_SCHEMA_VERSION) {
+        if (readStateSchemaContentVersion(db) === getAdmittedStateSchemaVersion(db)) {
           assertCurrentStateRuntimeSchema(db, pathname);
         }
         if (rebuiltIndexNames.size > 0) {

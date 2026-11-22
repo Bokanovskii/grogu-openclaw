@@ -147,14 +147,16 @@ function inspectOwnProtectedAgentFormat(
     return false;
   }
   assertSupportedAgentSchemaVersion(database, input.pathname);
-  assertSqliteIntegrity(database, input.pathname);
-  assertOpenClawAgentSchemaContains(
-    database,
-    input.pathname,
-    getOpenClawAgentMigrationSchema(version),
-    "current",
-    true,
-  );
+  if (!input.requireStartupMigrationReadiness) {
+    assertSqliteIntegrity(database, input.pathname);
+    assertOpenClawAgentSchemaContains(
+      database,
+      input.pathname,
+      getOpenClawAgentMigrationSchema(version),
+      "current",
+      true,
+    );
+  }
   return true;
 }
 
@@ -193,14 +195,18 @@ export function inspectAgentDatabaseSchema(
   const inspection: AgentSchemaInspection = { version };
   let checkingShape = false;
   try {
-    if (inspectOwnProtectedAgentFormat(database, input, version)) {
-      const metadata = readExistingAgentSchemaMeta(database);
-      if (input.verifyCurrentSchemaShape && input.agentId) {
-        assertCurrentAgentSchemaMetadata(metadata, input.agentId, input.pathname, version);
+    const ownProtectedFormat = inspectOwnProtectedAgentFormat(database, input, version);
+    if (ownProtectedFormat) {
+      if (!input.requireStartupMigrationReadiness) {
+        const metadata = readExistingAgentSchemaMeta(database);
+        if (input.verifyCurrentSchemaShape && input.agentId) {
+          assertCurrentAgentSchemaMetadata(metadata, input.agentId, input.pathname, version);
+        }
+        return { version, ownProtectedFormat: true, agentSchemaMeta: metadata };
       }
-      return { version, ownProtectedFormat: true, agentSchemaMeta: metadata };
+      inspection.ownProtectedFormat = true;
     }
-    if (version > input.supportedVersion) {
+    if (version > input.supportedVersion && !ownProtectedFormat) {
       const writerAppVersion = readSqliteWriterAppVersion(database);
       return { version, ...(writerAppVersion ? { writerAppVersion } : {}) };
     }
@@ -211,7 +217,7 @@ export function inspectAgentDatabaseSchema(
     }
     if (input.requireStartupMigrationReadiness) {
       const migrationPending =
-        version !== input.supportedVersion ||
+        (version !== input.supportedVersion && !ownProtectedFormat) ||
         hasPendingCurrentVersionAgentDatabaseMigration(database);
       if (
         canReuseOpenClawAgentIntegrityVerification(

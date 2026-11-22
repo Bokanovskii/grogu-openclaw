@@ -435,6 +435,7 @@ export async function evaluateAgentDatabaseAdmissions(
   const result = await preflightOpenClawDatabaseSchemas(
     {
       env,
+      inspectOwnProtectedFormats: true,
       configuredAgentDatabaseTargets: [],
       configuredAgentDatabaseCandidatePaths: resolveConfiguredAgentDatabaseCandidatePaths(config, {
         env,

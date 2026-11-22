@@ -106,7 +106,7 @@ export async function assertOpenClawDatabasesReady(
       env: options.env,
       onAgentInspection: options.onAgentInspection,
       verifyCurrentSchemaShape: true,
-      inspectOwnProtectedFormats: options.operation === "doctor",
+      inspectOwnProtectedFormats: true,
       ...(options.config
         ? {
             agentAdmissionConfig: options.config,

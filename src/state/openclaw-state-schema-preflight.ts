@@ -79,11 +79,11 @@ export function inspectStateDatabaseSchema(
   try {
     const stateVersion = readSqliteUserVersion(database);
     let supportedVersion = input.supportedVersion;
-    if (
+    const ownProtectedFormat =
       input.inspectOwnProtectedFormats &&
       stateVersion === PROTECTED_SHARED_STATE_SCHEMA_VERSION &&
-      stateVersion > supportedVersion
-    ) {
+      stateVersion > supportedVersion;
+    if (ownProtectedFormat) {
       assertSupportedStateSchemaVersion(database, pathname);
       assertSqliteIntegrity(database, pathname);
       assertCanonicalStateSchemaShape(database, pathname);
@@ -128,13 +128,17 @@ export function inspectStateDatabaseSchema(
         ),
       ];
     }
-    if (input.requireStartupMigrationReadiness && contentVersion <= OPENCLAW_STATE_SCHEMA_VERSION) {
-      assertSqliteIntegrity(database, pathname);
-      assertCanonicalStateSchemaShape(database, pathname);
+    if (input.requireStartupMigrationReadiness && contentVersion <= supportedVersion) {
+      if (!ownProtectedFormat) {
+        assertSqliteIntegrity(database, pathname);
+        assertCanonicalStateSchemaShape(database, pathname);
+      }
       // Readiness must reject malformed ownership even when startup has no pending writes.
       inspectOpenClawStateOwnershipFromDatabase(database, pathname);
-      if (migrationVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
-        assertStartupSchemaValid(database, pathname, stateVersion);
+      if (migrationVersion === supportedVersion) {
+        if (!ownProtectedFormat) {
+          assertStartupSchemaValid(database, pathname, stateVersion);
+        }
       } else {
         openClawStateMigrationAssertions.get(migrationVersion)?.(database, { pathname });
       }

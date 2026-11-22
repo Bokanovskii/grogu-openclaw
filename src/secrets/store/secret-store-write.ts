@@ -12,6 +12,7 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../../state/openclaw-state-db.js";
+import { openSecretStoreValue, sealSecretStoreValue } from "./secret-store-encryption.js";
 import { classifyHiddenGitHubStoreName } from "./secret-store-hidden-github.js";
 import { withMissingSecretStoreFallback } from "./secret-store-sqlite.js";
 import { SecretStoreValidationError } from "./secret-store-validation-error.js";
@@ -78,7 +79,7 @@ export function writeSecretStoreEntriesInDatabase(
       const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
       const resolved = params.entries.map((entry) => {
         const repair = entry.expectedValue !== undefined;
-        const previous =
+        const storedPrevious =
           capturePrevious || inheritExistingKind || repair
             ? executeSqliteQueryTakeFirstSync(
                 sqlite,
@@ -91,6 +92,13 @@ export function writeSecretStoreEntriesInDatabase(
                   .where("deleted_at_ms", "is", null),
               )
             : undefined;
+        const identity = { scope_kind: "team", scope_id: "", name: entry.name };
+        const previous = storedPrevious
+          ? {
+              ...storedPrevious,
+              value: openSecretStoreValue(sqlite, identity, storedPrevious.value),
+            }
+          : undefined;
         if (repair && previous?.value !== entry.expectedValue) {
           throw new SecretStoreValidationError(
             "SECRET_STORE_VALUE_CHANGED",
@@ -121,7 +129,12 @@ export function writeSecretStoreEntriesInDatabase(
       for (const { entry, kind, allowedHosts, repair } of resolved) {
         const allowedHostsJson = allowedHosts?.length ? JSON.stringify(allowedHosts) : null;
         const values = {
-          value: entry.value,
+          value: sealSecretStoreValue(
+            sqlite,
+            { scope_kind: "team", scope_id: "", name: entry.name },
+            entry.value,
+            kind,
+          ),
           updated_at_ms: now,
           updated_by: params.updatedBy,
           deleted_at_ms: null,
@@ -198,7 +211,12 @@ export function rollbackSecretStoreEntryWriteInDatabase(
             params.previous === undefined
               ? { deleted_at_ms: now, updated_at_ms: now }
               : {
-                  value: params.previous.value,
+                  value: sealSecretStoreValue(
+                    sqlite,
+                    { scope_kind: "team", scope_id: "", name: params.name },
+                    params.previous.value,
+                    params.previous.kind,
+                  ),
                   kind: params.previous.kind,
                   allowed_hosts: params.previous.allowedHosts,
                   updated_at_ms: now,

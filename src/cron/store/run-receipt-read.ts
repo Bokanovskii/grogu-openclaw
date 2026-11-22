@@ -10,6 +10,7 @@ import { readAgentDeletionJournalInDatabase } from "../../state/agent-deletion-j
 import type { DB as OpenClawStateDatabase } from "../../state/openclaw-state-db.generated.js";
 import { projectCronReceiptAuthorityJobFacts } from "./receipt-authority-facts.js";
 import { loadedCronStoreFromRows, loadCronRows } from "./row-codec.js";
+import { openCronReceiptValue } from "./run-receipt-encryption.js";
 import type {
   CronRunReceipt,
   CronRunReceiptCurrentFacts,
@@ -34,23 +35,45 @@ function isReceiptStatus(value: string): value is CronRunReceiptStatus {
   );
 }
 
-export function receiptFromRow(row: CronRunReceiptRow): CronRunReceipt {
+export function receiptFromRow(database: DatabaseSync, row: CronRunReceiptRow): CronRunReceipt {
   if (!isReceiptStatus(row.status)) {
     throw new Error(`invalid cron run receipt status ${row.status}`);
   }
+  const identity = [row.store_key, row.job_id, row.receipt_id];
+  const configRevision = openCronReceiptValue(
+    database,
+    "cron_run_receipts",
+    "config_revision",
+    identity,
+    row.config_revision,
+  );
+  const requestRunId = openCronReceiptValue(
+    database,
+    "cron_run_receipts",
+    "request_run_id",
+    identity,
+    row.request_run_id,
+  );
+  const error = openCronReceiptValue(
+    database,
+    "cron_run_receipts",
+    "error_text",
+    identity,
+    row.error_text,
+  );
   return {
     receiptId: row.receipt_id,
     storeKey: row.store_key,
     jobId: row.job_id,
-    configRevision: row.config_revision,
+    configRevision,
     agentId: row.agent_id,
-    ...(row.request_run_id ? { requestRunId: row.request_run_id } : {}),
+    ...(requestRunId ? { requestRunId } : {}),
     status: row.status,
     ownerPid: row.owner_pid,
     ownerStartTime: row.owner_start_time,
     startedAtMs: row.started_at_ms,
     finishedAtMs: row.finished_at_ms,
-    ...(row.error_text ? { error: row.error_text } : {}),
+    ...(error ? { error } : {}),
   };
 }
 
@@ -128,7 +151,7 @@ export function readActiveCronRunReceiptsInDatabase(
   const selected = new Set(jobIds);
   return rows
     .filter((row) => selected.has(row.job_id))
-    .map((row) => receiptHandle(receiptFromRow(row)));
+    .map((row) => receiptHandle(receiptFromRow(database, row)));
 }
 
 /** Drainage needs receipt ownership even after its scheduled job has been removed. */

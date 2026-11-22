@@ -12,11 +12,15 @@ import {
   SESSION_PENDING_INPUTS_TABLE,
 } from "../../state/openclaw-agent-pending-inputs-schema.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
-import {
-  isFinalInputCompletion,
-  readSessionPendingInputByKey,
-} from "./session-accessor.sqlite-pending-inputs.js";
+import { readSessionPendingInputByKey } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import { isFinalInputCompletion } from "./session-input-completion-store.js";
+import {
+  openSessionInputCompletionOutcome,
+  openSessionPendingInputMessage,
+  sealSessionInputCompletionOutcome,
+  sealSessionPendingInputMessage,
+} from "./session-pending-input-encryption.js";
 
 type PendingInputDatabase = Pick<OpenClawAgentDatabase, "db" | "path">;
 
@@ -63,6 +67,7 @@ export function copySessionPendingInputsForRepair(
       ensureSessionPendingInputsSchema(destination.db);
       initialized = true;
     }
+    const sourceMessage = openSessionPendingInputMessage(source.db, row.input_id, row.message_json);
     const existing = readSessionPendingInputByKey(
       destination,
       { sessionKey: canonicalKey, sessionId: row.session_id },
@@ -71,7 +76,7 @@ export function copySessionPendingInputsForRepair(
     if (existing) {
       if (
         existing.request_hash !== row.request_hash ||
-        existing.message_json !== row.message_json ||
+        existing.message_json !== sourceMessage ||
         existing.run_id !== row.run_id ||
         (existing.consumed_event_id != null &&
           row.consumed_event_id != null &&
@@ -99,6 +104,7 @@ export function copySessionPendingInputsForRepair(
       destination.db,
       db.insertInto("session_pending_inputs").values({
         ...record,
+        message_json: sealSessionPendingInputMessage(destination.db, row.input_id, sourceMessage),
         session_key: canonicalKey,
         state: row.state === "cancelled" ? "cancelled" : "interrupted",
       }),
@@ -160,19 +166,47 @@ export function copySessionInputCompletionsForRepair(
         throw new Error("Canonical repair found conflicting input completions");
       }
       // SAFETY: the feature-owned receipt writer persists typed terminal outcomes.
-      const existingOutcome = JSON.parse(existing.outcome_json) as AgentRunTerminalOutcome;
+      const existingOutcome = JSON.parse(
+        openSessionInputCompletionOutcome(
+          destination.db,
+          existing.session_id,
+          existing.idempotency_key,
+          existing.outcome_json,
+        ),
+      ) as AgentRunTerminalOutcome;
       // A Stop is final even though it is not successful. Never replace a final
       // destination receipt with an older/retryable source attempt.
       if (isFinalInputCompletion(existingOutcome)) {
         continue;
       }
       // SAFETY: repair preserves feature-owned typed outcomes, just like the receipt reader.
-      const outcome = JSON.parse(row.outcome_json) as AgentRunTerminalOutcome;
+      const outcome = JSON.parse(
+        openSessionInputCompletionOutcome(
+          source.db,
+          row.session_id,
+          row.idempotency_key,
+          row.outcome_json,
+        ),
+      ) as AgentRunTerminalOutcome;
       if (!isFinalInputCompletion(outcome) && existing.completed_at >= row.completed_at) {
         continue;
       }
     }
-    const canonical = { ...row, session_key: canonicalKey };
+    const canonical = {
+      ...row,
+      outcome_json: sealSessionInputCompletionOutcome(
+        destination.db,
+        row.session_id,
+        row.idempotency_key,
+        openSessionInputCompletionOutcome(
+          source.db,
+          row.session_id,
+          row.idempotency_key,
+          row.outcome_json,
+        ),
+      ),
+      session_key: canonicalKey,
+    };
     executeSqliteQuerySync(
       destination.db,
       db
@@ -192,23 +226,44 @@ export function readSessionInputArtifactRows(
   const db = getSessionKysely(database.db);
   return {
     pendingInputs: tableExists(database.db, SESSION_PENDING_INPUTS_TABLE)
-      ? iterateSqliteQuerySync(
-          database.db,
-          db
-            .selectFrom("session_pending_inputs")
-            .selectAll()
-            .where("session_id", "=", sessionId)
-            .orderBy("seq"),
+      ? Array.from(
+          iterateSqliteQuerySync(
+            database.db,
+            db
+              .selectFrom("session_pending_inputs")
+              .selectAll()
+              .where("session_id", "=", sessionId)
+              .orderBy("seq"),
+          ),
+          (row) => ({
+            ...row,
+            message_json: openSessionPendingInputMessage(
+              database.db,
+              row.input_id,
+              row.message_json,
+            ),
+          }),
         )
       : [],
     inputCompletions: tableExists(database.db, SESSION_INPUT_COMPLETIONS_TABLE)
-      ? iterateSqliteQuerySync(
-          database.db,
-          db
-            .selectFrom("session_input_completions")
-            .selectAll()
-            .where("session_id", "=", sessionId)
-            .orderBy("idempotency_key"),
+      ? Array.from(
+          iterateSqliteQuerySync(
+            database.db,
+            db
+              .selectFrom("session_input_completions")
+              .selectAll()
+              .where("session_id", "=", sessionId)
+              .orderBy("idempotency_key"),
+          ),
+          (row) => ({
+            ...row,
+            outcome_json: openSessionInputCompletionOutcome(
+              database.db,
+              row.session_id,
+              row.idempotency_key,
+              row.outcome_json,
+            ),
+          }),
         )
       : [],
   };

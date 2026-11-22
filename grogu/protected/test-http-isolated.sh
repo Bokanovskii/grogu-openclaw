@@ -22,5 +22,8 @@ exec_command=(
   OPENCLAW_PROTECTED_ISOLATED_TEST=1
   node --import ./scripts/tsx.mjs --test --test-timeout=90000
   grogu/protected/http.test.ts
+  grogu/protected/capacity.test.ts
+  grogu/protected/automations-store.test.ts
+  grogu/protected/revocation-http.test.ts
 )
 /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))' "${exec_command[@]}"

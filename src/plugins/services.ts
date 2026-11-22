@@ -1,5 +1,6 @@
 import { STATE_DIR } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { CronJob } from "../cron/types.js";
 import { runOutsideOperatorToolGatewayAuthority } from "../gateway/operator-tool-gateway-authority.js";
 import { createScheduledGatewayRunner } from "../gateway/scheduled-run-gateway-context.js";
 import type { GatewayPluginEventBroadcastFn } from "../gateway/server-broadcast-types.js";
@@ -9,15 +10,11 @@ import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import {
-  createPluginRuntimeCapabilityLease,
-  type PluginRuntimeCapabilityLease,
-} from "./capability-lease.js";
+import { createPluginRuntimeCapabilityLease } from "./capability-lease.js";
 import { createPluginServiceGatewayEvents } from "./gateway-events.js";
 import { withPluginHttpRouteRegistry } from "./http-registry.js";
 import { pluginInstanceInvocation } from "./plugin-instance-invocation.js";
 import { getPluginInstance, runPluginCleanup } from "./plugin-instance-scope.js";
-import type { PluginInstanceConsumer } from "./plugin-instance.types.js";
 import { resolvePluginReturnPromise } from "./plugin-return-value.js";
 import { getPluginRecordRegistry } from "./registry-lifecycle.js";
 import { getPluginRegistryRuntime } from "./registry-runtime-binding.js";
@@ -25,16 +22,19 @@ import type { PluginServiceRegistration } from "./registry-types.js";
 import type { PluginRegistry } from "./registry.js";
 import { getGatewayContextResolver } from "./runtime/gateway-request-scope.js";
 import { runOutsidePluginRuntimeGenerationScope } from "./runtime/generation-scope.js";
+import {
+  cronJobPrefix,
+  serviceOwners,
+  type OwnedPluginService,
+  type PluginServicesOwner,
+} from "./service-cron-authority.js";
 import { createPluginServiceCronGetter, type PluginServiceCronHost } from "./service-cron.js";
 import { createPluginServiceDiagnostics } from "./service-diagnostics.js";
 import { createPluginServiceHealthReporter } from "./service-health.js";
 import { createPluginServiceNodeInvoker } from "./service-nodes.js";
 import { withPluginServiceScheduler } from "./service-scheduler-binding.js";
 import { createPluginServiceSchedulerRunner } from "./service-scheduler-context.js";
-import {
-  createPluginServiceScheduler,
-  type PluginServiceSchedulerOwner,
-} from "./service-scheduler.js";
+import { createPluginServiceScheduler } from "./service-scheduler.js";
 import { encodeStartupTraceSegment } from "./startup-trace-segment.js";
 import type { OpenClawPluginServiceContext, OpenClawPluginServiceContextV2 } from "./types.js";
 
@@ -83,37 +83,6 @@ export type PluginServicesHandle = {
     pluginIds?: ReadonlySet<string>;
   }) => Promise<void | PluginServiceStopResult>;
 };
-
-type OwnedPluginService = {
-  owner: PluginServicesOwner;
-  id: string;
-  pluginId: string;
-  registration: PluginServiceRegistration;
-  registry: PluginRegistry;
-  diagnosticsExporter: boolean;
-  stop?: () => unknown;
-  startup?: Promise<void>;
-  startupConsumer?: PluginInstanceConsumer;
-  stopping?: Promise<unknown>;
-  reloading?: Promise<void>;
-  cleaned: boolean;
-  cleanupErrors: unknown[];
-  cleanupReporting?: Promise<unknown>;
-  stopRequested: boolean;
-  stopNodeInvocations?: () => void;
-  health: NonNullable<OpenClawPluginServiceContext["serviceHealth"]>;
-  lease: PluginRuntimeCapabilityLease;
-  scheduling: PluginServiceSchedulerOwner;
-};
-
-type PluginServicesOwner = {
-  services: OwnedPluginService[];
-  attempts: WeakMap<PluginServiceRegistration, OwnedPluginService>;
-  registrations: Set<PluginServiceRegistration>;
-  stopped: Set<PluginServiceRegistration>;
-  closed: boolean;
-};
-const serviceOwners = new WeakMap<PluginServicesHandle, PluginServicesOwner>();
 
 type StartPluginServicesParams = {
   scheduler: GatewayScheduler;
@@ -496,6 +465,7 @@ async function startPreparedPluginServices({
     candidate = false,
   ): Promise<boolean> => {
     const { service, id } = entry;
+    const authorizeCronJob = service.authorizeCronJob;
     const record = registry.plugins.find((plugin) => plugin.id === entry.pluginId);
     const instance = record && getPluginInstance(record);
     // Native service receivers retain their brands; registration owns their invocation scope.
@@ -511,10 +481,13 @@ async function startPreparedPluginServices({
     const { health, revoke } = createPluginServiceHealthReporter(entry);
     lease.retain(revoke);
     const runtime = getPluginRegistryRuntime(registry);
-    const scheduling = createPluginServiceScheduler(
-      scheduler,
-      createPluginServiceSchedulerRunner({ registry, record, instance, lease }),
-    );
+    const runServiceWork = createPluginServiceSchedulerRunner({
+      registry,
+      record,
+      instance,
+      lease,
+    });
+    const scheduling = createPluginServiceScheduler(scheduler, runServiceWork);
     const runServiceStart = createScheduledGatewayRunner(
       runtime ? getGatewayContextResolver(runtime) : undefined,
     );
@@ -550,6 +523,7 @@ async function startPreparedPluginServices({
         debug: (msg) => log.debug(msg),
       },
       serviceHealth: health,
+      ...(service.authorizeCronJob ? { cronJobPrefix: cronJobPrefix(entry) } : {}),
       ...(getCron ? { getCron } : {}),
       ...(nodeInvoker
         ? { invokeNode: nodeInvoker.invoke, openNodeDuplex: nodeInvoker.openDuplex }
@@ -610,6 +584,21 @@ async function startPreparedPluginServices({
       health,
       lease,
       scheduling,
+      ...(instance
+        ? {
+            assertInstanceCurrent: () => {
+              if (!instance.acceptingCalls || instance.disposing || instance.owner?.revoked) {
+                throw new Error("Native job execution authority plugin is not current.");
+              }
+            },
+          }
+        : {}),
+      ...(authorizeCronJob
+        ? {
+            authorizeCronJob: (job: CronJob) =>
+              runServiceWork(() => authorizeCronJob.call(service, job)),
+          }
+        : {}),
     };
     // Retry in place. A new registration is inserted before retained later declarations,
     // so transfer cannot reorder a dependency behind its already-running consumer.

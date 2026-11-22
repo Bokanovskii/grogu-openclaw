@@ -10,6 +10,7 @@ import { createSessionVisibilityChecker } from "../../plugin-sdk/session-visibil
 import { normalizeToolParameters } from "../agent-tools.schema.js";
 import { describeSessionLinkRule } from "../tool-description-presets.js";
 import { compactToolOutputHint } from "../tool-schema-hints.js";
+import { withHostSessionAccess } from "./scoped-session-access.js";
 import { createSessionsSearchTool } from "./sessions-search-tool.js";
 
 type CallGatewayRequest = Parameters<typeof gatewayCall>[0];
@@ -473,5 +474,71 @@ describe("sessions_search tool", () => {
     } finally {
       unregister();
     }
+  });
+
+  it("limits unscoped host-bound search to granted sessions and their current incarnation", async () => {
+    const prefix = "agent:main:family:member:";
+    const requester = `${prefix}coordinator`;
+    const permitted = `${prefix}permitted`;
+    const foreign = "agent:main:family:other:private";
+    const requests: CallGatewayRequest[] = [];
+    let revalidations = 0;
+    const tool = createSessionsSearchTool({
+      agentSessionKey: requester,
+      config: {
+        agents: { entries: { main: {} } },
+        tools: { sessions: { visibility: "all" } },
+      } as OpenClawConfig,
+      callGateway: async <T = Record<string, unknown>>(request: CallGatewayRequest): Promise<T> => {
+        requests.push(request);
+        if (request.method === "sessions.list") {
+          return {
+            sessions: [requester, permitted, foreign].map((key) => ({
+              key,
+              sessionId: `${key}:current`,
+            })),
+            hasMore: false,
+          } as T;
+        }
+        return {
+          results: [
+            hit({ sessionKey: permitted, sessionId: `${permitted}:current`, snippet: "kept" }),
+            hit({ sessionKey: permitted, sessionId: `${permitted}:old`, snippet: "stale" }),
+            hit({ sessionKey: foreign, sessionId: `${foreign}:current`, snippet: "foreign" }),
+          ],
+        } as T;
+      },
+    });
+    const scope = {
+      creatorProfileId: "member",
+      assertCurrent: () => {},
+      revalidate: async () => {
+        revalidations += 1;
+      },
+      resolve: async ({ reference }: { reference: string }) =>
+        reference.startsWith(prefix)
+          ? { sessionKey: reference, sessionId: `${reference}:current`, agentId: "main" }
+          : undefined,
+    };
+
+    const result = await withHostSessionAccess(scope, () =>
+      tool.execute("host-search", { query: "text" }),
+    );
+
+    expect(
+      (result.details as { results: Array<{ snippet: string }> }).results.map(
+        ({ snippet }) => snippet,
+      ),
+    ).toEqual(["kept"]);
+    const listRequests = requests.filter((request) => request.method === "sessions.list");
+    expect(listRequests.length).toBeGreaterThan(0);
+    for (const request of listRequests) {
+      expect(request.params).toMatchObject({ creatorId: "member" });
+    }
+    const searched = requests
+      .filter((request) => request.method === "sessions.search")
+      .flatMap((request) => (request.params as { sessionKeys: string[] }).sessionKeys);
+    expect(searched.toSorted()).toEqual([requester, permitted]);
+    expect(revalidations).toBeGreaterThan(0);
   });
 });

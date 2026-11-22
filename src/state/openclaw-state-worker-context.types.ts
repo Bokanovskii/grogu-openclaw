@@ -7,6 +7,7 @@ import type {
 export type OpenClawStateWorkerContext = Omit<SqliteWorkerStateContext, "environment"> & {
   environment: {
     OPENCLAW_STATE_DIR: string;
+    OPENCLAW_PROTECTED_STORAGE_KEY_FILE?: string;
     OPENCLAW_SUPERVISOR_MODE?: "external";
   };
   admission: OpenClawStateDatabaseReadAdmission;

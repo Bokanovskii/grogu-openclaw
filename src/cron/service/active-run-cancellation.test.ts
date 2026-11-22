@@ -84,6 +84,12 @@ describe("cron task cancellation tracking", () => {
         active: 0,
       });
       expect(getSuspensionVisibleCronTaskRunCount()).toBe(1);
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "selected-state",
+          jobIds: ["selected-job"],
+        }),
+      ).toBe(1);
 
       core.resolve();
       await core.promise;

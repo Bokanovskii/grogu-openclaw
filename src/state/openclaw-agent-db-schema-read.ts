@@ -7,8 +7,14 @@ import {
   readSqliteUserVersion,
 } from "../infra/sqlite-user-version.js";
 import {
+  hasSqliteStorageValueEncryption,
+  openSqliteStorageText,
+  setSqliteStorageValueEncryptionStrict,
+} from "../storage/sqlite-encryption.js";
+import {
   AGENT_MEDIA_SCHEMA_VERSION,
   OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
 } from "./openclaw-agent-db-contract.js";
 import {
   readExistingAgentSchemaMeta,
@@ -16,19 +22,98 @@ import {
 } from "./openclaw-agent-db-metadata.js";
 import { OpenClawAgentDatabaseMediaMigrationRequiredError } from "./openclaw-agent-db-migration-required.js";
 
+export const PROTECTED_ENCRYPTION_TABLE = "grogu_protected_storage";
+export const PROTECTED_ENCRYPTION_KEY_CHECK = "openclaw:protected:key-check";
+export const PROTECTED_ENCRYPTION_KEY_CHECK_VALUE = "protected-storage-key-v1";
+
 export { readExistingAgentSchemaMeta } from "./openclaw-agent-db-metadata.js";
+
+export function getAgentDatabaseTargetSchemaVersion(db: DatabaseSync): number {
+  return hasSqliteStorageValueEncryption(db)
+    ? PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
+    : OPENCLAW_AGENT_SCHEMA_VERSION;
+}
+
+function assertProtectedEncryptionAdmission(
+  db: DatabaseSync,
+  pathname: string,
+  userVersion: number,
+): void {
+  const encryptionEnabled = hasSqliteStorageValueEncryption(db);
+  const hasMarker = Boolean(
+    db
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
+      .get(PROTECTED_ENCRYPTION_TABLE),
+  );
+  if (userVersion === PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION && !hasMarker) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} has an encrypted schema version but no encryption marker; keep it stopped and repair it with a supporting build.`,
+    );
+  }
+  if (hasMarker && userVersion !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} has an encryption marker without its schema version; keep it stopped and repair it with a supporting build.`,
+    );
+  }
+  if (!hasMarker) {
+    return;
+  }
+  if (!encryptionEnabled) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} is encrypted but its key is unavailable; restore the protected storage key and restart the protected service.`,
+    );
+  }
+  const row = db.prepare("SELECT key_check FROM grogu_protected_storage WHERE id = 1").get();
+  if (typeof row?.key_check !== "string") {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} has an invalid encryption marker; keep it stopped and repair it with a supporting build.`,
+    );
+  }
+  setSqliteStorageValueEncryptionStrict(db, true);
+  let keyCheck: string;
+  try {
+    keyCheck = openSqliteStorageText(db, row.key_check, PROTECTED_ENCRYPTION_KEY_CHECK);
+  } catch {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} could not be opened with the configured storage key; verify the protected key file and restart the service.`,
+    );
+  }
+  if (keyCheck !== PROTECTED_ENCRYPTION_KEY_CHECK_VALUE) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} has an invalid encryption key check; verify the protected key file and restart the service.`,
+    );
+  }
+}
 
 export function assertSupportedAgentSchemaVersion(db: DatabaseSync, pathname: string): number {
   const userVersion = getAdmittedSqliteSchemaFacts(db)?.userVersion ?? readSqliteUserVersion(db);
-  if (userVersion > OPENCLAW_AGENT_SCHEMA_VERSION) {
+  assertProtectedEncryptionAdmission(db, pathname, userVersion);
+  const targetVersion = getAgentDatabaseTargetSchemaVersion(db);
+  if (userVersion > targetVersion) {
     throw createNewerSqliteSchemaVersionError(
       "OpenClaw agent database",
       pathname,
       userVersion,
-      OPENCLAW_AGENT_SCHEMA_VERSION,
+      targetVersion,
     );
   }
   return userVersion;
+}
+
+/** Require an existing encrypted agent schema, without migrating plaintext state. */
+export function assertRequiredProtectedAgentStorage(db: DatabaseSync, pathname: string): void {
+  if (!hasSqliteStorageValueEncryption(db)) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} requires its storage key; restore the key before starting the service.`,
+    );
+  }
+  if (
+    assertSupportedAgentSchemaVersion(db, pathname) !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
+  ) {
+    throw new SqliteSchemaMismatchError(
+      `Protected agent database ${pathname} is unmarked or unencrypted; stop the service and run provision-storage-key before starting it.`,
+    );
+  }
 }
 
 /** Readers may pass their immediate check; writers reread the version after integrity work. */
@@ -82,6 +167,7 @@ export function assertCurrentAgentSchemaMetadata(
   metadata: ExistingAgentSchemaMeta | null,
   agentId: string,
   pathname: string,
+  schemaVersion = OPENCLAW_AGENT_SCHEMA_VERSION,
 ): void {
   if (!metadata) {
     throw new SqliteSchemaMismatchError(
@@ -89,9 +175,23 @@ export function assertCurrentAgentSchemaMetadata(
     );
   }
   assertExistingAgentSchemaOwner(metadata, agentId, pathname);
-  if (metadata.schemaVersion !== OPENCLAW_AGENT_SCHEMA_VERSION) {
+  if (metadata.schemaVersion !== schemaVersion) {
     throw new SqliteSchemaMismatchError(
-      `OpenClaw agent database ${pathname} metadata schema version ${metadata.schemaVersion ?? "invalid"} does not match ${OPENCLAW_AGENT_SCHEMA_VERSION}; run openclaw doctor --fix before using it.`,
+      `OpenClaw agent database ${pathname} metadata schema version ${metadata.schemaVersion ?? "invalid"} does not match ${schemaVersion}; run openclaw doctor --fix before using it.`,
     );
   }
+}
+
+export function assertCurrentAgentDatabaseSchemaMetadata(
+  database: DatabaseSync,
+  metadata: ExistingAgentSchemaMeta | null,
+  agentId: string,
+  pathname: string,
+): void {
+  assertCurrentAgentSchemaMetadata(
+    metadata,
+    agentId,
+    pathname,
+    getAgentDatabaseTargetSchemaVersion(database),
+  );
 }

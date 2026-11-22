@@ -87,6 +87,7 @@ export async function readVerifiedUserProfileDirectory(
     preferenceKey: string;
     after: string | null;
     limit: number;
+    profileId?: string;
   },
   options: ProfileReadOptions = {},
 ) {

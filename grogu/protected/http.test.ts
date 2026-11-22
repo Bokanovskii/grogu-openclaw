@@ -2,13 +2,19 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { before as beforeTests, test } from "node:test";
+import { after, before as beforeTests, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
+  ProtectedAgentCatalogSchema,
+  ProtectedAgentCatalogV1Schema,
   ProtectedAutomationCatalogSchema,
+  ProtectedAutomationCatalogV1Schema,
   ProtectedAutomationDraftValidationSchema,
+  ProtectedAutomationListResponseSchema,
+  ProtectedAutomationResponseSchema,
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
@@ -17,6 +23,7 @@ import { FailoverError } from "../../src/agents/failover/error.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
+import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
 import {
   getCanonicalUserPreferences,
@@ -28,6 +35,7 @@ import {
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
+import { addProtectedSubject } from "./admission-store.js";
 import { protectedResearchAgent, type ProtectedAgentExtension } from "./agents.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
@@ -46,7 +54,7 @@ const protectedCleanupAgent: ProtectedAgentExtension = {
   name: "Cleanup proof",
   description: "Creates a widget to verify transient file cleanup.",
   instructions: "Create a widget so transient files are cleaned.",
-  tools: ["show_widget"],
+  selectable: true,
 };
 
 beforeTests(async () => {
@@ -72,6 +80,38 @@ beforeTests(async () => {
     });
   });
   assert.ok(denied, `Native network isolation was not verified. Run: ${command}`);
+});
+
+const protectedTestStateDirs = new Set<string>();
+const originalOpenClawStateDir = process.env.OPENCLAW_STATE_DIR;
+const originalProtectedKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+const sqliteEncryptionStateDir =
+  originalOpenClawStateDir ?? path.resolve(".artifacts", `protected-http-${randomUUID()}`);
+const sqliteEncryptionKeyFile = `${sqliteEncryptionStateDir}.protected-storage-key`;
+beforeTests(async () => {
+  await mkdir(sqliteEncryptionStateDir, { recursive: true, mode: 0o700 });
+  await writeFile(sqliteEncryptionKeyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
+  process.env.OPENCLAW_STATE_DIR = sqliteEncryptionStateDir;
+  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = sqliteEncryptionKeyFile;
+});
+after(async () => {
+  await Promise.all(
+    [...protectedTestStateDirs].map(async (stateDir) => {
+      await rm(stateDir, { recursive: true, force: true });
+    }),
+  );
+  await rm(sqliteEncryptionKeyFile, { force: true });
+  if (originalOpenClawStateDir === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR;
+    await rm(sqliteEncryptionStateDir, { recursive: true, force: true });
+  } else {
+    process.env.OPENCLAW_STATE_DIR = originalOpenClawStateDir;
+  }
+  if (originalProtectedKeyFile === undefined) {
+    delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+  } else {
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = originalProtectedKeyFile;
+  }
 });
 
 function providerSse(events: Array<{ type: string; [field: string]: unknown }>, named = false) {
@@ -163,13 +203,18 @@ void test("protected responses use neutral service wording", async (t) => {
     },
   });
   t.after(() => app.shutdown());
-  const response = await app.fetch(new Request(`${origin}/api/protected/v1/me`));
+  const response = await app.fetch(
+    new Request(`${origin}/api/protected/v1/me`, {
+      headers: { "x-alcove-capabilities": "profile-v1" },
+    }),
+  );
   assert.equal(response.status, 200);
   const { user, disclosure } = await response.json();
-  assert.equal(user.displayName, "User");
+  assert.equal(user.displayName, "");
+  assert.equal(user.setupRequired, true);
   assert.equal(
     disclosure,
-    "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+    "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
   );
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
@@ -310,6 +355,7 @@ void test("fixture blocks egress from work that outlives its test", () => {
 
 void test("Family HTTP isolates chats, relays device authorization, and durably revokes sessions", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-test-${randomUUID()}`);
+  protectedTestStateDirs.add(stateDir);
   const usersDir = path.join(stateDir, "users");
   const bundleDir = path.join(stateDir, "bundle");
   await Promise.all([
@@ -322,8 +368,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     writeFile(path.join(bundleDir, "assets/notebook-Ab12_cd.woff2"), "wOF2"),
     symlink("../index.html", path.join(bundleDir, "assets/index-Symlink.js")),
   ]);
+  const release = Promise.withResolvers<void>();
+  const shutdownApps: Array<() => Promise<void>> = [];
+  t.after(async () => {
+    release.resolve();
+    await Promise.all(shutdownApps.map((shutdown) => shutdown()));
+  });
   const staticClient = await createProtectedStaticClient(await root(bundleDir));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const usersRoot = await root(usersDir);
   const expiresAt = Date.now() + 120_000;
   const verifyIdentity: ProtectedIdentityVerifier = async (request) => {
@@ -342,8 +393,6 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     };
   };
   const submitted = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  t.after(() => release.resolve());
   const origin = "https://family.example";
   const catalogExtensions = [protectedResearchAgent];
   const open = async (
@@ -359,6 +408,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       description: string;
       instructions: string;
       tools: readonly string[];
+      systemPrompt: string;
     }> = [];
     const app = createProtectedHttp({
       origin,
@@ -395,6 +445,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     });
     const server = createProtectedServer(origin, app.fetch, staticClient);
     const url = await listen(server);
+    let shutdownPromise: Promise<void> | undefined;
+    const shutdown = () => (shutdownPromise ??= closeProtectedServer(server, app, stateDir));
+    shutdownApps.push(shutdown);
     const call = (user: string, route: string, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       headers.set("origin", headers.get("origin") ?? origin);
@@ -403,9 +456,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       return fetch(`${url}/api/protected/v1${route}`, { ...init, headers });
     };
     return {
-      server,
       url,
       call,
+      shutdown,
       observedAgents,
       revokeProfile: (id: string) => app.revokeProfile(id),
     };
@@ -419,7 +472,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       thinking: { levels: ["low", "medium", "ultra"], default: "ultra" },
     },
   ]);
-  t.after(() => close(first.server));
+  t.after(() => first.shutdown());
   // The proof route answers from its own assertion; entering the verifier here would recurse.
   const proof = await fetch(`${first.url}/api/protected/v1/access-proof?challenge=c`);
   assert.deepEqual(await proof.json(), {
@@ -488,15 +541,27 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.deepEqual(automationCatalog.capabilities.automations, {
     catalog: true,
     draftValidation: true,
-    list: false,
-    create: false,
+    list: true,
+    create: true,
     scheduleControl: false,
     run: false,
     sharing: false,
     notifications: false,
   });
-  assert.equal(automationCatalog.defaultAgentId, "travel");
-  assert.ok(automationCatalog.agents.some((agent: { id: string }) => agent.id === "travel"));
+  assert.equal(automationCatalog.defaultAgentId, "grogu");
+  assert.deepEqual(
+    automationCatalog.agents.map((agent: { id: string }) => agent.id),
+    ["grogu", "travel"],
+  );
+  assert.equal(automationCatalogResponse.headers.get("vary"), "X-Alcove-Capabilities");
+  const automationCatalogV1 = await (
+    await first.call("alice", "/automations/catalog", {
+      headers: { "x-alcove-capabilities": "profile-v1, agents-v1" },
+    })
+  ).json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogV1Schema, automationCatalogV1), true);
+  assert.equal(Value.Check(ProtectedAutomationCatalogSchema, automationCatalogV1), false);
+  assert.deepEqual({ ...automationCatalogV1, agents: automationCatalog.agents }, automationCatalog);
   assert.deepEqual(automationCatalog.schedule.everyMs, {
     minimum: 1,
     maximum: 8_640_000_000_000_000,
@@ -537,6 +602,85 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     valid: true,
     draft: { ...automationDraft, thinking: "ultra" },
   });
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://synthetic.example", subject }),
+      "added",
+    );
+  }
+  const invalidEnabledCreate = await first.call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify({ ...automationDraft, enabled: true }),
+  });
+  assert.equal(invalidEnabledCreate.status, 422);
+  const createdAutomationResponse = await first.call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(automationDraft),
+  });
+  assert.equal(createdAutomationResponse.status, 201);
+  const createdAutomationBody = await createdAutomationResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationResponseSchema, createdAutomationBody), true);
+  const createdAutomation = createdAutomationBody.automation;
+  assert.equal(createdAutomation.enabled, false);
+  assert.equal(createdAutomation.state, "paused");
+  assert.equal(createdAutomation.version, "1");
+  assert.equal(createdAutomation.nextCheckAt, null);
+  const automationListResponse = await first.call("alice", "/automations");
+  assert.equal(automationListResponse.status, 200);
+  const automationList = await automationListResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationListResponseSchema, automationList), true);
+  assert.deepEqual(
+    automationList.automations.map((automation: { id: string }) => automation.id),
+    [createdAutomation.id],
+  );
+  const updatedAutomationResponse = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+    {
+      method: "PATCH",
+      headers: { "if-match": createdAutomation.version },
+      body: JSON.stringify({ enabled: false, name: "Updated synthetic morning summary" }),
+    },
+  );
+  assert.equal(updatedAutomationResponse.status, 200);
+  const updatedAutomationBody = await updatedAutomationResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationResponseSchema, updatedAutomationBody), true);
+  assert.equal(updatedAutomationBody.automation.name, "Updated synthetic morning summary");
+  assert.equal(updatedAutomationBody.automation.enabled, false);
+  assert.equal(updatedAutomationBody.automation.state, "paused");
+  assert.equal(updatedAutomationBody.automation.version, "2");
+  const staleAutomationPatch = await first.call("alice", `/automations/${createdAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": createdAutomation.version },
+    body: JSON.stringify({ name: "Stale update" }),
+  });
+  assert.equal(staleAutomationPatch.status, 412);
+  const unavailableAutomationStart = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+    {
+      method: "PATCH",
+      headers: { "if-match": updatedAutomationBody.automation.version },
+      body: JSON.stringify({ enabled: true }),
+    },
+  );
+  assert.equal(unavailableAutomationStart.status, 503);
+  assert.equal((await unavailableAutomationStart.json()).error.code, "scheduler_unavailable");
+  const bobAutomationRead = await first.call("bob", `/automations/${createdAutomation.id}`);
+  assert.equal(bobAutomationRead.status, 404);
+  const bobAutomationPatch = await first.call("bob", `/automations/${createdAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": updatedAutomationBody.automation.version },
+    body: JSON.stringify({ name: "Bob's update" }),
+  });
+  assert.equal(bobAutomationPatch.status, 404);
+  const unchangedAfterRejectedStart = await first.call(
+    "alice",
+    `/automations/${createdAutomation.id}`,
+  );
+  const unchangedAutomation = await unchangedAfterRejectedStart.json();
+  assert.equal(unchangedAutomation.automation.version, "2");
+  assert.equal(unchangedAutomation.automation.enabled, false);
   const maximumName = "😀".repeat(40);
   const maximumNameResponse = await first.call("alice", "/automations/drafts/validate", {
     method: "POST",
@@ -637,11 +781,20 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     draft: { ...calendarDraft, thinking: "ultra" },
   });
   assert.equal(first.observedAgents.length, 0);
-  assert.equal((await (await first.call("alice", "/storage/chats")).json()).usedBytes, 0);
+  const automationStorage = await (await first.call("alice", "/storage/chats")).json();
+  assert.ok(automationStorage.usedBytes > 0);
+  assert.deepEqual(automationStorage.chats, []);
   const catalogResponse = await first.call("alice", "/agents");
   assert.equal(catalogResponse.status, 200);
+  assert.equal(catalogResponse.headers.get("vary"), "X-Alcove-Capabilities");
   const catalog = await catalogResponse.json();
-  assert.equal(catalog.defaultAgentId, "travel");
+  assert.equal(Value.Check(ProtectedAgentCatalogSchema, catalog), true);
+  assert.equal(catalog.defaultAgentId, "grogu");
+  // Shipped strict clients get only new-chat choices, without metadata or tool names they reject.
+  assert.deepEqual(
+    catalog.agents.map((agent: { id: string }) => agent.id),
+    ["grogu", "travel"],
+  );
   assert.deepEqual(catalog.agents.find((agent: { id: string }) => agent.id === "travel")?.tools, [
     "web_fetch",
     "show_widget",
@@ -650,28 +803,92 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     "sessions_send",
   ]);
   assert.doesNotMatch(JSON.stringify(catalog), /Use concise, evidence-based summaries/);
+  const catalogV1Response = await first.call("alice", "/agents", {
+    headers: { "x-alcove-capabilities": "agents-v1" },
+  });
+  assert.equal(catalogV1Response.headers.get("vary"), "X-Alcove-Capabilities");
+  const catalogV1 = await catalogV1Response.json();
+  assert.equal(Value.Check(ProtectedAgentCatalogV1Schema, catalogV1), true);
+  assert.deepEqual(
+    catalogV1.agents.map((agent: { id: string; selectable: boolean }) => [
+      agent.id,
+      agent.selectable,
+    ]),
+    [
+      ["grogu", true],
+      ["travel", true],
+      ["general", false],
+      ["research", false],
+    ],
+  );
+  const [groguV1, travelV1] = catalogV1.agents;
+  assert.deepEqual(groguV1.presentation, {
+    icon: "grogu",
+    reasoningIndicator: "grogu-eater",
+    widgetWidth: "standard",
+  });
+  assert.deepEqual(travelV1.presentation, {
+    icon: "plane",
+    reasoningIndicator: "standard",
+    widgetWidth: "wide",
+  });
+  assert.deepEqual(
+    travelV1.skills.map((skill: { id: string }) => skill.id),
+    ["travel-dashboard"],
+  );
+  assert.equal(groguV1.examplePrompts.length, 4);
+  assert.ok(groguV1.tools.includes("web_search"));
+  assert.ok(!groguV1.tools.includes("sessions_search"));
+  for (const agent of catalogV1.agents) {
+    assert.deepEqual(agent.tools, groguV1.tools, "every agent shares one tool surface");
+  }
+  // Instructions and skill guidance stay server-side.
+  assert.doesNotMatch(
+    JSON.stringify(catalogV1),
+    /evidence-based summaries|careful travel planner|trip-head/i,
+  );
   const created = await first.call("alice", "/chats", {
     method: "POST",
     body: '{"title":"Alice private"}',
   });
-  assert.equal(created.status, 200);
+  assert.equal(created.status, 200, await created.clone().text());
   const { chat } = await created.json();
-  assert.equal(chat.selectedAgentId, "travel");
+  assert.equal(chat.selectedAgentId, "grogu");
   const route = `/chats/${chat.id}`;
-  const selected = await first.call("alice", `${route}/agent`, {
+  const retiredSelection = await first.call("alice", `${route}/agent`, {
     method: "PATCH",
     headers: { "if-match": chat.version },
     body: '{"selectedAgentId":"general"}',
   });
+  assert.equal(retiredSelection.status, 422);
+  assert.equal((await retiredSelection.json()).error.code, "agent_unavailable");
+  // A chat saved while Research was selectable keeps it after Research leaves the new-chat choices.
+  const earlierRuntime = await open(1, [{ ...protectedResearchAgent, selectable: true }]);
+  t.after(() => earlierRuntime.shutdown());
+  const selected = await earlierRuntime.call("alice", `${route}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": chat.version },
+    body: '{"selectedAgentId":"research"}',
+  });
   assert.equal(selected.status, 200);
   const selectedChat = (await selected.json()).chat;
-  assert.equal(selectedChat.selectedAgentId, "general");
+  assert.equal(selectedChat.selectedAgentId, "research");
   const reloadedRuntime = await open(1, catalogExtensions);
-  t.after(() => close(reloadedRuntime.server));
+  t.after(() => reloadedRuntime.shutdown());
   assert.equal((await reloadedRuntime.call("alice", "/automations/catalog")).status, 404);
   const reloadedChat = await reloadedRuntime.call("alice", route);
   assert.equal(reloadedChat.status, 200);
-  assert.equal((await reloadedChat.json()).chat.selectedAgentId, "general");
+  assert.equal((await reloadedChat.json()).chat.selectedAgentId, "research");
+  assert.equal(
+    (
+      await first.call("alice", `${route}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": selectedChat.version },
+        body: '{"selectedAgentId":"research"}',
+      })
+    ).status,
+    422,
+  );
   assert.equal(
     (
       await first.call("alice", `${route}/agent`, {
@@ -706,7 +923,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       title: "Alice private",
       version: selectedChat.version,
       updatedAt: selectedChat.updatedAt,
-      approximateBytes: storage.usedBytes,
+      approximateBytes: storage.usedBytes - automationStorage.usedBytes,
     },
   ]);
   assert.deepEqual(await (await first.call("bob", "/storage/chats")).json(), {
@@ -734,6 +951,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     ).status,
     422,
   );
+  const retiredMention = await first.call("alice", `${route}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": user.id },
+    body: '{"provider":"anthropic","text":"@research Hello","credential":{"accessToken":"synthetic-only"},"mentions":[{"agentId":"research"}]}',
+  });
+  assert.equal(retiredMention.status, 422);
+  assert.equal((await retiredMention.json()).error.code, "agent_unavailable");
   assert.equal((await first.call("alice", `${route}/turns`, turn)).status, 403);
   const running = await first.call("alice", `${route}/turns`, {
     ...turn,
@@ -741,8 +965,12 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   });
   assert.equal(running.status, 200);
   await submitted.promise;
-  assert.equal(first.observedAgents[0]?.id, "general");
-  assert.match(first.observedAgents[0]?.instructions ?? "", /general questions/);
+  assert.equal(first.observedAgents[0]?.id, "research");
+  assert.match(first.observedAgents[0]?.instructions ?? "", /evidence-based summaries/);
+  assert.match(
+    first.observedAgents[0]?.systemPrompt ?? "",
+    /^# Alcove\n[\s\S]*\n## Current agent: Research \(research\)\n\nUse concise/u,
+  );
   assert.equal(
     (
       await first.call("alice", `${route}/agent`, {
@@ -862,7 +1090,11 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     );
     assert.deepEqual(providerCalls, []);
     for (const [provider, verificationUrl, accessToken] of [
-      ["github-copilot", "https://github.com/login/device", "synthetic-github"],
+      [
+        "github-copilot",
+        "https://github.com/login/device",
+        bindGithubCopilotToken("synthetic-github", "github.com"),
+      ],
       ["openai", "https://auth.openai.com/codex/device", openaiAccess],
     ]) {
       const connect = `/providers/${provider}/connect`;
@@ -924,10 +1156,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
   assert.equal((await (await first.call("bob", "/storage/chats")).json()).usedBytes, 0);
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
-  await close(first.server);
+  await first.shutdown();
 
   const reopened = await open(Number.MAX_SAFE_INTEGER);
-  t.after(() => close(reopened.server));
   assert.equal((await reopened.call("alice", "/me")).status, 401);
   assert.equal((await reopened.call("bob", "/me")).status, 401);
   const lowDisk = await reopened.call("carol", "/chats", { method: "POST", body: "{}" });
@@ -986,13 +1217,19 @@ void test("Family directory lists admitted people and isolates the development i
     });
     const server = createProtectedServer(origin, app.fetch);
     const url = await listen(server);
-    const call = (user: keyof typeof subjects, route: string, init?: RequestInit) =>
+    const call = (
+      user: keyof typeof subjects,
+      route: string,
+      init?: RequestInit,
+      profileCapability = true,
+    ) =>
       fetch(`${url}/api/protected/v1${route}`, {
         ...init,
         headers: {
           origin,
           cookie: `synthetic=${user}`,
           "content-type": "application/json",
+          ...(profileCapability ? { "x-alcove-capabilities": "profile-v1" } : {}),
           ...init?.headers,
         },
       });
@@ -1003,15 +1240,82 @@ void test("Family directory lists admitted people and isolates the development i
   const alice = (await (await first.call("alice", "/me")).json()).user;
   const bob = (await (await first.call("bob", "/me")).json()).user;
   const development = (await (await first.call("development", "/me")).json()).user;
-  assert.deepEqual((await (await first.call("alice", "/account")).json()).directory, {
-    description: "",
-    hidden: false,
+  for (const capabilities of [undefined, "", "profile-v10, unknown-v1"]) {
+    const headers: Record<string, string> =
+      capabilities === undefined ? {} : { "x-alcove-capabilities": capabilities };
+    const legacyMe = await first.call("alice", "/me", { headers }, false);
+    assert.deepEqual((await legacyMe.json()).user, { id: alice.id, displayName: "User" });
+    const legacyAccount = await first.call("alice", "/account", { headers }, false);
+    assert.deepEqual((await legacyAccount.json()).user, {
+      id: alice.id,
+      displayName: "Family member",
+    });
+    const legacyPeople = await first.call("alice", "/people", { headers }, false);
+    assert.ok(
+      (await legacyPeople.json()).people.every(
+        (person: Record<string, unknown>) => !Object.hasOwn(person, "icon"),
+      ),
+    );
+    assert.equal(legacyMe.headers.get("vary"), "X-Alcove-Capabilities");
+    assert.equal(legacyAccount.headers.get("vary"), "X-Alcove-Capabilities");
+    assert.equal(legacyPeople.headers.get("vary"), "X-Alcove-Capabilities");
+  }
+  assert.deepEqual(alice, { id: alice.id, displayName: "", setupRequired: true, icon: null });
+  const combined = await first.call("alice", "/me", {
+    headers: { "x-alcove-capabilities": "agents-v1, profile-v1 ,unknown-v2" },
+  });
+  assert.deepEqual((await combined.json()).user, alice);
+  assert.equal(combined.headers.get("vary"), "X-Alcove-Capabilities");
+  assert.deepEqual(await (await first.call("alice", "/account")).json(), {
+    user: { id: alice.id, displayName: "", setupRequired: true, icon: null },
+    directory: { description: "", hidden: false },
   });
   assert.equal((await (await first.call("development", "/account")).json()).directory.hidden, true);
   const put = (user: keyof typeof subjects, route: string, value: unknown) =>
     first.call(user, route, { method: "PUT", body: JSON.stringify(value) });
 
-  assert.equal((await put("alice", "/account/name", { displayName: "Alice" })).status, 200);
+  // Setup saves About and icon before the name; only the name completes setup.
+  assert.equal(
+    (await put("alice", "/account/directory-settings", { description: "", hidden: false })).status,
+    200,
+  );
+  const emoji = await put("alice", "/account/icon", { icon: { kind: "emoji", emoji: "🦊" } });
+  assert.equal(emoji.status, 200);
+  assert.deepEqual(await emoji.json(), { icon: { kind: "emoji", emoji: "🦊" } });
+  assert.equal((await (await first.call("alice", "/me")).json()).user.setupRequired, true);
+  const named = await put("alice", "/account/name", { displayName: " Alice " });
+  assert.equal(named.status, 200);
+  assert.deepEqual((await named.json()).user, {
+    id: alice.id,
+    displayName: "Alice",
+    setupRequired: false,
+    icon: { kind: "emoji", emoji: "🦊" },
+  });
+  assert.equal((await (await first.call("alice", "/me")).json()).user.setupRequired, false);
+  const legacyNamed = await first.call(
+    "alice",
+    "/account/name",
+    { method: "PUT", body: JSON.stringify({ displayName: "Alice" }) },
+    false,
+  );
+  assert.deepEqual((await legacyNamed.json()).user, { id: alice.id, displayName: "Alice" });
+  assert.equal(legacyNamed.headers.get("vary"), "X-Alcove-Capabilities");
+  for (const icon of [
+    { kind: "emoji", emoji: "ab" },
+    { kind: "emoji", emoji: "🦊🦊" },
+    { kind: "image", url: `/api/protected/v1/people/${alice.id}/icon?v=x` },
+  ]) {
+    assert.equal((await put("alice", "/account/icon", { icon })).status, 400);
+  }
+  const family = await put("alice", "/account/icon", {
+    icon: { kind: "emoji", emoji: "👨‍👩‍👧" },
+  });
+  assert.deepEqual(await family.json(), { icon: { kind: "emoji", emoji: "👨‍👩‍👧" } });
+  assert.deepEqual(await (await put("alice", "/account/icon", { icon: null })).json(), {
+    icon: null,
+  });
+  assert.equal((await (await first.call("alice", "/account")).json()).user.icon, null);
+
   assert.equal((await put("bob", "/account/name", { displayName: "Bob" })).status, 200);
   assert.equal(
     (
@@ -1032,13 +1336,104 @@ void test("Family directory lists admitted people and isolates the development i
   assert.deepEqual(
     (await list("alice")).toSorted((a, b) => a.displayName.localeCompare(b.displayName)),
     [
-      { id: alice.id, displayName: "Alice", description: "" },
-      { id: bob.id, displayName: "Bob", description: "Enjoys books" },
+      { id: alice.id, displayName: "Alice", description: "", icon: null },
+      { id: bob.id, displayName: "Bob", description: "Enjoys books", icon: null },
     ],
   );
   assert.deepEqual(await list("development"), []);
   assert.notEqual(development.id, alice.id);
   assert.notEqual(development.id, bob.id);
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const upload = (user: keyof typeof subjects, bytes: Buffer, type: string) =>
+    first.call(user, "/account/icon/image", {
+      method: "PUT",
+      body: new Uint8Array(bytes),
+      headers: { "content-type": type },
+    });
+  const rejected = async (response: Response) => [
+    response.status,
+    (await response.json()).error.code,
+  ];
+  assert.deepEqual(await rejected(await upload("bob", png, "image/gif")), [
+    415,
+    "icon_unsupported_type",
+  ]);
+  assert.deepEqual(await rejected(await upload("bob", png, "image/jpeg")), [
+    415,
+    "icon_unsupported_type",
+  ]);
+  // Declare an oversized body without sending it; the server must refuse from the header.
+  const oversized = await new Promise<number | undefined>((resolve, reject) => {
+    const address = first.server.address();
+    assert.ok(address && typeof address !== "string");
+    const pending = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: "PUT",
+        path: "/api/protected/v1/account/icon/image",
+        headers: {
+          origin,
+          cookie: "synthetic=bob",
+          "content-type": "image/png",
+          "content-length": String(512 * 1024 + 1),
+        },
+      },
+      (response) => {
+        response.resume();
+        pending.destroy();
+        resolve(response.statusCode);
+      },
+    );
+    pending.on("error", reject);
+    pending.flushHeaders();
+  });
+  assert.equal(oversized, 413);
+  const uploaded = await upload("bob", png, "image/png");
+  assert.equal(uploaded.status, 200);
+  const bobIcon = (await uploaded.json()).icon;
+  const revision = createHash("sha256").update(png).digest("hex");
+  assert.deepEqual(bobIcon, {
+    kind: "image",
+    url: `/api/protected/v1/people/${bob.id}/icon?v=${revision}-png`,
+  });
+  assert.deepEqual((await list("alice")).find((person) => person.id === bob.id)?.icon, bobIcon);
+  const legacyPeople = (await (await first.call("alice", "/people", undefined, false)).json()) as {
+    people: Array<Record<string, unknown>>;
+  };
+  assert.deepEqual(
+    legacyPeople.people.find((person) => person.id === bob.id),
+    { id: bob.id, displayName: "Bob", description: "Enjoys books" },
+  );
+  const iconRoute = bobIcon.url.slice("/api/protected/v1".length);
+  for (const user of ["bob", "alice"] as const) {
+    const served = await first.call(user, iconRoute);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "image/png");
+    assert.equal(served.headers.get("cache-control"), "private, no-cache");
+    assert.equal(served.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), png);
+    const cached = await first.call(user, iconRoute, {
+      headers: { "if-none-match": served.headers.get("etag")! },
+    });
+    assert.equal(cached.status, 304);
+  }
+  assert.equal((await first.call("development", iconRoute)).status, 404);
+  assert.equal((await first.call("alice", `/people/${randomUUID()}/icon`)).status, 404);
+  assert.equal((await first.call("alice", `/people/${alice.id}/icon`)).status, 404);
+  assert.equal(
+    (await put("bob", "/account/icon", { icon: { kind: "emoji", emoji: "📚" } })).status,
+    200,
+  );
+  assert.equal((await first.call("bob", iconRoute)).status, 404);
+  assert.equal((await upload("development", png, "image/png")).status, 200);
+  assert.equal((await first.call("development", `/people/${development.id}/icon`)).status, 200);
+  assert.equal((await first.call("alice", `/people/${development.id}/icon`)).status, 404);
+  assert.equal((await put("bob", "/account/icon", { icon: null })).status, 200);
 
   const hide = await put("bob", "/account/directory-settings", {
     description: "Not published",
@@ -1081,6 +1476,7 @@ void test("Family directory lists admitted people and isolates the development i
       id: bob.id,
       displayName: "Bob",
       description: "",
+      icon: null,
     },
   );
   assert.equal(
@@ -1103,8 +1499,8 @@ void test("Family directory lists admitted people and isolates the development i
       a.displayName.localeCompare(b.displayName),
     ),
     [
-      { id: alice.id, displayName: "Alice", description: "" },
-      { id: bob.id, displayName: "Bob", description: "" },
+      { id: alice.id, displayName: "Alice", description: "", icon: null },
+      { id: bob.id, displayName: "Bob", description: "", icon: null },
     ],
   );
   assert.deepEqual((await (await reopened.call("bob", "/account")).json()).directory, {
@@ -1192,6 +1588,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
     "Set an isolated OPENCLAW_STATE_DIR under .artifacts/protected-proof-*.",
   );
+  protectedTestStateDirs.add(stateDir);
   const usersDir = path.join(stateDir, "users");
   const workspaceDir = path.join(stateDir, "workspace");
   const agentDir = path.join(stateDir, "agents", "protected", "agent");
@@ -1222,9 +1619,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   t.after(() => offlineRelease.resolve());
   t.after(() => failedOfflineRelease.resolve());
   const sourceUrl = "https://example.com/family-source";
+  const routePrompt = "Hand this trip to the right agent.";
+  const routeBrief = "Plan a relaxed weekend in Lisbon for two adults.";
+  const selfRoutePrompt = "Hand this request back to yourself.";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
-  const githubToken = `gho_family_${suffix}`;
+  const rawGithubToken = `gho_family_${suffix}`;
+  // Clients hold the relay producer's github.com-bound credential.
+  const githubToken = bindGithubCopilotToken(rawGithubToken, "github.com");
+  const hostTenant = "host-tenant.ghe.com";
   const anthropicKey = `sk-ant-family-${suffix}`;
   const openaiRefresh = `family-refresh-${suffix}`;
   const accountId = "family-synthetic-account";
@@ -1234,10 +1637,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     }),
   ).toString("base64url")}.family-${suffix}`;
   const fallback = `host-fallback-${suffix}`;
-  const ambient = ["COPILOT_GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
+  const ambient = [
+    "COPILOT_GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "COPILOT_GITHUB_DOMAIN",
+  ];
   const prior = ambient.map((key) => process.env[key]);
   for (const key of ambient) {
-    process.env[key] = fallback;
+    process.env[key] = key === "COPILOT_GITHUB_DOMAIN" ? hostTenant : fallback;
   }
   t.after(() =>
     ambient.forEach((key, index) => {
@@ -1283,6 +1691,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
           key: headers.get("x-api-key"),
         });
         switch (endpoint) {
+          case `https://api.${hostTenant}/copilot_internal/user`:
+            return new Response(null, { status: 401 });
           case "https://api.github.com/copilot_internal/user":
             if (headers.get("authorization") === "Bearer denied-synthetic") {
               return new Response(null, { status: 401 });
@@ -1431,9 +1841,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       const researchTurn = JSON.stringify(body.messages).includes(
         "Use concise, evidence-based summaries.",
       );
+      // Selectable agents' intents are in the shared header, so match the current-agent section.
       const cleanupTurn = JSON.stringify(body.messages).includes(
-        "Create a widget so transient files are cleaned.",
+        "## Current agent: Cleanup proof (cleanup)",
       );
+      const groguTurn = JSON.stringify(body.messages).includes("## Current agent: Grogu (grogu)");
+      const routeArguments = JSON.stringify(body.messages).includes(routePrompt)
+        ? { agentId: "travel", brief: routeBrief }
+        : JSON.stringify(body.messages).includes(selfRoutePrompt)
+          ? { agentId: "grogu", brief: "Answer it yourself." }
+          : undefined;
       const hasToolResponse = body.messages.some(
         (message: { role?: string }) => message.role === "tool",
       );
@@ -1441,17 +1858,20 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         "Inspect my permitted sessions.",
       );
       const frames =
-        (cleanupTurn || finalWidgetTurn) && !hasToolResponse
+        groguTurn && routeArguments && !hasToolResponse
           ? [
+              [{ role: "assistant", content: "Travel will help with this." }, null],
               [
                 {
-                  role: "assistant",
                   tool_calls: [
                     {
                       index: 0,
-                      id: "call_widget_cleanup",
+                      id: "call_route",
                       type: "function",
-                      function: { name: "show_widget", arguments: widgetArguments },
+                      function: {
+                        name: "route_to_agent",
+                        arguments: JSON.stringify(routeArguments),
+                      },
                     },
                   ],
                 },
@@ -1459,7 +1879,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
               ],
               [{}, "tool_calls"],
             ]
-          : sessionListTurn && !hasToolResponse && sessionHistoryTargets
+          : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
             ? [
                 [
                   {
@@ -1467,34 +1887,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_sessions_list",
+                        id: "call_widget_cleanup",
                         type: "function",
-                        function: {
-                          name: "sessions_list",
-                          arguments: JSON.stringify({ limit: 25 }),
-                        },
-                      },
-                      {
-                        index: 1,
-                        id: "call_sessions_history_owned",
-                        type: "function",
-                        function: {
-                          name: "sessions_history",
-                          arguments: JSON.stringify({
-                            sessionKey: sessionHistoryTargets.permitted,
-                          }),
-                        },
-                      },
-                      {
-                        index: 2,
-                        id: "call_sessions_history_foreign",
-                        type: "function",
-                        function: {
-                          name: "sessions_history",
-                          arguments: JSON.stringify({
-                            sessionKey: sessionHistoryTargets.foreign,
-                          }),
-                        },
+                        function: { name: "show_widget", arguments: widgetArguments },
                       },
                     ],
                   },
@@ -1502,7 +1897,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 ],
                 [{}, "tool_calls"],
               ]
-            : researchTurn && !hasToolResponse
+            : sessionListTurn && !hasToolResponse && sessionHistoryTargets
               ? [
                   [
                     {
@@ -1510,11 +1905,33 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                       tool_calls: [
                         {
                           index: 0,
-                          id: "call_fetch_research",
+                          id: "call_sessions_list",
                           type: "function",
                           function: {
-                            name: "web_fetch",
-                            arguments: JSON.stringify({ url: sourceUrl }),
+                            name: "sessions_list",
+                            arguments: JSON.stringify({ limit: 25 }),
+                          },
+                        },
+                        {
+                          index: 1,
+                          id: "call_sessions_history_owned",
+                          type: "function",
+                          function: {
+                            name: "sessions_history",
+                            arguments: JSON.stringify({
+                              sessionKey: sessionHistoryTargets.permitted,
+                            }),
+                          },
+                        },
+                        {
+                          index: 2,
+                          id: "call_sessions_history_foreign",
+                          type: "function",
+                          function: {
+                            name: "sessions_history",
+                            arguments: JSON.stringify({
+                              sessionKey: sessionHistoryTargets.foreign,
+                            }),
                           },
                         },
                       ],
@@ -1523,23 +1940,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   ],
                   [{}, "tool_calls"],
                 ]
-              : !researchTurn && seen.length === 1
+              : researchTurn && !hasToolResponse
                 ? [
-                    [{ role: "assistant", reasoning_content: "Check the source. " }, null],
-                    [{ reasoning_content: "Prepare the widget." }, null],
                     [
                       {
                         role: "assistant",
                         tool_calls: [
                           {
                             index: 0,
-                            id: "call_widget_1",
-                            type: "function",
-                            function: { name: "show_widget", arguments: widgetArguments },
-                          },
-                          {
-                            index: 1,
-                            id: "call_fetch_1",
+                            id: "call_fetch_research",
                             type: "function",
                             function: {
                               name: "web_fetch",
@@ -1552,10 +1961,39 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     ],
                     [{}, "tool_calls"],
                   ]
-                : [
-                    [{ role: "assistant", content: "Committed synthetic answer." }, null],
-                    [{}, "stop"],
-                  ];
+                : !researchTurn && seen.length === 1
+                  ? [
+                      [{ role: "assistant", reasoning_content: "Check the source. " }, null],
+                      [{ reasoning_content: "Prepare the widget." }, null],
+                      [
+                        {
+                          role: "assistant",
+                          tool_calls: [
+                            {
+                              index: 0,
+                              id: "call_widget_1",
+                              type: "function",
+                              function: { name: "show_widget", arguments: widgetArguments },
+                            },
+                            {
+                              index: 1,
+                              id: "call_fetch_1",
+                              type: "function",
+                              function: {
+                                name: "web_fetch",
+                                arguments: JSON.stringify({ url: sourceUrl }),
+                              },
+                            },
+                          ],
+                        },
+                        null,
+                      ],
+                      [{}, "tool_calls"],
+                    ]
+                  : [
+                      [{ role: "assistant", content: "Committed synthetic answer." }, null],
+                      [{}, "stop"],
+                    ];
       for (const [delta, finish_reason] of frames) {
         response.write(
           `data: ${JSON.stringify({
@@ -1584,19 +2022,31 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   t.after(() => close(provider));
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
-  const serviceConfig = protectedOpenClawConfig(stateDir);
+  const serviceConfig = protectedOpenClawConfig(
+    stateDir,
+    fileURLToPath(new URL("../..", import.meta.url)),
+  );
   const encryption = createStorageValueEncryption(randomBytes(32));
   t.after(() => encryption.dispose());
   const protectedConfig: OpenClawConfig = {
     ...serviceConfig,
     agents: {
       ...serviceConfig.agents,
-      defaults: { models: { "openai/gpt-5.6-luna": { params: { transport: "sse" } } } },
+      defaults: {
+        ...serviceConfig.agents?.defaults,
+        models: { "openai/gpt-5.6-luna": { params: { transport: "sse" } } },
+      },
       entries: { protected: { workspace: workspaceDir, agentDir } },
     },
     models: {
       mode: "replace" as const,
       providers: {
+        // Conflicting ambient tenant config; bound relay credentials must ignore it.
+        "github-copilot": {
+          baseUrl: `https://copilot-api.${hostTenant}`,
+          params: { githubDomain: hostTenant },
+          models: [],
+        },
         sparky: {
           baseUrl: `${providerOrigin}/v1`,
           api: "openai-completions",
@@ -1691,7 +2141,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     return { call, shutdown };
   };
   const { call, shutdown } = await open();
-  const { user, models: fixedModels } = await (await call("/me")).json();
+  const me = await call("/me");
+  assert.equal(me.status, 200, await me.clone().text());
+  const { user, models: fixedModels } = await me.json();
   const sparkyModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "sparky",
   );
@@ -1712,7 +2164,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       .aliases,
     ["adaptive"],
   );
-  const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+  const created = await call("/chats", { method: "POST", body: "{}" });
+  assert.equal(created.status, 200, await created.clone().text());
+  const { chat } = await created.json();
   const response = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Reply briefly"}',
@@ -1769,15 +2223,32 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     outputTokens: 4,
   });
   assert.equal(seen[0]?.auth, "Bearer synthetic-request-only-key");
-  const tools = seen[0]?.body.tools?.map((tool) => tool.function.name) ?? [];
-  assert.deepEqual([...tools].toSorted(), [
+  const sharedTools = [
     "sessions_history",
     "sessions_list",
     "sessions_send",
     "show_widget",
     "web_fetch",
-  ]);
-  assert.ok(tools.includes("show_widget"));
+    "web_search",
+  ];
+  const mainRunTools = ["route_to_agent", ...sharedTools];
+  // Core subagent policy withholds sessions_send from native children; they answer through the announce chain.
+  const childTools = sharedTools.filter((name) => name !== "sessions_send");
+  const toolNames = (request: (typeof seen)[number] | undefined) =>
+    request?.body.tools?.map((tool) => tool.function.name).toSorted();
+  const systemText = (request: (typeof seen)[number] | undefined) => {
+    const content = (request?.body.messages?.[0] as { content?: unknown } | undefined)?.content;
+    assert.equal(typeof content, "string", "the system prompt is the first request message");
+    return content as string;
+  };
+  const sharedPrefix = (request: (typeof seen)[number] | undefined) => {
+    const text = systemText(request);
+    const end = text.indexOf("\n## Current agent: ");
+    assert.ok(end > 0, "the request contains the Alcove current-agent section");
+    return text.slice(0, end);
+  };
+  assert.deepEqual(toolNames(seen[0]), mainRunTools);
+  assert.match(systemText(seen[0]), /\n# Alcove\n/);
   const { call: reopened } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
   assert.deepEqual(read.usage, {
@@ -1811,6 +2282,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const widgetResponse = await reopened(`/chats/${chat.id}/widgets/${widget.id}`);
   assert.equal(widgetResponse.status, 200);
   assert.match((await widgetResponse.json()).html, /Scoped widget body/);
+  const exported = await reopened("/export", {
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(exported.status, 200, await exported.clone().text());
+  const exportedChats = await exported.json();
+  assert.ok(exportedChats.chats.some((item: { id: string }) => item.id === chat.id));
+  assert.match(JSON.stringify(exportedChats), /Committed synthetic answer\./);
   const profileDirectory = path.join(usersDir, createHash("sha256").update(user.id).digest("hex"));
   const storedFiles = (
     await readdir(profileDirectory, { recursive: true, withFileTypes: true })
@@ -1872,15 +2350,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const childRequests = seen
     .slice(firstMentionedRequest)
     .filter(({ body }) =>
-      JSON.stringify(body.messages).includes("Create a widget so transient files are cleaned."),
+      JSON.stringify(body.messages).includes("## Current agent: Cleanup proof (cleanup)"),
     );
   assert.equal(childRequests.length, 2, "the native child executes its own instructions");
   for (const request of childRequests) {
     assert.equal(request.auth, "Bearer synthetic-request-only-key");
     assert.deepEqual(
-      request.body.tools?.map((tool) => tool.function.name),
-      ["show_widget"],
-      "the child receives only its admitted tool surface",
+      toolNames(request),
+      childTools,
+      "the child receives the shared tool surface without routing or cross-chat sends",
     );
   }
   const { chat: finalWidgetChat } = await (
@@ -1939,11 +2417,29 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   } finally {
     profileFiles.dispose();
   }
-  const selected = await reopened(`/chats/${chat.id}/agent`, {
+  const retiredSelection = await reopened(`/chats/${chat.id}/agent`, {
     method: "PATCH",
     headers: { "if-match": mentionedRead.chat.version },
     body: '{"selectedAgentId":"research"}',
   });
+  assert.equal(retiredSelection.status, 422);
+  // Research is retired from new selection; a chat saved while it was selectable keeps running it.
+  const earlierApp = createProtectedHttp({
+    ...options,
+    agentExtensions: [{ ...protectedResearchAgent, selectable: true }, protectedCleanupAgent],
+  });
+  t.after(() => earlierApp.shutdown());
+  const selected = await earlierApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${chat.id}/agent`, {
+      method: "PATCH",
+      headers: {
+        origin,
+        "content-type": "application/json",
+        "if-match": mentionedRead.chat.version,
+      },
+      body: '{"selectedAgentId":"research"}',
+    }),
+  );
   assert.equal(selected.status, 200);
   const firstResearchRequest = seen.length;
   const researchTurn = await reopened(`/chats/${chat.id}/turns`, {
@@ -1959,14 +2455,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       JSON.stringify(body.messages).includes("Use concise, evidence-based summaries."),
     );
   assert.ok(researchRequest, "the selected research agent reaches the synthetic provider");
-  assert.deepEqual(
-    researchRequest.body.tools?.map((tool) => tool.function.name),
-    ["web_fetch"],
-  );
-  assert.match(
-    JSON.stringify(researchRequest.body.messages),
-    /Use concise, evidence-based summaries/,
-  );
+  assert.deepEqual(toolNames(researchRequest), mainRunTools);
+  assert.match(systemText(researchRequest), /\n## Current agent: Research \(research\)\n/);
   const selectedRead = await (await reopened(`/chats/${chat.id}`)).json();
   assert.equal(selectedRead.chat.selectedAgentId, "research");
   const deleted = await reopened(`/chats/${chat.id}`, {
@@ -1975,6 +2465,104 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   });
   assert.equal(deleted.status, 204);
   assert.equal((await reopened(`/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
+
+  const { chat: travelChat } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  assert.equal(travelChat.selectedAgentId, "grogu");
+  const travelSelected = await reopened(`/chats/${travelChat.id}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": travelChat.version },
+    body: '{"selectedAgentId":"travel"}',
+  });
+  assert.equal(travelSelected.status, 200);
+  const firstTravelRequest = seen.length;
+  const travelTurn = await reopened(`/chats/${travelChat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Plan a weekend away."}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await travelTurn.text(), /"type":"done"/);
+  const travelRequest = seen[firstTravelRequest];
+  assert.match(systemText(travelRequest), /\n## Current agent: Travel \(travel\)\n/);
+  assert.match(systemText(travelRequest), /\n## Skill: Travel dashboard\n/);
+  assert.match(systemText(travelRequest), /```html\n<style>[\s\S]*<details class="day" open>/);
+  assert.doesNotMatch(systemText(seen[0]), /## Skill: Travel dashboard/);
+  // Earlier child runs must not seed workspace onboarding into later member prompts.
+  assert.doesNotMatch(systemText(travelRequest), /## Bootstrap Pending/);
+  // Grogu and Travel requests differ only after the shared header.
+  assert.deepEqual(travelRequest?.body.tools, seen[0]?.body.tools);
+  assert.equal(sharedPrefix(travelRequest), sharedPrefix(seen[0]));
+
+  const { chat: routedChat } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const firstRoutedRequest = seen.length;
+  const routedTurn = await reopened(`/chats/${routedChat.id}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: routePrompt }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.equal(routedTurn.status, 200);
+  const routedEvents = (await routedTurn.text())
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+  assert.equal(routedEvents.at(-1)?.type, "done", JSON.stringify(routedEvents));
+  assert.deepEqual(
+    routedEvents
+      .filter((event) => event.type === "child-result")
+      .map((event) => [event.agentId, event.text]),
+    [["travel", "Committed synthetic answer."]],
+  );
+  const routedRequests = seen.slice(firstRoutedRequest);
+  assert.equal(routedRequests.length, 2, "Grogu routes once and Travel answers once");
+  assert.match(systemText(routedRequests[0]), /\n## Current agent: Grogu \(grogu\)\n/);
+  const routedChild = routedRequests[1];
+  assert.match(systemText(routedChild), /\n## Current agent: Travel \(travel\)\n/);
+  assert.match(systemText(routedChild), /\n## Skill: Travel dashboard\n/);
+  assert.deepEqual(toolNames(routedChild), childTools, "a routed agent cannot route again");
+  assert.match(JSON.stringify(routedChild?.body.messages), new RegExp(routeBrief));
+  const routedRead = await (await reopened(`/chats/${routedChat.id}`)).json();
+  assert.deepEqual(
+    routedRead.chat.messages.map((message: { role: string; agentId?: string; text: string }) => [
+      message.role,
+      message.agentId,
+      message.text,
+    ]),
+    [
+      ["user", undefined, routePrompt],
+      ["assistant", undefined, "Travel will help with this."],
+      ["assistant", "travel", "Committed synthetic answer."],
+    ],
+  );
+  assert.equal(routedRead.chat.messages[1]?.status, "complete", "a routing reply reloads complete");
+  const { chat: selfRoutedChat } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const selfRouted = await reopened(`/chats/${selfRoutedChat.id}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: selfRoutePrompt }),
+    headers: { "x-grogu-profile": user.id },
+  });
+  const selfRoutedEvents = (await selfRouted.text())
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    selfRoutedEvents
+      .filter((event) => event.type === "error" || event.type === "child-result")
+      .map((event) => [event.type, event.code]),
+    [["error", "agent_failed"]],
+  );
+  for (const id of [travelChat.id, routedChat.id, selfRoutedChat.id]) {
+    const current = await (await reopened(`/chats/${id}`)).json();
+    const removed = await reopened(`/chats/${id}`, {
+      method: "DELETE",
+      headers: { "if-match": current.chat.version },
+    });
+    assert.equal(removed.status, 204, await removed.text());
+  }
 
   const foreignApp = createProtectedHttp({
     ...options,
@@ -2010,6 +2598,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     JSON.stringify(await foreignTranscript.json()),
     /Foreign profile private transcript marker/,
   );
+  const foreignRequest = seen.find(({ body }) =>
+    JSON.stringify(body.messages?.slice(1)).includes("Foreign profile private transcript marker"),
+  );
+  assert.equal(
+    sharedPrefix(foreignRequest),
+    sharedPrefix(seen[0]),
+    "members share the same header prefix",
+  );
+  assert.deepEqual(foreignRequest?.body.tools, seen[0]?.body.tools);
   const { chat: permitted } = await (
     await reopened("/chats", { method: "POST", body: "{}" })
   ).json();
@@ -2115,6 +2712,35 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.deepEqual(models[2].thinking.orchestrationLevels, ["ultra"]);
     assert.equal(models[2].thinking.default, "off");
   });
+  await t.test("unbound legacy credentials still follow the ambient tenant", async () => {
+    const before = providerRequests.length;
+    const legacy = await call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({ credential: { accessToken: rawGithubToken } }),
+    });
+    assert.equal(legacy.status, 401);
+    assert.equal((await legacy.json()).error.code, "provider_auth_failed");
+    assert.deepEqual(
+      providerRequests
+        .slice(before)
+        .map(({ endpoint, authorization }) => [endpoint, authorization]),
+      [[`https://api.${hostTenant}/copilot_internal/user`, `Bearer ${rawGithubToken}`]],
+    );
+  });
+  await t.test("rejects malformed bound credentials", async () => {
+    const before = providerRequests.length;
+    const malformed = await call("/providers/github-copilot/models", {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id },
+      body: JSON.stringify({
+        credential: { accessToken: "openclaw-github-copilot-token:v1:{" },
+      }),
+    });
+    assert.equal(malformed.status, 401);
+    assert.equal((await malformed.json()).error.code, "provider_auth_failed");
+    assert.equal(providerRequests.length, before);
+  });
   await t.test("rejects unavailable Copilot thinking levels", async () => {
     const rejected = await copilotTurn("max");
     assert.equal(rejected.status, 422);
@@ -2192,9 +2818,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         }),
         headers: { "x-grogu-profile": user.id },
       });
-    const before = providerRequests.length;
+    const requestsBeforeCredential = providerRequests.length;
     assert.match(await (await turn()).text(), /provider_credential_required/);
-    assert.equal(providerRequests.length, before);
+    assert.equal(providerRequests.length, requestsBeforeCredential);
     const result = await turn(credential);
     assert.equal(result.status, 200);
     const trace = await result.text();
@@ -2230,19 +2856,19 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     [
       {
         endpoint: "https://api.github.com/copilot_internal/user",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },
       {
         endpoint: "https://api.github.com/copilot_internal/user",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },
       {
         endpoint: "https://api.business.githubcopilot.com/responses",
-        authorization: `Bearer ${githubToken}`,
+        authorization: `Bearer ${rawGithubToken}`,
         account: null,
         key: null,
       },
@@ -2434,14 +3060,22 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   } finally {
     await restart.shutdown();
   }
-  for (const dir of [stateDir, process.env.HOME!]) {
-    for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-      if (entry.isFile()) {
-        const bytes = await readFile(path.join(entry.parentPath, entry.name));
-        assert.ok(
-          !bytes.includes(suffix),
-          `synthetic personal credential persisted in ${entry.name}`,
-        );
+  const plaintextMarkers = [
+    suffix,
+    "Reply briefly",
+    "Committed synthetic answer.",
+    "Scoped widget body",
+    "Synthetic widget",
+    sourceUrl,
+    "Family source evidence.",
+    offlinePrompt,
+  ];
+  for (const entry of await readdir(stateDir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) {
+      const filePath = path.join(entry.parentPath, entry.name);
+      const bytes = await readFile(filePath);
+      for (const marker of plaintextMarkers) {
+        assert.ok(!bytes.includes(marker), `plaintext marker persisted in ${filePath}`);
       }
     }
   }
@@ -2546,4 +3180,147 @@ void test("An in-flight session capability stops when its profile is merged", as
   assert.equal(staleAuthorityAccepted, false);
   assert.match(events, /"type":"error"/);
   assert.doesNotMatch(events, /Must not cross the profile merge|"type":"done"/);
+});
+
+void test("automation definitions consume member and global storage quota", async (t) => {
+  const stateDir = path.resolve(".artifacts", `automation-quota-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://quota.example";
+  const expiresAt = Date.now() + 120_000;
+  const options = {
+    origin,
+    stateDir,
+    accessIssuer: "https://identity.example",
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer: "https://identity.example",
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run() {
+        assert.fail("Automation quota proof does not run an agent.");
+      },
+      async steer() {
+        assert.fail("Automation quota proof does not steer an agent.");
+      },
+    },
+  };
+  const app = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 12_000, userBytes: 8_000, freeFloorBytes: 1 },
+  });
+  t.after(() => app.shutdown());
+  const call = (subject: string, route: string, init?: RequestInit) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  await call("alice", "/me");
+  await call("bob", "/me");
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://identity.example", subject }),
+      "added",
+    );
+  }
+  const draft = {
+    name: "Synthetic quota test",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const firstCreated = await call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(firstCreated.status, 201);
+  const firstAutomation = (await firstCreated.json()).automation;
+
+  const secondAliceCreate = await call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(secondAliceCreate.status, 413);
+  assert.equal((await secondAliceCreate.json()).error.code, "quota_exceeded");
+
+  const firstBobCreate = await call("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(firstBobCreate.status, 201);
+
+  const secondBobCreate = await call("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(secondBobCreate.status, 413);
+  assert.equal((await secondBobCreate.json()).error.code, "quota_exceeded");
+
+  const oversizedPatch = await call("alice", `/automations/${firstAutomation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": firstAutomation.version },
+    body: JSON.stringify({ instructions: "x".repeat(6_000) }),
+  });
+  assert.equal(oversizedPatch.status, 413);
+  assert.equal((await oversizedPatch.json()).error.code, "quota_exceeded");
+  const unchanged = await call("alice", `/automations/${firstAutomation.id}`);
+  const unchangedAutomation = (await unchanged.json()).automation;
+  assert.equal(unchangedAutomation.version, firstAutomation.version);
+  assert.equal(unchangedAutomation.instructions, draft.instructions);
+
+  const withoutStorageLimits = createProtectedHttp(options);
+  t.after(() => withoutStorageLimits.shutdown());
+  const catalogWithoutLimits = await withoutStorageLimits.fetch(
+    new Request(`${origin}/api/protected/v1/automations/catalog`, {
+      headers: { origin, cookie: "synthetic=alice" },
+    }),
+  );
+  const disabledCatalog = await catalogWithoutLimits.json();
+  assert.equal(disabledCatalog.capabilities.automations.list, false);
+  assert.equal(disabledCatalog.capabilities.automations.create, false);
+  const disabledCreate = await withoutStorageLimits.fetch(
+    new Request(`${origin}/api/protected/v1/automations`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie: "synthetic=alice",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(draft),
+    }),
+  );
+  assert.equal(disabledCreate.status, 404);
 });

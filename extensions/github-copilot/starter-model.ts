@@ -16,6 +16,7 @@ export async function resolveCopilotStarterModel(params: {
   githubToken: string;
   env?: NodeJS.ProcessEnv;
   githubDomain?: string;
+  boundGithubDomain?: string;
   config?: OpenClawConfig;
   signal?: AbortSignal;
 }): Promise<string> {
@@ -23,6 +24,7 @@ export async function resolveCopilotStarterModel(params: {
     githubToken: params.githubToken,
     ...(params.env ? { env: params.env } : {}),
     ...(params.githubDomain ? { githubDomain: params.githubDomain } : {}),
+    ...(params.boundGithubDomain ? { boundGithubDomain: params.boundGithubDomain } : {}),
     ...(params.config ? { config: params.config } : {}),
     ...(params.signal ? { signal: params.signal } : {}),
   });

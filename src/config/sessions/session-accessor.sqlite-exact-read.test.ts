@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ import {
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
+import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import {
   assignSessionOwner,
   listSessionChildEntriesReadOnly,
@@ -40,6 +42,50 @@ afterEach(() => {
 });
 
 describe("exact SQLite session batches", () => {
+  it("writes protected session metadata through the encrypted owner and reads it back", async () => {
+    await withOpenClawTestState({ label: "protected-session-entry-owner" }, async (state) => {
+      const keyPath = state.path("protected-storage.key");
+      await fs.writeFile(keyPath, Buffer.alloc(32, 0x47), { mode: 0o600 });
+      await fs.chmod(keyPath, 0o600);
+      state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+      state.applyEnv();
+
+      const scope = {
+        agentId: "main",
+        env: state.env,
+        sessionKey: "agent:main:protected-entry",
+      };
+      const entry = {
+        sessionId: "protected-entry-session",
+        updatedAt: 1,
+        title: "protected-entry-title-sentinel",
+        summary: "protected-entry-summary-sentinel",
+        skillsSnapshot: { prompt: "protected-entry-snapshot-sentinel", skills: [] },
+      };
+      replaceSessionEntrySync(scope, entry);
+
+      const database = openOpenClawAgentDatabase(scope);
+      const stored = database.db
+        .prepare("SELECT entry_json, label, display_name FROM session_nodes WHERE session_key = ?")
+        .get(scope.sessionKey);
+      expect(stored?.entry_json).toBe(
+        JSON.stringify({ sessionId: entry.sessionId, updatedAt: entry.updatedAt }),
+      );
+      expect(stored?.label).toBeNull();
+      expect(stored?.display_name).toBeNull();
+      const encrypted = database.db
+        .prepare(
+          "SELECT encrypted_entry_json FROM grogu_protected_session_entries WHERE session_key = ?",
+        )
+        .get(scope.sessionKey)?.encrypted_entry_json;
+      expect(typeof encrypted).toBe("string");
+      expect(encrypted).not.toContain("protected-entry-title-sentinel");
+      expect(encrypted).not.toContain("protected-entry-summary-sentinel");
+      expect(encrypted).not.toContain("protected-entry-snapshot-sentinel");
+      expect(loadExactSessionEntryReadOnly(scope)?.entry).toMatchObject(entry);
+    });
+  });
+
   it("checks captured database birthtime even without an open owner handle", () => {
     const filename = path.join(
       autoTempDirs.make("openclaw-read-source-identity-"),

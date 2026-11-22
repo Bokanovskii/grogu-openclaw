@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
 import { getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
@@ -7,6 +8,10 @@ import {
   projectSqliteSessionOwner,
   type SqliteSessionOwnerRow,
 } from "./session-accessor.sqlite-owner-projection.js";
+import {
+  protectedSessionEntryPayloadSql,
+  sessionEntryJsonSql,
+} from "./session-entry-encryption.js";
 import {
   hasValidSessionEntryIdentity,
   parseSqliteSessionEntryRecord,
@@ -27,10 +32,14 @@ export function selectSessionEntryRows(
   // Prepared readers pass the column shape from this operation's fresh schema check.
   ownerColumns?: boolean,
 ) {
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   return getNodeSqliteKysely<OpenClawAgentKyselyDatabase>(database.db)
     .selectFrom("session_nodes")
     .select("session_key")
-    .select("entry_json")
+    .select(sessionEntryJsonSql(database.db).as("entry_json"))
+    .$if(protectedEntry !== undefined, (query) =>
+      query.select(protectedEntry!.as("protected_entry_json")),
+    )
     .$if(projection !== "list" || fullEntryKeys.length > 0, (query) =>
       query.select(
         projection === "list"
@@ -51,10 +60,11 @@ export function selectSessionEntryRows(
 
 // Canonical writers persist validated entry identity. Inventory readers need
 // no payload for settled rows, but must retain parser semantics for pending/retained rows.
-export const sessionEntryInventoryJson =
-  /* kysely-allow-raw: reuse the writer-owned validity projection without loading saved prompts. */ sql<
+export function sessionEntryInventoryJson(database: DatabaseSync) {
+  return /* kysely-allow-raw: retain validation semantics while opening only uncertified entry payloads. */ sql<
     string | null
-  >`CASE WHEN entry_valid = 1 THEN NULL ELSE entry_json END`.as("entry_json");
+  >`CASE WHEN entry_valid = 1 THEN NULL ELSE ${sessionEntryJsonSql(database)} END`.as("entry_json");
+}
 
 export function normalizeStatus(value: unknown): NonNullable<SessionEntry["status"]> | null {
   // Keep canonical interruption distinct without changing the derived status index schema.
@@ -74,10 +84,11 @@ export function parseSessionEntryJson(
     entry_json: string;
     updated_at?: number;
   } & SqliteSessionOwnerRow &
-    SessionEntrySnapshotRow,
+    SessionEntrySnapshotRow & { session_key?: string; protected_entry_json?: string | null },
   projection: SessionEntryProjection = "full",
+  database?: DatabaseSync,
 ): SessionEntry | null {
-  const record = parseSqliteSessionEntryRecord(row);
+  const record = parseSqliteSessionEntryRecord(row, database);
   if (!record) {
     return null;
   }

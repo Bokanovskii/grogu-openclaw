@@ -95,6 +95,48 @@ only its service scope, leaving the CLI scheduler available to other work.
 
 ## Gateway and node namespaces
 
+### Durable native Cron jobs
+
+`getCron()` in a service context borrows the Gateway's native Cron owner; it
+does not create another scheduler. Its `add` and `update` methods accept native
+Cron input, including `agentTurn`, while preserving the existing plugin input
+shapes. `add`, `update`, `remove`, and `enqueueRun` accept an optional
+`{ commitGuard }`. The synchronous guard runs inside native mutation admission,
+composed with the service lifetime and scheduler-replacement guards. Capture
+current caller authority, not just a profile ID or an earlier access decision.
+Queue admission does not authorize later execution.
+
+A service can register `authorizeCronJob(job)` to reacquire authority at native
+dispatch for an `agentTurn` job and its optional trigger. Other payload kinds
+are rejected for this namespace. Its startup context supplies `cronJobPrefix`. Store a job's
+`declarationKey` as that prefix followed by a feature-owned stable identifier.
+The prefix selects the current service; it grants no member, tool, or account
+access. The service must independently verify current ownership, revisions,
+membership, and grants using its existing state owner.
+
+The callback returns `toolsAllow`, `toolBindings`, and
+`assertInvocationCurrent`. The assertion must reject revoked or replaced access
+immediately before effects. Native execution intersects the current tool cap
+with the job's saved cap. Both trigger and agent execution receive the bindings
+and live assertion. Service stop, failed startup, replacement, and missing
+authority reject namespaced jobs before trigger or payload work. Initial
+Gateway startup and Cron reload resolve the current plugin-service owner rather
+than retaining its previous handle. Ordinary native jobs keep their existing
+execution behavior.
+
+Native cancellation and setup timeouts also cover authorization, even when the
+job permits unlimited execution. A callback that finishes after interruption
+cannot start trigger or agent work.
+
+These fields provide dispatch authorization, not member workspace/session
+isolation, provider credentials, or a protected HTTP API. The feature owner must
+bind those existing contracts before exposing member execution. CLI-backed
+models cannot carry this execution authority and are rejected before a backend
+call. New namespaced
+jobs use the existing native job store and receipt retention; this capability
+adds no tables, cleanup policy, or schema migration. Do not run those jobs with
+an older host that lacks this dispatch contract.
+
 ### Session resource methods
 
 A plugin can declare `sessionAccess` when registering an additive Gateway method:

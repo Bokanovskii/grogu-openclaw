@@ -4,6 +4,7 @@ import { iterateSqliteQuerySync, sqliteStringSet } from "../../infra/kysely-sync
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 import { getSessionMaintenanceActivityAt } from "./store-maintenance-activity.js";
 import { shouldPreserveMaintenanceEntry } from "./store-maintenance.js";
@@ -37,8 +38,8 @@ function maintenanceCandidates(database: Pick<OpenClawAgentDatabase, "db">) {
     THEN (SELECT json_group_object(key, CASE type
       WHEN 'object' THEN json(value) WHEN 'array' THEN json(value)
       WHEN 'true' THEN json('true') WHEN 'false' THEN json('false')
-      ELSE value END) FROM json_each(entry_json) WHERE key IN (${sql.join(maintenanceFields)}))
-    ELSE entry_json END`.as("entry_json");
+      ELSE value END) FROM json_each(${sessionEntryJsonSql(database.db)}) WHERE key IN (${sql.join(maintenanceFields)}))
+    ELSE ${sessionEntryJsonSql(database.db)} END`.as("entry_json");
   return getSessionKysely(database.db)
     .selectFrom("session_nodes")
     .select([projection, "current_session_id", "session_key", "updated_at", "archived_at"])

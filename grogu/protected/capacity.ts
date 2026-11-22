@@ -5,13 +5,52 @@ import {
   type AuthorizedUserFiles,
 } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
+import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import type { ProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
+import {
+  createStoredDataReplacementReservation,
+  createStoredDataReservation,
+  retireStoredData,
+  storedDataTransferKey,
+  transferStoredData,
+  storedDataEntryKey,
+  storedDataRetirementKey,
+  type StoredDataEntry,
+  type StoredDataLedger,
+  type StoredDataReplacement,
+  type StoredDataReplacementReservation,
+  type StoredDataReservation,
+  type StoredDataRetirement,
+  type StoredDataTransfer,
+} from "./storage-entry-quota.js";
 
 const MiB = 1024 * 1024;
 const chatBytes = 32 * 1024;
+export const storageEntryOverheadBytes = 4096;
 export type StorageLimits = { globalBytes: number; userBytes: number; freeFloorBytes: number };
+
+export type StorageAdmission = {
+  release(): void;
+  charge(bytes: number): void;
+  chargeChatCreation(): void;
+  recordCreatedChat(id: string, sessionKey: string): void;
+  chargeAutomationCreate(storedBytes: number): void;
+  settleAutomationCreate(storedBytes: number, created: boolean, automationId?: string): void;
+  chargeAutomationPatch(currentStoredBytes: number, nextStoredBytes: number): void;
+  settleAutomationPatch(
+    currentStoredBytes: number,
+    nextStoredBytes: number,
+    updated: boolean,
+  ): void;
+  assertResult(): void;
+  reserveStoredData(bytes: number): StoredDataReservation;
+  // Await admission before the native transaction. Reserve synchronously against its
+  // measured ledger; retain the receipt through commit/rollback, including unknown outcomes.
+  reserveStoredDataReplacement(change: StoredDataReplacement): StoredDataReplacementReservation;
+  files(files: AuthorizedUserFiles): AuthorizedUserFiles;
+};
 
 function freeBytes(directory: string) {
   const { bavail, bsize } = statfsSync(directory, { bigint: true });
@@ -42,11 +81,13 @@ async function fileBytes(files: AuthorizedUserFiles, directory: string): Promise
     }
     throw error;
   }
-  let bytes = 4096;
+  let bytes = storageEntryOverheadBytes;
   for (const name of names) {
     const relative = `${directory}/${name}`;
     const info = await files.stat(relative);
-    bytes += info.isDirectory ? await fileBytes(files, relative) : info.storedSize + 4096;
+    bytes += info.isDirectory
+      ? await fileBytes(files, relative)
+      : info.storedSize + storageEntryOverheadBytes;
   }
   return bytes;
 }
@@ -57,6 +98,14 @@ type StorageMeasurementOptions = Pick<
 > & {
   chats: Pick<ProtectedChats, "capacityEntries" | "transcriptBytes">;
   maxFileBytes: number;
+  automationUsage?: (
+    profileId: string,
+    assertCurrent: () => void,
+  ) => Promise<ProtectedAutomationStorageUsage>;
+  storedDataUsage?: (
+    profileId: string,
+    assertCurrent: () => void,
+  ) => Promise<readonly StoredDataEntry[]>;
 };
 
 export async function measureProtectedStorage(
@@ -69,6 +118,9 @@ export async function measureProtectedStorage(
     entry: Awaited<ReturnType<ProtectedChats["capacityEntries"]>>[number],
     bytes: number,
   ) => void,
+  onAutomationUsage?: (profileId: string, bytes: number) => void,
+  onAutomationEntry?: (entry: ProtectedAutomationStorageUsage["entries"][number]) => void,
+  onStoredDataEntry?: (entry: StoredDataEntry) => void,
 ) {
   let globalBytes = 0;
   let personalBytes = 0;
@@ -112,6 +164,44 @@ export async function measureProtectedStorage(
     }
   }
   assertCurrent();
+  const automationUsage = await options.automationUsage?.(profileId, assertCurrent);
+  if (automationUsage) {
+    const totalAutomationBytes =
+      automationUsage.totalDefinitionBytes +
+      automationUsage.totalRecords * storageEntryOverheadBytes;
+    const profileAutomationBytes =
+      automationUsage.profileDefinitionBytes +
+      automationUsage.profileRecords * storageEntryOverheadBytes;
+    globalBytes += includeOtherProfiles ? totalAutomationBytes : profileAutomationBytes;
+    personalBytes += profileAutomationBytes;
+    for (const profile of automationUsage.profiles) {
+      onAutomationUsage?.(
+        profile.profileId,
+        profile.definitionBytes + profile.records * storageEntryOverheadBytes,
+      );
+    }
+    for (const entry of automationUsage.entries) {
+      onAutomationEntry?.(entry);
+    }
+  }
+  const storedEntries = await options.storedDataUsage?.(profileId, assertCurrent);
+  const storedKeys = new Set<string>();
+  for (const entry of storedEntries ?? []) {
+    assertCurrent();
+    const key = storedDataEntryKey(entry);
+    if (storedKeys.has(key)) {
+      throw new Error("Stored data measurement contains a duplicate entry.");
+    }
+    storedKeys.add(key);
+    if (includeOtherProfiles || entry.profileId === profileId) {
+      globalBytes += entry.bytes;
+      onStoredDataEntry?.(entry);
+    }
+    if (entry.profileId === profileId) {
+      personalBytes += entry.bytes;
+    }
+  }
+  assertCurrent();
   return { globalBytes, personalBytes, chatCount, lastChatActivityAt };
 }
 
@@ -123,19 +213,28 @@ export function createStorageAdmission(
 ) {
   let pending = Promise.resolve();
   type Reservation = { profileId: string };
-  type Ledger = {
-    globalBytes: number;
-    users: Map<string, number>;
+  type Ledger = StoredDataLedger & {
     active: Set<Reservation>;
     baseline: Map<string, { profileId: string; id: string; bytes: number }>;
+    baselineAutomations: Set<string>;
+    postMeasurementAutomations: Set<string>;
+    retiredAutomations: Set<string>;
   };
   const entryKey = (entry: { profileId: string; id: string; sessionKey: string }) =>
     JSON.stringify([entry.profileId, entry.id, entry.sessionKey]);
   const chatKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
+  const automationKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
   let ledger: Ledger | undefined;
   let scanInProgress: Promise<void> | undefined;
   let deletedDuringScan: Set<string> | undefined;
+  let deletedAutomationsDuringScan:
+    | Map<string, ProtectedAutomationStorageUsage["entries"][number]>
+    | undefined;
   let pendingFileWrites = 0;
+  type StoredDataScanChange =
+    | { kind: "retire"; change: StoredDataRetirement }
+    | { kind: "transfer"; change: StoredDataTransfer };
+  let storedDataChangesDuringScan: StoredDataScanChange[] | undefined;
   const fileWriters = new Map<string, Promise<void>>();
   const forgetChat = (account: Ledger, profileId: string, id: string) => {
     for (const [key, entry] of account.baseline) {
@@ -146,11 +245,29 @@ export function createStorageAdmission(
       }
     }
   };
+  const forgetAutomation = (
+    account: Ledger,
+    entry: ProtectedAutomationStorageUsage["entries"][number],
+  ) => {
+    const key = automationKey(entry.profileId, entry.id);
+    if (account.retiredAutomations.has(key)) {
+      return;
+    }
+    const wasMeasured = account.baselineAutomations.delete(key);
+    const wasCharged = account.postMeasurementAutomations.delete(key);
+    account.retiredAutomations.add(key);
+    if (!wasMeasured && !wasCharged) {
+      return;
+    }
+    const bytes = entry.definitionBytes + storageEntryOverheadBytes;
+    account.globalBytes -= bytes;
+    account.users.set(entry.profileId, (account.users.get(entry.profileId) ?? 0) - bytes);
+  };
   const admit = async (
     profileId: string,
     assertCurrent: () => void,
-    operation: "create" | "turn",
-  ) => {
+    operation: "create" | "turn" | "automation" | "stored-data",
+  ): Promise<StorageAdmission> => {
     const previous = pending;
     let unlock!: () => void;
     pending = new Promise<void>((resolve) => {
@@ -192,7 +309,14 @@ export function createStorageAdmission(
       assertDisk();
       const measure = async () => {
         const deleted = new Set<string>();
+        const deletedAutomations = new Map<
+          string,
+          ProtectedAutomationStorageUsage["entries"][number]
+        >();
         deletedDuringScan = deleted;
+        deletedAutomationsDuringScan = deletedAutomations;
+        const storedDataChanges: StoredDataScanChange[] = [];
+        storedDataChangesDuringScan = storedDataChanges;
         let finishScan!: () => void;
         scanInProgress = new Promise<void>((resolve) => {
           finishScan = resolve;
@@ -200,6 +324,8 @@ export function createStorageAdmission(
         try {
           const users = new Map<string, number>();
           const baseline = new Map<string, { profileId: string; id: string; bytes: number }>();
+          const baselineAutomations = new Set<string>();
+          const storedEntries = new Map<string, StoredDataEntry>();
           const { globalBytes } = await measureProtectedStorage(
             options,
             profileId,
@@ -210,21 +336,49 @@ export function createStorageAdmission(
               users.set(entry.profileId, (users.get(entry.profileId) ?? 0) + bytes);
               baseline.set(entryKey(entry), { profileId: entry.profileId, id: entry.id, bytes });
             },
+            (automationProfileId, bytes) => {
+              users.set(automationProfileId, (users.get(automationProfileId) ?? 0) + bytes);
+            },
+            (entry) => {
+              baselineAutomations.add(automationKey(entry.profileId, entry.id));
+            },
+            (entry) => {
+              users.set(entry.profileId, (users.get(entry.profileId) ?? 0) + entry.bytes);
+              storedEntries.set(storedDataEntryKey(entry), entry);
+            },
           );
           const account: Ledger = {
             globalBytes,
             users,
             active: new Set<Reservation>(),
             baseline,
+            baselineAutomations,
+            postMeasurementAutomations: new Set<string>(),
+            retiredAutomations: new Set<string>(),
+            storedEntries,
+            retiredStoredEntries: new Map<string, StoredDataEntry | null>(),
           };
           for (const entry of baseline.values()) {
             if (deleted.has(chatKey(entry.profileId, entry.id))) {
               forgetChat(account, entry.profileId, entry.id);
             }
           }
+          for (const entry of deletedAutomations.values()) {
+            forgetAutomation(account, entry);
+          }
+          // Preserve receipt order so late retirement cannot erase a transferred identity.
+          for (const event of storedDataChanges) {
+            if (event.kind === "retire") {
+              retireStoredData(account, event.change);
+            } else {
+              transferStoredData(account, event.change);
+            }
+          }
           ledger = account;
         } finally {
           deletedDuringScan = undefined;
+          deletedAutomationsDuringScan = undefined;
+          storedDataChangesDuringScan = undefined;
           scanInProgress = undefined;
           finishScan();
         }
@@ -232,7 +386,7 @@ export function createStorageAdmission(
       if (!ledger) {
         await measure();
       } else {
-        const initial = operation === "create" ? chatBytes : 16 * 1024;
+        const initial = operation === "create" ? chatBytes : operation === "turn" ? 16 * 1024 : 0;
         if (
           pendingFileWrites === 0 &&
           (ledger.globalBytes + initial > options.limits.globalBytes ||
@@ -245,8 +399,7 @@ export function createStorageAdmission(
             await measure();
           } else {
             const present = new Set(entries.map(entryKey));
-            // Reclaim only the original measured bytes of deleted chats. New
-            // charges remain reserved, even when their writes are already visible.
+            // Reclaim only original measured chat bytes. New charges stay reserved.
             for (const [key, entry] of existing.baseline) {
               if (!present.has(key)) {
                 existing.globalBytes -= entry.bytes;
@@ -282,7 +435,7 @@ export function createStorageAdmission(
             throw new ProtectedError(
               413,
               "quota_exceeded",
-              "Storage limit reached. Delete a chat to free space.",
+              "Storage limit reached. Delete stored data to free space, or contact the server operator.",
             );
           }
           remaining -= bytes;
@@ -295,10 +448,42 @@ export function createStorageAdmission(
           throw error;
         }
       };
-      charge(operation === "create" ? chatBytes : 16 * 1024);
+      if (operation === "create") {
+        charge(chatBytes);
+      } else if (operation === "turn") {
+        charge(16 * 1024);
+      }
+      const refund = (bytes: number) => {
+        account.globalBytes -= bytes;
+        account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
+        remaining = Math.min(8 * MiB, remaining + bytes);
+      };
+      const storedDataOptions = {
+        account,
+        profileId,
+        charge,
+        refund,
+        begin() {
+          pendingWrites++;
+        },
+        finish() {
+          pendingWrites--;
+          finishReservation();
+        },
+      };
       return {
         release,
         charge,
+        reserveStoredData(bytes) {
+          return createStoredDataReservation({
+            ...storedDataOptions,
+            bytes,
+          });
+        },
+        reserveStoredDataReplacement(change) {
+          assertDisk();
+          return createStoredDataReplacementReservation({ ...storedDataOptions, change });
+        },
         chargeChatCreation() {
           charge(chatBytes);
         },
@@ -311,6 +496,57 @@ export function createStorageAdmission(
             id,
             bytes: chatBytes,
           });
+        },
+        chargeAutomationCreate(storedBytes) {
+          if (operation !== "automation") {
+            throw new Error("Only automation admission can charge an automation create.");
+          }
+          charge(storedBytes + storageEntryOverheadBytes);
+        },
+        settleAutomationCreate(storedBytes, created, automationId) {
+          if (operation !== "automation") {
+            throw new Error("Only automation admission can settle an automation create.");
+          }
+          if (created) {
+            if (!automationId) {
+              throw new Error("A created automation must have an identifier.");
+            }
+            const key = automationKey(profileId, automationId);
+            if (account.retiredAutomations.has(key)) {
+              const bytes = storedBytes + storageEntryOverheadBytes;
+              account.globalBytes -= bytes;
+              account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
+              remaining = Math.min(8 * MiB, remaining + bytes);
+              return;
+            }
+            account.postMeasurementAutomations.add(key);
+            return;
+          }
+          const bytes = storedBytes + storageEntryOverheadBytes;
+          account.globalBytes -= bytes;
+          account.users.set(profileId, (account.users.get(profileId) ?? 0) - bytes);
+          remaining = Math.min(8 * MiB, remaining + bytes);
+        },
+        chargeAutomationPatch(currentStoredBytes, nextStoredBytes) {
+          if (operation !== "automation") {
+            throw new Error("Only automation admission can charge an automation edit.");
+          }
+          const growth = nextStoredBytes - currentStoredBytes;
+          if (growth > 0) {
+            charge(growth);
+          }
+        },
+        settleAutomationPatch(currentStoredBytes, nextStoredBytes, updated) {
+          if (operation !== "automation") {
+            throw new Error("Only automation admission can settle an automation edit.");
+          }
+          const delta = nextStoredBytes - currentStoredBytes;
+          const freed = updated ? -delta : delta;
+          if (freed > 0) {
+            account.globalBytes -= freed;
+            account.users.set(profileId, (account.users.get(profileId) ?? 0) - freed);
+            remaining = Math.min(8 * MiB, remaining + freed);
+          }
         },
         assertResult() {
           if (failure) {
@@ -371,11 +607,6 @@ export function createStorageAdmission(
             charge(bytes);
             pendingWrites++;
             pendingFileWrites++;
-            const refund = (amount: number) => {
-              account.globalBytes -= amount;
-              account.users.set(profileId, (account.users.get(profileId) ?? 0) - amount);
-              remaining += amount;
-            };
             try {
               await withFileLock(async () => {
                 await scanInProgress;
@@ -454,10 +685,56 @@ export function createStorageAdmission(
     }
   };
   return Object.assign(admit, {
+    async reserveStoredData(profileId: string, assertCurrent: () => void, bytes: number) {
+      const admission = await admit(profileId, assertCurrent, "stored-data");
+      try {
+        const reservation = admission.reserveStoredData(bytes);
+        return {
+          settle(result: Parameters<StoredDataReservation["settle"]>[0]) {
+            reservation.settle(result);
+            admission.release();
+          },
+          release() {
+            reservation.release();
+            admission.release();
+          },
+        };
+      } catch (error) {
+        admission.release();
+        throw error;
+      }
+    },
+    retiredStoredData(changes: readonly StoredDataRetirement[]) {
+      for (const change of changes) {
+        storedDataRetirementKey(change);
+        storedDataChangesDuringScan?.push({ kind: "retire", change: structuredClone(change) });
+        if (ledger) {
+          retireStoredData(ledger, change);
+        }
+      }
+    },
+    transferredStoredData(changes: readonly StoredDataTransfer[]) {
+      for (const change of changes) {
+        storedDataTransferKey(change);
+        if (ledger) {
+          transferStoredData(ledger, change);
+        }
+        storedDataChangesDuringScan?.push({ kind: "transfer", change: structuredClone(change) });
+      }
+    },
     deletedChat(profileId: string, id: string) {
       deletedDuringScan?.add(chatKey(profileId, id));
       if (ledger) {
         forgetChat(ledger, profileId, id);
+      }
+    },
+    deletedAutomations(records: readonly ProtectedAutomationStorageUsage["entries"][number][]) {
+      for (const entry of records) {
+        const key = automationKey(entry.profileId, entry.id);
+        deletedAutomationsDuringScan?.set(key, entry);
+        if (ledger) {
+          forgetAutomation(ledger, entry);
+        }
       }
     },
   });

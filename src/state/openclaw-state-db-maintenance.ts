@@ -34,11 +34,13 @@ import {
 import { migrateJsonCanonicalWideRowsV13 } from "./openclaw-state-db-schema-v13-widerow.js";
 import {
   assertSupportedStateSchemaVersion,
+  getAdmittedStateSchemaVersion,
   readStateSchemaContentVersion,
   type StateSchemaVersionFacts,
 } from "./openclaw-state-db-schema-version.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 import { assertOpenClawStateWriteAllowed } from "./openclaw-state-ownership.js";
+import { getAdmittedSharedStateSchema } from "./openclaw-state-protected-schema.js";
 import {
   getOpenClawStateRuntimeSchema,
   OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
@@ -184,7 +186,7 @@ export function assertOpenClawStateDatabaseForMaintenance(
   );
   const contentVersion =
     options.schemaVersions?.contentVersion ?? readStateSchemaContentVersion(database);
-  if (contentVersion !== OPENCLAW_STATE_SCHEMA_VERSION) {
+  if (contentVersion !== getAdmittedStateSchemaVersion(database)) {
     throw new SqliteSchemaMismatchError(
       `OpenClaw state database ${options.pathname} uses schema version ${userVersion}; run openclaw doctor --fix before compacting it.`,
     );
@@ -201,7 +203,7 @@ export function assertOpenClawStateDatabaseForMaintenance(
   assertSqliteSchemaContains(
     database,
     options.pathname,
-    OPENCLAW_STATE_SCHEMA_SQL,
+    getAdmittedSharedStateSchema(database),
     OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
     readTable,
   );

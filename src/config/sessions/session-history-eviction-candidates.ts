@@ -13,6 +13,10 @@ import { readReferencedSessionIds } from "./session-accessor.sqlite-lifecycle-st
 import { collectSessionStateIdsForEntry } from "./session-accessor.sqlite-references.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import {
+  protectedSessionEntryPayloadSql,
+  sessionEntryJsonSql,
+} from "./session-entry-encryption.js";
 import { sessionEntrySnapshotColumns } from "./session-entry-snapshots.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 import { isSessionEntryDiskBudgetEvictable } from "./store-maintenance.js";
@@ -29,9 +33,13 @@ export function readDiskEvictableArchivedSessionBatchInDatabase(
   let cursor = params.after;
   while (candidates.length < limit) {
     const db = getSessionKysely(database.db);
+    const protectedEntry = protectedSessionEntryPayloadSql(database.db);
     let query = db
       .selectFrom("session_nodes")
       .select(["archived_at", "current_session_id", "entry_json", "session_key", "updated_at"])
+      .$if(protectedEntry !== undefined, (builder) =>
+        builder.select(protectedEntry!.as("protected_entry_json")),
+      )
       .select(sessionEntrySnapshotColumns)
       .where("archived_at", "is not", null)
       .orderBy("archived_at", "asc")
@@ -57,7 +65,7 @@ export function readDiskEvictableArchivedSessionBatchInDatabase(
         continue;
       }
       cursor = { archivedAt: row.archived_at, sessionKey: row.session_key };
-      const entry = parseSessionEntryJson(row);
+      const entry = parseSessionEntryJson(row, "full", database.db);
       if (
         entry &&
         isSessionEntryDiskBudgetEvictable({
@@ -118,7 +126,8 @@ export function collectSessionAdmissionReferences(params: {
         params.database.db,
         db
           .selectFrom("session_nodes")
-          .select(["entry_json", "current_session_id"])
+          .select(["current_session_id", "session_key"])
+          .select(sessionEntryJsonSql(params.database.db).as("entry_json"))
           // Keep stored keys inside SQLite: Node TEXT rebinding can change raw UTF-16 keys.
           // The key-only subquery scans the existing index before fetching matched payloads.
           .where(

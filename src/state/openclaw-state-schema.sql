@@ -2749,6 +2749,48 @@ CREATE INDEX IF NOT EXISTS idx_protected_usage_daily_day ON protected_usage_dail
 CREATE INDEX IF NOT EXISTS idx_protected_usage_runs_day
   ON protected_usage_runs(day);
 
+CREATE TABLE IF NOT EXISTS protected_automations (
+  id TEXT NOT NULL PRIMARY KEY CHECK (
+    length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+    AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+    AND id NOT GLOB '*[^0-9a-f-]*' AND substr(id, 15, 1) = '4'
+    AND substr(id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  creator_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  central_owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  provider TEXT NOT NULL CHECK (provider = 'sparky'),
+  definition_json TEXT NOT NULL CHECK (json_valid(definition_json)),
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared')),
+  publication_revision INTEGER NOT NULL DEFAULT 0 CHECK (publication_revision >= 0),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automations_owner
+  ON protected_automations(central_owner_profile_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS protected_automation_members (
+  automation_id TEXT NOT NULL REFERENCES protected_automations(id) ON DELETE CASCADE,
+  profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  role TEXT NOT NULL CHECK (role IN ('owner', 'follower')),
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (automation_id, profile_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_members_profile_role
+  ON protected_automation_members(profile_id, role, automation_id);
+
+CREATE TABLE IF NOT EXISTS protected_automation_job_bindings (
+  job_id TEXT NOT NULL PRIMARY KEY,
+  automation_id TEXT NOT NULL UNIQUE REFERENCES protected_automations(id) ON DELETE CASCADE,
+  central_owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_job_bindings_owner
+  ON protected_automation_job_bindings(central_owner_profile_id, automation_id);
+
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,

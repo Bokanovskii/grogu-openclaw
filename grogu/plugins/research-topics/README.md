@@ -83,6 +83,9 @@ member's ledger, delivery, live authority, and storage admission. A turn without
 a valid binding does not receive the tool. The host must revoke access and await
 the ledger's `close()` before deleting that member's ledger. The default mode
 continues to use the personal ledger and configured Main delivery.
+Member tool instructions follow the host's delivery policy. For inbox-only
+hosts, they do not direct the agent to send texts or conversation updates.
+The host must provide delivery and native receipts before finalization.
 
 For a development load path, first run `npm run build` in this directory. Keep
 the entire `dist/` directory. Remove the superseded development path when switching

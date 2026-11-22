@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import { stableStringify } from "@openclaw/normalization-core";
 import type { Selectable } from "kysely";
 import { resolveCronJobConfigRevision } from "../cron/config-revision.js";
+import { openCronJobRow, openCronJobValue } from "../cron/store/job-encryption.js";
 import {
   loadedCronStoreFromRows,
   resolveCronJobGrantDefinitionGenerationFloor,
@@ -191,7 +192,7 @@ export function mintCronStandingGrantLocked(
     return;
   }
   const jobRow = jobRows[0]!;
-  const loaded = loadedCronStoreFromRows(jobRows);
+  const loaded = loadedCronStoreFromRows([openCronJobRow(database.db, jobRow.store_key, jobRow)]);
   const job = loaded.store.jobs.find((entry) => entry.id === params.cronJobId);
   if (!job || resolveCronJobConfigRevision(job) !== params.jobConfigRevision) {
     return;
@@ -311,7 +312,9 @@ export function lookupCronStandingGrantInDatabase(
     if (jobRows.length !== 1) {
       return { outcome: "job-missing" };
     }
-    const loaded = loadedCronStoreFromRows(jobRows);
+    const loaded = loadedCronStoreFromRows([
+      openCronJobRow(db, jobRows[0]!.store_key, jobRows[0]!),
+    ]);
     const job = loaded.store.jobs.find((entry) => entry.id === params.cronJobId);
     if (!job) {
       return { outcome: "job-missing" };
@@ -434,14 +437,27 @@ export function listCronStandingGrantsInDatabase(
       .selectFrom(STANDING_GRANT_TABLE)
       .leftJoin("cron_jobs", "cron_jobs.job_id", "operator_approval_standing_grants.cron_job_id")
       .selectAll(STANDING_GRANT_TABLE)
-      .select("cron_jobs.name as cron_job_name")
+      .select([
+        "cron_jobs.name as cron_job_name",
+        "cron_jobs.store_key as cron_store_key",
+        "cron_jobs.job_id as cron_row_job_id",
+      ])
       .orderBy("operator_approval_standing_grants.created_at_ms", "desc")
       .orderBy("operator_approval_standing_grants.grant_id", "desc")
       .limit(limit),
   ).rows;
   return rows.map((row) =>
     Object.assign(projectCronStandingGrant(row), {
-      cronJobName: row.cron_job_name ?? null,
+      cronJobName:
+        row.cron_job_name === null || row.cron_store_key === null || row.cron_row_job_id === null
+          ? null
+          : openCronJobValue(
+              db,
+              row.cron_store_key,
+              row.cron_row_job_id,
+              "name",
+              row.cron_job_name,
+            ),
       revokedAtMs: row.revoked_at_ms,
       revokedBy: row.revoked_by,
     }),

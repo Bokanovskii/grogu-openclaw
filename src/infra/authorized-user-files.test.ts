@@ -7,7 +7,11 @@ import {
   createStorageValueEncryption,
   type StorageValueEncryption,
 } from "../storage/encryption.js";
-import { createAuthorizedUserFiles } from "./authorized-user-files.js";
+import {
+  createAuthorizedUserFiles,
+  migrateAuthorizedUserFiles,
+  verifyAuthorizedUserFiles,
+} from "./authorized-user-files.js";
 import { root } from "./fs-safe.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -31,6 +35,7 @@ async function fixture(options: { encryption?: StorageValueEncryption } = {}) {
     alice,
     bob,
     admit,
+    usersRoot,
     userPath,
     revoke: () => {
       active = false;
@@ -76,6 +81,86 @@ describe("authorized user files", () => {
       encryption.dispose();
       reloadedEncryption.dispose();
       wrongEncryption.dispose();
+    }
+  });
+
+  it("resumes staged user-file migration and refuses unauthenticated copies", async () => {
+    const encryption = createStorageValueEncryption(randomBytes(32));
+    const wrongEncryption = createStorageValueEncryption(randomBytes(32));
+    try {
+      const { alice, usersRoot, userPath } = await fixture({ encryption });
+      const profileHash = createHash("sha256").update("alice").digest("hex");
+      const pendingPath = "draft/report.txt";
+      const pendingPlaintext = Buffer.from("staged before an interrupted migration");
+      const ordinaryPath = "legacy.txt";
+      const ordinaryPlaintext = Buffer.from("plaintext awaiting migration");
+      const migrationDirectory = ".openclaw-protected-storage-migration";
+      const migrationPath = path.join(userPath("alice"), migrationDirectory);
+      const stagedPath = path.join(migrationPath, pendingPath);
+      await fs.mkdir(path.dirname(path.join(userPath("alice"), pendingPath)), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await fs.writeFile(path.join(userPath("alice"), ordinaryPath), ordinaryPlaintext);
+      await fs.writeFile(path.join(userPath("alice"), pendingPath), pendingPlaintext);
+      await fs.mkdir(path.dirname(stagedPath), { recursive: true, mode: 0o700 });
+      await fs.writeFile(path.join(migrationPath, "owner"), "openclaw-protected-user-files-v1\n", {
+        mode: 0o600,
+      });
+      const stagedCiphertext = encryption.encrypt(
+        pendingPlaintext,
+        `openclaw:user-file:${profileHash}`,
+      );
+      await fs.writeFile(stagedPath, stagedCiphertext, { mode: 0o600 });
+
+      const options = { usersRoot, assertCurrent: () => undefined, maxBytes: 1024 };
+      await expect(
+        verifyAuthorizedUserFiles({ ...options, encryption: wrongEncryption }),
+      ).rejects.toThrow("could not be authenticated");
+      expect(await fs.readFile(path.join(userPath("alice"), ordinaryPath))).toEqual(
+        ordinaryPlaintext,
+      );
+      expect(await fs.readFile(path.join(userPath("alice"), pendingPath))).toEqual(
+        pendingPlaintext,
+      );
+      expect(await fs.readFile(stagedPath)).toEqual(stagedCiphertext);
+
+      await verifyAuthorizedUserFiles({ ...options, encryption });
+      await migrateAuthorizedUserFiles({ ...options, encryption });
+
+      expect(await alice.readText(ordinaryPath)).toBe(ordinaryPlaintext.toString("utf8"));
+      expect(await alice.readText(pendingPath)).toBe(pendingPlaintext.toString("utf8"));
+      expect(
+        (await fs.readFile(path.join(userPath("alice"), ordinaryPath))).includes(ordinaryPlaintext),
+      ).toBe(false);
+      await expect(fs.stat(migrationPath)).rejects.toThrow();
+    } finally {
+      encryption.dispose();
+      wrongEncryption.dispose();
+    }
+  });
+
+  it("resumes cleanup after interrupted removal leaves only empty staging directories", async () => {
+    const encryption = createStorageValueEncryption(randomBytes(32));
+    try {
+      const { alice, usersRoot, userPath } = await fixture({ encryption });
+      const migrationDirectory = ".openclaw-protected-storage-migration";
+      const migrationPath = path.join(userPath("alice"), migrationDirectory);
+      const plaintext = "already-promoted encrypted file";
+      await alice.create("complete.txt", plaintext);
+      await fs.mkdir(path.join(migrationPath, "partial", "nested"), {
+        recursive: true,
+        mode: 0o700,
+      });
+
+      const options = { usersRoot, assertCurrent: () => undefined, maxBytes: 1024, encryption };
+      await verifyAuthorizedUserFiles(options);
+      await migrateAuthorizedUserFiles(options);
+
+      expect(await alice.readText("complete.txt")).toBe(plaintext);
+      await expect(fs.stat(migrationPath)).rejects.toThrow();
+    } finally {
+      encryption.dispose();
     }
   });
 
@@ -125,26 +210,31 @@ describe("authorized user files", () => {
     expect(await bob.readText("draft/report.txt")).toBe("other user");
   });
 
-  it.each(["../bob/private", "a/../secret", "/etc/passwd", "a\\..\\secret", "%2e%2e/x", "a//b"])(
-    "rejects an untrusted path on every operation: %s",
-    async (name) => {
-      const { alice } = await fixture();
-      for (const operation of [
-        () => alice.read(name),
-        () => alice.readText(name),
-        () => alice.list(name),
-        () => alice.stat(name),
-        () => alice.mkdir(name),
-        () => alice.create(name, "bad"),
-        () => alice.write(name, "bad"),
-        () => alice.move(name, "destination"),
-        () => alice.move("source", name),
-        () => alice.remove(name),
-      ]) {
-        await expect(operation()).rejects.toMatchObject({ code: "invalid-path" });
-      }
-    },
-  );
+  it.each([
+    "../bob/private",
+    "a/../secret",
+    "/etc/passwd",
+    "a\\..\\secret",
+    "%2e%2e/x",
+    "a//b",
+    ".openclaw-protected-storage-migration/owner",
+  ])("rejects an untrusted path on every operation: %s", async (name) => {
+    const { alice } = await fixture();
+    for (const operation of [
+      () => alice.read(name),
+      () => alice.readText(name),
+      () => alice.list(name),
+      () => alice.stat(name),
+      () => alice.mkdir(name),
+      () => alice.create(name, "bad"),
+      () => alice.write(name, "bad"),
+      () => alice.move(name, "destination"),
+      () => alice.move("source", name),
+      () => alice.remove(name),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({ code: "invalid-path" });
+    }
+  });
 
   it.skipIf(process.platform === "win32")(
     "denies links and a replaced root without touching another user",

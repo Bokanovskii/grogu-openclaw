@@ -6,7 +6,7 @@ import type {
   CronRunStatus,
   CronStoreFile,
 } from "../types.js";
-import type { CronJobFamilyIdentity } from "./row-codec.js";
+import type { CronJobFamilyIdentity } from "./job-family.js";
 import type {
   CronRunReceipt,
   CronRunReceiptHandle,

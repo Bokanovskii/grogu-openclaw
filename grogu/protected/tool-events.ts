@@ -5,6 +5,13 @@ export type Source = { url: string; title: string };
 export type Widget = { id: string; title: string };
 export const widgetIdPattern = /^cv_[a-f0-9]{32}$/u;
 
+const toolLabels: Partial<Record<string, string>> = {
+  sessions_list: "Looking through your chats",
+  sessions_history: "Reading another chat",
+  sessions_send: "Sending to another chat",
+  route_to_agent: "Asking another agent",
+};
+
 export function projectActivity(
   name: unknown,
   id: unknown,
@@ -20,8 +27,20 @@ export function projectActivity(
         ? (["fetch", "Fetching a source"] as const)
         : name === "show_widget"
           ? (["widget", "Creating a widget"] as const)
-          : (["tool", "Using a tool"] as const);
+          : (["tool", toolLabels[name] ?? "Using a tool"] as const);
   return { id, kind, label, status };
+}
+
+// Web tools frame untrusted titles for the model; show members only the framed text.
+const framedTitle =
+  /^\n?<<<EXTERNAL_UNTRUSTED_CONTENT id="([a-f0-9]{16})">>>\nSource: Web (?:Search|Fetch)\n---\n([\s\S]*?)\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="\1">>>$/u;
+
+function sourceTitle(value: unknown, fallback: string) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const title = (framedTitle.exec(value)?.[2] ?? value).replace(/\s+/gu, " ").trim();
+  return title.slice(0, 256) || fallback;
 }
 
 function source(value: unknown): Source[] {
@@ -40,7 +59,7 @@ function source(value: unknown): Source[] {
   return [
     {
       url: parsed.href,
-      title: typeof value.title === "string" ? value.title.slice(0, 256) : parsed.hostname,
+      title: sourceTitle(value.title, parsed.hostname),
     },
   ];
 }

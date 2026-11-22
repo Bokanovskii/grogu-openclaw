@@ -22,8 +22,8 @@ import {
   type CronQuarantinedJob,
   type QuarantinedCronConfigJob,
 } from "../../../cron/store.js";
+import { fingerprintCronJobRows } from "../../../cron/store/fingerprint.js";
 import { cronStoreKey } from "../../../cron/store/key.js";
-import { fingerprintCronJobRows } from "../../../cron/store/row-codec.js";
 import type { CronJob } from "../../../cron/types.js";
 import {
   collectErrorGraphCandidates,

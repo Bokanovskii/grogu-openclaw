@@ -1,4 +1,3 @@
-// Github Copilot tests cover index plugin behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +14,8 @@ import type {
   ProviderAuthResult,
 } from "openclaw/plugin-sdk/plugin-entry";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+// Github Copilot tests cover index plugin behavior.
+import { bindGithubCopilotToken } from "openclaw/plugin-sdk/provider-auth";
 import type { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { markdownToIR } from "openclaw/plugin-sdk/text-chunking";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -1147,7 +1148,7 @@ describe("github-copilot plugin", () => {
     expect(result?.profiles[0]?.credential).toEqual({
       type: "token",
       provider: "github-copilot",
-      token: "refreshed-token",
+      token: bindGithubCopilotToken("refreshed-token", "github.com"),
     });
     expect(result?.profiles[0]?.secretStorage).toBeUndefined();
     expect(result?.notes).toContain(
@@ -1266,7 +1267,14 @@ describe("github-copilot plugin", () => {
       expect(result?.profiles).toEqual([
         {
           profileId: "github-copilot:github",
-          credential: { type: "token", provider: "github-copilot", token: "connected-token" },
+          credential: {
+            type: "token",
+            provider: "github-copilot",
+            token:
+              methodIndex === 1
+                ? "connected-token"
+                : bindGithubCopilotToken("connected-token", "github.com"),
+          },
           secretStorage: { kind: "store", namePrefix: "GITHUB_COPILOT_TOKEN" },
         },
       ]);
@@ -1329,7 +1337,7 @@ describe("github-copilot plugin", () => {
     expect(result.profiles[0]?.credential).toEqual({
       type: "token",
       provider: "github-copilot",
-      token: "public-fresh-token",
+      token: bindGithubCopilotToken("public-fresh-token", "github.com"),
     });
     expect(result.profiles[0]?.secretStorage).toEqual({
       kind: "store",

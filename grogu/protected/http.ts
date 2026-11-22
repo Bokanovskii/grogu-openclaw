@@ -3,26 +3,36 @@ import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
 import {
   isProtectedAgentSelection,
+  isProtectedAutomationPatchRequest,
   isProtectedCreateChat,
+  isProtectedAccountIcon,
   isProtectedAccountName,
   isProtectedDirectorySettings,
   isProtectedRenew,
   isProtectedSteer,
   isProtectedTurnRequest,
   type ProtectedAgentCatalogDto,
+  type ProtectedAgentCatalogV1,
   type ProtectedAgentSelectionResponse,
+  type ProtectedAutomationCatalog,
+  type ProtectedAutomationCatalogV1,
+  type ProtectedAutomationListResponse,
+  type ProtectedAutomationResponse,
   type ProtectedChatStorage,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
+import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { buildSandboxHostDocument } from "../../src/agents/sandbox-host.js";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
+import { matchesHttpIfNoneMatch } from "../../src/gateway/http-conditional.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
 import {
   getCanonicalUserPreferences,
+  getUserPreferenceValues,
   setCanonicalUserPreferences,
 } from "../../src/state/user-preferences.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
@@ -30,7 +40,14 @@ import {
   prepareCurrentUserProfileAliases,
   readVerifiedUserProfileDirectory,
 } from "../../src/state/user-profile-reads.js";
-import { setCanonicalUserProfileDisplayName } from "../../src/state/user-profile-writes.js";
+import {
+  clearCanonicalUserProfileAvatar,
+  setCanonicalUserProfileAvatar,
+  setCanonicalUserProfileDisplayName,
+} from "../../src/state/user-profile-writes.js";
+import { createProfileAvatarReader } from "../../src/state/user-profiles-avatar.js";
+import { formatUserProfileAvatarEtag } from "../../src/state/user-profiles.js";
+import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/storage/sqlite-encryption.js";
 import {
   bindProtectedProfile,
   editProtectedAccessRequest,
@@ -46,6 +63,13 @@ import {
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
 import {
+  createProtectedAutomationRecord,
+  listProtectedAutomationRecords,
+  patchProtectedAutomationRecord,
+  readProtectedAutomationRecord,
+  readProtectedAutomationStorageUsage,
+} from "./automations-store.js";
+import {
   createProtectedAutomationCatalog,
   validateProtectedAutomationDraft,
 } from "./automations.js";
@@ -56,7 +80,16 @@ import {
   removeChatFilesDirectory,
 } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
+import { clientCapabilitiesVary, hasClientCapability } from "./client-capabilities.js";
 import { ProtectedError, publicError } from "./errors.js";
+import {
+  iconImageMime,
+  iconPreference,
+  isIconImage,
+  maxIconBytes,
+  parseStoredIcon,
+  projectIcon,
+} from "./icons.js";
 import {
   protectedAccessProofPath,
   resolveProtectedProfile,
@@ -85,6 +118,11 @@ type Run = {
 
 function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: commonHeaders });
+}
+function profileJson(data: unknown) {
+  return Response.json(data, {
+    headers: { ...commonHeaders, vary: clientCapabilitiesVary },
+  });
 }
 function notFound(): never {
   throw new ProtectedError(404, "not_found", "Not found.");
@@ -172,16 +210,35 @@ export function createProtectedHttp(options: {
   if (new URL(options.origin).origin !== options.origin) {
     throw new TypeError("Configure the exact protected client origin.");
   }
+  const ownedEncryption = createSqliteStorageValueEncryptionFromEnvironment();
+  if (!ownedEncryption) {
+    throw new Error(
+      "Protected storage encryption requires OPENCLAW_PROTECTED_STORAGE_KEY_FILE; provision the private key before starting the service.",
+    );
+  }
+  const encryption = options.encryption ?? ownedEncryption;
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const agentRouting = {
+    tool: agentCatalog.routeTool,
+    briefMaxChars: agentCatalog.routeBriefMaxChars,
+    resolve: agentCatalog.getSelectable,
+  };
+  const chats = createProtectedChats({ ...options, agentCatalog });
+  const storageMeasurement = {
+    ...options,
+    chats,
+    automationUsage: (profileId: string, assertCurrent: () => void) =>
+      readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
+  };
+  const admitStorage = options.storageLimits
+    ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
+    : undefined;
   const automationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,
     calendarDraftValidationAvailable: true,
+    persistenceAvailable: Boolean(admitStorage),
   });
-  const chats = createProtectedChats({ ...options, agentCatalog });
-  const admitStorage = options.storageLimits
-    ? createStorageAdmission({ ...options, chats, limits: options.storageLimits })
-    : undefined;
   const runs = new Map<string, Run>();
   const pending = new Set<Promise<unknown>>();
   const revokedSessions = new Set<string>();
@@ -548,12 +605,7 @@ export function createProtectedHttp(options: {
           : [];
         const storage = person.profileId
           ? await measureProtectedStorage(
-              {
-                usersRoot: options.usersRoot,
-                chats,
-                maxFileBytes: options.maxFileBytes,
-                encryption: options.encryption,
-              },
+              storageMeasurement,
               person.profileId,
               assertCurrent,
               false,
@@ -610,13 +662,14 @@ export function createProtectedHttp(options: {
           options.stateDir,
           { id: adminPerson[1]!, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
           assertCurrent,
-          (subject, profileId) => {
+          (subject, profileId, retiredAutomations) => {
             if (subject) {
               options.onRemoveSubject?.(subject);
             }
             if (profileId) {
               invalidateProfile(profileId);
             }
+            admitStorage?.deletedAutomations(retiredAutomations);
           },
           () => options.onPolicyChanged?.(),
         );
@@ -686,6 +739,7 @@ export function createProtectedHttp(options: {
       ) =>
         createAuthorizedUserFiles({
           ...options,
+          encryption,
           profileId: profile.id,
           assertCurrent: assert,
           signal,
@@ -730,11 +784,40 @@ export function createProtectedHttp(options: {
         }
         return { chat, usage };
       };
+      const saveIcon = async (icon: unknown) => {
+        const saved = await setCanonicalUserPreferences(
+          profile.id,
+          { [iconPreference]: icon },
+          { env: chats.env, assertCurrent, requireExactProfile: true },
+        );
+        if (!saved?.ok) {
+          throw new ProtectedError(409, "account_settings_not_saved", "Could not save your icon.");
+        }
+      };
+      const readAccountIcon = async () => {
+        const preferences = await getCanonicalUserPreferences(profile.id, [iconPreference], {
+          env: chats.env,
+          requireExactProfile: true,
+        });
+        await revalidate();
+        if (!preferences) {
+          return unauthorized();
+        }
+        return projectIcon(profile.id, preferences.entries[iconPreference]);
+      };
+      const profileCapability = hasClientCapability(request.headers, "profile-v1");
+      // Setup completes only through a saved canonical name, never a rendered fallback.
+      const accountUser = (displayName: string | null, icon: unknown) => {
+        const name = displayName?.trim() ?? "";
+        return { id: profile.id, displayName: name.slice(0, 40), setupRequired: !name, icon };
+      };
       if (pathname === "/me" && method === "GET") {
-        return json({
-          user: { id: profile.id, displayName: profile.displayName ?? "User" },
+        return profileJson({
+          user: profileCapability
+            ? accountUser(profile.displayName, await readAccountIcon())
+            : { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure:
-            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+            "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
           models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
@@ -747,10 +830,11 @@ export function createProtectedHttp(options: {
         const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
           env: chats.env,
         });
-        const preferences = await getCanonicalUserPreferences(profile.id, [directoryPreference], {
-          env: chats.env,
-          requireExactProfile: true,
-        });
+        const preferences = await getCanonicalUserPreferences(
+          profile.id,
+          profileCapability ? [directoryPreference, iconPreference] : [directoryPreference],
+          { env: chats.env, requireExactProfile: true },
+        );
         await revalidate();
         profileAuthority.assertCurrent();
         if (!preferences) {
@@ -764,11 +848,16 @@ export function createProtectedHttp(options: {
             "Save your directory settings again.",
           );
         }
-        return json({
-          user: {
-            id: profile.id,
-            displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
-          },
+        return profileJson({
+          user: profileCapability
+            ? accountUser(
+                profile.displayName,
+                projectIcon(profile.id, preferences.entries[iconPreference]),
+              )
+            : {
+                id: profile.id,
+                displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
+              },
           directory: {
             description:
               saved?.hidden && identity.kind !== "development" ? "" : (saved?.description ?? ""),
@@ -792,7 +881,59 @@ export function createProtectedHttp(options: {
           },
         );
         assertCurrent();
-        return json({ user: { id: updated.profile.id, displayName: updated.profile.displayName } });
+        return profileJson({
+          user: profileCapability
+            ? accountUser(updated.profile.displayName, await readAccountIcon())
+            : { id: updated.profile.id, displayName: updated.profile.displayName },
+        });
+      }
+      if (pathname === "/account/icon" && method === "PUT") {
+        const input = await body(request);
+        if (
+          !isProtectedAccountIcon(input) ||
+          (input.icon !== null && !parseStoredIcon(input.icon))
+        ) {
+          return invalid();
+        }
+        await revalidate();
+        await saveIcon(input.icon);
+        // Replaced image bytes are not retained once another icon is chosen.
+        await clearCanonicalUserProfileAvatar(profile.id, { env: chats.env, assertCurrent });
+        assertCurrent();
+        return json({ icon: projectIcon(profile.id, input.icon) });
+      }
+      if (pathname === "/account/icon/image" && method === "PUT") {
+        const mime = iconImageMime(request.headers.get("content-type"));
+        if (!mime) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        const tooLarge = () =>
+          new ProtectedError(413, "icon_too_large", "Choose an image under 512 KiB.");
+        if (Number(request.headers.get("content-length") ?? 0) > maxIconBytes) {
+          throw tooLarge();
+        }
+        if (!request.body) {
+          return invalid();
+        }
+        const bytes = await readByteStreamWithLimit(request.body, {
+          maxBytes: maxIconBytes,
+          onOverflow: tooLarge,
+        });
+        if (!isIconImage(bytes, mime)) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        await revalidate();
+        const saved = await setCanonicalUserProfileAvatar(profile.id, bytes, mime, {
+          env: chats.env,
+          assertCurrent,
+        });
+        if (!saved.ok) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        const icon = { kind: "image", revision: saved.value.display.avatarRevision };
+        await saveIcon(icon);
+        assertCurrent();
+        return json({ icon: projectIcon(profile.id, icon) });
       }
       if (pathname === "/account/directory-settings" && method === "PUT") {
         const input = await body(request);
@@ -832,7 +973,7 @@ export function createProtectedHttp(options: {
       if (pathname === "/people" && method === "GET") {
         if (identity.kind === "development") {
           await revalidate();
-          return json({ people: [], nextCursor: null });
+          return profileJson({ people: [], nextCursor: null });
         }
         const cursor = new URL(request.url).searchParams.get("cursor");
         if (cursor !== null && !subjectPattern.test(cursor)) {
@@ -851,31 +992,134 @@ export function createProtectedHttp(options: {
           },
           { env: chats.env },
         );
+        const icons = profileCapability
+          ? await getUserPreferenceValues(
+              result.people.map((person) => person.id),
+              iconPreference,
+              { env: chats.env },
+            )
+          : undefined;
         await revalidate();
         const currentSubjects = new Set(options.directory.allowedSubjects);
         if (
           !result.isCurrent() ||
+          (icons && !icons.isCurrent()) ||
           directorySubjects.some((subject) => !currentSubjects.has(subject)) ||
           result.people.some((person) => deniedProfiles.has(person.id))
         ) {
           throw new ProtectedError(409, "directory_changed", "The directory changed. Try again.");
         }
-        return json({ people: result.people, nextCursor: result.nextCursor });
+        return profileJson({
+          people: icons
+            ? result.people.map((person) => ({
+                ...person,
+                icon: projectIcon(person.id, icons.values.get(person.id)),
+              }))
+            : result.people,
+          nextCursor: result.nextCursor,
+        });
+      }
+      const personIcon = /^\/people\/([a-f0-9-]{36})\/icon$/u.exec(pathname);
+      if (personIcon && method === "GET") {
+        const targetId = personIcon[1]!;
+        let targetVisible = () => true;
+        if (targetId !== profile.id) {
+          if (identity.kind === "development") {
+            return notFound();
+          }
+          const directorySubjects = options.directory.allowedSubjects.filter((subject) =>
+            subjectPattern.test(subject),
+          );
+          const visible = await readVerifiedUserProfileDirectory(
+            {
+              issuer: options.directory.issuer,
+              subjects: directorySubjects,
+              preferenceKey: directoryPreference,
+              after: null,
+              limit: 1,
+              profileId: targetId,
+            },
+            { env: chats.env },
+          );
+          await revalidate();
+          const currentSubjects = new Set(options.directory.allowedSubjects);
+          if (
+            !visible.isCurrent() ||
+            directorySubjects.some((subject) => !currentSubjects.has(subject)) ||
+            visible.people[0]?.id !== targetId ||
+            deniedProfiles.has(targetId)
+          ) {
+            return notFound();
+          }
+          // Removal during later awaited reads must still hide the icon.
+          targetVisible = () => visible.isCurrent() && !deniedProfiles.has(targetId);
+        }
+        const selected = await getUserPreferenceValues([targetId], iconPreference, {
+          env: chats.env,
+        });
+        await revalidate();
+        if (
+          !targetVisible() ||
+          !selected.isCurrent() ||
+          parseStoredIcon(selected.values.get(targetId))?.kind !== "image"
+        ) {
+          return notFound();
+        }
+        const reader = createProfileAvatarReader(targetId, { env: chats.env });
+        for (;;) {
+          const prepared = await reader.inspect();
+          await revalidate();
+          const uploaded = prepared.avatar;
+          if (!uploaded || prepared.profile?.id !== targetId) {
+            return notFound();
+          }
+          const etag = formatUserProfileAvatarEtag(uploaded.sha256, uploaded.mime);
+          const headers = {
+            "cache-control": "private, no-cache",
+            "x-content-type-options": "nosniff",
+            etag,
+          };
+          const matches = matchesHttpIfNoneMatch(
+            request.headers.get("if-none-match") ?? undefined,
+            etag,
+          );
+          const loaded = matches ? undefined : await prepared.loadBytes();
+          assertCurrent();
+          if (!targetVisible()) {
+            return notFound();
+          }
+          if (!prepared.isCurrent() || (!matches && !loaded)) {
+            continue;
+          }
+          if (matches || !loaded) {
+            return new Response(null, { status: 304, headers });
+          }
+          return new Response(Buffer.from(loaded.bytes), {
+            headers: { ...headers, "content-type": uploaded.mime },
+          });
+        }
       }
       if (pathname === "/agents" && method === "GET") {
         await revalidate();
-        const catalog: ProtectedAgentCatalogDto = {
-          defaultAgentId: agentCatalog.defaultAgentId,
-          agents: agentCatalog.list(),
-        };
-        return json(catalog);
+        const { defaultAgentId } = agentCatalog;
+        const catalog: ProtectedAgentCatalogDto | ProtectedAgentCatalogV1 = hasClientCapability(
+          request.headers,
+          "agents-v1",
+        )
+          ? { defaultAgentId, agents: agentCatalog.listV1() }
+          : { defaultAgentId, agents: agentCatalog.list() };
+        return profileJson(catalog);
       }
       if (pathname === "/automations/catalog" && method === "GET") {
         if (!automationCatalog) {
           return notFound();
         }
         await revalidate();
-        return json(automationCatalog);
+        const catalog: ProtectedAutomationCatalog | ProtectedAutomationCatalogV1 =
+          hasClientCapability(request.headers, "agents-v1")
+            ? { ...automationCatalog, agents: agentCatalog.listV1() }
+            : automationCatalog;
+        return profileJson(catalog);
       }
       if (pathname === "/automations/drafts/validate" && method === "POST") {
         if (!automationCatalog) {
@@ -887,6 +1131,182 @@ export function createProtectedHttp(options: {
         await revalidate();
         assertCurrent();
         return json(result);
+      }
+      if (pathname === "/automations" && method === "GET") {
+        if (!automationCatalog?.capabilities.automations.list) {
+          return notFound();
+        }
+        await revalidate();
+        const automations = await listProtectedAutomationRecords(options.stateDir, authority);
+        assertCurrent();
+        const result: ProtectedAutomationListResponse = { automations };
+        return json(result);
+      }
+      if (pathname === "/automations" && method === "POST") {
+        if (!automationCatalog?.capabilities.automations.create) {
+          return notFound();
+        }
+        const draft = await body(request);
+        assertCurrent();
+        const validation = validateProtectedAutomationDraft(draft, automationCatalog);
+        if (!validation.valid) {
+          return json(validation, 422);
+        }
+        await revalidate();
+        if (!admitStorage) {
+          return notFound();
+        }
+        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        try {
+          const automation = await createProtectedAutomationRecord(
+            options.stateDir,
+            { profileId: profile.id, definition: validation.draft, now: Date.now() },
+            authority,
+            storage,
+          );
+          if (!automation) {
+            unauthorized();
+          }
+          assertCurrent();
+          const result: ProtectedAutomationResponse = { automation };
+          return json(result, 201);
+        } finally {
+          storage.release();
+        }
+      }
+      const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
+      if (automationMatch && method === "GET") {
+        if (!automationCatalog?.capabilities.automations.list) {
+          return notFound();
+        }
+        await revalidate();
+        const automation = await readProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, automationId: automationMatch[1]! },
+          authority,
+        );
+        if (!automation) {
+          return notFound();
+        }
+        assertCurrent();
+        const result: ProtectedAutomationResponse = { automation };
+        return json(result);
+      }
+      if (automationMatch && method === "PATCH") {
+        if (!automationCatalog?.capabilities.automations.create) {
+          return notFound();
+        }
+        const patch = await body(request);
+        if (!isProtectedAutomationPatchRequest(patch) || Object.keys(patch).length === 0) {
+          return invalid();
+        }
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(
+            428,
+            "version_required",
+            "Reload the automation before saving changes.",
+          );
+        }
+        if (!/^[1-9]\d*$/u.test(version) || !Number.isSafeInteger(Number(version))) {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before saving.",
+          );
+        }
+        await revalidate();
+        const automationId = automationMatch[1]!;
+        const current = await readProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, automationId },
+          authority,
+        );
+        if (!current) {
+          return notFound();
+        }
+        if (current.version !== version) {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before saving.",
+          );
+        }
+        if (patch.enabled === true || current.enabled) {
+          throw new ProtectedError(
+            503,
+            "scheduler_unavailable",
+            "Automation scheduling is not available yet. Your changes were not saved.",
+          );
+        }
+        const definition: Record<string, unknown> = { ...current };
+        delete definition.id;
+        delete definition.version;
+        delete definition.enabled;
+        delete definition.state;
+        delete definition.nextCheckAt;
+        for (const [key, value] of Object.entries(patch)) {
+          if (key === "enabled") {
+            continue;
+          }
+          if (value === null) {
+            delete definition[key];
+          } else {
+            definition[key] = value;
+          }
+        }
+        const validation = validateProtectedAutomationDraft(
+          definition,
+          automationCatalog,
+          agentCatalog.get(current.agentId),
+        );
+        if (!validation.valid) {
+          return json(validation, 422);
+        }
+        await revalidate();
+        if (!admitStorage) {
+          return notFound();
+        }
+        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        try {
+          const updated = await patchProtectedAutomationRecord(
+            options.stateDir,
+            {
+              profileId: profile.id,
+              automationId,
+              expectedRevision: Number(version),
+              definition: validation.draft,
+              now: Date.now(),
+            },
+            authority,
+            storage,
+          );
+          if (updated && "status" in updated) {
+            if (updated.status === "member_inactive") {
+              unauthorized();
+            }
+            if (updated.status === "version_mismatch") {
+              throw new ProtectedError(
+                412,
+                "version_mismatch",
+                "This automation changed. Reload it before saving.",
+              );
+            }
+            if (updated.status === "scheduler_required") {
+              throw new ProtectedError(
+                503,
+                "scheduler_unavailable",
+                "Automation scheduling is not available yet. Your changes were not saved.",
+              );
+            }
+            return notFound();
+          }
+          assertCurrent();
+          const result: ProtectedAutomationResponse = { automation: updated };
+          return json(result);
+        } finally {
+          storage.release();
+        }
       }
       if (pathname === "/logout" && method === "POST") {
         revokedSessions.add(identity.sessionId);
@@ -986,7 +1406,7 @@ export function createProtectedHttp(options: {
       if (pathname === "/storage/chats" && method === "GET") {
         const items: ProtectedChatStorage["chats"] = [];
         const { personalBytes } = await measureProtectedStorage(
-          { ...options, chats },
+          storageMeasurement,
           profile.id,
           assertCurrent,
           false,
@@ -1024,7 +1444,7 @@ export function createProtectedHttp(options: {
         let storage;
         try {
           const selectedAgentId = data.selectedAgentId ?? agentCatalog.defaultAgentId;
-          if (!agentCatalog.get(selectedAgentId)) {
+          if (!agentCatalog.getSelectable(selectedAgentId)) {
             throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
           }
           await revalidate();
@@ -1143,7 +1563,7 @@ export function createProtectedHttp(options: {
         if (!isProtectedAgentSelection(data)) {
           return invalid();
         }
-        if (!agentCatalog.get(data.selectedAgentId)) {
+        if (!agentCatalog.getSelectable(data.selectedAgentId)) {
           throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
         }
         const version = request.headers.get("if-match");
@@ -1283,7 +1703,8 @@ export function createProtectedHttp(options: {
               request.signal.throwIfAborted();
             }
             const currentEntry = await chats.readEntry(authority, id);
-            const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.defaultAgentId;
+            const selectedAgentId =
+              currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
             const selectedAgent = agentCatalog.get(selectedAgentId);
             if (!selectedAgent) {
               throw new ProtectedError(
@@ -1293,7 +1714,7 @@ export function createProtectedHttp(options: {
               );
             }
             const mentionedAgents = (data.mentions ?? []).map((mention) => {
-              const agent = agentCatalog.get(mention.agentId);
+              const agent = agentCatalog.getSelectable(mention.agentId);
               if (!agent || agent.id === selectedAgentId) {
                 throw new ProtectedError(
                   422,
@@ -1497,6 +1918,7 @@ export function createProtectedHttp(options: {
                         input,
                         mentionedAgents,
                         agent: selectedAgent,
+                        routing: agentRouting,
                         sessionAccess,
                         files: storage?.files(owned) ?? owned,
                         signal,
@@ -1730,6 +2152,7 @@ export function createProtectedHttp(options: {
       while (pending.size) {
         await Promise.allSettled(pending);
       }
+      ownedEncryption?.dispose();
     },
     async revokeProfile(profileId: string) {
       invalidateProfile(profileId);

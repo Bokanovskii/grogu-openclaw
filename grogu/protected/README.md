@@ -78,6 +78,14 @@ OPENCLAW_CONFIG_PATH=/absolute/private/config/openclaw.json \
 node --import ./scripts/tsx.mjs grogu/protected/main.ts /absolute/private/config/protected.json
 ```
 
+For production, run `pnpm build` from the exact source revision being packaged.
+Include the complete generated root `dist/` and workspace package build outputs
+in the runtime archive, alongside that source and the client build. The source
+entrypoint uses the production workers when `dist/` is present; an incomplete
+build stops startup. If `dist/` is absent, source-only development continues to
+use TypeScript workers. Never combine workers and source from different builds.
+The installed launcher does not need to change.
+
 The fixed macOS maintenance helper runs pinned pnpm 12.15.0 through its
 `bin/pnpm.mjs` Node fallback. Its install scripts are disabled, so do not assume
 that the package's top-level native launcher was installed or use the older
@@ -118,11 +126,15 @@ Initialization measures free space on the state volume. It reserves a 512 MiB
 free-space floor and takes at most one-sixteenth of the remaining space, capped
 at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
 that budget. The runtime counts canonical chat/transcript bytes and files in
-each chat's directory, including widgets and fetched artifacts, and conservatively
-limits growth per turn. The pilot allows one storage-growing request at a time.
-If a quota is reached, export or delete a chat to free admission; the runtime
-does not evict chats or keep backups. A volume below its floor stops accepting
-writes until space is available. Chat deletion remains available.
+each chat's directory, including widgets and fetched artifacts. It also counts
+each saved automation definition against its owner profile and the global
+budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
+entry overhead as stored files. The runtime limits growth per operation and
+reserves quota before writes so concurrent requests stay within the configured
+limits. If a quota is reached, delete a chat or reduce a saved automation
+definition to free space, or contact the server operator. The runtime does not
+evict chats or keep backups. A volume below its floor stops accepting writes
+until space is available. Chat deletion remains available.
 
 An answer can finish with a widget and no closing text. When the native agent
 confirms successful terminal tool execution, Alcove saves a completion receipt
@@ -133,25 +145,28 @@ without that receipt retain their recorded status.
 
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
-and overhead charges as the quota. `usedBytes` also counts transient child work,
-which is not a separate cleanup item. `limitBytes` is the member's configured
-limit, not the host's free disk space. To delete a reviewed chat, send its
-`version` in `If-Match` to the existing `DELETE /api/protected/v1/chats/:id`
-route. Read storage again after deletion to show the new total.
+and overhead charges as the quota. `usedBytes` also counts saved automation
+definitions and transient child work. Neither is listed as a chat. `limitBytes`
+is the member's configured limit, not the host's free disk space. To delete a
+reviewed chat, send its `version` in `If-Match` to the existing
+`DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
+show the new total.
 
 ## Automation discovery and draft validation
 
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.
-It returns the public protected-agent catalog, the configured Sparky model and
+It returns the public protected-agent catalog (in the `agents-v1` shape when
+the request asks for it, as for `/agents`), the configured Sparky model and
 its supported reasoning levels/default, and capabilities. `/me` remains
 unchanged for strict older clients. If Sparky or its reasoning catalog is
 unavailable, the automation catalog route returns 404; older servers also
 return 404, so clients can keep the feature unavailable without breaking sign-in.
-At this stage only `catalog` and `draftValidation` are true; list, create,
-schedule control, run, sharing, and notification capabilities are false. The
-catalog advertises interval and fixed calendar schedules for draft validation
-only. This does not enable listing, saving, starting, pausing, or running
-automations.
+`catalog` and `draftValidation` are true when the model catalog is available.
+`list` and `create` are true only when the protected storage budget is
+configured. Without it, list and write routes return 404. Schedule control, run,
+sharing, and notification capabilities remain false. The catalog advertises
+interval and fixed calendar schedules for draft validation only; those schedules
+are not active jobs.
 
 `POST /api/protected/v1/automations/drafts/validate` accepts an in-memory draft:
 `name`, `instructions`, `whenToNotify`, optional `doneWhen`, `agentId`,
@@ -174,9 +189,43 @@ Valid input returns `{ valid: true, draft }`, including the resolved thinking
 level. Invalid input returns `{ valid: false, errors }` with field, code, and
 message entries. Schedule intervals are checked against the native Cron
 schema's technical range of 1 through 8,640,000,000,000,000 milliseconds; this
-does not enable scheduling or recommend a cadence. This route does not call a
-model or provider, save a draft, create a schedule, or produce a run. There is
-no automation list or persistence route yet.
+does not enable scheduling or recommend a cadence. Validation itself does not
+call a model or provider, save a draft, create a schedule, or produce a run.
+
+`GET /api/protected/v1/automations` lists the signed-in member's private
+automations. `GET /api/protected/v1/automations/:id` reads one private record,
+and `POST /api/protected/v1/automations` saves a validated draft. Creation
+always starts paused; an `enabled` field is not accepted on create. `PATCH
+/api/protected/v1/automations/:id` accepts partial draft fields and the
+canonical optional `enabled` boolean, and requires the current `version` in
+`If-Match`. Stale versions return 412. Paused definitions can be edited; a
+request to enable an automation returns `503 scheduler_unavailable` without
+changing the record because no native Cron control bridge is wired yet. Thus
+`scheduleControl` remains false and no saved automation can run on a schedule.
+The existing per-profile and global storage budgets cover both operations.
+Creation charges the definition's stored UTF-8 bytes and the existing per-entry
+overhead. An edit charges only positive definition growth, so an edit that
+reduces storage can free budget. A quota refusal returns `413 quota_exceeded`
+before the state worker writes. The PATCH route is not a substitute scheduler.
+
+When an administrator removes an admitted member, the removal transaction deletes
+that member's saved private, paused definitions and their sole-owner memberships.
+It leaves other members' definitions, shared or co-owned definitions, enabled
+definitions, and definitions with native job bindings intact. Access revocation
+and active-turn interruption do not wait for broader retirement work. Legacy
+stores without automation definitions still support removal. This save-only
+cleanup does not delete chats, files, profiles, or scheduler jobs.
+
+The internal state owner stores automation definitions, owners, followers,
+visibility, the paused/enabled state, and native Cron job bindings in the
+shared-state worker. A binding ties one native job to the current central owner
+and definition revision. Reads and mutations require an active admission and
+private definitions are exposed only to their owners. Shared definitions,
+results, runs, account grants, and notifications are not exposed by HTTP.
+The first release stores no Research Topics reference and does not give
+automation turns the Research Topics tool. Automation IDs are canonical
+lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines
+the accepted form.
 
 The fixed calendar draft-validation contract uses schedules of
 `{ kind: "cron", expr, tz }`. The currently designed choices map to
@@ -191,26 +240,22 @@ not evidence that an automation can be saved or dispatched. Native Cron owns
 the DST behavior, and its isolated schedule tests cover the advertised
 `America/Los_Angeles` zone.
 
-The inactive owner-operation DTOs use one full record shape for list rows,
-detail reads, and every `{ automation }` mutation response: the draft fields
-above plus `id`, opaque `version`, `enabled`, `state: "active" | "paused"`, and
-`nextCheckAt: string | null`; records include the resolved effective
-`thinking` level. Create uses the full draft body; patch uses its partial form
-and does not change enabled state. Omitted patch fields are retained;
-`doneWhen: null` clears that rule and `thinking: null` resets to the catalog
-default. The proposed owner routes are
-`GET /automations`, `GET /automations/:id`, `POST /automations`,
-`PATCH /automations/:id`, `POST /automations/:id/start`,
-`POST /automations/:id/pause`, and `POST /automations/:id/run`. Mutations use
-`If-Match`; create starts paused. None is mounted until the protected-to-Gateway
-trust and native durable ownership boundary are approved and implemented.
+List, detail, create, and patch responses use the full record shape: the draft
+fields above plus `id`, opaque `version`, `enabled`, `state: "active" | "paused"`,
+and `nextCheckAt: string | null`; records include the resolved effective
+`thinking` level. Omitted patch fields are retained; `doneWhen: null` clears
+that rule and `thinking: null` resets to the catalog default. Start, run, and
+pause of active schedules remain unavailable until the protected-to-Gateway
+trust boundary reaches the native Cron owner.
 
-The default Sparky route can fetch known public URLs with OpenClaw's `web_fetch`
-and display the resulting sources. It does not have a search provider;
-`web_search` is disabled. Managed search would require a separately approved
-search plugin and isolated credential or endpoint (for example, Brave with its
-own `BRAVE_API_KEY`). The Sparky key is not a search credential, and Alcove does
-not inherit provider keys or configuration from personal Grogu.
+Chat agents can search the public web with OpenClaw's `web_search` and fetch
+public URLs with `web_fetch`; the stream shows the resulting sources. Search
+uses only the keyless bundled DuckDuckGo provider. It needs no credential, and
+no other search provider is enabled. The runtime loads that plugin from the
+packaged `extensions/duckduckgo` source because it has no bundled build, so the
+runtime archive must include that directory; startup stops without it. The
+Sparky key is not a search credential, and Alcove does not inherit provider keys
+or configuration from personal Grogu.
 
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
 levels. A signed-in profile can send its Copilot access token to
@@ -292,55 +337,180 @@ Updates drain or interrupt them before the new listener starts.
 Saved terminal model failures appear in the chat as a failed assistant message
 with fixed, classified guidance. Provider error text is never returned.
 
-## File encryption API
+## Encrypted storage
 
-The internal `createProtectedHttp` API accepts a host-owned `encryption` handle
-from `createStorageValueEncryption`. With that handle, authorized user files use
-AES-256-GCM and a fresh data key for each write. The service key wraps each data
-key. Both the wrapped key and the content are bound to the canonical profile.
-Moving a file within that profile does not require re-encryption.
+The protected runtime requires the host-owned 32-byte key at
+`$SERVICE_HOME/secrets/storage-key`, outside the state directory and readable
+only by the `groguProtected` service account. The bootstrap creates it with mode
+`0600`; protected runtime startup and initialization refuse a missing or invalid
+key. Never replace an existing key to recover access. Losing the key makes
+encrypted chats and files unrecoverable.
 
-The file owner preserves its path, directory-identity, link, and authority checks.
-Reads reject plaintext, damaged content, the wrong key, and content copied from
-another profile. File limits and returned sizes describe plaintext bytes. Quotas
-include the encrypted size, which adds 96 bytes per file. The caller must retain
-the handle until requests settle, then dispose it.
+The protected shared-state database encrypts stored automation definitions,
+secret-store values, and retained Cron content, including job definitions,
+state, history, scratch, receipt errors, and diagnostic quarantine payloads.
+Storage metadata needed for routing and scheduling remains readable. Personal
+Grogu shared state remains plaintext at the upstream schema version.
 
-This API does not enable encryption in `main.ts`. The deployed service still
-stores plaintext. Key provisioning, migration, and encryption of canonical chats
-remain separate work. Do not enable a managed-encryption indicator or point an
-encrypted file scope at existing plaintext files.
+The service encrypts chat transcript events, session titles and summaries,
+session snapshots, queued messages and completion results, trajectories, ACP
+parent-stream events, and archived transcripts. Each value uses AES-256-GCM
+with its own fresh data key, wrapped by the service key and bound to its owner.
+Widgets and other per-user files use the same per-file data-key design. The
+server admin can read chats; this protects copied storage files, not a running
+service or its administrator.
+
+Subagent task and terminal-result text are excluded from this encryption path:
+the companion transient-run lifecycle repair removes their durable retention
+and keeps only cleanup identity in `subagent_runs`.
+
+Full-text transcript search is disabled for protected encrypted stores because
+its index would create a readable copy. Search reports this limit and directs
+agents to list sessions and read their history instead. Session reference lookup
+and deletion safety continue to use the non-content projection. User-requested
+exports may be readable to the user who requested them.
+
+The forward migration verifies encrypted read-back before replacing plaintext
+user files. It keeps only a transient encrypted staging copy, atomically
+replaces the plaintext file after verification, and removes the staging
+directory before startup completes. It checkpoints and vacuums SQLite after
+conversion, but this cannot promise forensic erasure from filesystem snapshots,
+storage-device remapping, or copies outside the managed state. Grogu keeps no
+backups. Interrupted migration can be retried; missing or wrong keys and
+unsupported schema versions fail closed rather than reopening the store as
+plaintext. Shared-state migration verifies the stored ciphertext within the
+transaction before committing it and removing the committed plaintext. If
+cleanup is interrupted, startup resumes it before admitting readers.
+Secret-store values must fit the existing 64 KiB limit after encryption. A
+large plaintext value can prevent migration; the transaction rolls back without
+removing it. Reduce the value before retrying.
+Protected runtime startup requires an existing encrypted agent database with a
+valid key and encryption marker. It refuses a missing or plaintext database
+instead of creating or migrating it. Stop the listener and use the maintenance
+command below to provision or migrate plaintext state.
+Protected encrypted agent databases use schema version 26 so older builds
+refuse them. Protected shared-state databases use schema version 21. Ordinary
+personal Grogu databases keep the upstream schemas and versions. When merging
+this fork with upstream, select unused protected versions above the updated
+upstream versions. Update the protected-version contracts, migration checks,
+and tests together. Never reuse an upstream number.
+
+### Upgrade an existing installation
+
+Stop the protected listener before running maintenance. The installed
+service-owned helper can provision the key and migrate existing plaintext
+shared state, the agent database, and per-user files without replacing the root
+launcher:
+
+```sh
+sudo -n -u groguProtected \
+  /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run provision-storage-key
+```
+
+The command derives the key path from the validated service home when an older
+launcher does not export `OPENCLAW_PROTECTED_STORAGE_KEY_FILE`. It preserves an
+existing key, verifies encrypted files before changing the database, and
+migrates through the shared-state, agent database, and user-file owners. If the
+key is missing but encrypted database or user-file data exists, the command
+refuses to create a replacement; restore the original key instead. An interrupted plaintext
+migration can be retried with the same key. Startup resumes shared-state cleanup
+and repeats the idempotent file migration before opening the listener. Start the
+listener again only after maintenance succeeds.
 
 ## Protected chat agents
 
-`GET /api/protected/v1/agents` returns the runtime-owned catalog. `travel` is the
-default for new chats and for older chat entries without a selection. Choose
-`general` ("Just chat") for a generic conversation with the same protected tool
-ceiling; this does not change existing selections or the Travel default. The
-catalog also includes the narrow `research` role, which can fetch and summarize
-user-selected sources. The response includes public names, descriptions, and
-tool ceilings, never the server-owned instructions. The service owner can add
-entries through the `agentExtensions` option to `createProtectedHttp`; extension
-IDs must be unique, and their tools can only be chosen from the protected
-runtime's existing tool ceiling.
+`grogu/protected/agents.ts` owns the agent catalog. Every agent gets the same
+native tools, the same member-scoped access, and the same prompt header. Agents
+differ only in their intent instructions, packaged skills, example prompts, and
+presentation hints for the client.
+
+- **Grogu** (`grogu`) is the default for new chats. It is the generic Alcove
+  agent with no specialty. Its prompt lists the other selectable agents, and it
+  can hand a request to one of them (see routing below).
+- **Travel** (`travel`) plans trips. Its `travel-dashboard` skill gives planning
+  guidance and an HTML dashboard template for `show_widget`.
+- `general` ("Just chat") and `research` are retired. They are not selectable
+  for new chats, mentions, or routing, but saved chats that use them keep
+  working. Chats saved before agent selection was recorded still use Travel.
+
+Shared tools are `web_search`, `web_fetch`, `show_widget`, `sessions_list`,
+`sessions_history`, and `sessions_send`. They reach only the
+signed-in member's own chats, the public web, and widgets in the current chat.
+Session tools recheck the profile and exact chat incarnation, so another
+member's chats are unavailable. `sessions_send` can steer only an active
+permitted chat while the current request remains authorized; it cannot start an
+idle or detached run. Tools that need credentials the service does not hold,
+such as image, PDF, speech, video, and music generation, stay off.
+
+Protected turns restrict their tools, so OpenClaw builds its minimal system
+prompt and puts the shared Alcove header in its `## Subagent Context` section.
+Then it adds `## Current agent:` with the agent's intent, then each `## Skill:`
+with its guidance. Main-turn requests with the same date and reasoning level
+have the same tool list and the same system text up to `## Current agent:`, for
+every member and agent. That makes the header part of a shared prefix that
+providers can cache. A shared prefix does not guarantee a cache hit; check
+provider usage metrics for that. Mentioned and routed agents run as native
+children with fewer tools, so their prefix differs from main turns.
+
+The service sets `agents.defaults.skipBootstrap`, so child runs do not create
+`BOOTSTRAP.md` in the shared workspace. Members cannot finish that onboarding.
+An existing `workspace/BOOTSTRAP.md` from an older version adds a "Bootstrap
+Pending" section to every member's main-turn prompt. To remove it, stop the
+service and run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run retire-bootstrap
+```
+
+The command removes the file only if it is the generated default. It keeps an
+edited or linked file and refuses without printing its content. If the file is
+missing, the command does nothing. It refuses while the listener is running.
+
+Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
+`name` and `description`. A `{{template}}` marker is replaced with that
+directory's `template.html`. The runtime archive must include
+`grogu/protected/agent-skills/`; the catalog fails to load without it. The
+service owner can add agents through the `agentExtensions` option to
+`createProtectedHttp`. Extension IDs must be unique.
+
+`GET /api/protected/v1/agents` returns the catalog. Its shape depends on the
+`X-Alcove-Capabilities` request header, parsed by `client-capabilities.ts`:
+
+- Without `agents-v1`, the response keeps the exact legacy shape for shipped
+  strict clients: only selectable agents, each with `id`, `name`,
+  `description`, and the legacy tool list.
+- With `agents-v1`, it returns every agent with `selectable`, `examplePrompts`,
+  public skill names and descriptions, and `presentation` (`icon`,
+  `reasoningIndicator`, and `widgetWidth`). Grogu uses the `grogu-eater`
+  reasoning indicator; Travel uses wide widgets.
+
+Both shapes send `Vary: X-Alcove-Capabilities` and never include instructions
+or skill guidance. The capability header changes only the response shape; it
+grants no access.
 
 `POST /api/protected/v1/chats` accepts an optional `selectedAgentId`.
 `PATCH /api/protected/v1/chats/:id/agent` accepts the same field and requires
-the current chat version in `If-Match`. Selection changes are rejected while
+the current chat version in `If-Match`. Both accept only selectable agents and
+otherwise return 422 `agent_unavailable`. Selection changes are rejected while
 the chat is running. The selected ID is persisted in the canonical session
 entry and returned as `selectedAgentId`; changing it updates the chat version.
-If a later deployment removes an extension that a chat selected, turns fail
-closed until the user selects an agent still present in the catalog.
-The selection supplies only server-owned prompt instructions and a restrictive
-tool ceiling. It does not change the protected OpenClaw agent identity or grant
-permissions beyond the protected runtime's existing policy. Travel can also
-list and read chats owned by the same profile, and steer an active permitted
-chat while the current request remains authorized. Session tools recheck the
-profile and exact chat incarnation; another profile's chats are unavailable.
-Steering cannot start an idle or detached run.
+If a later deployment removes an agent that a chat selected, turns fail closed
+until the user selects an agent still present in the catalog. The selection
+does not change the protected OpenClaw agent identity or grant permissions
+beyond the protected runtime's existing policy.
+
+A main turn also offers the client tool `route_to_agent` with a selectable
+`agentId` and a `brief` of at most 2,000 characters. When the agent calls it
+once, its reply ends and the chosen agent runs as a native child with the
+member's request and the brief, like a mention. That result is saved below the
+reply with the chosen agent's ID. More than one call, an unknown or retired
+agent, a route to itself, or an empty or oversized brief fails the turn with
+502 `agent_failed`. A routed or mentioned child cannot route again, and core
+child policy withholds `sessions_send` from it, so only the chat's own agent
+can add messages to another chat.
 
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
-up to four distinct, available agent IDs other than the selected agent. Each
+up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
 provider credential, file boundary, and deadline. Child work is not detached:
 child transcript and file bytes count against the initiating profile while

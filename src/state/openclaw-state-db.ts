@@ -65,6 +65,7 @@ import {
 import { ensureOpenClawStateRuntimeSchema as ensureSchema } from "./openclaw-state-db-schema-runtime.js";
 import {
   assertSupportedStateSchemaVersion,
+  getAdmittedStateSchemaVersion,
   readStateSchemaContentVersion,
 } from "./openclaw-state-db-schema-version.js";
 import {
@@ -207,7 +208,8 @@ export function withOpenClawStateStartupMigrationCheckpointDatabase<T>(
   const database = getOpenClawStateDatabaseIfOpen(options);
   if (
     database &&
-    getAdmittedSqliteSchemaFacts(database.db)?.userVersion === OPENCLAW_STATE_SCHEMA_VERSION
+    getAdmittedSqliteSchemaFacts(database.db)?.userVersion ===
+      getAdmittedStateSchemaVersion(database.db)
   ) {
     // Lease rows use the admitted owner; legacy/native bootstrap still needs its
     // separate integrity-proven connection before the full schema can be opened.
@@ -248,7 +250,7 @@ export async function openExistingOpenClawStateDatabaseReadOnly(
     } else {
       assertSupportedStateSchemaVersion(db, pathname);
       assertSqliteIntegrity(db, pathname);
-      if (readStateSchemaContentVersion(db) === OPENCLAW_STATE_SCHEMA_VERSION) {
+      if (readStateSchemaContentVersion(db) === getAdmittedStateSchemaVersion(db)) {
         assertOpenClawStateDatabaseForMaintenance(db, { pathname });
       }
     }

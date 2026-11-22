@@ -57,6 +57,12 @@ import {
   markCanonicalSessionValidationPending,
 } from "./session-canonical-key.js";
 import { validateCanonicalSessionRow } from "./session-canonical-row.js";
+import {
+  hasProtectedSessionEntryStorage,
+  protectSessionEntryProjection,
+  protectedSessionEntryPayloadSql,
+  writeProtectedSessionEntryJson,
+} from "./session-entry-encryption.js";
 import { preserveCreationStamp } from "./session-entry-provenance.js";
 import {
   splitSessionEntrySnapshots,
@@ -213,6 +219,7 @@ export function deleteSessionEntryRows(
     database.db,
     db.selectFrom("session_windows").select("session_id").where("session_key", "=", sessionKey),
   ).rows;
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   // Skip the survivor scan when maintenance reclaimed every window. Otherwise, project
   // reference metadata before acquiring rows to avoid loading unrelated saved prompts.
   const survivingNodes =
@@ -222,6 +229,9 @@ export function deleteSessionEntryRows(
           db
             .selectFrom("session_nodes")
             .select(["current_session_id", "entry_json", "session_key"])
+            .$if(protectedEntry !== undefined, (query) =>
+              query.select(protectedEntry!.as("protected_entry_json")),
+            )
             .where("session_key", "!=", sessionKey)
             .orderBy("session_key", "asc"),
         ).rows
@@ -231,7 +241,7 @@ export function deleteSessionEntryRows(
       if (node.current_session_id === window.session_id) {
         return true;
       }
-      const entry = parseSessionEntryRow(node);
+      const entry = parseSessionEntryRow(node, "full", database.db);
       return entry ? collectSessionStateIdsForEntry(entry).includes(window.session_id) : false;
     });
     if (survivingNode) {
@@ -557,6 +567,15 @@ export function writeSessionEntry(
     // Offline import/repair can stage aliases; readiness must validate them before use.
     markCanonicalSessionValidationPending(database, [sessionKey]);
   }
+  const protectedEntryStorage = hasProtectedSessionEntryStorage(database.db);
+  const storedSessionNode = protectedEntryStorage
+    ? {
+        ...sessionNode,
+        entry_json: protectSessionEntryProjection(sessionNode.entry_json),
+        label: null,
+        display_name: null,
+      }
+    : sessionNode;
   // Collaboration rows belong to the exact canonical node being overwritten,
   // which can differ from the selected alias during canonicalization.
   if (canonicalPreviousEntry && canonicalPreviousEntry.sessionId !== normalizedEntry.sessionId) {
@@ -567,6 +586,9 @@ export function writeSessionEntry(
     });
   }
   const boundSessionRoot = bindSessionRoot({ entry: normalizedEntry, sessionKey, updatedAt });
+  if (protectedEntryStorage) {
+    boundSessionRoot.display_name = null;
+  }
   const conversation = prepareSessionConversationForWrite({
     database,
     entry: normalizedEntry,
@@ -594,8 +616,11 @@ export function writeSessionEntry(
   });
   const queries = getSessionEntryWriteQueries(database.db);
   const writeGeneration = trackSessionEntryCacheWrite(database, () => {
-    queries.node(sessionNode);
-    if (persisted.snapshotsChanged) {
+    queries.node(storedSessionNode);
+    if (protectedEntryStorage) {
+      writeProtectedSessionEntryJson(database.db, sessionKey, JSON.stringify(canonicalEntry));
+      writeSessionEntrySnapshots(database, sessionKey, []);
+    } else if (persisted.snapshotsChanged) {
       writeSessionEntrySnapshots(database, sessionKey, persisted.snapshots);
     }
   });

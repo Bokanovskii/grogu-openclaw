@@ -95,11 +95,12 @@ import {
 } from "./openclaw-agent-db-resources.js";
 import {
   assertCanonicalAgentPersistenceVersion,
-  assertCurrentAgentSchemaMetadata,
+  assertCurrentAgentDatabaseSchemaMetadata,
   assertExistingAgentSchemaOwner,
   assertSupportedAgentSchemaVersion,
   readExistingAgentSchemaMeta,
 } from "./openclaw-agent-db-schema-helpers.js";
+import { assertRequiredProtectedAgentStorage } from "./openclaw-agent-db-schema-read.js";
 import {
   agentDatabaseIntegrityBeforeMutationSteps,
   ensureOpenClawAgentSchema,
@@ -227,6 +228,9 @@ function* openOpenClawAgentDatabaseSteps(
   const opened = getOpenClawAgentDatabaseIfOpen(databaseOptions);
   if (opened) {
     assertCurrent(opened);
+    if (repairAdmission?.requireProtectedStorage) {
+      throw new Error("Protected agent startup requires a fresh physical database admission.");
+    }
     if (preparedLease) {
       throw new Error("A prepared Worker lease cannot adopt an existing agent database handle");
     }
@@ -382,6 +386,14 @@ function* openOpenClawAgentDatabaseSteps(
     openedDb = db;
     registerOpenClawAgentDatabaseIdentity(db);
     assertCurrent({ db, path: pathname });
+    if (repairAdmission?.requireProtectedStorage) {
+      try {
+        assertRequiredProtectedAgentStorage(db, pathname);
+      } catch (error) {
+        db.close();
+        throw error;
+      }
+    }
     if (repairAdmission?.expectedIdentity) {
       ensureOpenClawAgentDatabasePermissions(pathname, databaseOptions);
     }
@@ -415,7 +427,7 @@ function* openOpenClawAgentDatabaseSteps(
       const existingSchema = readExistingAgentSchemaMeta(db);
       assertExistingAgentSchemaOwner(existingSchema, agentId, pathname);
       if (reusedSchema) {
-        assertCurrentAgentSchemaMetadata(existingSchema, agentId, pathname);
+        assertCurrentAgentDatabaseSchemaMetadata(db, existingSchema, agentId, pathname);
       }
       if (pending) {
         releaseCreationAdmission = reserveAgentCreationClaimAdmission(
@@ -750,3 +762,4 @@ export {
   settleOpenClawAgentDatabaseWorkerClose,
   type OpenClawAgentDatabaseWorkerCloseResult,
 } from "./openclaw-agent-db-lifecycle.js";
+/* oxlint-disable max-lines -- Physical admission must precede schema convergence in this owner. */

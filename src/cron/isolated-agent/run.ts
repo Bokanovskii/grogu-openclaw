@@ -325,6 +325,7 @@ async function runCronIsolatedAgentTurnInTrace(
               thinkingCatalog: prepared.context.thinkingSelection.catalog,
               loadThinkingCatalog: prepared.context.thinkingSelection.loadThinkingCatalog,
               executionIdentity: params.executionIdentity,
+              executionAuthority: params.executionAuthority,
               admissionSource: params.admissionSource,
             };
             const execution = await prepared.context.sessionWorkAdmission.run(() =>
@@ -496,5 +497,7 @@ async function runCronIsolatedAgentTurnInTrace(
     );
   } finally {
     leaseActive = false;
+    // Preparation transfers admission before callbacks can reject execution setup.
+    prepared.context.sessionWorkAdmission.release();
   }
 }

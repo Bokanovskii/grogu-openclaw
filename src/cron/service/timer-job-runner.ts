@@ -13,7 +13,11 @@ import type { CronCompletionDeliveryFence } from "../delivery-attempt-fence.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
 import type { CronRunReceiptHandle } from "../store/run-receipt.types.js";
-import type { CronAgentExecutionStarted, CronJob } from "../types.js";
+import {
+  PLUGIN_SERVICE_CRON_JOB_PREFIX,
+  type CronAgentExecutionStarted,
+  type CronJob,
+} from "../types.js";
 import {
   registerActiveCronTaskRun,
   trackActiveCronTaskRunSettlement,
@@ -199,16 +203,22 @@ async function executeJobCoreWithTimeoutUnfinalized(
   const receiptSource = opts?.runReceipt
     ? { handle: opts.runReceipt, context: opts.runReceiptContext }
     : undefined;
-  const assertRunCurrent = receiptSource
-    ? () =>
-        assertServiceCronRunReceiptCurrent(
-          state,
-          receiptSource.handle,
-          opts?.activeJobMarker,
-          receiptSource.context,
-          runAbortController.signal,
-        )
-    : undefined;
+  let executionAuthority: import("./state.js").CronJobExecutionAuthority | undefined;
+  const assertRunCurrent =
+    receiptSource || state.deps.resolveJobExecutionAuthority
+      ? async () => {
+          if (receiptSource) {
+            await assertServiceCronRunReceiptCurrent(
+              state,
+              receiptSource.handle,
+              opts?.activeJobMarker,
+              receiptSource.context,
+              runAbortController.signal,
+            );
+          }
+          executionAuthority?.assertInvocationCurrent();
+        }
+      : undefined;
   const deliveryAttemptFence = opts?.runReceipt
     ? createCronCompletionDeliveryFence({
         state,
@@ -292,6 +302,10 @@ async function executeJobCoreWithTimeoutUnfinalized(
         })
       : undefined;
   const jobTimeoutMs = resolveCronJobTimeoutMs(job);
+  // Unlimited execution still bounds service admission by the native setup budget.
+  const watchdogTimeoutMs =
+    jobTimeoutMs ??
+    (state.deps.resolveJobExecutionAuthority ? CRON_AGENT_SETUP_WATCHDOG_MS : undefined);
   try {
     const timeout = createDeferredCore<CronRunTimeout>();
 
@@ -299,19 +313,19 @@ async function executeJobCoreWithTimeoutUnfinalized(
     // timeout until the runner starts so cold setup gets a clearer failure reason.
     const deferTimeoutUntilExecutionStart =
       job.sessionTarget !== "main" && job.payload.kind === "agentTurn";
-    const watchdog =
-      jobTimeoutMs === undefined
+    let watchdog =
+      watchdogTimeoutMs === undefined
         ? undefined
         : createCronAgentWatchdog({
             deferUntilRunner: deferTimeoutUntilExecutionStart,
-            jobTimeoutMs,
+            jobTimeoutMs: watchdogTimeoutMs,
             triggerTimeout: (reason) => {
               if (!runAbortController.signal.aborted) {
                 const timeoutError = new Error(reason);
                 timeoutError.name = "TimeoutError";
                 runAbortController.abort(timeoutError);
               }
-              timeout.resolve({ timeoutMs: jobTimeoutMs, reason });
+              timeout.resolve({ timeoutMs: watchdogTimeoutMs, reason });
             },
           });
     // Unlimited runs still retain attribution when cancellation wins the race.
@@ -339,7 +353,7 @@ async function executeJobCoreWithTimeoutUnfinalized(
         accumulateExecution(info);
       }
     };
-    const trackExecution = !watchdog || deferTimeoutUntilExecutionStart;
+    const trackExecution = jobTimeoutMs === undefined || deferTimeoutUntilExecutionStart;
     const resolveHeartbeatTimeoutMs = state.deps.resolveHeartbeatTimeoutMs;
     const executionIdentity = opts?.executionIdentity;
     const coreOptions: ExecuteJobCoreOptions = {
@@ -369,8 +383,8 @@ async function executeJobCoreWithTimeoutUnfinalized(
               const heartbeatTimeoutMs = resolveHeartbeatTimeoutMs(heartbeat);
               // The queue owns admission and retries; only attempts spend the deadline.
               return {
-                onAttemptStarted: () => watchdog.replaceTimeout(heartbeatTimeoutMs),
-                onQueued: () => watchdog.replaceTimeout(undefined),
+                onAttemptStarted: () => watchdog?.replaceTimeout(heartbeatTimeoutMs),
+                onQueued: () => watchdog?.replaceTimeout(undefined),
               };
             }
           : undefined,
@@ -384,7 +398,31 @@ async function executeJobCoreWithTimeoutUnfinalized(
       },
     };
     watchdog?.start();
-    const corePromise = executeJobCore(state, job, runAbortController.signal, coreOptions);
+    const corePromise = (async () => {
+      runAbortController.signal.throwIfAborted();
+      const requiresServiceAuthority =
+        job.declarationKey?.startsWith(PLUGIN_SERVICE_CRON_JOB_PREFIX) === true;
+      if (requiresServiceAuthority && !state.deps.resolveJobExecutionAuthority) {
+        throw new Error("Native job execution authority resolver is unavailable.");
+      }
+      if (state.deps.resolveJobExecutionAuthority) {
+        executionAuthority = await state.deps.resolveJobExecutionAuthority({ job });
+        runAbortController.signal.throwIfAborted();
+        if (requiresServiceAuthority && !executionAuthority) {
+          throw new Error("Native job execution authority service is unavailable.");
+        }
+        await assertRunCurrent?.();
+        runAbortController.signal.throwIfAborted();
+      }
+      if (jobTimeoutMs === undefined) {
+        watchdog?.dispose();
+        watchdog = undefined;
+      }
+      return await executeJobCore(state, job, runAbortController.signal, {
+        ...coreOptions,
+        executionAuthority,
+      });
+    })();
     commandSettlement = job.payload.kind === "command" ? corePromise : undefined;
     const runPromise = corePromise.then(async (result) => {
       progress.completedCoreResult = result;
@@ -408,10 +446,13 @@ async function executeJobCoreWithTimeoutUnfinalized(
         settlement: runPromise,
       });
     }
+    const stateIdentityKey =
+      receiptSource?.context.admission.identity.key ?? opts?.activeJobMarker?.stateIdentityKey;
     trackActiveCronTaskRunSettlement(
       runPromise,
       runAbortController.signal,
       opts?.runReceipt?.agentId ?? opts?.activeJobMarker?.agentId,
+      stateIdentityKey ? { jobId: job.id, stateIdentityKey } : undefined,
     );
     void runPromise.catch((err: unknown) => {
       if (runAbortController.signal.aborted) {

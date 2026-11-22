@@ -17,16 +17,18 @@ const limits = {
   doneWhenCodeUnits: 2_000,
 } as const;
 
-const capabilities = {
-  catalog: true,
-  draftValidation: true,
-  list: false,
-  create: false,
-  scheduleControl: false,
-  run: false,
-  sharing: false,
-  notifications: false,
-} as const;
+function capabilities(persistenceAvailable: boolean) {
+  return {
+    catalog: true,
+    draftValidation: true,
+    list: persistenceAvailable,
+    create: persistenceAvailable,
+    scheduleControl: false,
+    run: false,
+    sharing: false,
+    notifications: false,
+  } as const;
+}
 const cronCatalog: NonNullable<ProtectedAutomationCatalog["schedule"]["cron"]> = {
   format: "5-field",
   repeats: ["daily", "weekdays", "saturday"],
@@ -76,6 +78,7 @@ export function createProtectedAutomationCatalog(input: {
   agents: ProtectedAgentCatalogDto;
   models: readonly ProtectedModel[];
   calendarDraftValidationAvailable?: boolean;
+  persistenceAvailable?: boolean;
 }): ProtectedAutomationCatalog | undefined {
   const sparky = input.models.find((model) => model.provider === "sparky");
   if (
@@ -86,7 +89,7 @@ export function createProtectedAutomationCatalog(input: {
     return undefined;
   }
   return {
-    capabilities: { automations: capabilities },
+    capabilities: { automations: capabilities(input.persistenceAvailable ?? true) },
     defaultAgentId: input.agents.defaultAgentId,
     agents: input.agents.agents,
     models: [sparky],
@@ -102,6 +105,7 @@ export function createProtectedAutomationCatalog(input: {
 export function validateProtectedAutomationDraft(
   input: unknown,
   catalog: ProtectedAutomationCatalog,
+  retainedAgent?: Pick<ProtectedAgentCatalogDto["agents"][number], "id">,
 ): ProtectedAutomationDraftValidation {
   const model = catalog.models[0];
   if (!model?.thinking) {
@@ -159,7 +163,10 @@ export function validateProtectedAutomationDraft(
 
   const draft = isProtectedAutomationDraft(candidate) ? candidate : undefined;
   if (draft) {
-    if (!catalog.agents.some((agent) => agent.id === draft.agentId)) {
+    if (
+      !catalog.agents.some((agent) => agent.id === draft.agentId) &&
+      retainedAgent?.id !== draft.agentId
+    ) {
       errors.push(error("agentId", "unsupported_agent", "Choose an available agent."));
     }
     if (draft.model.id !== model.id) {

@@ -62,6 +62,7 @@ export async function resolveCopilotRuntimeAuth(params: {
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   githubDomain?: string;
+  boundGithubDomain?: string;
   config?: OpenClawConfig;
   signal?: AbortSignal;
 }): Promise<{
@@ -73,6 +74,7 @@ export async function resolveCopilotRuntimeAuth(params: {
   const domain = resolveGithubCopilotDomain({
     env,
     explicit: params.githubDomain,
+    bound: params.boundGithubDomain,
     config: params.config,
   });
   const userUrl = copilotUserUrl(domain);

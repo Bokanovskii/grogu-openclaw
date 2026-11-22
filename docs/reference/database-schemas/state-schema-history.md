@@ -42,10 +42,24 @@ Doctor completes recognized schema-1 databases that predate the audit ledger bef
 | 18      | Original requesting authority retained with shared GitHub publication receipts                                                                                                                                                                                                                                                  | `v2026.9.6`         |
 | 19      | Durable original channel-owner authorization and revocation continuity                                                                                                                                                                                                                                                          | `v2026.9.7`         |
 | 20      | Cron receipt delivery-attempt fence prevents replay of ambiguous one-shot completions                                                                                                                                                                                                                                           | `v2026.10.1-beta.1` |
+| 21      | Grogu protected only: shared-state encryption and Cron scratch ciphertext bound                                                                                                                                                                                                                                                 | `Unreleased`        |
 
 Earlier beta releases first included schema 1 in `v2026.5.30-beta.1`, schema 2
 in `v2026.7.2-beta.1`, schema 3 in `v2026.7.2-beta.2`, schema 5 in
 `v2026.7.2-beta.4`, and schema 6 in `v2026.7.2-beta.5`.
+
+### Grogu protected state schema 21
+
+The Grogu fork uses state schema 21 only for its protected service. It encrypts
+automation definitions, secret-store values, and retained Cron content with the
+service-managed key. Personal shared state remains at upstream schema 20.
+
+The protected owner migrates state 20 in a transaction and reads ciphertext
+back before commit. Startup refuses access until post-commit SQLite cleanup
+finishes. Interrupted cleanup can resume with the same key. SQLite cleanup does
+not guarantee forensic erasure from snapshots or storage-device remapping.
+Older builds refuse schema 21. If upstream adopts schema 21 first, renumber the
+protected schema and its admission and migration contracts together.
 
 ### State schema 20
 

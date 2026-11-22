@@ -10,9 +10,15 @@ const VALUE_KEY_BYTES = 32;
 const VALUE_HEADER_BYTES = VALUE_MAGIC.length + VALUE_NONCE_BYTES * 2 + VALUE_KEY_BYTES + TAG_BYTES;
 const VALUE_OVERHEAD_BYTES = VALUE_HEADER_BYTES + TAG_BYTES;
 
+export function isStorageValueEncrypted(value: Buffer): boolean {
+  return value.subarray(0, VALUE_MAGIC.length).equals(VALUE_MAGIC);
+}
+
 export type StorageValueEncryption = {
   encrypt(value: Buffer, context: string): Buffer;
   decrypt(value: Buffer, context: string): Buffer;
+  encryptText(value: string, context: string): Buffer;
+  decryptText(value: Buffer, context: string): string;
   storedSize(plaintextBytes: number): number;
   plaintextSize(storedBytes: number): number;
   dispose(): void;
@@ -63,48 +69,56 @@ export function createStorageValueEncryption(masterKey: Buffer): StorageValueEnc
     }
     return storedBytes - VALUE_OVERHEAD_BYTES;
   };
-  return {
-    encrypt(value, context) {
-      const owner = contextBytes(context);
-      storedSize(value.length);
-      const dataKey = randomBytes(VALUE_KEY_BYTES);
-      try {
-        const keyNonce = randomBytes(VALUE_NONCE_BYTES);
-        const dataNonce = randomBytes(VALUE_NONCE_BYTES);
-        const wrappedKey = sealValue(dataKey, key, keyNonce, Buffer.concat([VALUE_MAGIC, owner]));
-        const header = Buffer.concat([VALUE_MAGIC, keyNonce, wrappedKey, dataNonce]);
-        return Buffer.concat([
-          header,
-          sealValue(value, dataKey, dataNonce, Buffer.concat([header, owner])),
-        ]);
-      } finally {
-        dataKey.fill(0);
-      }
-    },
-    decrypt(value, context) {
-      const owner = contextBytes(context);
-      plaintextSize(value.length);
-      if (!value.subarray(0, VALUE_MAGIC.length).equals(VALUE_MAGIC)) {
-        throw new Error("Invalid encrypted storage value.");
-      }
-      const nonceEnd = VALUE_MAGIC.length + VALUE_NONCE_BYTES;
-      const keyEnd = nonceEnd + VALUE_KEY_BYTES + TAG_BYTES;
-      const dataKey = openValue(
-        value.subarray(nonceEnd, keyEnd),
-        key,
-        value.subarray(VALUE_MAGIC.length, nonceEnd),
-        Buffer.concat([VALUE_MAGIC, owner]),
+  const encrypt = (value: Buffer, context: string) => {
+    const owner = contextBytes(context);
+    storedSize(value.length);
+    const dataKey = randomBytes(VALUE_KEY_BYTES);
+    try {
+      const keyNonce = randomBytes(VALUE_NONCE_BYTES);
+      const dataNonce = randomBytes(VALUE_NONCE_BYTES);
+      const wrappedKey = sealValue(dataKey, key, keyNonce, Buffer.concat([VALUE_MAGIC, owner]));
+      const header = Buffer.concat([VALUE_MAGIC, keyNonce, wrappedKey, dataNonce]);
+      return Buffer.concat([
+        header,
+        sealValue(value, dataKey, dataNonce, Buffer.concat([header, owner])),
+      ]);
+    } finally {
+      dataKey.fill(0);
+    }
+  };
+  const decrypt = (value: Buffer, context: string) => {
+    const owner = contextBytes(context);
+    plaintextSize(value.length);
+    if (!value.subarray(0, VALUE_MAGIC.length).equals(VALUE_MAGIC)) {
+      throw new Error("Invalid encrypted storage value.");
+    }
+    const nonceEnd = VALUE_MAGIC.length + VALUE_NONCE_BYTES;
+    const keyEnd = nonceEnd + VALUE_KEY_BYTES + TAG_BYTES;
+    const dataKey = openValue(
+      value.subarray(nonceEnd, keyEnd),
+      key,
+      value.subarray(VALUE_MAGIC.length, nonceEnd),
+      Buffer.concat([VALUE_MAGIC, owner]),
+    );
+    try {
+      return openValue(
+        value.subarray(VALUE_HEADER_BYTES),
+        dataKey,
+        value.subarray(keyEnd, VALUE_HEADER_BYTES),
+        Buffer.concat([value.subarray(0, VALUE_HEADER_BYTES), owner]),
       );
-      try {
-        return openValue(
-          value.subarray(VALUE_HEADER_BYTES),
-          dataKey,
-          value.subarray(keyEnd, VALUE_HEADER_BYTES),
-          Buffer.concat([value.subarray(0, VALUE_HEADER_BYTES), owner]),
-        );
-      } finally {
-        dataKey.fill(0);
-      }
+    } finally {
+      dataKey.fill(0);
+    }
+  };
+  return {
+    encrypt,
+    decrypt,
+    encryptText(value, context) {
+      return encrypt(Buffer.from(value, "utf16le"), context);
+    },
+    decryptText(value, context) {
+      return decrypt(value, context).toString("utf16le");
     },
     storedSize,
     plaintextSize,

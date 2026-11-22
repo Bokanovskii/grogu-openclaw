@@ -6,6 +6,10 @@ import {
   cronRunStorageStatus,
   parseCronRunLogEntryObject,
 } from "../cron/run-history-detail.js";
+import {
+  openCronHistoryValue,
+  sealCronHistoryValue,
+} from "../cron/store/run-history-encryption.js";
 import { coerceRequiredSqliteNumber, normalizeSqliteNumber } from "./sqlite-number.js";
 
 type CronRunLogEntry = import("../cron/run-log-types.js").CronRunLogEntry;
@@ -39,6 +43,7 @@ type LegacyCronRunLogRow = {
 };
 
 type MirroredTask = {
+  task_id: string;
   source_id: string | null;
   ended_at: number | bigint | null;
   detail_json: string | null;
@@ -66,14 +71,15 @@ export function hasLegacyCronRunLogs(db: DatabaseSync): boolean {
 function collectMirroredTasks(db: DatabaseSync): Map<string, MirroredIdentity[]> {
   const rows = db
     .prepare(
-      `SELECT source_id, ended_at, detail_json
+      `SELECT task_id, source_id, ended_at, detail_json
        FROM task_runs
        WHERE runtime = 'cron' AND source_id IS NOT NULL AND detail_json IS NOT NULL`,
     )
     .all() as MirroredTask[];
   const bySource = new Map<string, MirroredIdentity[]>();
   for (const row of rows) {
-    const detail = row.detail_json ? safeParseJsonRecord(row.detail_json) : undefined;
+    const value = openCronHistoryValue(db, row.task_id, "detail_json", row.detail_json);
+    const detail = value ? safeParseJsonRecord(value) : undefined;
     if (!row.source_id || detail?.kind !== "cron-run") {
       continue;
     }
@@ -194,15 +200,25 @@ export function migrateLegacyCronRunLogsToTaskRuns(db: DatabaseSync): CronRunLog
         source_id: entry.jobId,
         child_session_key: entry.sessionKey?.trim() || null,
         run_id: taskId,
-        task: entry.jobId,
+        task: sealCronHistoryValue(db, taskId, "task", entry.jobId),
         status,
         created_at: entry.runAtMs ?? entry.ts,
         started_at: entry.runAtMs ?? null,
         ended_at: entry.ts,
-        error: entry.error ?? null,
-        terminal_summary: entry.summary ?? null,
+        error: sealCronHistoryValue(db, taskId, "error", entry.error ?? null),
+        terminal_summary: sealCronHistoryValue(
+          db,
+          taskId,
+          "terminal_summary",
+          entry.summary ?? null,
+        ),
         terminal_outcome: status === "succeeded" ? "succeeded" : null,
-        detail_json: JSON.stringify(cronRunLogEntryToDetail(entry, { storeKey: row.store_key })),
+        detail_json: sealCronHistoryValue(
+          db,
+          taskId,
+          "detail_json",
+          JSON.stringify(cronRunLogEntryToDetail(entry, { storeKey: row.store_key })),
+        ),
       });
       imported++;
     }

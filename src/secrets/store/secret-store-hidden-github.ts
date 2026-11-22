@@ -14,6 +14,7 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../../state/openclaw-state-db.js";
+import { openSecretStoreValue, sealSecretStoreValue } from "./secret-store-encryption.js";
 import { withMissingSecretStoreFallback } from "./secret-store-sqlite.js";
 import { SecretStoreValidationError } from "./secret-store-validation-error.js";
 import { assertSecretStoreValueLength } from "./secret-store-value.js";
@@ -80,17 +81,23 @@ export function readPersonalGitHubSecret(db: DatabaseSync, profileId: string): s
       if (row.kind !== "secret" || row.allowed_hosts !== null) {
         throw new PersonalGitHubStateError();
       }
+      const value = openSecretStoreValue(
+        db,
+        { scope_kind: "identity", scope_id: profileId, name: "github-connection" },
+        row.value,
+      );
       try {
-        assertSecretStoreValueLength(row.value, "secret");
+        assertSecretStoreValueLength(value, "secret");
       } catch (error) {
         if (error instanceof SecretStoreValidationError) {
           throw new PersonalGitHubStateError();
         }
         throw error;
       }
-      registerSecretValueForRedaction(row.value);
+      registerSecretValueForRedaction(value);
+      return value;
     }
-    return row?.value;
+    return undefined;
   }, undefined);
 }
 
@@ -135,7 +142,7 @@ function upsertHiddenGitHubSecret(
   now: number,
 ): void {
   const values = {
-    value: entry.value,
+    value: sealSecretStoreValue(db, entry, entry.value, "secret"),
     updated_by: entry.updated_by,
     kind: "secret",
     allowed_hosts: null,
@@ -218,12 +225,22 @@ export function readHiddenGitHubSecretRecord(params: {
   const kind = assertHiddenGitHubSecretRecordName(params.name);
   return withMissingSecretStoreFallback(() => {
     const row = withExistingOpenClawStateDatabaseReadOnly(({ db: sqlite }) => {
-      return executeSqliteQueryTakeFirstSync(
+      const selected = executeSqliteQueryTakeFirstSync(
         sqlite,
         selectHiddenGitHubSecretRecords(sqlite).where("name", "=", params.name),
       );
+      return selected && isLiveHiddenGitHubStoreRow(selected, kind, Date.now())
+        ? {
+            ...selected,
+            value: openSecretStoreValue(
+              sqlite,
+              { scope_kind: "team", scope_id: "", name: selected.name },
+              selected.value,
+            ),
+          }
+        : undefined;
     }, params.database ?? {});
-    if (!row || !isLiveHiddenGitHubStoreRow(row, kind, Date.now())) {
+    if (!row) {
       return undefined;
     }
     registerSecretValueForRedaction(row.value);
@@ -256,7 +273,13 @@ export function listHiddenGitHubSecretRecordNames(params: {
           ) {
             return [];
           }
-          registerSecretValueForRedaction(row.value);
+          registerSecretValueForRedaction(
+            openSecretStoreValue(
+              sqlite,
+              { scope_kind: "team", scope_id: "", name: row.name },
+              row.value,
+            ),
+          );
           return [row.name];
         });
       }, params.database ?? {}) ?? []

@@ -30,6 +30,7 @@ import {
   captureOpenClawAgentDatabaseExecution,
   supportsOpenClawAgentDatabaseExecution,
 } from "../../state/openclaw-agent-execution.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import {
   captureLifecycleDatabaseScope,
@@ -321,8 +322,13 @@ export function searchSessionTranscriptsReadOnlySync(
   const query = validateSearchQuery(params.query);
   const scope = preparedDatabase ? { agentId: params.agentId } : resolveSqliteReadScope(params);
   const databaseOptions = preparedDatabase ?? toDatabaseOptions(scope);
-  const result = withOpenClawAgentDatabaseReadOnly(
-    (database) => ({
+  const result = withOpenClawAgentDatabaseReadOnly((database) => {
+    if (hasSqliteStorageValueEncryption(database.db)) {
+      throw new Error(
+        "Transcript search is unavailable for encrypted storage; use sessions_list and sessions_history instead.",
+      );
+    }
+    return {
       // Capture before BEGIN to detect commits during or after the hit snapshot.
       revision: readSearchRevision(database.db),
       ...runSqliteDeferredTransactionSync(
@@ -473,8 +479,7 @@ export function searchSessionTranscriptsReadOnlySync(
         },
         { databaseLabel: database.path, operationLabel: "session transcript search" },
       ),
-    }),
-    databaseOptions,
-  );
+    };
+  }, databaseOptions);
   return result.found ? result.value : { found: false, hits: [], truncated: false };
 }

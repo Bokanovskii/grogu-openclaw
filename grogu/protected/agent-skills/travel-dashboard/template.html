@@ -1,0 +1,87 @@
+<style>
+  .trip{display:grid;gap:14px}
+  .trip-head{display:grid;gap:6px;padding:16px;border-radius:var(--radius);background:linear-gradient(135deg,var(--accent-subtle),var(--info-subtle));border:1px solid var(--border)}
+  .trip-head h1{font-size:20px;margin:0}
+  .trip-meta{display:flex;flex-wrap:wrap;gap:6px}
+  .trip-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+  .fact{display:grid;gap:2px}
+  .fact .label{font-size:12px;color:var(--muted)}
+  .fact .value{font-weight:600;color:var(--text-strong)}
+  .day{border:1px solid var(--border);border-radius:var(--radius);background:var(--card)}
+  .day>summary{cursor:pointer;padding:10px 14px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-weight:600;color:var(--text-strong)}
+  .day>summary .muted{font-weight:400}
+  .day ol{list-style:none;margin:0;padding:0 14px 12px;display:grid;gap:8px}
+  .day li{display:grid;grid-template-columns:64px 1fr;gap:10px;padding-top:8px;border-top:1px solid var(--border)}
+  .day time{font-size:12px;color:var(--muted);padding-top:2px}
+  .item-title{font-weight:600;color:var(--text-strong)}
+  .trip h2{font-size:15px;margin:0 0 8px}
+  .trip ul.plain{margin:0;padding-left:18px;display:grid;gap:4px}
+  @media (max-width:420px){.day li{grid-template-columns:1fr}}
+</style>
+<div class="trip">
+  <header class="trip-head">
+    <h1>Trip name</h1>
+    <div class="muted">Start date – end date · Travelers</div>
+    <div class="trip-meta">
+      <span class="badge">N nights</span>
+      <span class="badge info">Pace</span>
+      <span class="badge ok">Estimated total</span>
+    </div>
+  </header>
+
+  <section class="trip-grid">
+    <div class="card fact"><span class="label">Getting there</span><span class="value">To decide</span></div>
+    <div class="card fact"><span class="label">Where to stay</span><span class="value">To decide</span></div>
+    <div class="card fact"><span class="label">Weather</span><span class="value">To decide</span></div>
+    <div class="card fact"><span class="label">Budget</span><span class="value">To decide</span></div>
+  </section>
+
+  <section>
+    <h2>Day by day</h2>
+    <div style="display:grid;gap:8px">
+      <details class="day" open>
+        <summary><span>Day 1 · Area</span><span class="muted">Date</span></summary>
+        <ol>
+          <li>
+            <time>09:00</time>
+            <div>
+              <div class="item-title">Activity</div>
+              <div class="muted">Why it fits, travel time, and backup plan.</div>
+            </div>
+          </li>
+        </ol>
+      </details>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Bookings to make</h2>
+    <table>
+      <thead><tr><th>Item</th><th>Status</th><th>Book by</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://example.com">Booking item</a></td><td><span class="badge">Idea</span></td><td>To decide</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Budget estimate</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Estimate</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Lodging</td><td>To decide</td><td class="muted">Price seen on date</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="trip-grid">
+    <div class="card">
+      <h2>Open questions</h2>
+      <ul class="plain"><li>Decision the member needs to make</li></ul>
+    </div>
+    <div class="card">
+      <h2>Sources</h2>
+      <ul class="plain"><li><a href="https://example.com">Source title</a></li></ul>
+    </div>
+  </section>
+</div>

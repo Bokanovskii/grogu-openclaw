@@ -11,6 +11,7 @@ import {
 } from "../../state/openclaw-agent-pending-inputs-schema.js";
 import { readLegacyCompactionHistory } from "./legacy-compaction-history.js";
 import { hasMainSessionRecoveryClaim } from "./restart-recovery-state.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import { parseSqliteSessionEntryRecord } from "./session-entry-json.js";
 import { projectCanonicalSessionEntryShape } from "./store-entry-shape.js";
 import type { InternalSessionEntry } from "./types.js";
@@ -22,6 +23,7 @@ export function readSessionColdStorageProtection(
   liveSessionKeys: ReadonlySet<string>,
 ): Set<string> {
   const db = getNodeSqliteKysely<DB>(database.db);
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   const protectedIds = new Set<string>();
   const busyKeys = new Set(liveSessionKeys);
   // Keep only protection facts, not a second store-wide array of serialized metadata.
@@ -36,9 +38,12 @@ export function readSessionColdStorageProtection(
         "last_activity_at",
         "last_interaction_at",
         "entry_json",
-      ]),
+      ])
+      .$if(protectedEntry !== undefined, (query) =>
+        query.select(protectedEntry!.as("protected_entry_json")),
+      ),
   )) {
-    const record = parseSqliteSessionEntryRecord(row);
+    const record = parseSqliteSessionEntryRecord(row, database.db);
     const entry: InternalSessionEntry | undefined = record
       ? projectCanonicalSessionEntryShape(record)
       : undefined;

@@ -16,7 +16,10 @@ import { readCronRunRecordsForTests } from "../run-history.test-support.js";
 import { saveCronStore } from "../store.js";
 import { inspectActiveCronRunReceipt } from "../store/run-receipt-store.test-support.js";
 import type { CronJob } from "../types.js";
-import { getSuspensionVisibleCronTaskRunCount } from "./active-run-cancellation.js";
+import {
+  getSuspensionVisibleCronTaskRunCount,
+  retireActiveCronTaskRunTracking,
+} from "./active-run-cancellation.js";
 import { resetActiveCronTaskRunsForTests } from "./active-run-cancellation.test-support.js";
 import { stop } from "./ops-lifecycle.js";
 import type { CronServiceDeps, CronServiceState } from "./state.js";
@@ -91,6 +94,74 @@ async function drain(...runs: Promise<unknown>[]) {
 }
 
 describe("cron execution watchdogs", () => {
+  it.each(["timeout", "cancel"] as const)(
+    "interrupts stalled service authorization on %s without executing after late admission",
+    async (interruption) => {
+      resetActiveCronTaskRunsForTests();
+      const job = dueJob(`stalled-authority-${interruption}`, {
+        declarationKey: `plugin-service:fixture:authority:${interruption}`,
+        payload: { kind: "agentTurn", message: "work", timeoutSeconds: 0 },
+      });
+      const started = createDeferred();
+      const authority = createDeferred<{
+        toolsAllow: string[];
+        toolBindings: Record<string, unknown>;
+        assertInvocationCurrent(): void;
+      }>();
+      const runner = vi.fn<CronServiceDeps["runIsolatedAgentJob"]>(async () => ({
+        status: "ok",
+        summary: "ordinary control",
+      }));
+      const { state, advance } = await fixture(job, {
+        runIsolatedAgentJob: runner,
+        resolveJobExecutionAuthority: async ({ job: current }) => {
+          if (current.id !== job.id) {
+            return undefined;
+          }
+          started.resolve();
+          return await authority.promise;
+        },
+      });
+      const marker = markCronJobActive(job.id);
+      const run = executeJobCoreWithTimeout(state, job, {
+        runId: job.id,
+        activeJobMarker: marker,
+      });
+      let outcome: Awaited<typeof run> | undefined;
+      void run.then((result) => {
+        outcome = result;
+      });
+      try {
+        await started.promise;
+        if (interruption === "cancel") {
+          requestActiveCronJobCancellation(job.id, "Cancelled during authorization.");
+          await advance(0);
+        } else {
+          await advance(60_001);
+        }
+        expect(outcome).toMatchObject({
+          status: "error",
+          error: expect.stringContaining(interruption === "cancel" ? "Cancelled" : "timed out"),
+        });
+        expect(runner).not.toHaveBeenCalled();
+        const control = dueJob("ordinary-after-stalled-authorization");
+        await expect(executeJobCoreWithTimeout(state, control)).resolves.toMatchObject({
+          status: "ok",
+        });
+        authority.resolve({ toolsAllow: [], toolBindings: {}, assertInvocationCurrent() {} });
+        await drain(run, authority.promise);
+        expect(runner).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ job: expect.objectContaining({ id: control.id }) }),
+        );
+      } finally {
+        authority.resolve({ toolsAllow: [], toolBindings: {}, assertInvocationCurrent() {} });
+        await drain(run, authority.promise);
+        clearCronJobActive(job.id, marker);
+        resetActiveCronTaskRunsForTests();
+      }
+    },
+  );
+
   it("keeps timed-out cron runs from being overwritten by late cancellation", async () => {
     resetActiveCronTaskRunsForTests();
     const job = dueJob("late-cancel-after-timeout", {
@@ -158,7 +229,10 @@ describe("cron execution watchdogs", () => {
       payload: { kind: "agentTurn", message: "work", timeoutSeconds: 0 },
     });
     const { storePath } = fixtures.makeStorePath();
-    const activeJobMarker = markCronJobActive(job.id);
+    const activeJobMarker = markCronJobActive(job.id, {
+      agentId: "protected",
+      stateIdentityKey: "cancel-attribution-state",
+    });
     const entered = createDeferred();
     const release = createDeferred<{ status: "ok"; summary: string }>();
     const state = createCronRegressionState({
@@ -191,6 +265,25 @@ describe("cron execution watchdogs", () => {
       expect(result.model).toBe("deepseek-v4-pro");
       expect(result.sessionId).toBe("sess-attrib");
       expect(result.sessionKey).toBe("key-attrib");
+      retireActiveCronTaskRunTracking();
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "cancel-attribution-state",
+          jobIds: [job.id],
+        }),
+      ).toBe(1);
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "cancel-attribution-state",
+          jobIds: ["another-member-job"],
+        }),
+      ).toBe(0);
+      expect(
+        getSuspensionVisibleCronTaskRunCount({
+          stateIdentityKey: "another-state",
+          jobIds: [job.id],
+        }),
+      ).toBe(0);
     } finally {
       stop(state);
       release.resolve({ status: "ok", summary: "done" });
@@ -458,6 +551,7 @@ describe("cron execution watchdogs", () => {
     const { state, advance } = await fixture(job, {
       nowMs: Date.now,
       defaultAgentId: "main",
+      resolveJobExecutionAuthority: async () => undefined,
       resolveHeartbeatTimeoutMs: vi.fn(() => undefined),
       requestHeartbeatAndWait: vi.fn(async (_wake, { onQueued, onAttemptStarted }) => {
         onQueued?.();

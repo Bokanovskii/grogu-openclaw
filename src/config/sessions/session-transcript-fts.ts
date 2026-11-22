@@ -6,6 +6,7 @@ import {
   sqliteStringSet,
 } from "../../infra/kysely-sync.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 
 type TranscriptFtsDatabase = Pick<DB, "session_transcript_fts_rows"> & {
   session_transcript_fts: Omit<DB["session_transcript_fts"], "timestamp"> & {
@@ -23,6 +24,9 @@ type TranscriptFtsEntry = {
 
 /** Insert both projection records in the caller's synchronous write transaction. */
 export function createSessionTranscriptFtsInserter(db: DatabaseSync, sessionId: string) {
+  if (hasSqliteStorageValueEncryption(db)) {
+    return () => undefined;
+  }
   const kysely = getNodeSqliteKysely<TranscriptFtsDatabase>(db);
   const insertIdentity = prepareSqliteQuerySync<TranscriptFtsEntry>(db, (parameter) =>
     kysely.insertInto("session_transcript_fts_rows").values({

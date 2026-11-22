@@ -23,6 +23,7 @@ import {
   readSessionColdTranscript,
   SessionTranscriptColdError,
 } from "./session-cold-storage-state.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import {
   publishSessionTranscriptAuthority,
   type SessionTranscriptAuthority,
@@ -175,7 +176,7 @@ export function ensureTranscriptSessionRoot(
       db
         .selectFrom("session_nodes")
         .select(["current_session_id", "entry_valid", "session_key", "updated_at"])
-        .select("entry_json")
+        .select(sessionEntryJsonSql(database.db).as("entry_json"))
         .select((eb) =>
           eb
             .selectFrom("session_windows")

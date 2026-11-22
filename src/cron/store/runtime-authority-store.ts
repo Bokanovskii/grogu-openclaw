@@ -16,6 +16,7 @@ import { normalizeCronRuntimeAuthority } from "../runtime-authority.js";
 import { normalizeCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { cronJobUsesToolRuntime } from "../tools-allow.js";
 import type { CronStoredJob, CronToolsAllowProvenance } from "../types.js";
+import { openCronReceiptValue, sealCronReceiptValue } from "./run-receipt-encryption.js";
 
 const CRON_RUNTIME_AUTHORITY_TABLE = "cron_job_runtime_authorities";
 const CRON_RUNTIME_AUTHORITY_FINGERPRINT_VERSION = 1;
@@ -95,6 +96,7 @@ function loadCronRuntimeAuthorityRows(
 }
 
 function applyCronRuntimeAuthorityRow(
+  db: DatabaseSync,
   job: CronStoredJob,
   row: CronRuntimeAuthorityRow,
 ): "ok" | "repair" {
@@ -104,8 +106,23 @@ function applyCronRuntimeAuthorityRow(
     job.runtimeAuthorityRecoveryRequired = true;
     return "ok";
   }
-  const authority = normalizeCronRuntimeAuthority(safeParseJson(row.authority_json ?? ""));
-  if (!authority || row.authority_input_fingerprint !== cronRuntimeAuthorityInputFingerprint(job)) {
+  const identity = [row.store_key, row.job_id];
+  const authorityJson = openCronReceiptValue(
+    db,
+    "cron_job_runtime_authorities",
+    "authority_json",
+    identity,
+    row.authority_json,
+  );
+  const fingerprint = openCronReceiptValue(
+    db,
+    "cron_job_runtime_authorities",
+    "authority_input_fingerprint",
+    identity,
+    row.authority_input_fingerprint,
+  );
+  const authority = normalizeCronRuntimeAuthority(safeParseJson(authorityJson ?? ""));
+  if (!authority || fingerprint !== cronRuntimeAuthorityInputFingerprint(job)) {
     job.runtimeAuthorityRecoveryRequired = true;
     return "repair";
   }
@@ -126,7 +143,7 @@ export function loadCronRuntimeAuthorities(params: {
     if (!job) {
       continue;
     }
-    if (applyCronRuntimeAuthorityRow(job, row) === "repair") {
+    if (applyCronRuntimeAuthorityRow(params.db, job, row) === "repair") {
       repairJobIds.push(job.id);
     }
   }
@@ -176,7 +193,7 @@ export function repairCronRuntimeAuthorityRows(params: {
     if (!job) {
       continue;
     }
-    if (applyCronRuntimeAuthorityRow(job, row) === "repair") {
+    if (applyCronRuntimeAuthorityRow(params.db, job, row) === "repair") {
       writeRecoveryRow(params.db, params.storeKey, job.id);
       repaired = true;
     }
@@ -215,7 +232,7 @@ export function replaceCronRuntimeAuthorityRows(params: {
     if (params.preserveExistingForJobIds?.has(job.id)) {
       const existingRow = existingRowsByJobId?.get(job.id);
       if (existingRow) {
-        if (applyCronRuntimeAuthorityRow(job, existingRow) === "repair") {
+        if (applyCronRuntimeAuthorityRow(params.db, job, existingRow) === "repair") {
           writeRecoveryRow(params.db, params.storeKey, job.id);
         }
         continue;
@@ -230,8 +247,21 @@ export function replaceCronRuntimeAuthorityRows(params: {
     }
     const authority = normalizeCronRuntimeAuthority(job.runtimeAuthority);
     if (authority) {
-      const authorityJson = JSON.stringify(authority);
-      const authorityInputFingerprint = cronRuntimeAuthorityInputFingerprint(job);
+      const identity = [params.storeKey, job.id];
+      const authorityJson = sealCronReceiptValue(
+        params.db,
+        "cron_job_runtime_authorities",
+        "authority_json",
+        identity,
+        JSON.stringify(authority),
+      );
+      const authorityInputFingerprint = sealCronReceiptValue(
+        params.db,
+        "cron_job_runtime_authorities",
+        "authority_input_fingerprint",
+        identity,
+        cronRuntimeAuthorityInputFingerprint(job),
+      );
       executeSqliteQuerySync(
         params.db,
         database

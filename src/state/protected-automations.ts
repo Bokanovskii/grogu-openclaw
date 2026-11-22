@@ -23,7 +23,7 @@ import {
 type AutomationVisibility = "private" | "shared";
 type AutomationRelation = "owner" | "follower" | "published";
 
-type ProtectedAutomationDatabase = ProtectedAdmissionDatabase & {
+export type ProtectedAutomationDatabase = ProtectedAdmissionDatabase & {
   protected_automations: {
     id: string;
     creator_profile_id: string;

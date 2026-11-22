@@ -166,6 +166,14 @@ changing the record because no native Cron control bridge is wired yet. Thus
 `scheduleControl` remains false and no saved automation can run on a schedule.
 The PATCH route is not a substitute scheduler.
 
+When an administrator removes an admitted member, the removal transaction deletes
+that member's saved private, paused definitions and their sole-owner memberships.
+It leaves other members' definitions, shared or co-owned definitions, enabled
+definitions, and definitions with native job bindings intact. Access revocation
+and active-turn interruption do not wait for broader retirement work. Legacy
+stores without automation definitions still support removal. This save-only
+cleanup does not delete chats, files, profiles, or scheduler jobs.
+
 The internal state owner stores automation definitions, owners, followers,
 visibility, the paused/enabled state, and native Cron job bindings in the
 shared-state worker. A binding ties one native job to the current central owner

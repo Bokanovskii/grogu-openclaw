@@ -5,7 +5,7 @@ import type {
   ProtectedChatSummary,
   ProtectedActivity,
   ProtectedMessage,
-  ProtectedModel,
+  ProtectedChatResponse,
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
@@ -30,7 +30,10 @@ import {
   type SessionTranscriptAssistantMessage,
 } from "../../src/config/sessions/transcript.js";
 import type { InternalSessionEntry, SessionEntry } from "../../src/config/sessions/types.js";
-import { aggregateSessionTranscriptUsage } from "../../src/gateway/session-transcript-derived-readers.js";
+import {
+  aggregateSessionTranscriptUsage,
+  createSessionTranscriptUsageAccumulator,
+} from "../../src/gateway/session-transcript-derived-readers.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import {
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
@@ -42,7 +45,6 @@ import { ProtectedError, publicError } from "./errors.js";
 import { projectActivity, projectToolResult } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
-type ProtectedMessageProvider = ProtectedModel["provider"];
 
 function missing(): never {
   throw new ProtectedError(404, "not_found", "Chat not found.");
@@ -231,9 +233,8 @@ export function createProtectedChats(options: {
     let reasoning: string[] = [];
     let activity = new Map<string, ProtectedActivity>();
     let turnStartedAt: number | undefined;
-    let usage:
-      | { contextTokens: number; provider: ProtectedMessageProvider; model: string }
-      | undefined;
+    let usage: ProtectedChatResponse["usage"];
+    let runUsage = createSessionTranscriptUsageAccumulator();
     for (const event of events) {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
@@ -268,6 +269,16 @@ export function createProtectedChats(options: {
                 .join("\n")
             : "";
       const provider = typeof message.provider === "string" ? message.provider : undefined;
+      if (message.role === "user") {
+        runUsage = createSessionTranscriptUsageAccumulator();
+      } else if (
+        provider === "sparky" ||
+        provider === "github-copilot" ||
+        provider === "anthropic" ||
+        provider === "openai"
+      ) {
+        runUsage.add(message);
+      }
       const errorText = typeof message.errorMessage === "string" ? message.errorMessage : "";
       const text =
         message.role === "assistant" && message.stopReason === "error"
@@ -288,6 +299,7 @@ export function createProtectedChats(options: {
           : undefined;
       if (message.role === "assistant" && status === "complete") {
         const snapshot = aggregateSessionTranscriptUsage([message]);
+        const tokens = runUsage.finish();
         const usageProvider = snapshot?.modelProvider;
         usage =
           typeof snapshot?.totalTokens === "number" &&
@@ -298,6 +310,17 @@ export function createProtectedChats(options: {
             usageProvider === "openai")
             ? {
                 contextTokens: snapshot.totalTokens,
+                // Native run usage omits zero counters, which can be adapter defaults.
+                ...(tokens?.inputTokens !== undefined &&
+                Number.isSafeInteger(tokens.inputTokens) &&
+                tokens.inputTokens > 0
+                  ? { inputTokens: tokens.inputTokens }
+                  : {}),
+                ...(tokens?.outputTokens !== undefined &&
+                Number.isSafeInteger(tokens.outputTokens) &&
+                tokens.outputTokens > 0
+                  ? { outputTokens: tokens.outputTokens }
+                  : {}),
                 provider: usageProvider,
                 model: snapshot.model,
               }

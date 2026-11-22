@@ -1565,7 +1565,14 @@ export function createProtectedHttp(options: {
                 }
                 failed = false;
                 if (usage && usage.provider === input.provider && usage.model === input.model) {
-                  send({ type: "usage", contextTokens: usage.contextTokens });
+                  send({
+                    type: "usage",
+                    contextTokens: usage.contextTokens,
+                    ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+                    ...(usage.outputTokens !== undefined
+                      ? { outputTokens: usage.outputTokens }
+                      : {}),
+                  });
                 }
                 send({ type: "done", chatVersion: chat.version });
                 outcome = "complete";

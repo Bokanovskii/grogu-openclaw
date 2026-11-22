@@ -21,6 +21,7 @@ type ChildConstraints = Pick<
   | "toolExecutionAllow"
   | "extraSystemPrompt"
   | "clientCaps"
+  | "skillsSnapshot"
 > & {
   onResultUsage?: (usage: NormalizedUsage | undefined) => void;
 };

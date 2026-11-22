@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type {
   ProtectedAgent,
   ProtectedAgentPresentation,
@@ -11,8 +12,14 @@ import {
   stripFrontmatterBlock,
 } from "@openclaw/markdown-core/frontmatter";
 import type { ClientToolDefinition } from "../../src/agents/command/shared-types.js";
+import { createSyntheticSourceInfo } from "../../src/agents/sessions/source-info.js";
+import { formatSkillsForPromptCore, type Skill } from "../../src/skills/loading/skill-contract.js";
+import {
+  WORKSPACE_SKILLS_PROMPT_FORMAT_VERSION,
+  type SkillSnapshot,
+} from "../../src/skills/types.js";
 
-/** Every Alcove agent gets this exact native tool surface, so requests share one prefix. */
+/** The shared tool ceiling; skill tools require the current agent's admitted catalog. */
 export const protectedAgentTools = Object.freeze([
   "web_search",
   "web_fetch",
@@ -21,6 +28,7 @@ export const protectedAgentTools = Object.freeze([
   "sessions_search",
   "sessions_history",
   "sessions_send",
+  "skills_read",
 ] as const);
 export type ProtectedNativeTool = (typeof protectedAgentTools)[number];
 export const protectedRouteToolName = "route_to_agent";
@@ -63,7 +71,8 @@ export type ProtectedAgentDefinition = Readonly<{
   skills: readonly Readonly<ProtectedAgentSkillDefinition>[];
   presentation: Readonly<ProtectedAgentPresentation>;
   tools: readonly ProtectedNativeTool[];
-  /** Shared header followed by this agent's intent and skill guidance. */
+  skillsSnapshot: SkillSnapshot;
+  /** Shared header followed by this agent's intent and skill descriptions. */
   systemPrompt: string;
 }>;
 
@@ -87,7 +96,7 @@ const travelAgent: ProtectedAgentExtension = {
   name: "Travel",
   description: "Plan trips and keep the plan in a live travel dashboard.",
   instructions:
-    "You are Travel, the Alcove trip planner. Help the member choose destinations, build itineraries, sort out logistics, and estimate budgets. Follow the Travel dashboard skill for how to plan and how to show the plan.",
+    "You are Travel, the Alcove trip planner. Help the member choose destinations, build itineraries, sort out logistics, and estimate budgets. Load the relevant travel skill when its description matches the request.",
   selectable: true,
   examplePrompts: [
     "Plan a relaxed 4-day trip to Lisbon in May for two adults.",
@@ -160,11 +169,16 @@ export function createProtectedAgentCatalog(extensions: readonly ProtectedAgentE
         skills: agent.skills,
         presentation: agent.presentation,
         tools: protectedAgentTools,
+        skillsSnapshot: createSkillSnapshot(agent.skills),
         systemPrompt: [
           header,
           `## Current agent: ${agent.name} (${agent.id})`,
           agent.instructions.trim(),
-          ...agent.skills.flatMap((skill) => [`## Skill: ${skill.name}`, skill.guidance]),
+          ...(agent.skills.length
+            ? [
+                `## Available skills\nLoad a relevant skill with \`skills_read\` before using it.\n${agent.skills.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n")}`,
+              ]
+            : []),
         ].join("\n\n"),
       }),
     ]),
@@ -245,7 +259,7 @@ function sharedHeader(
 ) {
   return [
     "# Alcove",
-    "You are an agent in Alcove, a private chat app for a small group of members. Every Alcove agent shares this header, the same tools, and the same access. Agents differ only in the Current agent section at the end.",
+    "You are an agent in Alcove, a private chat app for a small group of members. Every Alcove agent shares this header and the same member-scoped access. Agents have different skills and intent in the Current agent section at the end.",
     "## Access",
     [
       "- You act for the signed-in member only. Your tools reach this member's own Alcove chats, the public web, and widgets in this chat. You cannot see or change another member's chats or data.",
@@ -300,6 +314,33 @@ function validateExtension(candidate: ProtectedAgentExtension) {
   ) {
     throw new TypeError("Protected agent catalog entries must be valid and uniquely named.");
   }
+}
+
+function createSkillSnapshot(
+  skills: readonly Readonly<ProtectedAgentSkillDefinition>[],
+): SkillSnapshot {
+  const resolvedSkills: Skill[] = skills.map((skill) => {
+    const filePath = fileURLToPath(new URL(`${skill.id}/SKILL.md`, skillsRoot));
+    const baseDir = fileURLToPath(new URL(`${skill.id}/`, skillsRoot));
+    return {
+      name: skill.name,
+      description: skill.description,
+      filePath,
+      baseDir,
+      fileHost: "gateway",
+      readContent: skill.guidance,
+      sourceInfo: createSyntheticSourceInfo(filePath, { source: "protected" }),
+      disableModelInvocation: false,
+      source: "protected",
+    };
+  });
+  return {
+    prompt: formatSkillsForPromptCore(resolvedSkills),
+    skills: resolvedSkills.map((skill) => ({ name: skill.name, skillKey: skill.name })),
+    resolvedSkills,
+    discoverySkills: resolvedSkills,
+    promptFormatVersion: WORKSPACE_SKILLS_PROMPT_FORMAT_VERSION,
+  };
 }
 
 function loadSkill(id: string): Readonly<ProtectedAgentSkillDefinition> {

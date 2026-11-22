@@ -458,10 +458,9 @@ listener again only after maintenance succeeds.
 
 ## Protected chat agents
 
-`grogu/protected/agents.ts` owns the agent catalog. Every agent gets the same
-native tools, the same member-scoped access, and the same prompt header. Agents
-differ only in their intent instructions, packaged skills, example prompts, and
-presentation hints for the client.
+`grogu/protected/agents.ts` owns the agent catalog. Agents share member-scoped
+access and a prompt header. Their available skill reader, intent instructions,
+packaged skills, example prompts, and presentation hints can differ.
 
 - **Grogu** (`grogu`) is the default for new chats. It is the generic Alcove
   agent with no specialty. Its prompt lists the other selectable agents, and it
@@ -519,7 +518,9 @@ cleanup.
 
 Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
 `name` and `description`. A `{{template}}` marker is replaced with that
-directory's `template.html`. The runtime archive must include
+directory's `template.html`. The prompt includes only the agent's skill names
+and descriptions; `skills_read` loads the selected skill's complete guidance
+on request without granting general filesystem reads. The runtime archive must include
 `grogu/protected/agent-skills/`; the catalog fails to load without it. The
 service owner can add agents through the `agentExtensions` option to
 `createProtectedHttp`. Extension IDs must be unique.

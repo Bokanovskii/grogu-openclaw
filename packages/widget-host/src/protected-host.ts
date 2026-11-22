@@ -5,6 +5,7 @@ export type ProtectedWidgetOptions = {
   theme: "light" | "dark";
   sandboxUrl?: string;
   draft?: boolean;
+  onReady?: () => void;
   onPrompt: (text: string) => void;
   onError: (error: Error) => void;
 };
@@ -23,6 +24,7 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
   }
   let disposed = false;
   let loaded = false;
+  let ready = false;
   let promptPort: MessagePort | undefined;
   let theme = options.theme;
   const renderId = crypto.randomUUID();
@@ -76,6 +78,10 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
         data.params?.renderId === renderId
       ) {
         clearTimeout(timeout);
+        if (!ready) {
+          ready = true;
+          options.onReady?.();
+        }
       } else if (
         data.type === "openclaw:widget-size" &&
         Number.isFinite(data.height) &&

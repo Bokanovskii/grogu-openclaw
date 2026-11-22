@@ -15,3 +15,19 @@ Only bounded resize, display errors, theme, and composer text are supported.
 `onPrompt` inserts text for review; it must not send a chat or perform actions.
 No RPC, files, tokens, account state, or host execution crosses this bridge.
 `draft: true` disables scripts in the untrusted inner frame.
+The optional `onReady` callback fires once when the matching content has loaded.
+
+## Alcove content styles
+
+The protected sandbox supplies `ALCOVE_CONTENT_STYLES` to widgets and HTML
+previews. Wrap content in an element with `class="alcove"` to use the styles.
+The classes `alcove-stack`, `alcove-grid`, `alcove-card`, `alcove-badge`,
+`alcove-badge-warn`, and `alcove-muted` provide common layouts and treatments.
+Use semantic HTML for headings, links, and tables. Custom styles can override
+the library. Content without the `alcove` class keeps its existing appearance.
+
+An HTML file generator can embed the same exported CSS in a `<style>` element.
+The asset needs no network access and follows the browser's light or dark
+appearance when opened outside Alcove. Its fallback colors mirror the client
+tokens in `grogu-protected/src/tokens.css`; update both when the palette changes.
+The sandbox keeps its existing restrictions on scripts, links, and network access.

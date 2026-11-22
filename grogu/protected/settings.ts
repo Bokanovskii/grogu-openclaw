@@ -19,6 +19,7 @@ export const sparkyRef = {
 } satisfies SecretRef;
 export const subjectPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
 export const testClientIdPattern = /^[a-f0-9]{32}\.access$/u;
+export const protectedMaxFileBytes = 2 * 1024 * 1024;
 // Sparky streams long reasoning and large widget calls slowly when it shares its GPU; a two-minute
 // budget ended ordinary travel replies. Stop and identity revalidation still end a turn early.
 export const protectedTurnTimeoutMs = 15 * 60_000;

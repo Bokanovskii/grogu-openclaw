@@ -15,6 +15,7 @@ import {
   type ResolvedTranscriptScope,
 } from "./session-accessor.sqlite-scope.js";
 import { assertSessionTranscriptHot } from "./session-cold-storage-state.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import {
   assertOwnedTranscriptWriteCommit,
   SessionTranscriptWriterClaimReboundError,
@@ -38,15 +39,16 @@ export function createSessionTranscriptOwnerPredicate(
     sessionKey: string;
   },
 ): () => boolean {
+  const entryJson = sessionEntryJsonSql(database.db);
   let query = getSessionKysely(database.db)
     .selectFrom("session_nodes")
     .select((eb) => eb.val(1).as("matches"))
     .where("session_key", "=", expected.sessionKey)
     .where("current_session_id", "=", expected.sessionId)
-    .where((eb) => eb(eb.fn("json_valid", ["entry_json"]), "=", 1))
+    .where(sql<boolean>`json_valid(${entryJson}) = 1`)
     // JSON.parse uses the last duplicate key; SQLite extraction uses the first.
     .where(/* kysely-allow-raw: JSON1 table iteration rejects ambiguous private owner fields. */ sql<boolean>`NOT EXISTS (
-        SELECT 1 FROM json_each(entry_json)
+        SELECT 1 FROM json_each(${entryJson})
         WHERE key IN ('sessionId', 'lifecycleRevision', 'activeWriterRunId')
         GROUP BY key HAVING count(*) > 1
       )`);
@@ -55,13 +57,11 @@ export function createSessionTranscriptOwnerPredicate(
     ["$.lifecycleRevision", expected.lifecycleRevision],
     ["$.activeWriterRunId", expected.activeWriterRunId],
   ] as const) {
-    query = query.where((eb) =>
+    query = query.where(
       value === undefined
-        ? eb(eb.fn("json_type", ["entry_json", eb.val(jsonPath)]), "is", null)
-        : eb.and([
-            eb(eb.fn("json_type", ["entry_json", eb.val(jsonPath)]), "=", "text"),
-            eb(eb.fn("json_extract", ["entry_json", eb.val(jsonPath)]), "=", value),
-          ]),
+        ? sql<boolean>`json_type(${entryJson}, ${jsonPath}) IS NULL`
+        : sql<boolean>`json_type(${entryJson}, ${jsonPath}) = 'text'
+            AND json_extract(${entryJson}, ${jsonPath}) = ${value}`,
     );
   }
   return () => executeSqliteQueryTakeFirstSync(database.db, query)?.matches === 1;

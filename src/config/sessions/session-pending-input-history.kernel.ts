@@ -9,6 +9,7 @@ import { getAdmittedSqliteSchemaFacts } from "../../infra/sqlite-schema-facts.js
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import { openSessionPendingInputMessage } from "./session-pending-input-encryption.js";
 import type {
   PendingInputHistoryQuery,
   PendingInputHistorySnapshot,
@@ -83,10 +84,17 @@ export function readPendingInputHistoryInDatabase(
       throw new Error("Stored pending input exceeds the Gateway payload limit");
     }
     const rows = selected.length
-      ? executeSqliteQuerySync(
-          database.db,
-          base.selectAll().where("seq", "in", selected),
-        ).rows.toSorted((a, b) => b.seq - a.seq)
+      ? executeSqliteQuerySync(database.db, base.selectAll().where("seq", "in", selected))
+          .rows.toSorted((a, b) => b.seq - a.seq)
+          .map((row) =>
+            Object.assign(row, {
+              message_json: openSessionPendingInputMessage(
+                database.db,
+                row.input_id,
+                row.message_json,
+              ),
+            }),
+          )
       : [];
     return {
       rows,

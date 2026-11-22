@@ -46,7 +46,6 @@ import {
   AGENT_STORAGE_SCHEMA_VERSION,
   CANONICAL_SESSION_VALIDATION_SCHEMA_VERSION,
   CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION,
-  OPENCLAW_AGENT_SCHEMA_VERSION,
   TRANSCRIPT_FTS_ROW_SCHEMA_VERSION,
   type OpenClawAgentDatabaseOptions,
   type OpenClawAgentDatabase,
@@ -56,10 +55,10 @@ import { migrateOpenClawAgentSchema } from "./openclaw-agent-db-legacy-schema.js
 import { persistAgentSchemaMetadata } from "./openclaw-agent-db-metadata-write.js";
 import { ensureOpenClawAgentDatabasePermissions } from "./openclaw-agent-db-permissions.js";
 import { registerOpenClawAgentDatabase } from "./openclaw-agent-db-registry.js";
+import { finishAgentSchemaMigration } from "./openclaw-agent-db-schema-finish.js";
 import {
   getOpenClawAgentMigrationSchema,
   assertExistingAgentSchemaOwner,
-  assertCurrentAgentSchemaMetadata,
   assertOpenClawAgentCurrentRuntimeSchema,
   assertOpenClawAgentSchemaContains,
   assertSupportedAgentSchemaVersion,
@@ -73,6 +72,10 @@ import {
   readExistingAgentSchemaMeta,
   repairAndAssertOpenClawAgentV14SchemaForMigration,
 } from "./openclaw-agent-db-schema-helpers.js";
+import {
+  assertCurrentAgentDatabaseSchemaMetadata,
+  getAgentDatabaseTargetSchemaVersion,
+} from "./openclaw-agent-db-schema-read.js";
 import {
   backfillSessionConversations,
   assertSupportedAgentMigrationSchemas,
@@ -97,6 +100,13 @@ import {
   resolveOpenClawAgentSqlitePath,
 } from "./openclaw-agent-db.paths.js";
 import { migrateSessionParticipantsSchema } from "./openclaw-agent-participants-migration.js";
+import {
+  admitProtectedAgentStorage,
+  cleanupProtectedAgentStorageIfNeeded,
+  isProtectedStorageMigration,
+  migrateProtectedAgentStorageIfNeeded,
+  prepareProtectedAgentStorageMigration,
+} from "./openclaw-agent-protected-storage-schema.js";
 import { OPENCLAW_AGENT_SCHEMA_SQL } from "./openclaw-agent-schema.js";
 import { migrateSessionEntrySnapshotsInTransaction } from "./openclaw-agent-session-snapshots-migration.js";
 import {
@@ -142,22 +152,22 @@ export function* agentDatabaseIntegrityBeforeMutationSteps(
   }
   database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
   const userVersion = readSqliteUserVersion(database);
+  const targetVersion = getAgentDatabaseTargetSchemaVersion(database);
   const hasApplicationSchema = database
     .prepare("SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1")
     .get();
   const migrationPending =
     (userVersion === 0 && hasApplicationSchema !== undefined) ||
-    (userVersion > 0 && userVersion < OPENCLAW_AGENT_SCHEMA_VERSION);
+    (userVersion > 0 && userVersion < targetVersion);
   if (migrationPending) {
     agentDbLog.info("agent database schema migration pending; verifying integrity first", {
       fromVersion: userVersion,
       path: pathname,
-      toVersion: OPENCLAW_AGENT_SCHEMA_VERSION,
+      toVersion: targetVersion,
     });
   }
   const hasPendingCurrentVersionMigration =
-    userVersion === OPENCLAW_AGENT_SCHEMA_VERSION &&
-    hasPendingCurrentVersionAgentDatabaseMigration(database);
+    userVersion === targetVersion && hasPendingCurrentVersionAgentDatabaseMigration(database);
   const startedAt = performance.now();
   const deferredReason = processDeath
     ? "process-death"
@@ -182,7 +192,7 @@ export function* agentDatabaseIntegrityBeforeMutationSteps(
       },
     );
   }
-  if (userVersion === OPENCLAW_AGENT_SCHEMA_VERSION && !hasPendingCurrentVersionMigration) {
+  if (userVersion === targetVersion && !hasPendingCurrentVersionMigration) {
     const deferred = deferredReason !== undefined && !deferredRefusal;
     const reuseIntegrity =
       deferred ||
@@ -256,7 +266,8 @@ export function refreshOpenClawAgentDatabaseSchema(
       db,
       () => {
         assertSupportedAgentSchemaVersion(db, pathname);
-        assertCurrentAgentSchemaMetadata(readExistingAgentSchemaMeta(db), agentId, pathname);
+        const schemaMetadata = readExistingAgentSchemaMeta(db);
+        assertCurrentAgentDatabaseSchemaMetadata(db, schemaMetadata, agentId, pathname);
         const validation = getOpenClawAgentDatabaseValidation(database);
         return validation && adoptOpenClawAgentDatabaseSchema(database) ? validation : undefined;
       },
@@ -339,34 +350,13 @@ function migrateAgentStorageInTransaction(
   }
 }
 
-function finishAgentSchemaMigration(
-  db: DatabaseSync,
-  agentId: string,
-  pathname: string,
-  targetVersion: number,
-  schemaSql: string,
-  requiresMaintenance: boolean,
-  assertMigration: () => void,
-): void {
-  repairCanonicalSqliteIndexes(db, pathname, schemaSql, {
-    verifyPhysicalIntegrity: false,
-  });
-  db.exec(`PRAGMA user_version = ${targetVersion};`);
-  persistAgentSchemaMetadata(db, agentId, targetVersion);
-  assertAgentSchemaVersion(db, { agentId, pathname, version: targetVersion }, schemaSql);
-  if (requiresMaintenance && db.prepare("PRAGMA foreign_key_check").all().length > 0) {
-    throw new Error(`Agent schema migration failed foreign key validation for ${pathname}.`);
-  }
-  assertMigration();
-}
-
 type AgentSchemaMutationGuard = <T>(run: () => T) => T;
 
 function ensureAgentSchema(
   db: DatabaseSync,
   agentId: string,
   pathname: string,
-  targetVersion = OPENCLAW_AGENT_SCHEMA_VERSION,
+  targetVersion = getAgentDatabaseTargetSchemaVersion(db),
   withMutation: AgentSchemaMutationGuard = (run) => run(),
   onMigrationWarning?: (warning: string) => void,
 ): void {
@@ -376,9 +366,10 @@ function ensureAgentSchema(
   const schemaMigration =
     originalVersion < targetVersion &&
     (originalVersion > 0 || readExistingAgentSchemaMeta(db) !== null);
+  const protectedMigration = isProtectedStorageMigration(db, originalVersion, targetVersion);
   const identityMigration = targetVersion >= 18 && schemaMigration;
   const assertMigration = () => {
-    if (!schemaMigration) {
+    if (!schemaMigration || protectedMigration) {
       return;
     }
     if (identityMigration) {
@@ -392,6 +383,7 @@ function ensureAgentSchema(
     });
   };
   assertMigration();
+  prepareProtectedAgentStorageMigration(db);
   // FK enforcement must be off before BEGIN: PRAGMA foreign_keys is a silent
   // no-op inside a transaction, and legacy owner-table rebuilds would otherwise
   // cascade-delete their children. Steady-state enforcement is restored below.
@@ -482,6 +474,7 @@ function ensureAgentSchema(
         if (requiresCanonicalWriterMigration) {
           migrateCanonicalSessionWriterValidation(db);
         }
+        migrateProtectedAgentStorageIfNeeded(db, previousVersion, targetVersion);
         finishAgentSchemaMigration(
           db,
           agentId,
@@ -578,6 +571,7 @@ function ensureAgentSchema(
       if (requiresCanonicalWriterMigration) {
         migrateCanonicalSessionWriterValidation(db);
       }
+      migrateProtectedAgentStorageIfNeeded(db, previousVersion, targetVersion);
       finishAgentSchemaMigration(
         db,
         agentId,
@@ -598,6 +592,7 @@ function ensureAgentSchema(
       db.exec("PRAGMA foreign_keys = ON;");
     }
   }
+  cleanupProtectedAgentStorageIfNeeded(db);
   for (const warning of warnings) {
     const message = `Agent ${agentId}: ${warning}`;
     agentDbLog.warn(message);
@@ -624,9 +619,10 @@ export function* ensureOpenClawAgentDatabaseSchemaSteps(
   const agentId = normalizeAgentId(options.agentId);
   const databaseOptions = { ...options, agentId };
   const pathname = resolveOpenClawAgentSqlitePath(databaseOptions);
+  const targetVersion = getAgentDatabaseTargetSchemaVersion(db);
   assertExistingAgentSchemaOwner(readExistingAgentSchemaMeta(db), agentId, pathname);
   const version = assertSupportedAgentSchemaVersion(db, pathname);
-  if (version < OPENCLAW_AGENT_SCHEMA_VERSION) {
+  if (version < targetVersion) {
     assertSupportedAgentMigrationSchemas(db, pathname, version);
   }
   const deletionFence =
@@ -696,10 +692,11 @@ export function* ensureOpenClawAgentDatabaseSchemaSteps(
     db,
     agentId,
     pathname,
-    OPENCLAW_AGENT_SCHEMA_VERSION,
+    targetVersion,
     withRegistrationFence,
     options.onMigrationWarning,
   );
+  admitProtectedAgentStorage(db, pathname);
   ensureOpenClawAgentDatabasePermissions(pathname, databaseOptions);
   if (databaseOptions.register === true) {
     registerOpenClawAgentDatabase({ agentId, path: pathname, env: databaseOptions.env });

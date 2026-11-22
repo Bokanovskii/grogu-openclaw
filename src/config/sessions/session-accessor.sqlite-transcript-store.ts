@@ -16,6 +16,7 @@ import {
   openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import { advanceCliHistoryBoundaryInTransaction } from "./session-accessor.sqlite-cli-history-boundary.js";
 import type {
   TranscriptEvent,
@@ -70,6 +71,7 @@ import {
   createTranscriptPayloadUpdater,
   prepareTranscriptPayload,
   transcriptEventJsonSql,
+  protectTranscriptPayloadForStorage,
   type PreparedTranscriptPayload,
 } from "./transcript-payload.js";
 
@@ -450,14 +452,22 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
   if (rows.length === 0) {
     return;
   }
+  const encryptedStorage = hasSqliteStorageValueEncryption(database.db);
+  const legacyTextStorage = options.legacyTextStorage === true && !encryptedStorage;
   const rewrites = rows.map((row) => {
     const eventJson = JSON.stringify(canonicalizeTranscriptEventMedia(row.event));
+    const payload = legacyTextStorage
+      ? undefined
+      : protectTranscriptPayloadForStorage(
+          database.db,
+          resolved.sessionId,
+          row.seq,
+          prepareTranscriptPayload(database.db, eventJson),
+        );
     return {
       ...row,
       eventJson,
-      payload: options.legacyTextStorage
-        ? undefined
-        : prepareTranscriptPayload(database.db, eventJson),
+      payload,
     };
   });
   const projectionUnchanged =
@@ -466,7 +476,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
       transcriptRewritePreservesProjection(row.expectedEventJson, row.eventJson),
     );
   const rebuildSynchronously =
-    !options.legacyTextStorage &&
+    !legacyTextStorage &&
     !projectionUnchanged &&
     shouldRebuildSessionTranscriptIndexSynchronously(database.db, resolved.sessionId);
   const db = getSessionKysely(database.db);
@@ -474,7 +484,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
     db
       .updateTable("transcript_events")
       .set(
-        options.legacyTextStorage
+        legacyTextStorage
           ? { event_json: parameter((row) => row.eventJson) }
           : {
               event_json: parameter((row) => row.payload!.event_json),
@@ -490,7 +500,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
         parameter((row) => row.seq),
       )
       .where(
-        options.legacyTextStorage ? "event_json" : transcriptEventJsonSql(database.db),
+        legacyTextStorage ? "event_json" : transcriptEventJsonSql(database.db),
         "=",
         parameter((row) => row.expectedEventJson),
       ),
@@ -509,7 +519,7 @@ export function rewriteSqliteTranscriptEventRowsInTransaction(
     rotateTranscriptGenerationInTransaction(database, resolved.sessionId);
   }
   if (!projectionUnchanged) {
-    if (options.legacyTextStorage) {
+    if (legacyTextStorage) {
       // Media Doctor rebuilds after the physical storage migration; schema-22 readers
       // cannot inspect an older TEXT-only transcript table during this repair.
       markSessionTranscriptIndexDirtyInTransaction(database.db, resolved.sessionId);

@@ -95,7 +95,7 @@ import {
 } from "./openclaw-agent-db-resources.js";
 import {
   assertCanonicalAgentPersistenceVersion,
-  assertCurrentAgentSchemaMetadata,
+  assertCurrentAgentDatabaseSchemaMetadata,
   assertExistingAgentSchemaOwner,
   assertSupportedAgentSchemaVersion,
   readExistingAgentSchemaMeta,
@@ -415,7 +415,7 @@ function* openOpenClawAgentDatabaseSteps(
       const existingSchema = readExistingAgentSchemaMeta(db);
       assertExistingAgentSchemaOwner(existingSchema, agentId, pathname);
       if (reusedSchema) {
-        assertCurrentAgentSchemaMetadata(existingSchema, agentId, pathname);
+        assertCurrentAgentDatabaseSchemaMetadata(db, existingSchema, agentId, pathname);
       }
       if (pending) {
         releaseCreationAdmission = reserveAgentCreationClaimAdmission(

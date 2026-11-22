@@ -7,7 +7,6 @@ export const widgetIdPattern = /^cv_[a-f0-9]{32}$/u;
 
 const toolLabels: Partial<Record<string, string>> = {
   sessions_list: "Looking through your chats",
-  sessions_search: "Searching your chats",
   sessions_history: "Reading another chat",
   sessions_send: "Sending to another chat",
   route_to_agent: "Asking another agent",

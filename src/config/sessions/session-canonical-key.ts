@@ -51,6 +51,7 @@ import {
   validateCanonicalSessionRow,
 } from "./session-canonical-row.js";
 import { deferCanonicalSessionValidation } from "./session-canonical-validation-deferral.js";
+import { protectedSessionEntryPayloadSql } from "./session-entry-encryption.js";
 import {
   attachSessionEntrySnapshots,
   sessionEntrySnapshotColumns,
@@ -401,6 +402,7 @@ export function canonicalSessionValidationQuery(
   database: { db: DatabaseSync },
   options: { metadata?: boolean } = {},
 ) {
+  const protectedEntry = protectedSessionEntryPayloadSql(database.db);
   return getNodeSqliteKysely<CanonicalSessionDatabase>(database.db)
     .selectFrom("session_nodes")
     .leftJoin("session_windows as retained_window", (join) =>
@@ -418,6 +420,9 @@ export function canonicalSessionValidationQuery(
       "session_nodes.spawned_by",
       "retained_window.session_id as retained_window_id",
     ])
+    .$if(protectedEntry !== undefined, (query) =>
+      query.select(protectedEntry!.as("protected_entry_json")),
+    )
     .$if(Boolean(options.metadata), (query) => query.select("session_nodes.updated_at"))
     .$if(Boolean(options.metadata) && hasSqliteSessionOwnerColumns(database.db), (query) =>
       query.select([
@@ -457,7 +462,7 @@ export function scanCanonicalSqliteSessionEntries(
   )) {
     // Retained windows have no entry, but their keys remain part of a listing snapshot.
     metadata?.keys.push(row.session_key);
-    const entry = validateCanonicalSessionRow(row);
+    const entry = validateCanonicalSessionRow(row, "admission", database.db);
     if (!entry) {
       continue;
     }
@@ -567,7 +572,7 @@ export function assertCanonicalSqliteSessionKeysCurrent(
         pending,
       );
       for (const row of iterateSqliteQuerySync(database.db, query)) {
-        validateCanonicalSessionRow(row);
+        validateCanonicalSessionRow(row, "admission", database.db);
       }
       remember();
       return undefined;

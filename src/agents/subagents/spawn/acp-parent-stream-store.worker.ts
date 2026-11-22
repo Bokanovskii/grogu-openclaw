@@ -17,6 +17,8 @@ import {
   encodeOpenClawStateWorkerError,
   type OpenClawStateWorkerErrorPayload,
 } from "../../../state/openclaw-state-worker-error.js";
+import { sealSqliteStorageText } from "../../../storage/sqlite-encryption.js";
+import { acpParentStreamEventStorageContext } from "./acp-parent-stream-storage.js";
 
 export type AcpParentStreamWorkerOperations = {
   record: {
@@ -62,7 +64,15 @@ export function bindSqliteWorkerBackend(
                   session_id: input.sessionId,
                   run_id: input.runId,
                   seq: firstSeq + index,
-                  event_json: entry.eventJson,
+                  event_json: sealSqliteStorageText(
+                    database,
+                    entry.eventJson,
+                    acpParentStreamEventStorageContext(
+                      input.sessionId,
+                      input.runId,
+                      firstSeq + index,
+                    ),
+                  ),
                   created_at: entry.createdAt,
                 })),
               ),

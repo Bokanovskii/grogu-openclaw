@@ -14,6 +14,11 @@ import {
   subjectPattern,
   testClientIdPattern,
 } from "./settings.js";
+import {
+  provisionProtectedStorageKeyAndMigrate,
+  requireProtectedStorageEncryption,
+  resolveProtectedStorageKeyFile,
+} from "./storage-key.js";
 
 class MaintenanceRefused extends Error {}
 
@@ -65,6 +70,7 @@ async function main() {
   ) {
     throw new Error("Maintenance requires the isolated service account and environment.");
   }
+  resolveProtectedStorageKeyFile();
   const configDir = path.dirname(configPath);
   const runtimePath = path.join(configDir, "protected.json");
   if (action === "turn-timings" && arg === undefined && rest.length === 0) {
@@ -136,6 +142,8 @@ async function main() {
     rest.length === 1 &&
     path.isAbsolute(rest[0]!)
   ) {
+    const storageEncryption = requireProtectedStorageEncryption();
+    storageEncryption.dispose();
     const deploy = parseDeploySettings(await readSettingsJson(rest[0]!));
     const storageLimits = measureStorageLimits(stateDir);
     const configRoot = await root(configDir);
@@ -169,6 +177,32 @@ async function main() {
       { private: true, atomic: true },
     );
     process.stdout.write("Initialized Alcove config with no admitted subjects.\n");
+    return;
+  }
+  if (action === "provision-storage-key" && arg === undefined && rest.length === 0) {
+    const { acquireProtectedStateOwner } = await import("./state-owner.js");
+    const owner = await acquireProtectedStateOwner(stateDir);
+    if (!owner) {
+      throw new MaintenanceRefused("Stop the listener before provisioning protected storage.");
+    }
+    try {
+      owner.assertCurrent();
+      try {
+        await provisionProtectedStorageKeyAndMigrate(() => owner.assertCurrent());
+      } catch (error) {
+        if (error instanceof Error) {
+          throw new MaintenanceRefused(error.message);
+        }
+        throw new MaintenanceRefused(
+          "Protected storage provisioning failed; keep the listener stopped and preserve the original key.",
+        );
+      }
+    } finally {
+      owner.release();
+    }
+    process.stdout.write(
+      "Protected storage key is ready; the agent store and user files are encrypted.\n",
+    );
     return;
   }
   const updateSettings = (
@@ -260,7 +294,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, turn-timings.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, turn-timings.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

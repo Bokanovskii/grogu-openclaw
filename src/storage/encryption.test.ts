@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  createStorageValueEncryption,
   decryptStorageObject,
   encryptedStorageSize,
   encryptStorageObject,
@@ -104,5 +105,21 @@ describe("OCSTOR1 encryption", () => {
       }
     }
     expect(closed).toBe(true);
+  });
+});
+
+describe("OCSEAL1 text values", () => {
+  it("round trips exact UTF-16 code units, including escaped surrogates and embedded NUL", () => {
+    const encryption = createStorageValueEncryption(randomBytes(32));
+    const values = ["literal \\uD800 and NUL \0", String.fromCharCode(0xd800, 0, 0xdc00)];
+    try {
+      for (const value of values) {
+        expect(
+          encryption.decryptText(encryption.encryptText(value, "protected:test"), "protected:test"),
+        ).toBe(value);
+      }
+    } finally {
+      encryption.dispose();
+    }
   });
 });

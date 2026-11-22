@@ -40,6 +40,7 @@ import {
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
   OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
+import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encryption.js";
 import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
@@ -81,7 +82,10 @@ export function createProtectedChats(options: {
     throw new TypeError("Protected chats require an isolated absolute state directory and budget.");
   }
   const agentId = "protected";
-  const env = Object.freeze({ OPENCLAW_STATE_DIR: options.stateDir });
+  const env = Object.freeze({
+    OPENCLAW_STATE_DIR: options.stateDir,
+    [PROTECTED_STORAGE_KEY_FILE_ENV]: process.env[PROTECTED_STORAGE_KEY_FILE_ENV],
+  });
   const storePath = path.join(
     options.stateDir,
     "agents",

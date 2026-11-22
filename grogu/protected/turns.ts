@@ -22,9 +22,13 @@ import {
   withHostSessionAccess,
   type HostSessionAccess,
 } from "../../src/agents/tools/scoped-session-access.js";
-import type { NormalizedUsage } from "../../src/agents/usage.js";
+import { makeZeroUsageSnapshot, type NormalizedUsage } from "../../src/agents/usage.js";
 import { createDefaultDeps } from "../../src/cli/deps.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
+import {
+  appendExactAssistantMessageToSessionTranscript,
+  type SessionTranscriptAssistantMessage,
+} from "../../src/config/sessions/transcript.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { withLocalGatewayRequestScope } from "../../src/gateway/local-request-context.js";
 import { captureGatewayOperatorRunAuthority } from "../../src/gateway/operator-run-authority.js";
@@ -42,6 +46,11 @@ import {
   getPluginRuntimeGatewayRequestScope,
   withPluginRuntimeGatewayRequestScope,
 } from "../../src/plugins/runtime/gateway-request-scope.js";
+import {
+  OPENCLAW_DELIVERY_MIRROR_MODEL,
+  OPENCLAW_TRANSCRIPT_ARTIFACT_API,
+  OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
+} from "../../src/shared/transcript-only-openclaw-assistant.js";
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import type { ProtectedAgentDefinition } from "./agents.js";
 import { chatFilesDirectory } from "./chat-files.js";
@@ -647,6 +656,38 @@ export function createCanonicalProtectedTurns(options: {
         }
         if (result.payloads?.some((payload) => payload.isError) || result.meta.aborted) {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
+        }
+        if (result.meta.intentionalTerminalCompletion === "tool-batch") {
+          // Only the native owner can confirm that a settled tool batch ended the reply.
+          const message = {
+            role: "assistant",
+            content: [],
+            api: OPENCLAW_TRANSCRIPT_ARTIFACT_API,
+            provider: OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
+            model: OPENCLAW_DELIVERY_MIRROR_MODEL,
+            usage: makeZeroUsageSnapshot(),
+            stopReason: "stop",
+            timestamp: Date.now(),
+            protectedTerminalCompletion: "tool-batch",
+          } satisfies SessionTranscriptAssistantMessage & {
+            protectedTerminalCompletion: "tool-batch";
+          };
+          const saved = await appendExactAssistantMessageToSessionTranscript({
+            ...turn.target,
+            expectedSessionId: turn.target.nativeSessionId,
+            expectedLifecycleRevision: turn.target.lifecycleRevision,
+            idempotencyKey: `protected-terminal:${turn.runId}`,
+            assertCurrent: turn.assertCurrent,
+            message,
+          });
+          turn.assertCurrent();
+          if (!saved.ok) {
+            throw new ProtectedError(
+              500,
+              "save_failed",
+              "The reply completion could not be saved.",
+            );
+          }
         }
         if (turn.mentionedAgents.length) {
           await withoutModelRequestTelemetry(() =>

@@ -36,6 +36,7 @@ import {
 } from "../../src/gateway/session-transcript-derived-readers.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import {
+  OPENCLAW_DELIVERY_MIRROR_MODEL,
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
   OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
@@ -230,6 +231,7 @@ export function createProtectedChats(options: {
     const messages: ProtectedMessage[] = [];
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
+    let replyMessage: Record<string, unknown> | undefined;
     let reasoning: string[] = [];
     let activity = new Map<string, ProtectedActivity>();
     let turnStartedAt: number | undefined;
@@ -239,7 +241,21 @@ export function createProtectedChats(options: {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
       }
-      const message = event.message;
+      const terminalReceipt =
+        event.message.role === "assistant" &&
+        event.message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
+        event.message.provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
+        event.message.model === OPENCLAW_DELIVERY_MIRROR_MODEL &&
+        event.message.protectedTerminalCompletion === "tool-batch";
+      const completedReply =
+        terminalReceipt && replyMessage?.stopReason === "toolUse" ? reply : undefined;
+      if (terminalReceipt && !completedReply) {
+        continue;
+      }
+      // A host receipt completes the existing reply; it is not another model message.
+      const message: Record<string, unknown> = completedReply
+        ? { ...replyMessage, stopReason: "stop" }
+        : event.message;
       if (message.role === "toolResult") {
         const prior = typeof message.toolCallId === "string" && activity.get(message.toolCallId);
         if (prior) {
@@ -272,10 +288,11 @@ export function createProtectedChats(options: {
       if (message.role === "user") {
         runUsage = createSessionTranscriptUsageAccumulator();
       } else if (
-        provider === "sparky" ||
-        provider === "github-copilot" ||
-        provider === "anthropic" ||
-        provider === "openai"
+        !completedReply &&
+        (provider === "sparky" ||
+          provider === "github-copilot" ||
+          provider === "anthropic" ||
+          provider === "openai")
       ) {
         runUsage.add(message);
       }
@@ -329,12 +346,13 @@ export function createProtectedChats(options: {
       if (message.role === "user") {
         projections = projectToolResult(undefined, undefined);
         reply = undefined;
+        replyMessage = undefined;
         reasoning = [];
         activity = new Map();
         const timestamp =
           typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
         turnStartedAt = Number.isFinite(timestamp) ? timestamp : undefined;
-      } else if (Array.isArray(message.content)) {
+      } else if (!completedReply && Array.isArray(message.content)) {
         for (const block of message.content) {
           if (!isRecord(block)) {
             continue;
@@ -353,7 +371,9 @@ export function createProtectedChats(options: {
       const completedAt =
         typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
       const projected: ProtectedMessage = {
-        id: typeof event.id === "string" ? event.id : `${id}:${messages.length}`,
+        id:
+          completedReply?.id ??
+          (typeof event.id === "string" ? event.id : `${id}:${messages.length}`),
         role: message.role,
         text,
         ...(message.role === "assistant" &&
@@ -377,13 +397,18 @@ export function createProtectedChats(options: {
           ? { durationMs: completedAt - turnStartedAt }
           : {}),
       };
-      messages.push(projected);
+      if (completedReply) {
+        messages[messages.length - 1] = projected;
+      } else {
+        messages.push(projected);
+      }
       if (message.role === "assistant") {
         if (reply) {
           delete reply.sources;
           delete reply.widgets;
         }
         reply = projected;
+        replyMessage = message;
       }
     }
     const chat: ProtectedChat = {

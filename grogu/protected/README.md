@@ -136,6 +136,13 @@ definition to free space, or contact the server operator. The runtime does not
 evict chats or keep backups. A volume below its floor stops accepting writes
 until space is available. Chat deletion remains available.
 
+An answer can finish with a widget and no closing text. When the native agent
+confirms successful terminal tool execution, Alcove saves a completion receipt
+in the canonical transcript. The receipt completes the existing reply after
+reload and does not become another chat bubble or provider message. An ordinary
+tool call or saved widget alone does not prove completion. Existing transcripts
+without that receipt retain their recorded status.
+
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
 and overhead charges as the quota. `usedBytes` also counts saved automation

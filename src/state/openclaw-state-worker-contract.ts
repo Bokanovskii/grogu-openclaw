@@ -79,7 +79,9 @@ import type { OpenClawStateLeaseLifecycleOperations } from "./openclaw-state-lea
 import type { RegisteredStateWorkerOperations } from "./openclaw-state-worker-registry.js";
 import type { UserPreferenceWorkerOperations } from "./user-preferences.types.js";
 
-export type OpenClawStateWorkerOpenPreparation = { type: "deviceIdentity"; identityKey: string };
+export type OpenClawStateWorkerOpenPreparation =
+  | { type: "deviceIdentity"; identityKey: string }
+  | { type: "protectedSharedState" };
 
 /** Commands share one physical shared-state actor; bindings belong to commands, not open input. */
 export type OpenClawStateWorkerOperations = RegisteredStateWorkerOperations &
@@ -107,6 +109,7 @@ export type OpenClawStateWorkerOperations = RegisteredStateWorkerOperations &
       output: ReturnType<typeof recoverPendingWorktreesInWorker>;
     };
     "database.walMaintenance": { input: SqliteWalPeriodicRequest; output: SqliteWalPeriodicResult };
+    "database.prepareProtected": { input: undefined; output: void };
     "deviceIdentity.read": { input: { identityKey: string }; output: DeviceIdentity | null };
     "deviceIdentity.load": { input: { identityKey: string }; output: DeviceIdentity };
     "sandboxRegistry.insertIfMissing": { input: SandboxRegistryInsert; output: void };
@@ -267,6 +270,7 @@ export type OpenClawStateWorkerRuntimeCommand = Exclude<
       | "plugins.metadata.read"
       | "database.inspectIdle"
       | "database.walMaintenance"
+      | "database.prepareProtected"
       | "agentDatabases.releaseExitedLease"
       | "worktrees.reserveCapacity"
       | keyof RestartLifecycleWorkerOperations

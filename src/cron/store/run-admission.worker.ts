@@ -9,9 +9,9 @@ import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { recomputeJobNextRunAtMs } from "../service/jobs-scheduling.js";
 import { retainManualOneShotOccurrence } from "../service/one-shot-schedule.js";
 import type { CronJobPolicyContext } from "../service/state.js";
+import { deleteStaleCronJobFamilyRows } from "./job-family.js";
 import {
   deleteCronJobRowInDatabase,
-  deleteStaleCronJobFamilyRows,
   loadedCronStoreFromRows,
   loadCronRows,
   updateCronRuntimeRow,

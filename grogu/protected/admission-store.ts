@@ -3,12 +3,12 @@ import {
   createSqliteWorkerOperationAdmission,
   observeSqliteWorkerCommittedFacts,
 } from "../../src/infra/sqlite-worker-operation-admission.js";
-import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import {
   executeOpenClawStateWorker,
   runOpenClawStateWorkerOperation,
 } from "../../src/state/openclaw-state-worker-store.js";
 import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
+import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 export type { ProtectedAccessRequest } from "../../src/state/protected-admission.js";
 
@@ -16,54 +16,45 @@ export function submitProtectedAccessRequest(
   stateDir: string,
   input: { email: string; name: string; note: string; receipt?: string },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    {
-      type: "protectedAccess.submit",
-      input: { ...input, now: Date.now() },
-    },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.submit",
+    input: { ...input, now: Date.now() },
+  });
 }
 
 export function readProtectedAccessRequest(stateDir: string, receipt: string) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.read", input: { receipt } },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.read",
+    input: { receipt },
+  });
 }
 
 export function editProtectedAccessRequest(
   stateDir: string,
   input: { receipt: string; name: string; note: string },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    {
-      type: "protectedAccess.edit",
-      input: { ...input, now: Date.now() },
-    },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.edit",
+    input: { ...input, now: Date.now() },
+  });
 }
 
 export function withdrawProtectedAccessRequest(stateDir: string, receipt: string) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    {
-      type: "protectedAccess.withdraw",
-      input: { receipt, now: Date.now() },
-    },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.withdraw",
+    input: { receipt, now: Date.now() },
+  });
 }
 
 export function listProtectedAccessRequests(stateDir: string) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.list", input: undefined },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.list",
+    input: undefined,
+  });
 }
 
 function ownerMutationAdmission(
-  context: ReturnType<typeof captureOpenClawStateWorkerContext>,
+  context: ReturnType<typeof captureProtectedStateWorkerContext>,
   status: "approved" | "denied" | "removed" | "retry_policy",
   assertCurrent: () => void,
   onRemovalCommitted: (
@@ -121,7 +112,7 @@ export function setProtectedRequestStatus(
   assertCurrent: () => void,
   onPolicyChanged: () => void,
 ) {
-  const context = captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });
+  const context = captureProtectedStateWorkerContext(stateDir);
   const assertOwnerCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
@@ -155,7 +146,7 @@ export function removeProtectedAdmission(
   ) => void,
   onPolicyChanged: () => void,
 ) {
-  const context = captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });
+  const context = captureProtectedStateWorkerContext(stateDir);
   const assertOwnerCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
@@ -185,20 +176,17 @@ export function migrateProtectedSubjects(
   stateDir: string,
   input: { subjects: readonly string[]; issuer: string },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    {
-      type: "protectedAccess.migrate",
-      input: { ...input, now: Date.now() },
-    },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.migrate",
+    input: { ...input, now: Date.now() },
+  });
 }
 
 export function addProtectedSubject(stateDir: string, input: { issuer: string; subject: string }) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.addSubject", input: { ...input, now: Date.now() } },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.addSubject",
+    input: { ...input, now: Date.now() },
+  });
 }
 
 export function bindProtectedAdmission(
@@ -207,7 +195,7 @@ export function bindProtectedAdmission(
   assertCurrent: () => void,
   onCommitted: () => void,
 ) {
-  const context = captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });
+  const context = captureProtectedStateWorkerContext(stateDir);
   const assertIdentityCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
@@ -239,37 +227,37 @@ export function bindProtectedAdmission(
 }
 
 export function listProtectedAdmissions(stateDir: string) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.listAdmissions", input: undefined },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.listAdmissions",
+    input: undefined,
+  });
 }
 
 export function listPendingProtectedPolicy(stateDir: string) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.listPendingPolicy", input: undefined },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.listPendingPolicy",
+    input: undefined,
+  });
 }
 
 export function beginProtectedPolicy(
   stateDir: string,
   input: { id: string; email: string; revision: number },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.beginPolicy", input },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.beginPolicy",
+    input,
+  });
 }
 
 export function settleProtectedPolicy(
   stateDir: string,
   input: { id: string; email: string; revision: number; state: "synced" | "failed" | "unknown" },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedAccess.settlePolicy", input },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.settlePolicy",
+    input,
+  });
 }
 
 export function retryProtectedPolicy(
@@ -278,7 +266,7 @@ export function retryProtectedPolicy(
   assertCurrent: () => void,
   onPolicyChanged: () => void,
 ) {
-  const context = captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });
+  const context = captureProtectedStateWorkerContext(stateDir);
   const assertOwnerCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
@@ -304,11 +292,8 @@ export function bindProtectedProfile(
   stateDir: string,
   input: { issuer: string; subject: string; profileId: string },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    {
-      type: "protectedAccess.bindProfile",
-      input: { ...input, now: Date.now() },
-    },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.bindProfile",
+    input: { ...input, now: Date.now() },
+  });
 }

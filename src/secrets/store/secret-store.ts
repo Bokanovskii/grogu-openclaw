@@ -22,6 +22,7 @@ import {
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import { executeOpenClawStateWorker } from "../../state/openclaw-state-worker-store.js";
 import { sealSecretSentinel } from "../sentinel.js";
+import { openSecretStoreValue } from "./secret-store-encryption.js";
 import { captureSecretStoreExpiryCutoffs } from "./secret-store-expiry.kernel.js";
 import {
   classifyHiddenGitHubStoreName,
@@ -186,7 +187,11 @@ export function consumeGitHubSetupHandoff(params: {
             .where("scope_id", "=", "")
             .where("name", "=", params.name),
         );
-        return row.value;
+        return openSecretStoreValue(
+          sqlite,
+          { scope_kind: "team", scope_id: "", name: params.name },
+          row.value,
+        );
       },
       params.database,
       { operationLabel: "secrets.store.consume-github-setup-handoff" },

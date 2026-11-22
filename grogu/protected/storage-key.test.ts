@@ -10,12 +10,16 @@ import { fileURLToPath } from "node:url";
 import { PROTECTED_SESSION_ENTRY_TABLE } from "../../src/config/sessions/session-entry-encryption.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
+import { openSecretStoreValue } from "../../src/secrets/store/secret-store-encryption.js";
 import { resolveOpenClawAgentSqlitePath } from "../../src/state/openclaw-agent-db.paths.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import {
+  disposeSqliteStorageValueEncryption,
   loadStorageValueEncryptionFromFile,
   PROTECTED_STORAGE_KEY_FILE_ENV,
+  registerSqliteStorageValueEncryption,
+  setSqliteStorageValueEncryptionStrict,
 } from "../../src/storage/sqlite-encryption.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -62,6 +66,14 @@ void test("the predecessor maintenance environment provisions and migrates witho
           "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?, ?, ?, ?)",
         ).run(${JSON.stringify(sessionKey)}, "storage-migration-session", JSON.stringify({ title: ${JSON.stringify(plaintext)} }), Date.now());
       }, { agentId: "protected", env: process.env });
+      const { runOpenClawStateWriteTransaction } = await import("./src/state/openclaw-state-db.js");
+      const { ensureSecretStoreSchema } = await import("./src/state/openclaw-state-db-schema-additive.js");
+      runOpenClawStateWriteTransaction(({ db }) => {
+        ensureSecretStoreSchema(db);
+        db.prepare(
+          "INSERT INTO secret_store_entries (scope_kind, scope_id, name, value, kind, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).run("identity", "synthetic-member", "model-account:synthetic", "synthetic shared credential", "secret", 1, 1);
+      }, { env: process.env });
     `,
     true,
   );
@@ -69,7 +81,7 @@ void test("the predecessor maintenance environment provisions and migrates witho
 
   const migrated = run("provision-storage-key");
   assert.equal(migrated.status, 0, migrated.stderr);
-  assert.match(migrated.stdout, /agent store and user files are encrypted/u);
+  assert.match(migrated.stdout, /shared state, the agent store, and user files are encrypted/u);
   const originalKey = await readFile(keyPath);
   const keyStat = await lstat(keyPath, { bigint: true });
   assert.equal(keyStat.size, 32n);
@@ -110,6 +122,34 @@ void test("the predecessor maintenance environment provisions and migrates witho
     assert.match(encryptedEntry, /^OCSEAL1:/u);
   } finally {
     database.close();
+  }
+  const shared = new DatabaseSync(resolveOpenClawStateSqlitePath(env), { readOnly: true });
+  registerSqliteStorageValueEncryption(
+    shared,
+    loadStorageValueEncryptionFromFile(keyPath, stateDir),
+  );
+  try {
+    assert.equal(shared.prepare("PRAGMA user_version").get()?.user_version, 21);
+    assert.equal(
+      shared.prepare("SELECT cleanup_pending FROM grogu_protected_shared_state").get()
+        ?.cleanup_pending,
+      0,
+    );
+    const stored = shared.prepare("SELECT value FROM secret_store_entries").get()?.value;
+    assert.ok(typeof stored === "string");
+    assert.match(stored, /^OCSEAL1:/u);
+    setSqliteStorageValueEncryptionStrict(shared, true);
+    assert.equal(
+      openSecretStoreValue(
+        shared,
+        { scope_kind: "identity", scope_id: "synthetic-member", name: "model-account:synthetic" },
+        stored,
+      ),
+      "synthetic shared credential",
+    );
+  } finally {
+    disposeSqliteStorageValueEncryption(shared);
+    shared.close();
   }
   const databaseDirectory = path.dirname(databasePath);
   const databaseFiles = await readdir(databaseDirectory);

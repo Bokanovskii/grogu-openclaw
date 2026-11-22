@@ -241,6 +241,8 @@ export async function provisionProtectedStorageKeyAndMigrate(
       encryption,
     });
     assertCurrent();
+    const { prepareProtectedSharedState } = await import("./state-worker-context.js");
+    await prepareProtectedSharedState(stateDir, assertCurrent);
     const { runOpenClawAgentWriteTransaction } =
       await import("../../src/state/openclaw-agent-db.js");
     runOpenClawAgentWriteTransaction(() => undefined, {

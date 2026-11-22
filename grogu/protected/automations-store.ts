@@ -2,7 +2,6 @@ import type {
   ProtectedAutomationDraft,
   ProtectedAutomationRecord,
 } from "../../packages/gateway-protocol/src/protected.js";
-import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
 import {
   createProtectedAutomationWithAdmission,
@@ -11,13 +10,14 @@ import {
 } from "../../src/state/protected-automation-operations.js";
 import type { ProtectedAutomationStorageRecord } from "../../src/state/protected-automations.js";
 import type { StorageAdmission } from "./capacity.js";
+import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 function context(stateDir: string) {
-  return captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } });
+  return captureProtectedStateWorkerContext(stateDir);
 }
 
 function assertCurrent(
-  workerContext: ReturnType<typeof captureOpenClawStateWorkerContext>,
+  workerContext: ReturnType<typeof captureProtectedStateWorkerContext>,
   authority: ProtectedAutomationMutationAuthority,
 ) {
   workerContext.admission.assertCurrent();
@@ -37,19 +37,6 @@ function record(automation: ProtectedAutomationStorageRecord): ProtectedAutomati
     enabled: automation.enabled,
     state: automation.enabled ? "active" : "paused",
     nextCheckAt: null,
-  };
-}
-
-function definition(automation: ProtectedAutomationRecord): ProtectedAutomationDraft {
-  return {
-    name: automation.name,
-    instructions: automation.instructions,
-    whenToNotify: automation.whenToNotify,
-    ...(automation.doneWhen === undefined ? {} : { doneWhen: automation.doneWhen }),
-    agentId: automation.agentId,
-    model: automation.model,
-    ...(automation.thinking === undefined ? {} : { thinking: automation.thinking }),
-    schedule: automation.schedule,
   };
 }
 
@@ -121,15 +108,16 @@ export async function createProtectedAutomationRecord(
     "chargeAutomationCreate" | "settleAutomationCreate" | "assertResult"
   >,
 ): Promise<ProtectedAutomationRecord | undefined> {
-  storage.chargeAutomationCreate(input.definition);
   const workerContext = context(stateDir);
-  const result = await createProtectedAutomationWithAdmission(workerContext, input, authority);
+  const result = await createProtectedAutomationWithAdmission(workerContext, input, {
+    ...authority,
+    admitStorage: ({ nextStoredBytes }) => storage.chargeAutomationCreate(nextStoredBytes),
+    onStorageCommitted: ({ committedStoredBytes, automationId }) =>
+      storage.settleAutomationCreate(committedStoredBytes, true, automationId),
+    onStorageAborted: ({ nextStoredBytes }) =>
+      storage.settleAutomationCreate(nextStoredBytes, false),
+  });
   const created = result.status === "created";
-  storage.settleAutomationCreate(
-    input.definition,
-    created,
-    created ? result.automation.id : undefined,
-  );
   storage.assertResult();
   if (!created) {
     return undefined;
@@ -163,11 +151,16 @@ export async function patchProtectedAutomationRecord(
   if (current.version !== String(input.expectedRevision)) {
     return { status: "version_mismatch" as const };
   }
-  const currentDefinition = definition(current);
-  storage.chargeAutomationPatch(currentDefinition, input.definition);
   const workerContext = context(stateDir);
-  const result = await patchProtectedAutomationWithAdmission(workerContext, input, authority);
-  storage.settleAutomationPatch(currentDefinition, input.definition, result.status === "updated");
+  const result = await patchProtectedAutomationWithAdmission(workerContext, input, {
+    ...authority,
+    admitStorage: ({ currentStoredBytes, nextStoredBytes }) =>
+      storage.chargeAutomationPatch(currentStoredBytes, nextStoredBytes),
+    onStorageCommitted: ({ currentStoredBytes, committedStoredBytes }) =>
+      storage.settleAutomationPatch(currentStoredBytes, committedStoredBytes, true),
+    onStorageAborted: ({ currentStoredBytes, nextStoredBytes }) =>
+      storage.settleAutomationPatch(currentStoredBytes, nextStoredBytes, false),
+  });
   storage.assertResult();
   return result.status === "updated" ? record(result.automation) : result;
 }

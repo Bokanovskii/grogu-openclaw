@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { executeSqliteQuerySync, sqliteStringSet } from "../../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../../infra/sqlite-schema-facts.js";
+import { openCronJobValue } from "./job-encryption.js";
 import { getCronStoreKysely } from "./schema.js";
 
 /** Shared-state/history workers; native saves are limited to Doctor transaction hooks. */
@@ -21,5 +22,10 @@ export function readCronJobNamesInDatabase(
     query = query.where("job_id", "in", sqliteStringSet(jobIds));
   }
   const rows = executeSqliteQuerySync(db, query).rows;
-  return new Map(rows.map((row) => [row.job_id, normalizeOptionalString(row.name)]));
+  return new Map(
+    rows.map((row) => [
+      row.job_id,
+      normalizeOptionalString(openCronJobValue(db, storePath, row.job_id, "name", row.name)),
+    ]),
+  );
 }

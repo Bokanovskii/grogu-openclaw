@@ -86,6 +86,8 @@ async function main() {
       maxBytes: protectedMaxFileBytes,
       encryption: storageEncryption,
     });
+    const { prepareProtectedSharedState } = await import("./state-worker-context.js");
+    await prepareProtectedSharedState(stateDir, () => stateOwner.assertCurrent());
     const { runOpenClawAgentWriteTransaction } =
       await import("../../src/state/openclaw-agent-db.js");
     runOpenClawAgentWriteTransaction(() => undefined, {

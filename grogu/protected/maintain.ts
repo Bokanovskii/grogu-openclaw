@@ -180,6 +180,8 @@ async function main() {
     return;
   }
   if (action === "provision-storage-key" && arg === undefined && rest.length === 0) {
+    const { configureProtectedRuntimeWorkers } = await import("./runtime-workers.js");
+    await configureProtectedRuntimeWorkers(fileURLToPath(new URL("../..", import.meta.url)));
     const { acquireProtectedStateOwner } = await import("./state-owner.js");
     const owner = await acquireProtectedStateOwner(stateDir);
     if (!owner) {
@@ -201,7 +203,7 @@ async function main() {
       owner.release();
     }
     process.stdout.write(
-      "Protected storage key is ready; the agent store and user files are encrypted.\n",
+      "Protected storage key is ready; shared state, the agent store, and user files are encrypted.\n",
     );
     return;
   }
@@ -309,7 +311,12 @@ async function main() {
     owner.assertCurrent();
     changed = await updateCanonicalUserProfileAccess(
       { action: "revoke", profileId: arg },
-      { env: { OPENCLAW_STATE_DIR: stateDir } },
+      {
+        env: {
+          OPENCLAW_STATE_DIR: stateDir,
+          OPENCLAW_PROTECTED_STORAGE_KEY_FILE: process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE,
+        },
+      },
     );
   } finally {
     owner.release();

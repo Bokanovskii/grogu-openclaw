@@ -4,7 +4,6 @@ import { isDeepStrictEqual } from "node:util";
 import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { sha256Hex } from "../../infra/crypto-digest.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -12,6 +11,7 @@ import {
 } from "../../infra/kysely-sync.js";
 import { normalizeSqliteNumber as normalizeNumber } from "../../infra/sqlite-number.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
+import { isSqliteStorageValueEncryptionStrict } from "../../storage/sqlite-encryption.js";
 import { hashCronJobDefinition } from "../definition-hash.js";
 import { normalizeCronJobInput } from "../normalize.js";
 import { getInvalidPersistedCronJobReason } from "../persisted-shape.js";
@@ -29,12 +29,13 @@ import {
   decodeCronJobConfig,
   deliveryToJson,
 } from "./delivery-codec.js";
-import type {
-  CronJobGenerationReadRow,
-  CronJobInsert,
-  CronJobReadRow,
-  CronJobRow,
-} from "./schema.js";
+import {
+  cronJobStorageContext,
+  openCronJobRow,
+  openCronJobValue,
+  sealCronJobValue,
+} from "./job-encryption.js";
+import type { CronJobGenerationReadRow, CronJobInsert, CronJobReadRow } from "./schema.js";
 import {
   CRON_JOB_GENERATION_READ_COLUMNS,
   CRON_JOB_READ_COLUMNS,
@@ -91,25 +92,48 @@ function serializeCronJobState(state: CronJobState): string {
   });
 }
 
-function bindCronJobRow(storeKey: string, job: CronStoredJob, sortOrder: number): CronJobInsert {
+function bindCronJobRow(
+  db: DatabaseSync,
+  storeKey: string,
+  job: CronStoredJob,
+  sortOrder: number,
+): CronJobInsert {
   return {
     store_key: storeKey,
     job_id: job.id,
     declaration_key: job.declarationKey ?? null,
     owner_agent_id: job.owner?.agentId ?? null,
-    name: job.name,
-    description: job.description ?? null,
+    name: sealCronJobValue(db, storeKey, job.id, "name", job.name),
+    description: sealCronJobValue(db, storeKey, job.id, "description", job.description ?? null),
     enabled: job.enabled ? 1 : 0,
     updated_at: job.updatedAtMs,
     agent_id: job.agentId ?? null,
     payload_kind: job.payload.kind,
-    job_json: JSON.stringify(stripJobRuntimeFields(job)),
+    job_json: sealCronJobValue(
+      db,
+      storeKey,
+      job.id,
+      "job_json",
+      JSON.stringify(stripJobRuntimeFields(job)),
+    ),
     grant_definition_revision: resolveCronJobGrantDefinitionRevision(job),
     grant_definition_generation: 1,
     grant_definition_updated_at: job.updatedAtMs,
-    state_json: serializeCronJobState(job.state ?? {}),
+    state_json: sealCronJobValue(
+      db,
+      storeKey,
+      job.id,
+      "state_json",
+      serializeCronJobState(job.state ?? {}),
+    ),
     runtime_updated_at_ms: job.updatedAtMs,
-    schedule_identity: tryCronScheduleIdentity({ ...job }) ?? null,
+    schedule_identity: sealCronJobValue(
+      db,
+      storeKey,
+      job.id,
+      "schedule_identity",
+      tryCronScheduleIdentity({ ...job }) ?? null,
+    ),
     sort_order: sortOrder,
   };
 }
@@ -259,102 +283,12 @@ export function loadCronRows(
         ? query.where("job_id", "=", ids[0]!)
         : query.where("job_id", "in", sqliteStringSet(ids));
   }
-  const rows = executeSqliteQuerySync(db, query).rows;
+  const rows = executeSqliteQuerySync(db, query).rows.map((row) =>
+    openCronJobRow(db, storeKey, row),
+  );
   // SQLite replaces lone surrogates in bound IDs; keep exact caller identity
   // so an invalid ID cannot select the replacement-character job.
   return jobIds ? rows.filter((row) => jobIds.has(row.job_id)) : rows;
-}
-
-/** Fingerprints raw definition rows without mutating their config order. */
-export function fingerprintCronJobRows(
-  rows: readonly Pick<CronJobRow, "job_id" | "job_json" | "sort_order">[],
-): string {
-  // This internal, transient Doctor token uses one encoding-independent ID order.
-  // Keep raw fields so every definition edit invalidates the snapshot.
-  const ordered = rows
-    .map(({ job_id, job_json, sort_order }) => ({
-      idBytes: Buffer.from(job_id),
-      definition: { job_id, job_json, sort_order },
-    }))
-    .toSorted((left, right) => Buffer.compare(left.idBytes, right.idBytes));
-  return sha256Hex(JSON.stringify(ordered.map(({ definition }) => definition)));
-}
-
-/** Reads only definition JSON and order while excluding runtime-owned state. */
-export function readCronJobsFingerprint(db: DatabaseSync, storeKey: string): string {
-  const rows = executeSqliteQuerySync(
-    db,
-    getCronStoreKysely(db)
-      .selectFrom("cron_jobs")
-      .select(["job_id", "job_json", "sort_order"])
-      .where("store_key", "=", storeKey),
-  ).rows;
-  return fingerprintCronJobRows(rows);
-}
-
-/** Binds a scheduler snapshot before its in-memory pacing and catch-up adjustments. */
-export function fingerprintCronRuntimeRows(rows: readonly CronJobReadRow[]): string {
-  const ordered = rows
-    .map(({ job_id, state_json, runtime_updated_at_ms, updated_at, schedule_identity }) => ({
-      job_id,
-      state_json,
-      runtime_updated_at_ms,
-      updated_at,
-      schedule_identity,
-    }))
-    .toSorted((left, right) => Buffer.compare(Buffer.from(left.job_id), Buffer.from(right.job_id)));
-  return sha256Hex(JSON.stringify(ordered));
-}
-
-/** Capture both row owners together; Doctor's definition-only token stays unchanged. */
-export function readCronStoreFingerprints(db: DatabaseSync, storeKey: string) {
-  const rows = loadCronRows(db, storeKey);
-  return {
-    jobsFingerprint: fingerprintCronJobRows(rows),
-    runtimeFingerprint: fingerprintCronRuntimeRows(rows),
-  };
-}
-
-export type CronJobFamilyIdentity = {
-  declarationKey: string;
-  name: string;
-  ownerPluginTag: string;
-};
-
-/** Removes one owned job family from obsolete store partitions. */
-export function deleteStaleCronJobFamilyRows(
-  db: DatabaseSync,
-  activeStoreKey: string,
-  family: CronJobFamilyIdentity,
-): number {
-  const staleRows = executeSqliteQuerySync(
-    db,
-    getCronStoreKysely(db)
-      .selectFrom("cron_jobs")
-      .select(["store_key", "job_id", "declaration_key", "name"])
-      .select((eb) => [
-        // Native UTF-8 decoding can replace malformed bytes; only ASCII names
-        // admit an exact SQL comparison before the existing JavaScript filter.
-        /^\p{ASCII}*$/u.test(family.name)
-          ? eb
-              .case()
-              .when("name", "=", family.name)
-              .then(eb.ref("description"))
-              .else(null)
-              .end()
-              .as("description")
-          : "description",
-      ])
-      .where("store_key", "!=", activeStoreKey),
-  ).rows.filter(
-    (row) =>
-      row.declaration_key === family.declarationKey ||
-      (row.name === family.name && row.description?.includes(family.ownerPluginTag) === true),
-  );
-  for (const row of staleRows) {
-    deleteCronJobRowInDatabase(db, row.store_key, row.job_id);
-  }
-  return staleRows.length;
 }
 
 /** Replaces all persisted cron rows and returns the canonical jobs that were written. */
@@ -391,7 +325,10 @@ export function replaceCronRows(
   const legacyAuthorityJobIds = new Set<string>();
   for (const row of existingRows) {
     existingJobIds.add(row.job_id);
-    const storedJob = row.job_json === undefined ? undefined : safeParseJsonRecord(row.job_json);
+    const storedJob =
+      row.job_json === undefined
+        ? undefined
+        : safeParseJsonRecord(openCronJobValue(db, storeKey, row.job_id, "job_json", row.job_json));
     if (
       storedJob &&
       (Object.hasOwn(storedJob, "runtimeAuthority") ||
@@ -429,7 +366,7 @@ export function upsertCronJobRow(
     throw new Error(`Cannot persist invalid cron job ${job.id}`);
   }
   const unsupportedDelivery = !hasCanonicalCronDeliveryMode(normalized.delivery);
-  const existingRow =
+  const storedRow =
     unsupportedDelivery || opts?.knownExistingRow === undefined
       ? executeSqliteQueryTakeFirstSync(
           db,
@@ -440,6 +377,10 @@ export function upsertCronJobRow(
             .where("job_id", "=", normalized.id),
         )
       : (opts.knownExistingRow ?? undefined);
+  const existingRow =
+    storedRow && (unsupportedDelivery || opts?.knownExistingRow === undefined)
+      ? openCronJobRow(db, storeKey, storedRow)
+      : storedRow;
   const existingJobJson = existingRow ? safeParseJsonRecord(existingRow.job_json) : null;
   const existingJob =
     existingRow && existingJobJson ? rowToCronJob(existingRow, existingJobJson) : null;
@@ -472,7 +413,7 @@ export function upsertCronJobRow(
   }
   const retainedGrantGeneration = readMaximumRetainedGrantDefinitionGeneration(db, normalized.id);
   const values = {
-    ...bindCronJobRow(storeKey, normalized, sortOrder),
+    ...bindCronJobRow(db, storeKey, normalized, sortOrder),
     grant_definition_generation: retainedGrantGeneration + 1,
   };
   const existingDefinitionRevision = existingJob
@@ -557,7 +498,16 @@ export function upsertCronJobRow(
                 .case()
                 .when(
                   eb.and([
-                    eb("cron_jobs.job_json", "=", generationPreservationGuard.jobJson),
+                    eb(
+                      isSqliteStorageValueEncryptionStrict(db)
+                        ? eb.fn<string>("openclaw_storage_text_open", [
+                            eb.ref("cron_jobs.job_json"),
+                            eb.val(cronJobStorageContext(storeKey, normalized.id, "job_json")),
+                          ])
+                        : eb.ref("cron_jobs.job_json"),
+                      "=",
+                      generationPreservationGuard.jobJson,
+                    ),
                     eb(
                       "cron_jobs.grant_definition_revision",
                       "=",
@@ -675,22 +625,50 @@ export function updateCronRuntimeRow(
 ): void {
   const enabled = job.enabled ?? true;
   const enabledChanged = previousEnabled !== undefined && previousEnabled !== enabled;
+  const scheduleIdentity = tryCronScheduleIdentity({ ...job });
+  const protectedStorage = isSqliteStorageValueEncryptionStrict(db);
+  const definitionContext = protectedStorage
+    ? cronJobStorageContext(storeKey, job.id, "job_json")
+    : undefined;
   executeSqliteQuerySync(
     db,
     getCronStoreKysely(db)
       .updateTable("cron_jobs")
       .set((eb) => ({
-        state_json: serializeCronJobState(job.state ?? {}),
+        state_json: sealCronJobValue(
+          db,
+          storeKey,
+          job.id,
+          "state_json",
+          serializeCronJobState(job.state ?? {}),
+        ),
         runtime_updated_at_ms: job.updatedAtMs,
-        schedule_identity: tryCronScheduleIdentity({ ...job }),
+        schedule_identity:
+          scheduleIdentity === undefined
+            ? undefined
+            : sealCronJobValue(db, storeKey, job.id, "schedule_identity", scheduleIdentity),
         ...(enabledChanged
           ? {
               enabled: enabled ? 1 : 0,
-              job_json: eb.fn<string>("json_set", [
-                eb.ref("job_json"),
-                eb.val("$.enabled"),
-                eb.fn<string>("json", [eb.val(enabled ? "true" : "false")]),
-              ]),
+              job_json: (() => {
+                const definition = definitionContext
+                  ? eb.fn<string>("openclaw_storage_text_open", [
+                      eb.ref("job_json"),
+                      eb.val(definitionContext),
+                    ])
+                  : eb.ref("job_json");
+                const changed = eb.fn<string>("json_set", [
+                  definition,
+                  eb.val("$.enabled"),
+                  eb.fn<string>("json", [eb.val(enabled ? "true" : "false")]),
+                ]);
+                return definitionContext
+                  ? eb.fn<string>("openclaw_storage_text_seal", [
+                      changed,
+                      eb.val(definitionContext),
+                    ])
+                  : changed;
+              })(),
             }
           : {}),
       }))

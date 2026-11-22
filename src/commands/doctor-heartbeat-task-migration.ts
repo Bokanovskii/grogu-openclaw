@@ -11,6 +11,7 @@ import { patchSessionEntryCore } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { heartbeatTaskDeclarationKey, isHeartbeatTaskCronJob } from "../cron/heartbeat-task.js";
 import { cronSchedulingInputsEqual } from "../cron/schedule-identity.js";
+import { sealCronScratchContent } from "../cron/scratch-encryption.js";
 import {
   readHeartbeatMonitorScratch,
   readHeartbeatMonitorScratchReadOnly,
@@ -306,7 +307,12 @@ function commitAgentTaskMigration(params: {
         getCronStoreKysely(db)
           .updateTable("cron_job_scratch")
           .set({
-            content: params.plan.strippedContent,
+            content: sealCronScratchContent(
+              db,
+              storeKey,
+              params.plan.monitorJobId,
+              params.plan.strippedContent,
+            ),
             revision: params.plan.scratchRevision + 1,
             source_sha256: params.plan.sourceSha256 ?? null,
             updated_at_ms: params.nowMs,

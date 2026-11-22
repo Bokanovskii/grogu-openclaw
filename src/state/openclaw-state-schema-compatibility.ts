@@ -17,6 +17,7 @@ import {
   LAZY_ADDITIVE_STATE_INDEXES,
   LAZY_ADDITIVE_STATE_TABLES,
 } from "./openclaw-state-db-contract.js";
+import { PROTECTED_SHARED_STATE_SCHEMA_SQL } from "./openclaw-state-protected-schema.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 // Same-version databases may lack additive columns that only a writable open
@@ -65,14 +66,19 @@ const runtimeSchemaCache = new Map<string, string>();
 export function getOpenClawStateRuntimeSchema(options: {
   includeVersionLazyAdditiveTables: boolean;
   includeAgentDeletionJournal?: boolean;
+  protected?: boolean;
 }): string {
-  const { includeVersionLazyAdditiveTables, includeAgentDeletionJournal = true } = options;
-  const key = `${includeVersionLazyAdditiveTables}:${includeAgentDeletionJournal}`;
+  const {
+    includeVersionLazyAdditiveTables,
+    includeAgentDeletionJournal = true,
+    protected: protectedSchema = false,
+  } = options;
+  const key = `${includeVersionLazyAdditiveTables}:${includeAgentDeletionJournal}:${protectedSchema}`;
   const cached = runtimeSchemaCache.get(key);
   if (cached !== undefined) {
     return cached;
   }
-  let schema = OPENCLAW_STATE_SCHEMA_SQL;
+  let schema = protectedSchema ? PROTECTED_SHARED_STATE_SCHEMA_SQL : OPENCLAW_STATE_SCHEMA_SQL;
   const omittedTables = [
     ...(includeVersionLazyAdditiveTables ? FIRST_USE_STATE_TABLES : LAZY_ADDITIVE_STATE_TABLES),
     ...(includeAgentDeletionJournal ? [] : DOCTOR_OWNED_STATE_TABLES),

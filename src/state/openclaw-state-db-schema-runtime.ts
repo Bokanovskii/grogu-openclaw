@@ -11,6 +11,7 @@ import { StartupMaintenanceRequiredError } from "../infra/startup-maintenance-re
 import { withStateDatabaseSchemaMaintenance } from "../infra/state-database-maintenance.js";
 import { migrateLegacyCronRunLogsToTaskRuns } from "../infra/state-migrations.cron-run-logs.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { isSqliteStorageValueEncryptionStrict } from "../storage/sqlite-encryption.js";
 import { hasPreJournalStateSchema } from "./agent-deletion-journal-history.js";
 import { captureOpenClawStateIntegrityAdmission } from "./openclaw-state-db-cache.js";
 import {
@@ -86,10 +87,20 @@ export function ensureOpenClawStateRuntimeSchema(
       return [];
     }
   } catch (error) {
-    if (!db.isOpen || error instanceof StartupMaintenanceRequiredError) {
+    if (
+      !db.isOpen ||
+      isSqliteStorageValueEncryptionStrict(db) ||
+      error instanceof StartupMaintenanceRequiredError
+    ) {
       throw error;
     }
     // Preserve transactional schema convergence and its diagnostics after a clean rollback.
+  }
+
+  if (isSqliteStorageValueEncryptionStrict(db)) {
+    throw new Error(
+      `Protected shared-state database ${pathname} requires schema maintenance; refusing to run a plaintext migration.`,
+    );
   }
 
   return withStateDatabaseSchemaMaintenance({ databasePath: pathname, busyTimeoutMs }, () => {

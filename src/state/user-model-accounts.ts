@@ -13,6 +13,10 @@ import {
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
+import {
+  openSecretStoreValue,
+  sealSecretStoreValue,
+} from "../secrets/store/secret-store-encryption.js";
 import { SECRET_STORE_VALUE_MAX_BYTES } from "../secrets/store/secret-store-validation-error.js";
 import {
   executeExistingOpenClawStateRead,
@@ -28,6 +32,7 @@ import {
 import { captureOpenClawStateReadWorkerContext } from "./openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 import { isUserModelAuthProfileId, parseUserModelAuthProfileId } from "./user-model-account-id.js";
+import { transferUserModelAccountRecords } from "./user-model-account-merge.js";
 import { publishUserProfileModelAccountLinksChange } from "./user-profile-events.js";
 import {
   selectResolvedUserProfile,
@@ -115,18 +120,23 @@ function readRecord(db: DatabaseSync, owner: string, name: AccountRecordName): s
       .where("name", "=", name)
       .where("deleted_at_ms", "is", null),
   );
-  return row ? accountRecordValue(row) : undefined;
+  return row ? accountRecordValue(db, owner, name, row) : undefined;
 }
 
-function accountRecordValue(row: {
-  value: string | null;
-  kind: string | null;
-  allowed_hosts: string | null;
-}): string {
+function accountRecordValue(
+  db: DatabaseSync,
+  owner: string,
+  name: string,
+  row: {
+    value: string | null;
+    kind: string | null;
+    allowed_hosts: string | null;
+  },
+): string {
   if (row.kind !== "secret" || row.allowed_hosts !== null || row.value === null) {
     throw invalidAccounts();
   }
-  return row.value;
+  return openSecretStoreValue(db, { scope_kind: "identity", scope_id: owner, name }, row.value);
 }
 
 function writeRecord(
@@ -141,7 +151,12 @@ function writeRecord(
   ensureSecretStoreSchema(db);
   const now = Date.now();
   const mutable = {
-    value,
+    value: sealSecretStoreValue(
+      db,
+      { scope_kind: "identity", scope_id: owner, name },
+      value,
+      "secret",
+    ),
     kind: "secret",
     allowed_hosts: null,
     deleted_at_ms: null,
@@ -288,7 +303,11 @@ export function listUserModelAccounts(
         if (row.kind !== "secret" || row.allowed_hosts !== null) {
           throw invalidAccounts();
         }
-        return accountSummary(row.name.slice("model-account:".length), row.value, links);
+        return accountSummary(
+          row.name.slice("model-account:".length),
+          accountRecordValue(db, owner, row.name, row),
+          links,
+        );
       });
       const last = accounts.at(-1);
       return {
@@ -386,6 +405,7 @@ export function readUserModelAuthProfileInDatabase(
       )
       .select([
         "user_profiles.merged_into",
+        "user_profiles.id as owner_id",
         "secret_store_entries.name as record_name",
         "secret_store_entries.value",
         "secret_store_entries.kind",
@@ -395,7 +415,7 @@ export function readUserModelAuthProfileInDatabase(
   );
   return !row || row.merged_into || row.record_name === null
     ? undefined
-    : parseProfileRecord(accountRecordValue(row));
+    : parseProfileRecord(accountRecordValue(db, row.owner_id, row.record_name, row));
 }
 
 /** The catalog reads only explicit pins or linked credentials from its admitted reader. */
@@ -614,7 +634,14 @@ export function renameUserProfileAuthLinks(
           db,
           query
             .updateTable("secret_store_entries")
-            .set({ value })
+            .set({
+              value: sealSecretStoreValue(
+                db,
+                { scope_kind: "identity", scope_id: owner, name: "model-accounts" },
+                value,
+                "secret",
+              ),
+            })
             .where("scope_kind", "=", "identity")
             .where("scope_id", "=", owner)
             .where("name", "=", "model-accounts")
@@ -702,55 +729,8 @@ export function mergeUserModelAccounts(db: DatabaseSync, source: string, target:
       links: { ...sourceRecord.links, ...targetRecord.links },
     });
   }
-  const query = getNodeSqliteKysely<Pick<DB, "secret_store_entries">>(db);
   // Keep exact credential IDs for old session pins without loading every token
   // into memory or combining individually bounded secrets into one larger value.
-  executeSqliteQuerySync(
-    db,
-    query
-      .insertInto("secret_store_entries")
-      .columns([
-        "scope_kind",
-        "scope_id",
-        "name",
-        "value",
-        "kind",
-        "allowed_hosts",
-        "created_at_ms",
-        "updated_at_ms",
-        "updated_by",
-        "deleted_at_ms",
-      ])
-      .expression(
-        query
-          .selectFrom("secret_store_entries")
-          .select((eb) => [
-            "scope_kind",
-            eb.val(target).as("scope_id"),
-            "name",
-            "value",
-            "kind",
-            "allowed_hosts",
-            "created_at_ms",
-            "updated_at_ms",
-            "updated_by",
-            "deleted_at_ms",
-          ])
-          .where("scope_kind", "=", "identity")
-          .where("scope_id", "=", source)
-          .where("name", "like", "model-account:%"),
-      )
-      .onConflict((conflict) => conflict.columns(["scope_kind", "scope_id", "name"]).doNothing()),
-  );
-  executeSqliteQuerySync(
-    db,
-    query
-      .deleteFrom("secret_store_entries")
-      .where("scope_kind", "=", "identity")
-      .where("scope_id", "=", source)
-      .where((eb) =>
-        eb.or([eb("name", "=", "model-accounts"), eb("name", "like", "model-account:%")]),
-      ),
-  );
+  transferUserModelAccountRecords(db, source, target);
   publishUserProfileModelAccountLinksChange(db, source, target);
 }

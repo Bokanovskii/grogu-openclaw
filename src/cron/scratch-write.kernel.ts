@@ -16,6 +16,7 @@ import {
   type CronJobScratchWriteOutcome,
   type CronJobScratchWriteResult,
 } from "./scratch-contract.js";
+import { sealCronScratchContent } from "./scratch-encryption.js";
 import { cronStoreKey } from "./store/key.js";
 import { getCronStoreKysely } from "./store/schema.js";
 
@@ -104,7 +105,10 @@ export function writeCronJobScratchInDatabase(
     cronDb.insertInto("cron_job_scratch").values({
       store_key: input.storeKey,
       job_id: input.jobId,
-      content: input.content,
+      content:
+        input.content === null
+          ? null
+          : sealCronScratchContent(db, input.storeKey, input.jobId, input.content),
       revision,
       ...(sourceSha256 ? { source_sha256: sourceSha256 } : {}),
       updated_at_ms: input.nowMs,

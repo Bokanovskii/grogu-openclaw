@@ -28,6 +28,7 @@ import {
 } from "./delivery-codec.js";
 import { cronStoreKey } from "./key.js";
 import { loadedCronStoreFromRows, loadCronRows } from "./row-codec.js";
+import { sealCronReceiptValue } from "./run-receipt-encryption.js";
 import {
   matchesCronRunReceiptOwner,
   receiptFromRow,
@@ -368,14 +369,20 @@ export function adjudicateActiveCronRunReceiptInDatabase(params: {
         .set({
           status: "interrupted",
           finished_at_ms: params.finishedAtMs,
-          error_text: "cron: job interrupted because owner is unavailable",
+          error_text: sealCronReceiptValue(
+            params.database,
+            "cron_run_receipts",
+            "error_text",
+            [current.store_key, current.job_id, current.receipt_id],
+            "cron: job interrupted because owner is unavailable",
+          ),
         })
         .where("receipt_id", "=", current.receipt_id)
         .where("status", "=", "running"),
     );
     return;
   }
-  throw new CronRunReceiptConflictError(receiptFromRow(current));
+  throw new CronRunReceiptConflictError(receiptFromRow(params.database, current));
 }
 
 /** Claims the receipt inside the caller's synchronous cron-state transaction. */
@@ -410,9 +417,21 @@ export function claimCronRunReceiptInDatabase(params: {
         receipt_id: handle.receiptId,
         store_key: handle.storeKey,
         job_id: handle.jobId,
-        config_revision: handle.configRevision,
+        config_revision: sealCronReceiptValue(
+          params.database,
+          "cron_run_receipts",
+          "config_revision",
+          [handle.storeKey, handle.jobId, handle.receiptId],
+          handle.configRevision,
+        ),
         agent_id: handle.agentId,
-        request_run_id: params.prepared.requestRunId ?? null,
+        request_run_id: sealCronReceiptValue(
+          params.database,
+          "cron_run_receipts",
+          "request_run_id",
+          [handle.storeKey, handle.jobId, handle.receiptId],
+          params.prepared.requestRunId ?? null,
+        ),
         delivery_attempt_state: "not-started",
         status: "running",
         owner_pid: handle.ownerPid,
@@ -422,7 +441,9 @@ export function claimCronRunReceiptInDatabase(params: {
         error_text: null,
       }),
   );
-  return receiptHandle(receiptFromRow(activeRow(params.database, handle.storeKey, handle.jobId)!));
+  return receiptHandle(
+    receiptFromRow(params.database, activeRow(params.database, handle.storeKey, handle.jobId)!),
+  );
 }
 
 export function findActiveCronRunReceiptInDatabase(params: {
@@ -431,7 +452,7 @@ export function findActiveCronRunReceiptInDatabase(params: {
   jobId: string;
 }): CronRunReceiptRecoveryCandidate | undefined {
   const row = activeRow(params.database, cronStoreKey(params.storePath), params.jobId);
-  return row ? receiptHandle(receiptFromRow(row)) : undefined;
+  return row ? receiptHandle(receiptFromRow(params.database, row)) : undefined;
 }
 
 export function listActiveCronRunReceiptJobIdsInDatabase(
@@ -468,7 +489,10 @@ export function assertCronRunReceiptOwnedInDatabase(params: {
   handle: CronRunReceiptHandle;
 }): void {
   const current = activeRow(params.database, params.handle.storeKey, params.handle.jobId);
-  assertReceiptOwner(current ? receiptHandle(receiptFromRow(current)) : undefined, params.handle);
+  assertReceiptOwner(
+    current ? receiptHandle(receiptFromRow(params.database, current)) : undefined,
+    params.handle,
+  );
 }
 
 function assertReceiptOwner(
@@ -562,7 +586,13 @@ export function finishCronRunReceiptInDatabase(params: {
       .set({
         status: params.status,
         finished_at_ms: params.finishedAtMs,
-        error_text: params.error ?? null,
+        error_text: sealCronReceiptValue(
+          params.database,
+          "cron_run_receipts",
+          "error_text",
+          [params.handle.storeKey, params.handle.jobId, params.handle.receiptId],
+          params.error ?? null,
+        ),
       })
       .where("receipt_id", "=", params.handle.receiptId)
       .where("status", "=", "running")
@@ -582,5 +612,5 @@ export function finishCronRunReceiptInDatabase(params: {
       .selectAll()
       .where("receipt_id", "=", params.handle.receiptId),
   );
-  return row ? receiptFromRow(row) : undefined;
+  return row ? receiptFromRow(params.database, row) : undefined;
 }

@@ -128,7 +128,7 @@ at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
 that budget. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts. It also counts
 each saved automation definition against its owner profile and the global
-budget. Automation storage uses its UTF-8 definition bytes and the same 4 KiB
+budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
 entry overhead as stored files. The runtime limits growth per operation and
 reserves quota before writes so concurrent requests stay within the configured
 limits. If a quota is reached, delete a chat or reduce a saved automation
@@ -346,6 +346,12 @@ only by the `groguProtected` service account. The bootstrap creates it with mode
 key. Never replace an existing key to recover access. Losing the key makes
 encrypted chats and files unrecoverable.
 
+The protected shared-state database encrypts stored automation definitions,
+secret-store values, and retained Cron content, including job definitions,
+state, history, scratch, receipt errors, and diagnostic quarantine payloads.
+Storage metadata needed for routing and scheduling remains readable. Personal
+Grogu shared state remains plaintext at the upstream schema version.
+
 The service encrypts chat transcript events, session titles and summaries,
 session snapshots, queued messages and completion results, trajectories, ACP
 parent-stream events, and archived transcripts. Each value uses AES-256-GCM
@@ -372,19 +378,25 @@ conversion, but this cannot promise forensic erasure from filesystem snapshots,
 storage-device remapping, or copies outside the managed state. Grogu keeps no
 backups. Interrupted migration can be retried; missing or wrong keys and
 unsupported schema versions fail closed rather than reopening the store as
-plaintext.
+plaintext. Shared-state migration verifies the stored ciphertext within the
+transaction before committing it and removing the committed plaintext. If
+cleanup is interrupted, startup resumes it before admitting readers.
+Secret-store values must fit the existing 64 KiB limit after encryption. A
+large plaintext value can prevent migration; the transaction rolls back without
+removing it. Reduce the value before retrying.
 Protected encrypted agent databases use schema version 26 so older builds
-refuse them. Ordinary personal Grogu databases keep the upstream schema and
-version. When merging this fork with upstream, resolve the shared numeric
-sequence first: select an unused protected version above the updated upstream
-agent schema and update the protected-version contract, migration checks, and
-tests together; never reuse an upstream number.
+refuse them. Protected shared-state databases use schema version 21. Ordinary
+personal Grogu databases keep the upstream schemas and versions. When merging
+this fork with upstream, select unused protected versions above the updated
+upstream versions. Update the protected-version contracts, migration checks,
+and tests together. Never reuse an upstream number.
 
 ### Upgrade an existing installation
 
 Stop the protected listener before running maintenance. The installed
-service-owned helper can provision the key and migrate an existing plaintext
-agent database and per-user files without replacing the root launcher:
+service-owned helper can provision the key and migrate existing plaintext
+shared state, the agent database, and per-user files without replacing the root
+launcher:
 
 ```sh
 sudo -n -u groguProtected \
@@ -394,12 +406,12 @@ sudo -n -u groguProtected \
 The command derives the key path from the validated service home when an older
 launcher does not export `OPENCLAW_PROTECTED_STORAGE_KEY_FILE`. It preserves an
 existing key, verifies encrypted files before changing the database, and
-migrates through the agent database and user-file owners. If the key is missing
-but encrypted database or user-file data exists, the command refuses to create
-a replacement; restore the original key instead. An interrupted plaintext
-migration can be retried with the same key. Startup repeats the idempotent file
-migration before opening the listener. Start the listener again only after
-maintenance succeeds.
+migrates through the shared-state, agent database, and user-file owners. If the
+key is missing but encrypted database or user-file data exists, the command
+refuses to create a replacement; restore the original key instead. An interrupted plaintext
+migration can be retried with the same key. Startup resumes shared-state cleanup
+and repeats the idempotent file migration before opening the listener. Start the
+listener again only after maintenance succeeds.
 
 ## Protected chat agents
 

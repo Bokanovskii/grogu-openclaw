@@ -236,6 +236,19 @@ export function sealSqliteStorageText(
   return `${SEALED_TEXT_PREFIX}${state.encryption.encryptText(value, context).toString("base64")}`;
 }
 
+/** Seal a known plaintext value, including one that happens to resemble an envelope. */
+export function sealSqliteStoragePlaintext(
+  database: DatabaseSync,
+  value: string,
+  context: string,
+): string {
+  const encryption = states.get(database)?.encryption;
+  if (!encryption) {
+    throw new Error("Protected storage encryption key is unavailable.");
+  }
+  return `${SEALED_TEXT_PREFIX}${encryption.encryptText(value, context).toString("base64")}`;
+}
+
 export function sealSqliteStorageBytes(
   database: DatabaseSync,
   value: Uint8Array,

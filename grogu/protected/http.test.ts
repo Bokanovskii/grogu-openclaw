@@ -369,9 +369,12 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     symlink("../index.html", path.join(bundleDir, "assets/index-Symlink.js")),
   ]);
   const release = Promise.withResolvers<void>();
+  const renameStarted = Promise.withResolvers<void>();
+  const releaseRename = Promise.withResolvers<void>();
   const shutdownApps: Array<() => Promise<void>> = [];
   t.after(async () => {
     release.resolve();
+    releaseRename.resolve();
     await Promise.all(shutdownApps.map((shutdown) => shutdown()));
   });
   const staticClient = await createProtectedStaticClient(await root(bundleDir));
@@ -382,6 +385,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     if (subject !== "alice" && subject !== "bob" && subject !== "carol") {
       throw new ProtectedError(401, "unauthorized", "Sign in.");
     }
+    let revalidations = 0;
     return {
       issuer: "https://synthetic.example",
       subject,
@@ -389,7 +393,12 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
       expiresAt,
       sessionId: createHash("sha256").update(subject).digest("hex"),
       assertCurrent() {},
-      async revalidate() {},
+      async revalidate() {
+        if (request.headers.has("x-synthetic-hold-rename") && ++revalidations === 2) {
+          renameStarted.resolve();
+          await releaseRename.promise;
+        }
+      },
     };
   };
   const submitted = Promise.withResolvers<void>();
@@ -852,9 +861,85 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     body: '{"title":"Alice private"}',
   });
   assert.equal(created.status, 200, await created.clone().text());
-  const { chat } = await created.json();
+  let { chat } = await created.json();
   assert.equal(chat.selectedAgentId, "grogu");
   const route = `/chats/${chat.id}`;
+  await t.test(
+    "renames only an owned idle chat at its current version and persists on reload",
+    async () => {
+      const rename = (
+        subject: string,
+        title: unknown,
+        version: string | undefined = chat.version,
+      ) =>
+        first.call(subject, `${route}/title`, {
+          method: "PATCH",
+          headers: version === undefined ? {} : { "if-match": version },
+          body: JSON.stringify({ title }),
+        });
+      assert.equal(
+        (await first.call("alice", `${route}/title`, { method: "PATCH", body: '{"title":"New"}' }))
+          .status,
+        428,
+      );
+      for (const title of ["", " \n ", "x".repeat(161), 42, null, undefined]) {
+        const result = await rename("alice", title);
+        assert.equal(result.status, 422);
+        assert.equal((await result.json()).error.code, "invalid_title");
+      }
+      assert.equal((await rename("bob", "Not yours")).status, 404);
+      assert.equal((await rename("unadmitted", "Not admitted")).status, 401);
+      const stale = await rename("alice", "Stale", "stale");
+      assert.equal(stale.status, 412);
+      assert.equal((await stale.json()).error.code, "version_conflict");
+      const maximumTitle = await rename("alice", "x".repeat(160));
+      assert.equal(maximumTitle.status, 200);
+      chat = (await maximumTitle.json()).chat;
+      assert.equal(chat.title, "x".repeat(160));
+
+      const renaming = first.call("alice", `${route}/title`, {
+        method: "PATCH",
+        headers: { "if-match": chat.version, "x-synthetic-hold-rename": "1" },
+        body: '{"title":"  Alice renamed  "}',
+      });
+      await renameStarted.promise;
+      try {
+        const busy = await rename("alice", "Concurrent");
+        assert.equal(busy.status, 409);
+        assert.equal((await busy.json()).error.code, "busy");
+        assert.equal(
+          (
+            await first.call("alice", route, {
+              method: "DELETE",
+              headers: { "if-match": chat.version },
+            })
+          ).status,
+          409,
+        );
+      } finally {
+        releaseRename.resolve();
+      }
+      const renamed = await renaming;
+      assert.equal(renamed.status, 200, await renamed.clone().text());
+      const updated = (await renamed.json()).chat;
+      assert.equal(updated.title, "Alice renamed");
+      assert.ok(Number(updated.version) > Number(chat.version));
+      assert.deepEqual(updated.messages, chat.messages);
+      assert.equal(updated.selectedAgentId, chat.selectedAgentId);
+      assert.equal((await rename("alice", "Old version")).status, 412);
+      chat = updated;
+      const reload = await open(1, catalogExtensions);
+      try {
+        assert.deepEqual((await (await reload.call("alice", route)).json()).chat, chat);
+        assert.equal(
+          (await (await reload.call("alice", "/chats")).json()).chats[0].title,
+          chat.title,
+        );
+      } finally {
+        await reload.shutdown();
+      }
+    },
+  );
   const retiredSelection = await first.call("alice", `${route}/agent`, {
     method: "PATCH",
     headers: { "if-match": chat.version },
@@ -920,7 +1005,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.deepEqual(storage.chats, [
     {
       id: chat.id,
-      title: "Alice private",
+      title: "Alice renamed",
       version: selectedChat.version,
       updatedAt: selectedChat.updatedAt,
       approximateBytes: storage.usedBytes - automationStorage.usedBytes,
@@ -965,6 +1050,13 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   });
   assert.equal(running.status, 200);
   await submitted.promise;
+  const busyRename = await first.call("alice", `${route}/title`, {
+    method: "PATCH",
+    headers: { "if-match": selectedChat.version },
+    body: '{"title":"Busy rename"}',
+  });
+  assert.equal(busyRename.status, 409);
+  assert.equal((await busyRename.json()).error.code, "busy");
   assert.equal(first.observedAgents[0]?.id, "research");
   assert.match(first.observedAgents[0]?.instructions ?? "", /evidence-based summaries/);
   assert.match(

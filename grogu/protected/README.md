@@ -152,6 +152,21 @@ reviewed chat, send its `version` in `If-Match` to the existing
 `DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
 show the new total.
 
+`PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
+Send the current chat `version` in `If-Match` and a JSON body with `title`.
+The title must be a nonblank string of at most 160 UTF-16 code units before
+trimming. The server saves the trimmed title in the canonical session display
+name and returns `{ chat }` with its new version. Messages and the selected
+agent remain unchanged. A later chat read, list, export, or storage view uses
+the saved title.
+
+The route returns 428 without `If-Match`, 422 with code `invalid_title` for
+an invalid title, 412 with code `version_conflict` for a stale version, and
+409 with code `busy` while the chat runs or another mutation holds it.
+Another member's chat returns 404. Clients without rename support remain
+unchanged; the existing create, agent-selection, and delete contracts do not
+change.
+
 ## Automation discovery and draft validation
 
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.

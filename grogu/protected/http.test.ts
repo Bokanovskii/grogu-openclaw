@@ -935,7 +935,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal((await lowDisk.json()).error.code, "storage_full");
 });
 
-void test("Family directory respects account visibility and isolates the development identity", async (t) => {
+void test("Family directory lists admitted people and isolates the development identity", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
@@ -1040,12 +1040,16 @@ void test("Family directory respects account visibility and isolates the develop
   assert.notEqual(development.id, alice.id);
   assert.notEqual(development.id, bob.id);
 
+  const hide = await put("bob", "/account/directory-settings", {
+    description: "Not published",
+    hidden: true,
+  });
+  assert.equal(hide.status, 400);
+  assert.equal((await hide.json()).error.code, "directory_visibility_required");
   assert.equal(
-    (await put("bob", "/account/directory-settings", { description: "Enjoys books", hidden: true }))
-      .status,
-    200,
+    (await list("alice")).find((person) => person.id === bob.id)?.description,
+    "Enjoys books",
   );
-  assert.deepEqual(await list("alice"), [{ id: alice.id, displayName: "Alice", description: "" }]);
   assert.equal((await put("alice", "/account/name", { displayName: "a".repeat(41) })).status, 400);
   assert.equal(
     (
@@ -1071,18 +1075,42 @@ void test("Family directory respects account visibility and isolates the develop
     )?.ok,
     true,
   );
-  assert.deepEqual(await list("alice"), [{ id: alice.id, displayName: "Alice", description: "" }]);
+  assert.deepEqual(
+    (await list("alice")).find((person) => person.id === bob.id),
+    {
+      id: bob.id,
+      displayName: "Bob",
+      description: "",
+    },
+  );
   assert.equal(
-    (await put("bob", "/account/directory-settings", { description: "Enjoys books", hidden: true }))
-      .status,
-    200,
+    (
+      await setCanonicalUserPreferences(
+        bob.id,
+        { "grogu.protected.directory": { description: "Previously private", hidden: true } },
+        stateOptions,
+      )
+    )?.ok,
+    true,
   );
   await close(first.server);
 
   const reopened = await open();
   t.after(() => close(reopened.server));
   const afterRestart = await (await reopened.call("alice", "/people")).json();
-  assert.deepEqual(afterRestart.people, [{ id: alice.id, displayName: "Alice", description: "" }]);
+  assert.deepEqual(
+    afterRestart.people.toSorted((a: { displayName: string }, b: { displayName: string }) =>
+      a.displayName.localeCompare(b.displayName),
+    ),
+    [
+      { id: alice.id, displayName: "Alice", description: "" },
+      { id: bob.id, displayName: "Bob", description: "" },
+    ],
+  );
+  assert.deepEqual((await (await reopened.call("bob", "/account")).json()).directory, {
+    description: "",
+    hidden: false,
+  });
   assert.equal(
     (
       await reopened.call("bob", "/account/directory-settings", {

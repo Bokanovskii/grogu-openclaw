@@ -1559,6 +1559,33 @@ export function createProtectedHttp(options: {
           mutations.delete(id);
         }
       }
+      if (rest === "title" && method === "PATCH") {
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(428, "version_required", "Reload the chat before renaming.");
+        }
+        const data = await body(request);
+        if (typeof data.title !== "string" || !data.title.trim() || data.title.length > 160) {
+          throw new ProtectedError(
+            422,
+            "invalid_title",
+            "Enter a chat title of at most 160 characters.",
+          );
+        }
+        if (runs.has(id) || mutations.has(id)) {
+          throw new ProtectedError(409, "busy", "Stop the current work before renaming.");
+        }
+        mutations.add(id);
+        try {
+          await revalidate();
+          await chats.rename(authority, id, version, data.title.trim());
+          const { chat } = await readChat(id);
+          await revalidate();
+          return json({ chat });
+        } finally {
+          mutations.delete(id);
+        }
+      }
       if (rest === "agent" && method === "PATCH") {
         const data = await body(request);
         if (!isProtectedAgentSelection(data)) {

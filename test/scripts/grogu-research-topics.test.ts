@@ -15,7 +15,12 @@ import {
 } from "openclaw/plugin-sdk/sqlite-runtime";
 import { Check } from "typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDelivery } from "../../grogu/plugins/research-topics/delivery.js";
 import plugin from "../../grogu/plugins/research-topics/index.js";
+import {
+  ResearchLedger,
+  type ResearchMemberBinding,
+} from "../../grogu/plugins/research-topics/ledger.js";
 import {
   parseRequest,
   toolSchema,
@@ -154,6 +159,153 @@ function createV1(databasePath: string, now: number, activeLease = false) {
 }
 
 describe("research_topics v2", () => {
+  it("isolates bound member ledgers and refuses missing, revoked, or quota-denied access", async () => {
+    const root = directory();
+    const registered = vi.fn<OpenClawPluginApi["registerTool"]>();
+    const services = vi.fn<OpenClawPluginApi["registerService"]>();
+    const runtimeSource = fileURLToPath(
+      new URL("../../grogu/plugins/research-topics/index.ts", import.meta.url),
+    );
+    const api = createTestPluginApi({
+      id: "research-topics",
+      runtimeSource,
+      pluginConfig: {
+        ledgerMode: "member",
+        delivery: { agentId: "grogu", channel: "telegram", target: "telegram:synthetic-owner" },
+      },
+      registerTool: registered,
+      registerService: services,
+    });
+    plugin.register?.(api);
+    const factory = registered.mock.calls[0]?.[0];
+    if (
+      !factory ||
+      typeof factory !== "object" ||
+      !("contextVersion" in factory) ||
+      factory.contextVersion !== 2
+    ) {
+      throw new Error("Expected an authority-bound tool factory");
+    }
+    const delivery = createDelivery(api);
+    const cleanup = services.mock.calls[0]?.[0].stop;
+    if (!delivery || !cleanup) {
+      throw new Error("Expected delivery and plugin cleanup");
+    }
+    let active = true;
+    let quotaAvailable = true;
+    const first = new ResearchLedger(path.join(root, "first", "ledger.sqlite"), runtimeSource);
+    const second = new ResearchLedger(path.join(root, "second", "ledger.sqlite"), runtimeSource);
+    const make = (
+      ledger: ResearchLedger,
+      selectedDelivery: ResearchMemberBinding["delivery"] = delivery,
+    ) =>
+      factory.create({
+        ...firstSession,
+        assertInvocationCurrent: () => {},
+        toolBindings: {
+          research_topics: {
+            ledger,
+            delivery: selectedDelivery,
+            assertCurrent: () => {
+              if (!active) {
+                throw new Error("Member revoked");
+              }
+            },
+            withMutationAdmission: async <T>(run: (assertAdmission: () => void) => Promise<T>) =>
+              run(() => {
+                if (!quotaAvailable) {
+                  throw new Error("Member storage full");
+                }
+              }),
+          },
+        },
+      });
+    const one = make(first);
+    const two = make(second);
+    if (!one || Array.isArray(one) || !two || Array.isArray(two)) {
+      throw new Error("Expected member research tools");
+    }
+    try {
+      expect(factory.create({ ...firstSession, assertInvocationCurrent: () => {} })).toBeNull();
+      await one.execute("add", { action: "add", id: "private", title: "Private topic" });
+      expect((await two.execute("list", { action: "list" })).details).toMatchObject({ topics: [] });
+      const inboxTool = make(second, {
+        ...delivery,
+        authorize: () => {},
+        isMain: () => true,
+        mainSession: async () => firstSession,
+        recoverReceipt: async () => ({
+          ...firstSession,
+          kind: "owner_inbox",
+          messageId: "synthetic-inbox-entry",
+          completedAtMs: Date.now(),
+        }),
+      });
+      if (!inboxTool || Array.isArray(inboxTool)) {
+        throw new Error("Expected an inbox-bound research tool");
+      }
+      await inboxTool.execute("add", {
+        action: "add",
+        id: "inbox-topic",
+        title: "Inbox topic",
+        completionRule: "Find an answer",
+        origin: "automation",
+        sessionRefs: [],
+      });
+      const completion = (
+        await inboxTool.execute("complete", {
+          action: "complete",
+          id: "inbox-topic",
+          expectedRevision: 1,
+          reason: "Answered",
+        })
+      ).details;
+      const completionId = stringField(completion, "completionId");
+      await inboxTool.execute("prepare", {
+        action: "prepare_text",
+        id: "inbox-topic",
+        expectedRevision: 2,
+        completionId,
+        ownerText: "Answered",
+      });
+      const confirmed = (
+        await inboxTool.execute("confirm", {
+          action: "confirm_completion",
+          id: "inbox-topic",
+          expectedRevision: 3,
+          completionId,
+        })
+      ).details;
+      expect(confirmed).toMatchObject({
+        destinations: [{ receipt: { kind: "owner_inbox", messageId: "synthetic-inbox-entry" } }],
+      });
+      await inboxTool.execute("finalize", {
+        action: "finalize",
+        id: "inbox-topic",
+        expectedRevision: 3,
+        completionId,
+      });
+      quotaAvailable = false;
+      await expect(
+        one.execute("denied", { action: "add", id: "extra", title: "Over quota" }),
+      ).rejects.toThrow("Member storage full");
+      active = false;
+      await expect(one.execute("revoked", { action: "list" })).rejects.toThrow("Member revoked");
+      await first.close();
+      active = true;
+      await expect(one.execute("closed", { action: "list" })).rejects.toThrow("ledger stopped");
+    } finally {
+      await first.close();
+      await second.close();
+      await cleanup({
+        config: {},
+        stateDir: root,
+        logger: api.logger,
+        scheduler: createTestPluginServiceScheduler(),
+      });
+    }
+  });
+
   it("uses the registered tool, binds links to its caller, shares provider budgets, and rejects revoked callers", async () => {
     const root = directory();
     const registered = vi.fn<OpenClawPluginApi["registerTool"]>();

@@ -23,7 +23,9 @@ export function recordConfirmation(
   if (
     receipt.sessionKey !== destination.sessionKey ||
     receipt.sessionId !== destination.sessionId ||
-    receipt.kind !== (destination.kind === "main" ? "owner_text" : "session_message")
+    (destination.kind === "main"
+      ? receipt.kind !== "owner_text" && receipt.kind !== "owner_inbox"
+      : receipt.kind !== "session_message")
   ) {
     throw new Error("Native receipt does not match the completion destination.");
   }

@@ -190,7 +190,10 @@ function classifyEntrypoint(
       return pkg.name === "openclaw" ? { kind: "openclaw" } : { kind: "other" };
     }
   }
-  const identity = classifyOpenClawEntrypointPath(script, opts);
+  const identity = classifyOpenClawEntrypointPath(script, {
+    ...opts,
+    nodeEntrypoint: isNodeRuntime(args[0] ?? ""),
+  });
   return identity.kind === "openclaw" ? { ...identity, entryIndex } : identity;
 }
 
@@ -200,7 +203,7 @@ export function classifyOpenClawEntrypointPath(
   opts: Pick<
     ClassificationOptions,
     "cwd" | "pid" | "additionalEntrypoints" | "requirePackageIdentity" | "inspectPackage"
-  > = {},
+  > & { nodeEntrypoint?: boolean } = {},
 ): OpenClawArgvClassification {
   const normalized = normalizeProcArg(script);
   if (!opts.requirePackageIdentity && /(?:^|\/)openclaw\.mjs$/.test(normalized)) {
@@ -222,7 +225,19 @@ export function classifyOpenClawEntrypointPath(
   let resolved: string;
   let directory: boolean;
   try {
-    resolved = fs.realpathSync(scriptPath);
+    try {
+      resolved = fs.realpathSync(scriptPath);
+    } catch (error) {
+      if (
+        !opts.nodeEntrypoint ||
+        path.extname(scriptPath) ||
+        extractErrorCode(error) !== "ENOENT"
+      ) {
+        throw error;
+      }
+      // Node accepts extensionless .js entrypoints; avoid caching their resolved custody.
+      resolved = fs.realpathSync(`${scriptPath}.js`);
+    }
     if (
       opts.inspectPackage &&
       !opts.requirePackageIdentity &&

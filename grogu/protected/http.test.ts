@@ -37,7 +37,11 @@ import {
 } from "../../src/state/user-profile-writes.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { addProtectedSubject } from "./admission-store.js";
-import { protectedResearchAgent, type ProtectedAgentExtension } from "./agents.js";
+import {
+  protectedAgentTools,
+  protectedResearchAgent,
+  type ProtectedAgentExtension,
+} from "./agents.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -57,6 +61,192 @@ const protectedCleanupAgent: ProtectedAgentExtension = {
   instructions: "Create a widget so transient files are cleaned.",
   selectable: true,
 };
+
+void test("Protected skill discovery loads dashboard guidance only on request", async (t) => {
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  assert.ok(
+    stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
+  );
+  protectedTestStateDirs.add(stateDir);
+  const usersDir = path.join(stateDir, "users");
+  const workspaceDir = path.join(stateDir, "workspace");
+  const agentDir = path.join(stateDir, "agents", "protected", "agent");
+  await Promise.all(
+    [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
+  );
+  const requests: Array<{
+    messages: Array<{ role: string; content?: unknown }>;
+    tools?: Array<{ function: { name: string } }>;
+  }> = [];
+  const provider = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      requests.push(body);
+      const messages = JSON.stringify(body.messages);
+      const readSkill =
+        messages.includes("Make a travel dashboard") &&
+        !body.messages.some((message: { role: string }) => message.role === "tool");
+      const delta = readSkill
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "skill-call",
+                type: "function",
+                function: { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
+              },
+            ],
+          }
+        : { role: "assistant", content: "Synthetic answer." };
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}\n\n`,
+      );
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta: {}, finish_reason: readSkill ? "tool_calls" : "stop" }],
+        })}\n\n`,
+      );
+      response.end("data: [DONE]\n\n");
+    })().catch(() => response.destroy());
+  });
+  const providerOrigin = await listen(provider);
+  t.after(() => close(provider));
+  const serviceConfig = protectedOpenClawConfig(
+    stateDir,
+    fileURLToPath(new URL("../..", import.meta.url)),
+  );
+  const config: OpenClawConfig = {
+    ...serviceConfig,
+    agents: {
+      ...serviceConfig.agents,
+      entries: { protected: { workspace: workspaceDir, agentDir } },
+    },
+    models: {
+      mode: "replace",
+      providers: {
+        sparky: {
+          baseUrl: `${providerOrigin}/v1`,
+          api: "openai-completions",
+          request: { allowPrivateNetwork: true },
+          models: [
+            {
+              id: "synthetic",
+              name: "Synthetic",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 32_000,
+              maxTokens: 1024,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://synthetic.example",
+    stateDir,
+    usersRoot: await root(usersDir),
+    encryption,
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
+    directory: { issuer: "https://synthetic.example", allowedSubjects: ["synthetic-discovery"] },
+    verifyIdentity: async () => ({
+      issuer: "https://synthetic.example",
+      subject: "synthetic-discovery",
+      kind: "human",
+      expiresAt,
+      sessionId: createHash("sha256").update("synthetic-discovery-session").digest("hex"),
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    turns: createCanonicalProtectedTurns({
+      config,
+      workspaceDir,
+      agentDir,
+      models: [{ provider: "sparky", id: "synthetic", label: "Synthetic" }],
+      resolveSparkyKey: async () => "synthetic-request-only-key",
+    }),
+  });
+  const server = createProtectedServer(origin, app.fetch);
+  const url = await listen(server);
+  t.after(() => closeProtectedServer(server, app, stateDir));
+  const call = (route: string, init?: RequestInit) =>
+    fetch(`${url}/api/protected/v1${route}`, {
+      ...init,
+      headers: { origin, "content-type": "application/json", ...init?.headers },
+    });
+  const me = await call("/me");
+  assert.equal(me.status, 200, await me.clone().text());
+  const { user } = await me.json();
+  const created = await call("/chats", { method: "POST", body: "{}" });
+  assert.equal(created.status, 200, await created.clone().text());
+  const { chat } = await created.json();
+  const sibling = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Hello"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await sibling.text(), /"type":"done"/u);
+  assert.doesNotMatch(JSON.stringify(requests[0]?.messages), /## Available skills/u);
+  const readChat = await (await call(`/chats/${chat.id}`)).json();
+  assert.equal(
+    (
+      await call(`/chats/${chat.id}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": readChat.chat.version },
+        body: '{"selectedAgentId":"travel"}',
+      })
+    ).status,
+    200,
+  );
+  const firstTravel = requests.length;
+  const travel = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Make a travel dashboard"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await travel.text(), /"type":"done"/u);
+  const discovery = JSON.stringify(requests[firstTravel]?.messages);
+  const loaded = JSON.stringify(requests[firstTravel + 1]?.messages);
+  assert.match(
+    discovery,
+    /Travel dashboard: Plan a trip step by step and show it as a live HTML travel dashboard/u,
+  );
+  assert.doesNotMatch(discovery, /Work like a careful travel planner/u);
+  assert.match(loaded, /Work like a careful travel planner/u);
+  const toolNames = requests[firstTravel]?.tools?.map((tool) => tool.function.name);
+  assert.ok(toolNames);
+  assert.ok(toolNames.includes("skills_read"));
+  assert.ok(!toolNames.includes("create_artifact"));
+  const allowedTools = new Set<string>(["route_to_agent", ...protectedAgentTools]);
+  assert.ok(toolNames.every((name) => allowedTools.has(name)));
+});
 
 beforeTests(async () => {
   const command = "~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh";
@@ -352,7 +542,9 @@ void test("artifact pages expose only owned saved content through guarded reads"
     turns: {
       models: [],
       async run() {},
-      async steer() {},
+      async steer() {
+        assert.fail("This fixture does not steer turns.");
+      },
     },
   });
   t.after(() => app.shutdown());
@@ -2486,9 +2678,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   };
   const sharedPrefix = (request: (typeof seen)[number] | undefined) => {
     const text = systemText(request);
+    const start = text.indexOf("\n# Alcove\n");
     const end = text.indexOf("\n## Current agent: ");
-    assert.ok(end > 0, "the request contains the Alcove current-agent section");
-    return text.slice(0, end);
+    assert.ok(start >= 0 && end > start, "the request contains the shared Alcove section");
+    return text.slice(start, end);
   };
   assert.deepEqual(toolNames(seen[0]), mainRunTools);
   assert.match(systemText(seen[0]), /\n# Alcove\n/);
@@ -2728,13 +2921,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.match(await travelTurn.text(), /"type":"done"/);
   const travelRequest = seen[firstTravelRequest];
   assert.match(systemText(travelRequest), /\n## Current agent: Travel \(travel\)\n/);
-  assert.match(systemText(travelRequest), /\n## Skill: Travel dashboard\n/);
-  assert.match(systemText(travelRequest), /```html\n<style>[\s\S]*<details class="day" open>/);
-  assert.doesNotMatch(systemText(seen[0]), /## Skill: Travel dashboard/);
+  assert.match(systemText(travelRequest), /Travel dashboard: Plan a trip step by step/);
+  assert.doesNotMatch(systemText(travelRequest), /Work like a careful travel planner/);
+  assert.doesNotMatch(systemText(seen[0]), /## Available skills/);
   // Earlier child runs must not seed workspace onboarding into later member prompts.
   assert.doesNotMatch(systemText(travelRequest), /## Bootstrap Pending/);
-  // Grogu and Travel requests differ only after the shared header.
-  assert.deepEqual(travelRequest?.body.tools, seen[0]?.body.tools);
+  assert.deepEqual(toolNames(travelRequest), [...mainRunTools, "skills_read"].toSorted());
   assert.equal(sharedPrefix(travelRequest), sharedPrefix(seen[0]));
 
   const { chat: routedChat } = await (
@@ -2763,8 +2955,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.match(systemText(routedRequests[0]), /\n## Current agent: Grogu \(grogu\)\n/);
   const routedChild = routedRequests[1];
   assert.match(systemText(routedChild), /\n## Current agent: Travel \(travel\)\n/);
-  assert.match(systemText(routedChild), /\n## Skill: Travel dashboard\n/);
-  assert.deepEqual(toolNames(routedChild), childTools, "a routed agent cannot route again");
+  assert.match(systemText(routedChild), /Travel dashboard: Plan a trip step by step/);
+  assert.deepEqual(
+    toolNames(routedChild),
+    [...childTools, "skills_read"].toSorted(),
+    "a routed agent cannot route again",
+  );
   assert.match(JSON.stringify(routedChild?.body.messages), new RegExp(routeBrief));
   const routedRead = await (await reopened(`/chats/${routedChat.id}`)).json();
   assert.deepEqual(

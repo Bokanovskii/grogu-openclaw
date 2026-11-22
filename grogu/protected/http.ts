@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import {
   isProtectedAgentSelection,
   isProtectedCreateChat,
+  isProtectedAccountIcon,
   isProtectedAccountName,
   isProtectedDirectorySettings,
   isProtectedRenew,
@@ -14,15 +15,18 @@ import {
   type ProtectedChatStorage,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
+import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { buildSandboxHostDocument } from "../../src/agents/sandbox-host.js";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
+import { matchesHttpIfNoneMatch } from "../../src/gateway/http-conditional.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
 import {
   getCanonicalUserPreferences,
+  getUserPreferenceValues,
   setCanonicalUserPreferences,
 } from "../../src/state/user-preferences.js";
 import { updateCanonicalUserProfileAccess } from "../../src/state/user-profile-access.js";
@@ -30,7 +34,13 @@ import {
   prepareCurrentUserProfileAliases,
   readVerifiedUserProfileDirectory,
 } from "../../src/state/user-profile-reads.js";
-import { setCanonicalUserProfileDisplayName } from "../../src/state/user-profile-writes.js";
+import {
+  clearCanonicalUserProfileAvatar,
+  setCanonicalUserProfileAvatar,
+  setCanonicalUserProfileDisplayName,
+} from "../../src/state/user-profile-writes.js";
+import { createProfileAvatarReader } from "../../src/state/user-profiles-avatar.js";
+import { formatUserProfileAvatarEtag } from "../../src/state/user-profiles.js";
 import {
   bindProtectedProfile,
   editProtectedAccessRequest,
@@ -57,6 +67,14 @@ import {
 } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
+import {
+  iconImageMime,
+  iconPreference,
+  isIconImage,
+  maxIconBytes,
+  parseStoredIcon,
+  projectIcon,
+} from "./icons.js";
 import {
   protectedAccessProofPath,
   resolveProtectedProfile,
@@ -730,9 +748,35 @@ export function createProtectedHttp(options: {
         }
         return { chat, usage };
       };
+      const saveIcon = async (icon: unknown) => {
+        const saved = await setCanonicalUserPreferences(
+          profile.id,
+          { [iconPreference]: icon },
+          { env: chats.env, assertCurrent, requireExactProfile: true },
+        );
+        if (!saved?.ok) {
+          throw new ProtectedError(409, "account_settings_not_saved", "Could not save your icon.");
+        }
+      };
+      const readAccountIcon = async () => {
+        const preferences = await getCanonicalUserPreferences(profile.id, [iconPreference], {
+          env: chats.env,
+          requireExactProfile: true,
+        });
+        await revalidate();
+        if (!preferences) {
+          return unauthorized();
+        }
+        return projectIcon(profile.id, preferences.entries[iconPreference]);
+      };
+      // Setup completes only through a saved canonical name, never a rendered fallback.
+      const accountUser = (displayName: string | null, icon: unknown) => {
+        const name = displayName?.trim() ?? "";
+        return { id: profile.id, displayName: name.slice(0, 40), setupRequired: !name, icon };
+      };
       if (pathname === "/me" && method === "GET") {
         return json({
-          user: { id: profile.id, displayName: profile.displayName ?? "User" },
+          user: accountUser(profile.displayName, await readAccountIcon()),
           disclosure:
             "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
           models: options.turns.models.map((model) => withThinking(model)),
@@ -747,10 +791,11 @@ export function createProtectedHttp(options: {
         const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
           env: chats.env,
         });
-        const preferences = await getCanonicalUserPreferences(profile.id, [directoryPreference], {
-          env: chats.env,
-          requireExactProfile: true,
-        });
+        const preferences = await getCanonicalUserPreferences(
+          profile.id,
+          [directoryPreference, iconPreference],
+          { env: chats.env, requireExactProfile: true },
+        );
         await revalidate();
         profileAuthority.assertCurrent();
         if (!preferences) {
@@ -765,10 +810,10 @@ export function createProtectedHttp(options: {
           );
         }
         return json({
-          user: {
-            id: profile.id,
-            displayName: (profile.displayName?.trim() || "Family member").slice(0, 40),
-          },
+          user: accountUser(
+            profile.displayName,
+            projectIcon(profile.id, preferences.entries[iconPreference]),
+          ),
           directory: {
             description:
               saved?.hidden && identity.kind !== "development" ? "" : (saved?.description ?? ""),
@@ -792,7 +837,57 @@ export function createProtectedHttp(options: {
           },
         );
         assertCurrent();
-        return json({ user: { id: updated.profile.id, displayName: updated.profile.displayName } });
+        return json({
+          user: accountUser(updated.profile.displayName, await readAccountIcon()),
+        });
+      }
+      if (pathname === "/account/icon" && method === "PUT") {
+        const input = await body(request);
+        if (
+          !isProtectedAccountIcon(input) ||
+          (input.icon !== null && !parseStoredIcon(input.icon))
+        ) {
+          return invalid();
+        }
+        await revalidate();
+        await saveIcon(input.icon);
+        // Replaced image bytes are not retained once another icon is chosen.
+        await clearCanonicalUserProfileAvatar(profile.id, { env: chats.env, assertCurrent });
+        assertCurrent();
+        return json({ icon: projectIcon(profile.id, input.icon) });
+      }
+      if (pathname === "/account/icon/image" && method === "PUT") {
+        const mime = iconImageMime(request.headers.get("content-type"));
+        if (!mime) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        const tooLarge = () =>
+          new ProtectedError(413, "icon_too_large", "Choose an image under 512 KiB.");
+        if (Number(request.headers.get("content-length") ?? 0) > maxIconBytes) {
+          throw tooLarge();
+        }
+        if (!request.body) {
+          return invalid();
+        }
+        const bytes = await readByteStreamWithLimit(request.body, {
+          maxBytes: maxIconBytes,
+          onOverflow: tooLarge,
+        });
+        if (!isIconImage(bytes, mime)) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        await revalidate();
+        const saved = await setCanonicalUserProfileAvatar(profile.id, bytes, mime, {
+          env: chats.env,
+          assertCurrent,
+        });
+        if (!saved.ok) {
+          throw new ProtectedError(415, "icon_unsupported_type", "Use a PNG, JPEG, or WebP image.");
+        }
+        const icon = { kind: "image", revision: saved.value.display.avatarRevision };
+        await saveIcon(icon);
+        assertCurrent();
+        return json({ icon: projectIcon(profile.id, icon) });
       }
       if (pathname === "/account/directory-settings" && method === "PUT") {
         const input = await body(request);
@@ -851,16 +946,108 @@ export function createProtectedHttp(options: {
           },
           { env: chats.env },
         );
+        const icons = await getUserPreferenceValues(
+          result.people.map((person) => person.id),
+          iconPreference,
+          { env: chats.env },
+        );
         await revalidate();
         const currentSubjects = new Set(options.directory.allowedSubjects);
         if (
           !result.isCurrent() ||
+          !icons.isCurrent() ||
           directorySubjects.some((subject) => !currentSubjects.has(subject)) ||
           result.people.some((person) => deniedProfiles.has(person.id))
         ) {
           throw new ProtectedError(409, "directory_changed", "The directory changed. Try again.");
         }
-        return json({ people: result.people, nextCursor: result.nextCursor });
+        return json({
+          people: result.people.map((person) => ({
+            ...person,
+            icon: projectIcon(person.id, icons.values.get(person.id)),
+          })),
+          nextCursor: result.nextCursor,
+        });
+      }
+      const personIcon = /^\/people\/([a-f0-9-]{36})\/icon$/u.exec(pathname);
+      if (personIcon && method === "GET") {
+        const targetId = personIcon[1]!;
+        let targetVisible = () => true;
+        if (targetId !== profile.id) {
+          if (identity.kind === "development") {
+            return notFound();
+          }
+          const directorySubjects = options.directory.allowedSubjects.filter((subject) =>
+            subjectPattern.test(subject),
+          );
+          const visible = await readVerifiedUserProfileDirectory(
+            {
+              issuer: options.directory.issuer,
+              subjects: directorySubjects,
+              preferenceKey: directoryPreference,
+              after: null,
+              limit: 1,
+              profileId: targetId,
+            },
+            { env: chats.env },
+          );
+          await revalidate();
+          const currentSubjects = new Set(options.directory.allowedSubjects);
+          if (
+            !visible.isCurrent() ||
+            directorySubjects.some((subject) => !currentSubjects.has(subject)) ||
+            visible.people[0]?.id !== targetId ||
+            deniedProfiles.has(targetId)
+          ) {
+            return notFound();
+          }
+          // Removal during later awaited reads must still hide the icon.
+          targetVisible = () => visible.isCurrent() && !deniedProfiles.has(targetId);
+        }
+        const selected = await getUserPreferenceValues([targetId], iconPreference, {
+          env: chats.env,
+        });
+        await revalidate();
+        if (
+          !targetVisible() ||
+          !selected.isCurrent() ||
+          parseStoredIcon(selected.values.get(targetId))?.kind !== "image"
+        ) {
+          return notFound();
+        }
+        const reader = createProfileAvatarReader(targetId, { env: chats.env });
+        for (;;) {
+          const prepared = await reader.inspect();
+          await revalidate();
+          const uploaded = prepared.avatar;
+          if (!uploaded || prepared.profile?.id !== targetId) {
+            return notFound();
+          }
+          const etag = formatUserProfileAvatarEtag(uploaded.sha256, uploaded.mime);
+          const headers = {
+            "cache-control": "private, no-cache",
+            "x-content-type-options": "nosniff",
+            etag,
+          };
+          const matches = matchesHttpIfNoneMatch(
+            request.headers.get("if-none-match") ?? undefined,
+            etag,
+          );
+          const loaded = matches ? undefined : await prepared.loadBytes();
+          assertCurrent();
+          if (!targetVisible()) {
+            return notFound();
+          }
+          if (!prepared.isCurrent() || (!matches && !loaded)) {
+            continue;
+          }
+          if (matches || !loaded) {
+            return new Response(null, { status: 304, headers });
+          }
+          return new Response(Buffer.from(loaded.bytes), {
+            headers: { ...headers, "content-type": uploaded.mime },
+          });
+        }
       }
       if (pathname === "/agents" && method === "GET") {
         await revalidate();

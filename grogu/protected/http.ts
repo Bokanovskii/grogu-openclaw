@@ -800,7 +800,7 @@ export function createProtectedHttp(options: {
             ? accountUser(profile.displayName, await readAccountIcon())
             : { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure:
-            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
+            "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
           models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,

@@ -7,6 +7,7 @@ const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
 export const ProtectedAgentToolSchema = Type.Union([
+  Type.Literal("web_search"),
   Type.Literal("web_fetch"),
   Type.Literal("show_widget"),
   Type.Literal("sessions_list"),

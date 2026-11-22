@@ -45,6 +45,7 @@ import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { prepareCronRunAdmission } from "../run-admission.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { resolveCronAuthenticatedChannelRequester } from "../tools-allow-provenance.js";
+import { resolveCronRunToolsAllow } from "../tools-allow.js";
 import type { CronAgentExecutionPhaseUpdate } from "../types.js";
 import {
   resolveCronChannelOutputPolicy,
@@ -128,10 +129,13 @@ function createCronPromptExecutor(
     isCommandStyleCronMessage(params.agentPayload?.message ?? ""))
       ? "lightweight"
       : undefined;
+  const toolsAllow = params.executionAuthority
+    ? resolveCronRunToolsAllow(params.job, params.executionAuthority)
+    : params.agentPayload?.toolsAllow;
   const scheduledToolPolicy = resolveScheduledToolPolicyContext({
-    toolsAllow: params.agentPayload?.toolsAllow,
+    toolsAllow,
     scheduledToolPolicy: resolveCronScheduledToolPolicy({
-      toolsAllow: params.agentPayload?.toolsAllow,
+      toolsAllow,
       scheduledToolPolicy: params.job.scheduledToolPolicy,
       owner: params.job.owner,
     }),
@@ -208,7 +212,7 @@ function createCronPromptExecutor(
       sessionKey: params.runSessionKey,
       jobId: params.job.id,
       channelRequester: resolveCronAuthenticatedChannelRequester(params.job),
-      toolsAllow: params.agentPayload?.toolsAllow,
+      toolsAllow,
       scheduledToolPolicy,
       executionIdentity: params.executionIdentity,
     });
@@ -435,6 +439,9 @@ function createCronPromptExecutor(
               userTurnTranscriptRecorder.hasPersisted() || userTurnTranscriptRecorder.isBlocked(),
           }) satisfies Partial<Parameters<CronEmbeddedRuntime["runEmbeddedAgent"]>[0]>;
         if (cliExecution) {
+          if (params.executionAuthority) {
+            throw new Error("CLI backend cannot enforce plugin-service Cron execution authority.");
+          }
           const allowCliAuthProfileForwarding = cliBackendAcceptsAuthProfileForwarding({
             provider: executionProvider,
             config: params.cfgWithAgentDefaults,
@@ -483,6 +490,7 @@ function createCronPromptExecutor(
                   cliSessionBinding && hasCliSessionReuseMetadata(cliSessionBinding)
                     ? cliSessionBinding
                     : undefined;
+                params.executionAuthority?.assertInvocationCurrent();
                 const candidateResult = await runCliAgent({
                   ...buildCommonRunParams(),
                   diagnosticOwner,
@@ -503,7 +511,7 @@ function createCronPromptExecutor(
                   cliSessionId: cliSessionBinding?.sessionId,
                   cliSessionBinding: guardedCliSessionBinding,
                   cliSessionBindingFacts: params.cliSessionBindingFacts,
-                  toolsAllow: resolveCliRuntimeToolsAllow(params.agentPayload?.toolsAllow),
+                  toolsAllow: resolveCliRuntimeToolsAllow(toolsAllow),
                   abortSignal: cliAbortSignal,
                 });
                 const classification = runOptions.classifyResult(candidateResult);
@@ -566,6 +574,7 @@ function createCronPromptExecutor(
         });
         // Embedded runs receive both the explicit route and the current-channel
         // id so message-tool policy can target the same chat as fallback delivery.
+        params.executionAuthority?.assertInvocationCurrent();
         const result = await runEmbeddedAgent({
           ...buildCommonRunParams(),
           promptCacheKey,
@@ -593,7 +602,13 @@ function createCronPromptExecutor(
           authProfileFailurePolicy: runOptions.authProfileFailurePolicy ?? "local_transient",
           verboseLevel: params.resolvedVerboseLevel,
           runTimeoutOverrideMs: params.runTimeoutOverrideMs,
-          toolsAllow: params.agentPayload?.toolsAllow,
+          toolsAllow,
+          ...(params.executionAuthority
+            ? {
+                toolBindings: params.executionAuthority.toolBindings,
+                assertInvocationCurrent: params.executionAuthority.assertInvocationCurrent,
+              }
+            : {}),
           scheduledRuntimeAuthority: params.job.runtimeAuthority,
           scheduledRuntimeAuthorityRecoveryRequired:
             params.job.runtimeAuthorityRecoveryRequired === true,

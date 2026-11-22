@@ -20,7 +20,11 @@ import type {
   CronRunOutcome,
   CronRunTelemetry,
 } from "../types.js";
-import type { CronRunDeliveryResult, CronServiceState } from "./state.js";
+import type {
+  CronJobExecutionAuthority,
+  CronRunDeliveryResult,
+  CronServiceState,
+} from "./state.js";
 
 export const MAX_CRON_TIMER_DELAY_MS = 60_000;
 
@@ -134,6 +138,7 @@ export type ExecuteJobCoreOptions = {
   executionIdentity?: import("./state.js").CronExecutionIdentityAdmission;
   /** Revalidates the durable run fence after awaited planning and before effects. */
   assertRunCurrent?: () => Promise<void>;
+  executionAuthority?: CronJobExecutionAuthority;
   streamBatch?: string;
   // Source definition and logical identity are an inseparable admission claim.
   // The key catches edits; the identity catches disable→re-enable and A→B→A.

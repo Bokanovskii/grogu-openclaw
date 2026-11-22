@@ -7,8 +7,18 @@ import { upsertSessionEntryCore } from "../../../config/sessions/session-accesso
 import { CODEX_APP_SERVER_CONTEXT_ENGINE_HOST } from "../../../context-engine/host-compat.js";
 import { readLocalWorkspaceProjection } from "../../../gateway/worker-environments/local-workspace-store.test-support.js";
 import { getAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
+import { setCurrentPluginMetadataSnapshot } from "../../../plugins/current-plugin-metadata.test-support.js";
+import { resolveInstalledPluginIndexPolicyHash } from "../../../plugins/installed-plugin-index-policy.js";
+import { runPluginRegisterSyncInRegistry } from "../../../plugins/loader-module-runtime.js";
+import { createPluginRecord } from "../../../plugins/loader-records.js";
+import { createPluginMetadataSnapshotFixture } from "../../../plugins/plugin-metadata.test-support.js";
+import { bindPluginRuntimeArtifactSelection } from "../../../plugins/plugin-runtime-artifact-binding.js";
+import { resolvePluginRuntimeArtifactSelection } from "../../../plugins/plugin-runtime-artifact-selection.js";
 import { createEmptyPluginRegistry } from "../../../plugins/registry-empty.js";
+import { createTestPluginRegistry } from "../../../plugins/registry-runtime.test-helpers.js";
 import { setActivePluginRegistry } from "../../../plugins/runtime.js";
+import { createPluginRuntime } from "../../../plugins/runtime/index.js";
+import { resolvePluginTools } from "../../../plugins/tools.js";
 import { buildSkillSnapshot } from "../../../skills/loading/workspace-skill-prompt.js";
 import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
 import {
@@ -31,6 +41,7 @@ import { requireGit } from "../../worktrees/git.js";
 import { insertRegistryWorktree } from "../../worktrees/registry.js";
 import { initializeManagedWorktreeTestRepository } from "../../worktrees/service.test-support.js";
 import type { ManagedWorktreeRecord } from "../../worktrees/types.js";
+import { buildEmbeddedAttemptToolRunContext } from "./attempt-tool-run-context.js";
 import { createEmbeddedRunLaneController } from "./lane-controller.js";
 import { prepareAndDispatchEmbeddedRunAttempt } from "./run-attempt-dispatch.js";
 
@@ -54,7 +65,10 @@ vi.mock("../../runtime-plan/build.js", () => ({
   }) => ({ resolvedRef: { provider, modelId }, auth: preparedAuthPlan }),
 }));
 
-afterEach(() => setActivePluginRegistry(createEmptyPluginRegistry()));
+afterEach(() => {
+  setActivePluginRegistry(createEmptyPluginRegistry());
+  setCurrentPluginMetadataSnapshot(undefined);
+});
 
 type DispatchCase = {
   agentId: string;
@@ -218,6 +232,15 @@ it.each(dispatchCases)(
         );
       }
       const config = {
+        ...(configuredContextEngine
+          ? {
+              plugins: {
+                enabled: true,
+                slots: { memory: "none" },
+                entries: { "owner-tools": { enabled: true } },
+              },
+            }
+          : {}),
         agents: {
           ownership: "explicit" as const,
           entries: {
@@ -273,22 +296,101 @@ it.each(dispatchCases)(
         operationalRunInstance: createOperationalRunInstanceRef(runId),
       });
       const admittedRunContext = await admission.admit("plugin-harness", "owner-test");
-      setActivePluginRegistry(createEmptyPluginRegistry());
-      const runAttempt = vi.fn<AgentHarness["runAttempt"]>(async (params) => ({
-        terminal: { kind: "ok" },
-        sessionIdUsed: params.sessionId,
-        messagesSnapshot: [],
-        assistantTexts: [`${params.agentId} answered`],
-        toolMetas: [],
-        lastAssistant: undefined,
-        didSendViaMessagingTool: false,
-        messagingToolSentTexts: [],
-        messagingToolSentMediaUrls: [],
-        messagingToolSentTargets: [],
-        cloudCodeAssistFormatError: false,
-        replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
-        itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+      let invocationCurrent = true;
+      const toolEffect = vi.fn(async () => ({
+        content: [{ type: "text" as const, text: "synthetic effect" }],
+        details: {},
       }));
+      const { registry, createApi } = createTestPluginRegistry(createPluginRuntime());
+      if (configuredContextEngine) {
+        const plugin = createPluginRecord({
+          id: "owner-tools",
+          source: path.join(workspaceDir, "synthetic-authority-plugin.js"),
+          rootDir: workspaceDir,
+          origin: "bundled",
+          enabled: true,
+          configSchema: true,
+          contracts: { tools: ["owner_only"] },
+        });
+        bindPluginRuntimeArtifactSelection(plugin, {
+          preferBuiltPluginArtifacts: false,
+          runtimeEntry: resolvePluginRuntimeArtifactSelection({
+            source: plugin.source,
+            rootDir: workspaceDir,
+            origin: plugin.origin,
+            preferBuiltPluginArtifacts: false,
+            entryKind: "runtime",
+          }),
+        });
+        const snapshot = createPluginMetadataSnapshotFixture({
+          plugins: [
+            {
+              id: plugin.id,
+              source: plugin.source,
+              rootDir: plugin.rootDir,
+              origin: plugin.origin,
+              enabledByDefault: true,
+              contracts: plugin.contracts,
+            },
+          ],
+        });
+        snapshot.policyHash = resolveInstalledPluginIndexPolicyHash(config);
+        snapshot.workspaceDir = workspaceDir;
+        setCurrentPluginMetadataSnapshot(snapshot, { config, workspaceDir });
+        registry.plugins.push(plugin);
+        const api = createApi(plugin, { config });
+        runPluginRegisterSyncInRegistry(
+          () =>
+            api.registerTool(
+              () => ({
+                name: "owner_only",
+                label: "Synthetic effect",
+                description: "Synthetic effect",
+                parameters: { type: "object", properties: {} },
+                execute: toolEffect,
+              }),
+              { name: "owner_only" },
+            ),
+          api,
+          registry,
+          plugin.id,
+        );
+      }
+      setActivePluginRegistry(registry);
+      const runAttempt = vi.fn<AgentHarness["runAttempt"]>(async (params) => {
+        if (configuredContextEngine) {
+          const context = buildEmbeddedAttemptToolRunContext(params);
+          const [tool] = resolvePluginTools({
+            context: { config, workspaceDir },
+            runtimeRegistry: registry,
+            assertInvocationCurrent: context.assertInvocationCurrent,
+          });
+          expect(tool).toBeDefined();
+          await expect(tool!.execute("before-revocation", {})).resolves.toMatchObject({
+            content: [{ text: "synthetic effect" }],
+          });
+          invocationCurrent = false;
+          await expect(tool!.execute("after-revocation", {})).rejects.toThrow(
+            "Synthetic service authority revoked",
+          );
+          expect(toolEffect).toHaveBeenCalledOnce();
+        }
+        return {
+          terminal: { kind: "ok" },
+          sessionIdUsed: params.sessionId,
+          messagesSnapshot: [],
+          assistantTexts: [`${params.agentId} answered`],
+          toolMetas: [],
+          lastAssistant: undefined,
+          didSendViaMessagingTool: false,
+          messagingToolSentTexts: [],
+          messagingToolSentMediaUrls: [],
+          messagingToolSentTargets: [],
+          cloudCodeAssistFormatError: false,
+          replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
+          itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+        };
+      });
       registerAgentHarness({
         id: "owner-fixture",
         label: "Owner fixture",
@@ -342,6 +444,11 @@ it.each(dispatchCases)(
         timeoutMs: 5_000,
         oneShotCliRun,
         runtimePluginToolGrant,
+        assertInvocationCurrent: () => {
+          if (!invocationCurrent) {
+            throw new Error("Synthetic service authority revoked");
+          }
+        },
       };
       let lifecycleGeneration = getAgentEventLifecycleGeneration();
       const laneController = createEmbeddedRunLaneController({

@@ -220,6 +220,12 @@ export async function setCanonicalUserProfileAvatar(
 ) {
   return unwrap(await write("userProfiles.setAvatar", { profileId, bytes, mime }, options));
 }
+export async function clearCanonicalUserProfileAvatar(
+  profileId: string,
+  options: ProfileWriteOptions = {},
+) {
+  return unwrap(await write("userProfiles.clearAvatar", { profileId }, options));
+}
 export async function linkCanonicalUserProfileEmail(
   email: string,
   targetProfileId: string,

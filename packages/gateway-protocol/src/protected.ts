@@ -161,8 +161,19 @@ export const ProtectedModelSchema = node({
   ),
 });
 export const ProtectedModelsSchema = node({ models: Type.Array(ProtectedModelSchema) });
+export const ProtectedProfileIconSchema = Type.Union([
+  node({ kind: Type.Literal("emoji"), emoji: Type.String({ minLength: 1, maxLength: 32 }) }),
+  node({
+    kind: Type.Literal("image"),
+    url: Type.String({
+      pattern: "^/api/protected/v1/people/[A-Za-z0-9_.:%-]+/icon\\?v=[A-Za-z0-9_-]{1,128}$",
+    }),
+  }),
+]);
+const profileIconField = Type.Union([ProtectedProfileIconSchema, Type.Null()]);
+const profileSetupFields = { setupRequired: Type.Boolean(), icon: profileIconField };
 export const ProtectedMeSchema = node({
-  user: node({ id, displayName: Type.String() }),
+  user: node({ id, displayName: Type.String(), ...profileSetupFields }),
   disclosure: Type.String(),
   models: Type.Array(ProtectedModelSchema),
   capabilities: node({
@@ -312,13 +323,24 @@ export const ProtectedDirectorySettingsSchema = node({
   description: Type.String({ maxLength: 140 }),
   hidden: Type.Boolean(),
 });
+const protectedAccountUser = node({
+  id,
+  // Empty only while the account still needs first-time setup.
+  displayName: Type.String({ maxLength: 40 }),
+  ...profileSetupFields,
+});
 export const ProtectedAccountSchema = node({
-  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+  user: protectedAccountUser,
   directory: ProtectedDirectorySettingsSchema,
 });
-export const ProtectedAccountNameResponseSchema = node({
-  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+export const ProtectedAccountNameResponseSchema = node({ user: protectedAccountUser });
+export const ProtectedAccountIconSchema = node({
+  icon: Type.Union([
+    node({ kind: Type.Literal("emoji"), emoji: Type.String({ minLength: 1, maxLength: 32 }) }),
+    Type.Null(),
+  ]),
 });
+export const ProtectedAccountIconResponseSchema = node({ icon: profileIconField });
 export const ProtectedDirectorySettingsResponseSchema = node({
   directory: ProtectedDirectorySettingsSchema,
 });
@@ -328,6 +350,7 @@ export const ProtectedPeopleSchema = node({
       id,
       ...ProtectedAccountNameSchema.properties,
       description: Type.String({ maxLength: 140 }),
+      icon: profileIconField,
     }),
   ),
   nextCursor: Type.Union([id, Type.Null()]),
@@ -542,6 +565,9 @@ export type ProtectedAutomationDraftValidation = Static<
 >;
 export type ProtectedAccount = Static<typeof ProtectedAccountSchema>;
 export type ProtectedAccountName = Static<typeof ProtectedAccountNameSchema>;
+export type ProtectedProfileIcon = Static<typeof ProtectedProfileIconSchema>;
+export type ProtectedAccountIcon = Static<typeof ProtectedAccountIconSchema>;
+export type ProtectedAccountIconResponse = Static<typeof ProtectedAccountIconResponseSchema>;
 export type ProtectedAccountNameResponse = Static<typeof ProtectedAccountNameResponseSchema>;
 export type ProtectedDirectorySettings = Static<typeof ProtectedDirectorySettingsSchema>;
 export type ProtectedDirectorySettingsResponse = Static<
@@ -612,3 +638,5 @@ export const isProtectedDirectorySettings = (
   value: unknown,
 ): value is Static<typeof ProtectedDirectorySettingsSchema> =>
   Value.Check(ProtectedDirectorySettingsSchema, value);
+export const isProtectedAccountIcon = (value: unknown): value is ProtectedAccountIcon =>
+  Value.Check(ProtectedAccountIconSchema, value);

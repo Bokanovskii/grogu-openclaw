@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
 import { before as beforeTests, test } from "node:test";
@@ -166,10 +166,15 @@ void test("protected responses use neutral service wording", async (t) => {
     },
   });
   t.after(() => app.shutdown());
-  const response = await app.fetch(new Request(`${origin}/api/protected/v1/me`));
+  const response = await app.fetch(
+    new Request(`${origin}/api/protected/v1/me`, {
+      headers: { "x-alcove-capabilities": "profile-v1" },
+    }),
+  );
   assert.equal(response.status, 200);
   const { user, disclosure } = await response.json();
-  assert.equal(user.displayName, "User");
+  assert.equal(user.displayName, "");
+  assert.equal(user.setupRequired, true);
   assert.equal(
     disclosure,
     "Your chats and generated files are stored on the server until you delete them. The server operator can read them. They are stored unencrypted, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. The service can fetch known public URLs, but it does not search the web.",
@@ -1070,13 +1075,19 @@ void test("Family directory lists admitted people and isolates the development i
     });
     const server = createProtectedServer(origin, app.fetch);
     const url = await listen(server);
-    const call = (user: keyof typeof subjects, route: string, init?: RequestInit) =>
+    const call = (
+      user: keyof typeof subjects,
+      route: string,
+      init?: RequestInit,
+      profileCapability = true,
+    ) =>
       fetch(`${url}/api/protected/v1${route}`, {
         ...init,
         headers: {
           origin,
           cookie: `synthetic=${user}`,
           "content-type": "application/json",
+          ...(profileCapability ? { "x-alcove-capabilities": "profile-v1" } : {}),
           ...init?.headers,
         },
       });
@@ -1087,15 +1098,82 @@ void test("Family directory lists admitted people and isolates the development i
   const alice = (await (await first.call("alice", "/me")).json()).user;
   const bob = (await (await first.call("bob", "/me")).json()).user;
   const development = (await (await first.call("development", "/me")).json()).user;
-  assert.deepEqual((await (await first.call("alice", "/account")).json()).directory, {
-    description: "",
-    hidden: false,
+  for (const capabilities of [undefined, "", "profile-v10, unknown-v1"]) {
+    const headers: Record<string, string> =
+      capabilities === undefined ? {} : { "x-alcove-capabilities": capabilities };
+    const legacyMe = await first.call("alice", "/me", { headers }, false);
+    assert.deepEqual((await legacyMe.json()).user, { id: alice.id, displayName: "User" });
+    const legacyAccount = await first.call("alice", "/account", { headers }, false);
+    assert.deepEqual((await legacyAccount.json()).user, {
+      id: alice.id,
+      displayName: "Family member",
+    });
+    const legacyPeople = await first.call("alice", "/people", { headers }, false);
+    assert.ok(
+      (await legacyPeople.json()).people.every(
+        (person: Record<string, unknown>) => !Object.hasOwn(person, "icon"),
+      ),
+    );
+    assert.equal(legacyMe.headers.get("vary"), "X-Alcove-Capabilities");
+    assert.equal(legacyAccount.headers.get("vary"), "X-Alcove-Capabilities");
+    assert.equal(legacyPeople.headers.get("vary"), "X-Alcove-Capabilities");
+  }
+  assert.deepEqual(alice, { id: alice.id, displayName: "", setupRequired: true, icon: null });
+  const combined = await first.call("alice", "/me", {
+    headers: { "x-alcove-capabilities": "agents-v1, profile-v1 ,unknown-v2" },
+  });
+  assert.deepEqual((await combined.json()).user, alice);
+  assert.equal(combined.headers.get("vary"), "X-Alcove-Capabilities");
+  assert.deepEqual(await (await first.call("alice", "/account")).json(), {
+    user: { id: alice.id, displayName: "", setupRequired: true, icon: null },
+    directory: { description: "", hidden: false },
   });
   assert.equal((await (await first.call("development", "/account")).json()).directory.hidden, true);
   const put = (user: keyof typeof subjects, route: string, value: unknown) =>
     first.call(user, route, { method: "PUT", body: JSON.stringify(value) });
 
-  assert.equal((await put("alice", "/account/name", { displayName: "Alice" })).status, 200);
+  // Setup saves About and icon before the name; only the name completes setup.
+  assert.equal(
+    (await put("alice", "/account/directory-settings", { description: "", hidden: false })).status,
+    200,
+  );
+  const emoji = await put("alice", "/account/icon", { icon: { kind: "emoji", emoji: "🦊" } });
+  assert.equal(emoji.status, 200);
+  assert.deepEqual(await emoji.json(), { icon: { kind: "emoji", emoji: "🦊" } });
+  assert.equal((await (await first.call("alice", "/me")).json()).user.setupRequired, true);
+  const named = await put("alice", "/account/name", { displayName: " Alice " });
+  assert.equal(named.status, 200);
+  assert.deepEqual((await named.json()).user, {
+    id: alice.id,
+    displayName: "Alice",
+    setupRequired: false,
+    icon: { kind: "emoji", emoji: "🦊" },
+  });
+  assert.equal((await (await first.call("alice", "/me")).json()).user.setupRequired, false);
+  const legacyNamed = await first.call(
+    "alice",
+    "/account/name",
+    { method: "PUT", body: JSON.stringify({ displayName: "Alice" }) },
+    false,
+  );
+  assert.deepEqual((await legacyNamed.json()).user, { id: alice.id, displayName: "Alice" });
+  assert.equal(legacyNamed.headers.get("vary"), "X-Alcove-Capabilities");
+  for (const icon of [
+    { kind: "emoji", emoji: "ab" },
+    { kind: "emoji", emoji: "🦊🦊" },
+    { kind: "image", url: `/api/protected/v1/people/${alice.id}/icon?v=x` },
+  ]) {
+    assert.equal((await put("alice", "/account/icon", { icon })).status, 400);
+  }
+  const family = await put("alice", "/account/icon", {
+    icon: { kind: "emoji", emoji: "👨‍👩‍👧" },
+  });
+  assert.deepEqual(await family.json(), { icon: { kind: "emoji", emoji: "👨‍👩‍👧" } });
+  assert.deepEqual(await (await put("alice", "/account/icon", { icon: null })).json(), {
+    icon: null,
+  });
+  assert.equal((await (await first.call("alice", "/account")).json()).user.icon, null);
+
   assert.equal((await put("bob", "/account/name", { displayName: "Bob" })).status, 200);
   assert.equal(
     (
@@ -1116,13 +1194,104 @@ void test("Family directory lists admitted people and isolates the development i
   assert.deepEqual(
     (await list("alice")).toSorted((a, b) => a.displayName.localeCompare(b.displayName)),
     [
-      { id: alice.id, displayName: "Alice", description: "" },
-      { id: bob.id, displayName: "Bob", description: "Enjoys books" },
+      { id: alice.id, displayName: "Alice", description: "", icon: null },
+      { id: bob.id, displayName: "Bob", description: "Enjoys books", icon: null },
     ],
   );
   assert.deepEqual(await list("development"), []);
   assert.notEqual(development.id, alice.id);
   assert.notEqual(development.id, bob.id);
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const upload = (user: keyof typeof subjects, bytes: Buffer, type: string) =>
+    first.call(user, "/account/icon/image", {
+      method: "PUT",
+      body: new Uint8Array(bytes),
+      headers: { "content-type": type },
+    });
+  const rejected = async (response: Response) => [
+    response.status,
+    (await response.json()).error.code,
+  ];
+  assert.deepEqual(await rejected(await upload("bob", png, "image/gif")), [
+    415,
+    "icon_unsupported_type",
+  ]);
+  assert.deepEqual(await rejected(await upload("bob", png, "image/jpeg")), [
+    415,
+    "icon_unsupported_type",
+  ]);
+  // Declare an oversized body without sending it; the server must refuse from the header.
+  const oversized = await new Promise<number | undefined>((resolve, reject) => {
+    const address = first.server.address();
+    assert.ok(address && typeof address !== "string");
+    const pending = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: "PUT",
+        path: "/api/protected/v1/account/icon/image",
+        headers: {
+          origin,
+          cookie: "synthetic=bob",
+          "content-type": "image/png",
+          "content-length": String(512 * 1024 + 1),
+        },
+      },
+      (response) => {
+        response.resume();
+        pending.destroy();
+        resolve(response.statusCode);
+      },
+    );
+    pending.on("error", reject);
+    pending.flushHeaders();
+  });
+  assert.equal(oversized, 413);
+  const uploaded = await upload("bob", png, "image/png");
+  assert.equal(uploaded.status, 200);
+  const bobIcon = (await uploaded.json()).icon;
+  const revision = createHash("sha256").update(png).digest("hex");
+  assert.deepEqual(bobIcon, {
+    kind: "image",
+    url: `/api/protected/v1/people/${bob.id}/icon?v=${revision}-png`,
+  });
+  assert.deepEqual((await list("alice")).find((person) => person.id === bob.id)?.icon, bobIcon);
+  const legacyPeople = (await (await first.call("alice", "/people", undefined, false)).json()) as {
+    people: Array<Record<string, unknown>>;
+  };
+  assert.deepEqual(
+    legacyPeople.people.find((person) => person.id === bob.id),
+    { id: bob.id, displayName: "Bob", description: "Enjoys books" },
+  );
+  const iconRoute = bobIcon.url.slice("/api/protected/v1".length);
+  for (const user of ["bob", "alice"] as const) {
+    const served = await first.call(user, iconRoute);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "image/png");
+    assert.equal(served.headers.get("cache-control"), "private, no-cache");
+    assert.equal(served.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), png);
+    const cached = await first.call(user, iconRoute, {
+      headers: { "if-none-match": served.headers.get("etag")! },
+    });
+    assert.equal(cached.status, 304);
+  }
+  assert.equal((await first.call("development", iconRoute)).status, 404);
+  assert.equal((await first.call("alice", `/people/${randomUUID()}/icon`)).status, 404);
+  assert.equal((await first.call("alice", `/people/${alice.id}/icon`)).status, 404);
+  assert.equal(
+    (await put("bob", "/account/icon", { icon: { kind: "emoji", emoji: "📚" } })).status,
+    200,
+  );
+  assert.equal((await first.call("bob", iconRoute)).status, 404);
+  assert.equal((await upload("development", png, "image/png")).status, 200);
+  assert.equal((await first.call("development", `/people/${development.id}/icon`)).status, 200);
+  assert.equal((await first.call("alice", `/people/${development.id}/icon`)).status, 404);
+  assert.equal((await put("bob", "/account/icon", { icon: null })).status, 200);
 
   const hide = await put("bob", "/account/directory-settings", {
     description: "Not published",
@@ -1165,6 +1334,7 @@ void test("Family directory lists admitted people and isolates the development i
       id: bob.id,
       displayName: "Bob",
       description: "",
+      icon: null,
     },
   );
   assert.equal(
@@ -1187,8 +1357,8 @@ void test("Family directory lists admitted people and isolates the development i
       a.displayName.localeCompare(b.displayName),
     ),
     [
-      { id: alice.id, displayName: "Alice", description: "" },
-      { id: bob.id, displayName: "Bob", description: "" },
+      { id: alice.id, displayName: "Alice", description: "", icon: null },
+      { id: bob.id, displayName: "Bob", description: "", icon: null },
     ],
   );
   assert.deepEqual((await (await reopened.call("bob", "/account")).json()).directory, {

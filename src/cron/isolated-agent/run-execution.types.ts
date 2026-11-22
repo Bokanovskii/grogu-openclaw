@@ -47,6 +47,7 @@ export type CronRunExecutionParams = Pick<
     | "lane"
     | "onLaneWait"
     | "executionIdentity"
+    | "executionAuthority"
     | "admissionSource"
     | "deliveryAttemptFence"
   > & {

@@ -68,6 +68,42 @@ function createCronTriggerEvaluator(deps: EvaluatorDeps) {
 }
 
 describe("cron trigger script evaluator", () => {
+  it("intersects saved and current caps in real trigger tools, including warmed runtime changes", async () => {
+    const workspace = tempDirs.make("cron-trigger-current-cap-");
+    const target = path.join(workspace, "synthetic-source.txt");
+    fs.writeFileSync(target, "Synthetic local source.");
+    const config: OpenClawConfig = {
+      agents: { defaults: { workspace } },
+      plugins: { enabled: false },
+    };
+    const runtime = createCronScriptRuntime({
+      config,
+      runHeadless: runCodeModeScriptHeadless,
+    });
+    for (const { saved, current, allowed } of [
+      { saved: [], current: ["read"], allowed: false },
+      { saved: ["web_fetch"], current: ["*"], allowed: false },
+      { saved: ["read"], current: [], allowed: false },
+      { saved: ["read"], current: ["read"], allowed: true },
+      { saved: [], current: ["read"], allowed: false },
+    ]) {
+      const result = await runtime.evaluateTrigger({
+        jobId: "tool-authority-intersection",
+        script: `await read({path: ${JSON.stringify(target)}}); return { fire: true };`,
+        state: null,
+        toolsAllow: saved,
+        executionAuthority: {
+          toolsAllow: current,
+          toolBindings: {},
+          assertInvocationCurrent: () => {},
+        },
+      });
+      expect(result, JSON.stringify({ saved, current })).toMatchObject(
+        allowed ? { kind: "evaluated", fire: true } : { kind: "error" },
+      );
+    }
+  });
+
   it("cancels the real headless worker and bridge when its evaluation catalog closes", async () => {
     const entered = createDeferred();
     const release = createDeferred();

@@ -12,7 +12,10 @@ import {
   isProtectedSteer,
   isProtectedTurnRequest,
   type ProtectedAgentCatalogDto,
+  type ProtectedAgentCatalogV1,
   type ProtectedAgentSelectionResponse,
+  type ProtectedAutomationCatalog,
+  type ProtectedAutomationCatalogV1,
   type ProtectedAutomationListResponse,
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
@@ -215,6 +218,11 @@ export function createProtectedHttp(options: {
   }
   const encryption = options.encryption ?? ownedEncryption;
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const agentRouting = {
+    tool: agentCatalog.routeTool,
+    briefMaxChars: agentCatalog.routeBriefMaxChars,
+    resolve: agentCatalog.getSelectable,
+  };
   const chats = createProtectedChats({ ...options, agentCatalog });
   const storageMeasurement = {
     ...options,
@@ -1093,18 +1101,25 @@ export function createProtectedHttp(options: {
       }
       if (pathname === "/agents" && method === "GET") {
         await revalidate();
-        const catalog: ProtectedAgentCatalogDto = {
-          defaultAgentId: agentCatalog.defaultAgentId,
-          agents: agentCatalog.list(),
-        };
-        return json(catalog);
+        const { defaultAgentId } = agentCatalog;
+        const catalog: ProtectedAgentCatalogDto | ProtectedAgentCatalogV1 = hasClientCapability(
+          request.headers,
+          "agents-v1",
+        )
+          ? { defaultAgentId, agents: agentCatalog.listV1() }
+          : { defaultAgentId, agents: agentCatalog.list() };
+        return profileJson(catalog);
       }
       if (pathname === "/automations/catalog" && method === "GET") {
         if (!automationCatalog) {
           return notFound();
         }
         await revalidate();
-        return json(automationCatalog);
+        const catalog: ProtectedAutomationCatalog | ProtectedAutomationCatalogV1 =
+          hasClientCapability(request.headers, "agents-v1")
+            ? { ...automationCatalog, agents: agentCatalog.listV1() }
+            : automationCatalog;
+        return profileJson(catalog);
       }
       if (pathname === "/automations/drafts/validate" && method === "POST") {
         if (!automationCatalog) {
@@ -1240,7 +1255,11 @@ export function createProtectedHttp(options: {
             definition[key] = value;
           }
         }
-        const validation = validateProtectedAutomationDraft(definition, automationCatalog);
+        const validation = validateProtectedAutomationDraft(
+          definition,
+          automationCatalog,
+          agentCatalog.get(current.agentId),
+        );
         if (!validation.valid) {
           return json(validation, 422);
         }
@@ -1425,7 +1444,7 @@ export function createProtectedHttp(options: {
         let storage;
         try {
           const selectedAgentId = data.selectedAgentId ?? agentCatalog.defaultAgentId;
-          if (!agentCatalog.get(selectedAgentId)) {
+          if (!agentCatalog.getSelectable(selectedAgentId)) {
             throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
           }
           await revalidate();
@@ -1544,7 +1563,7 @@ export function createProtectedHttp(options: {
         if (!isProtectedAgentSelection(data)) {
           return invalid();
         }
-        if (!agentCatalog.get(data.selectedAgentId)) {
+        if (!agentCatalog.getSelectable(data.selectedAgentId)) {
           throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
         }
         const version = request.headers.get("if-match");
@@ -1684,7 +1703,8 @@ export function createProtectedHttp(options: {
               request.signal.throwIfAborted();
             }
             const currentEntry = await chats.readEntry(authority, id);
-            const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.defaultAgentId;
+            const selectedAgentId =
+              currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
             const selectedAgent = agentCatalog.get(selectedAgentId);
             if (!selectedAgent) {
               throw new ProtectedError(
@@ -1694,7 +1714,7 @@ export function createProtectedHttp(options: {
               );
             }
             const mentionedAgents = (data.mentions ?? []).map((mention) => {
-              const agent = agentCatalog.get(mention.agentId);
+              const agent = agentCatalog.getSelectable(mention.agentId);
               if (!agent || agent.id === selectedAgentId) {
                 throw new ProtectedError(
                   422,
@@ -1898,6 +1918,7 @@ export function createProtectedHttp(options: {
                         input,
                         mentionedAgents,
                         agent: selectedAgent,
+                        routing: agentRouting,
                         sessionAccess,
                         files: storage?.files(owned) ?? owned,
                         signal,

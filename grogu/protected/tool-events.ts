@@ -5,6 +5,14 @@ export type Source = { url: string; title: string };
 export type Widget = { id: string; title: string };
 export const widgetIdPattern = /^cv_[a-f0-9]{32}$/u;
 
+const toolLabels: Partial<Record<string, string>> = {
+  sessions_list: "Looking through your chats",
+  sessions_search: "Searching your chats",
+  sessions_history: "Reading another chat",
+  sessions_send: "Sending to another chat",
+  route_to_agent: "Asking another agent",
+};
+
 export function projectActivity(
   name: unknown,
   id: unknown,
@@ -20,7 +28,7 @@ export function projectActivity(
         ? (["fetch", "Fetching a source"] as const)
         : name === "show_widget"
           ? (["widget", "Creating a widget"] as const)
-          : (["tool", "Using a tool"] as const);
+          : (["tool", toolLabels[name] ?? "Using a tool"] as const);
   return { id, kind, label, status };
 }
 

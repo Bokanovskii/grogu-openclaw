@@ -325,6 +325,7 @@ async function runCronIsolatedAgentTurnInTrace(
               thinkingCatalog: prepared.context.thinkingSelection.catalog,
               loadThinkingCatalog: prepared.context.thinkingSelection.loadThinkingCatalog,
               executionIdentity: params.executionIdentity,
+              executionAuthority: params.executionAuthority,
               admissionSource: params.admissionSource,
             };
             const execution = await prepared.context.sessionWorkAdmission.run(() =>

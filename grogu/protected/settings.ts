@@ -111,6 +111,9 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
     tools: { web: { search: { enabled: true, provider: "duckduckgo", cacheTtlMinutes: 0 } } },
     agents: {
       ownership: "explicit",
+      // Members cannot finish workspace onboarding; a seeded BOOTSTRAP.md would add a
+      // pending-bootstrap section to every later member prompt after the first child run.
+      defaults: { skipBootstrap: true },
       entries: {
         protected: {
           workspace: path.join(stateDir, "workspace"),

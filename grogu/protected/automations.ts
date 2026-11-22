@@ -105,6 +105,7 @@ export function createProtectedAutomationCatalog(input: {
 export function validateProtectedAutomationDraft(
   input: unknown,
   catalog: ProtectedAutomationCatalog,
+  retainedAgent?: Pick<ProtectedAgentCatalogDto["agents"][number], "id">,
 ): ProtectedAutomationDraftValidation {
   const model = catalog.models[0];
   if (!model?.thinking) {
@@ -162,7 +163,10 @@ export function validateProtectedAutomationDraft(
 
   const draft = isProtectedAutomationDraft(candidate) ? candidate : undefined;
   if (draft) {
-    if (!catalog.agents.some((agent) => agent.id === draft.agentId)) {
+    if (
+      !catalog.agents.some((agent) => agent.id === draft.agentId) &&
+      retainedAgent?.id !== draft.agentId
+    ) {
       errors.push(error("agentId", "unsupported_agent", "Choose an available agent."));
     }
     if (draft.model.id !== model.id) {

@@ -72,6 +72,8 @@ export type RunEmbeddedAgentParams = {
   sandboxAgentId?: string;
   /** Out-of-band plugin bindings attached by the run initiator. */
   toolBindings?: Readonly<Record<string, unknown>>;
+  /** Live host authority rechecked by plugin tools at preparation and execution. */
+  assertInvocationCurrent?: () => void;
   /** Raw peer observed by the inbound routing owner, before identity linking. */
   conversationRoutePeerId?: string;
   /** What initiated this agent run: "user", "heartbeat", "cron", "memory", "overflow", or "manual". */

@@ -6,7 +6,12 @@ const runDeviceFlow = vi.hoisted(() => vi.fn<typeof runGitHubCopilotDeviceFlow>(
 
 vi.mock("./login.js", () => ({ runGitHubCopilotDeviceFlow: runDeviceFlow }));
 
-import { formatGithubCopilotApiKey, loginGithubCopilotOAuth } from "./oauth.js";
+import { bindGithubCopilotToken } from "openclaw/plugin-sdk/provider-auth";
+import {
+  formatGithubCopilotApiKey,
+  loginGithubCopilotOAuth,
+  parseGithubCopilotApiKey,
+} from "./oauth.js";
 
 describe("github-copilot session OAuth adapter", () => {
   beforeEach(() => {
@@ -96,4 +101,17 @@ describe("github-copilot session OAuth adapter", () => {
       ).toThrow("Unsupported GitHub Enterprise domain");
     },
   );
+});
+
+describe("github-copilot bound token envelope", () => {
+  it("round-trips the minting domain and rejects malformed envelopes", () => {
+    const bound = bindGithubCopilotToken("gho_synthetic", "github.com");
+    expect(bound).not.toBe("gho_synthetic");
+    expect(parseGithubCopilotApiKey(bound)).toMatchObject({
+      githubToken: "gho_synthetic",
+      boundGithubDomain: "github.com",
+    });
+    expect(parseGithubCopilotApiKey("gho_synthetic").boundGithubDomain).toBeUndefined();
+    expect(() => parseGithubCopilotApiKey("openclaw-github-copilot-token:v1:{")).toThrow();
+  });
 });

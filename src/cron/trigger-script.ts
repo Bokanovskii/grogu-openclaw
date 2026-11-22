@@ -47,6 +47,7 @@ import {
   resolveScheduledToolPolicyContext,
   type ScheduledToolPolicyContext,
 } from "../agents/scheduled-tool-policy.js";
+import { readToolAllowlistIntersection } from "../agents/tool-policy-shared.js";
 import {
   clearToolSearchCatalog,
   createToolSearchCatalogRef,
@@ -83,8 +84,9 @@ import {
   MAX_CRON_SCRIPT_TIMEOUT_SECONDS,
   MAX_CRON_SCRIPT_TOOL_BUDGET,
 } from "./script-payload.js";
-import type { CronServiceDeps } from "./service/state.js";
+import type { CronJobExecutionAuthority, CronServiceDeps } from "./service/state.js";
 import { resolveCronAuthenticatedChannelRequester } from "./tools-allow-provenance.js";
+import { resolveCronRunToolsAllow } from "./tools-allow.js";
 import { acquireCronScriptMcpTools, type CronScriptMcpTools } from "./trigger-script-mcp.js";
 import {
   parseScriptPayloadResult,
@@ -123,6 +125,7 @@ type PreparedTriggerRuntime = {
     admitted: AdmittedRunContext,
     signal: AbortSignal,
     messageActionTurnCapability: string | undefined,
+    executionAuthority?: CronJobExecutionAuthority,
   ) => Promise<AnyAgentTool[]>;
   /** Starts this evaluation's own MCP runtime for servers its toolsAllow names by prefix. */
   acquireMcpTools?: (
@@ -270,6 +273,7 @@ async function prepareTriggerRuntime(
       admitted,
       signal,
       messageActionTurnCapability,
+      executionAuthority,
     ) => {
       const allTools = toolPlan.constructTools
         ? await createOpenClawCodingToolsInternalAsync({
@@ -296,6 +300,12 @@ async function prepareTriggerRuntime(
             scheduledToolPolicy,
             conversationCapabilityProfile: resolveCapabilityProfile(admitted),
             toolConstructionPlan: toolPlan.codingToolConstructionPlan,
+            ...(executionAuthority
+              ? {
+                  toolBindings: executionAuthority.toolBindings,
+                  assertInvocationCurrent: executionAuthority.assertInvocationCurrent,
+                }
+              : {}),
           })
         : [];
       return applyEmbeddedAttemptToolsAllow(allTools, params.toolsAllow, {
@@ -370,6 +380,7 @@ function createCronCodeModeRunner(deps: CronTriggerEvaluatorDeps) {
     const agentId = resolveTriggerAgentId(request.runtimeConfig, request.agentId);
     const toolsAllowKey = JSON.stringify([
       request.toolsAllow ?? null,
+      request.toolsAllow ? (readToolAllowlistIntersection(request.toolsAllow) ?? null) : null,
       request.scheduledToolPolicy ?? null,
       request.execTarget ?? null,
     ]);
@@ -455,7 +466,7 @@ function createCronCodeModeRunner(deps: CronTriggerEvaluatorDeps) {
         runtimeConfig: resolveCronActiveRuntimeConfig(deps.config),
         jobId: params.job.id,
         agentId: params.job.agentId,
-        toolsAllow: params.job.payload.toolsAllow,
+        toolsAllow: resolveCronRunToolsAllow(params.job, params.executionAuthority),
         scheduledToolPolicy: resolveCronScheduledToolPolicy({
           toolsAllow: params.job.payload.toolsAllow,
           scheduledToolPolicy: params.job.scheduledToolPolicy,
@@ -477,6 +488,7 @@ function createCronCodeModeRunner(deps: CronTriggerEvaluatorDeps) {
           throw new Error("cron script invocation is no longer active");
         }
         assertAdmitted();
+        params.executionAuthority?.assertInvocationCurrent();
       }
       for (let refresh = 0; ; refresh += 1) {
         try {
@@ -522,6 +534,7 @@ function createCronCodeModeRunner(deps: CronTriggerEvaluatorDeps) {
                 authority,
                 evaluationScope.signal,
                 admission?.messageActionTurnCapability,
+                params.executionAuthority,
               ),
             ),
           );

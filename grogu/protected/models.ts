@@ -8,6 +8,7 @@ import {
   type ThinkLevel,
   type ThinkingCatalogEntry,
 } from "../../src/auto-reply/thinking.js";
+import { parseGithubCopilotBoundToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { LiveModelCatalogHttpError } from "../../src/plugin-sdk/provider-catalog-live-runtime.js";
 import { ProtectedError } from "./errors.js";
 
@@ -78,10 +79,20 @@ export async function fetchProtectedCopilotModels(
       "Reconnect or renew this provider first.",
     );
   }
+  let bound: ReturnType<typeof parseGithubCopilotBoundToken>;
+  try {
+    bound = parseGithubCopilotBoundToken(credential.accessToken);
+  } catch {
+    throw new ProtectedError(401, "provider_auth_failed", "Reconnect this provider first.");
+  }
   const api = await import("../../extensions/github-copilot/api.js");
   try {
     await authority.revalidate();
-    const auth = await api.resolveCopilotRuntimeAuth({ githubToken: credential.accessToken });
+    const auth = await api.resolveCopilotRuntimeAuth(
+      bound
+        ? { githubToken: bound.token, boundGithubDomain: bound.githubDomain }
+        : { githubToken: credential.accessToken },
+    );
     await authority.revalidate();
     const catalog = await api.fetchCopilotModelCatalog({
       copilotApiToken: auth.apiKey,

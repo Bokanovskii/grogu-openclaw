@@ -5,6 +5,7 @@ import { resolveSharedMainAuthAgentDir } from "../src/agents/auth-profiles/share
 import { ensureAuthProfileStoreWithoutExternalProfiles } from "../src/agents/auth-profiles/store-runtime.js";
 import { createModelAccountConnectService } from "../src/gateway/model-account-connect.js";
 import type { fetchWithSsrFGuard } from "../src/infra/net/fetch-guard.js";
+import { bindGithubCopilotToken } from "../src/plugin-sdk/github-copilot-domain.js";
 import type { ProviderPlugin } from "../src/plugins/types.js";
 import { createDeferredCore } from "../src/shared/deferred.js";
 import { readUserModelAuthProfile } from "../src/state/user-model-accounts.js";
@@ -76,6 +77,8 @@ const HOST_TOKEN = "ghp_host-sentinel-never-used";
 const MEMBER_TOKEN = "gho_synthetic-member-token";
 const DEVICE_CODE = "synthetic-device-code";
 const USER_CODE = "SYNT-1234";
+// A valid tenant, so a redirect would actually be honored if the binding failed.
+const HOST_TENANT = "host-tenant.ghe.com";
 
 afterEach(() => {
   network.requests.length = 0;
@@ -120,7 +123,7 @@ async function withMemberSignIn(
     vi.stubEnv("COPILOT_GITHUB_TOKEN", HOST_TOKEN);
     vi.stubEnv("GH_TOKEN", HOST_TOKEN);
     vi.stubEnv("GITHUB_TOKEN", HOST_TOKEN);
-    vi.stubEnv("COPILOT_GITHUB_DOMAIN", "enterprise.example.test");
+    vi.stubEnv("COPILOT_GITHUB_DOMAIN", HOST_TENANT);
     // Starter-model discovery uses global fetch; keep it offline and observable.
     vi.stubGlobal(
       "fetch",
@@ -241,9 +244,10 @@ it("connects a member-owned Copilot account without host credentials", async () 
       expect.objectContaining({ provider: "github-copilot", authType: "token" }),
     ]);
     expect(JSON.stringify(accounts)).not.toContain(MEMBER_TOKEN);
-    expect(readUserModelAuthProfile(accounts.accounts[0]?.authProfileId ?? "")).toMatchObject({
-      credential: { type: "token", provider: "github-copilot", token: MEMBER_TOKEN },
-    });
+    const stored = readUserModelAuthProfile(accounts.accounts[0]?.authProfileId ?? "");
+    expect(stored).toMatchObject({ credential: { type: "token", provider: "github-copilot" } });
+    const storedToken = stored?.credential.type === "token" ? (stored.credential.token ?? "") : "";
+    expect(storedToken).toBe(bindGithubCopilotToken(MEMBER_TOKEN, "github.com"));
     expect((await service.listAsync(other)).accounts).toEqual([]);
     expect(await service.statusAsync(other, connectId)).toEqual({ status: "expired" });
     expect(network.requests.slice(0, 2).map((request) => request.url)).toEqual([
@@ -253,8 +257,39 @@ it("connects a member-owned Copilot account without host credentials", async () 
     expect(network.requests[1]?.body).toContain(DEVICE_CODE);
     // Any later discovery is best effort and may carry only the member's own token.
     for (const request of network.requests.slice(2)) {
-      expect(new URL(request.url).hostname).not.toBe("enterprise.example.test");
+      expect(new URL(request.url).hostname).not.toContain(HOST_TENANT);
     }
+
+    // Inference with ambient and configured enterprise tenants stays on github.com.
+    network.requests.length = 0;
+    network.handleFetch = async () => Response.json({});
+    const prepare = (apiKey: string) =>
+      provider.current?.prepareRuntimeAuth?.({
+        provider: "github-copilot",
+        modelId: "gpt-5.4",
+        model: { id: "gpt-5.4", provider: "github-copilot", api: "openai-completions" },
+        env: process.env,
+        config: {
+          models: {
+            providers: {
+              "github-copilot": { baseUrl: "", models: [], params: { githubDomain: HOST_TENANT } },
+            },
+          },
+        },
+        apiKey,
+        authMode: "token",
+      } as never);
+    expect(await prepare(storedToken)).toMatchObject({ apiKey: MEMBER_TOKEN });
+    expect(network.requests.map((request) => request.url)).toEqual([
+      "https://api.github.com/copilot_internal/user",
+    ]);
+    expect(network.requests[0]?.headers).toContain(`Bearer ${MEMBER_TOKEN}`);
+    // Unbound legacy tokens keep the operator's tenant selection.
+    network.requests.length = 0;
+    await prepare("gho_synthetic-unbound-token");
+    expect(network.requests.map((request) => request.url)).toEqual([
+      `https://api.${HOST_TENANT}/copilot_internal/user`,
+    ]);
   });
 });
 

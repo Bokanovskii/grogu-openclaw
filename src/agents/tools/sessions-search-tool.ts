@@ -25,6 +25,9 @@ import {
   type AgentToolGatewayRequestCaller as GatewayCaller,
 } from "./in-process-gateway.js";
 import {
+  getHostSessionAccess,
+  type HostSessionAccess,
+  resolveHostSessionAccess,
   resolveSessionToolTargetAgentId,
   runWithScopedSessionAccess,
 } from "./scoped-session-access.js";
@@ -106,6 +109,10 @@ type SearchSessionCandidate = {
   expectedSessionId?: string;
 };
 
+type SearchVisibilityRow = Parameters<
+  ReturnType<typeof createSessionVisibilityRowChecker>["check"]
+>[0];
+
 function sanitizeHit(params: {
   alias: string;
   hit: GatewaySearchHit;
@@ -166,22 +173,48 @@ async function listVisibleSearchSessions(params: {
   gatewayCall: GatewayCaller;
   rowGuard: Pick<ReturnType<typeof createSessionVisibilityRowChecker>, "check">;
   restrictToSpawned: boolean;
+  hostScope?: HostSessionAccess;
 }): Promise<SearchSessionCandidate[]> {
+  const { hostScope } = params;
   const candidates = new Map<string, SearchSessionCandidate>();
   const candidateId = (candidate: Pick<SearchSessionCandidate, "agentId" | "key">) =>
     parseAgentSessionKey(candidate.key)
       ? candidate.key
       : `${candidate.agentId ?? ""}\0${candidate.key}`;
-  if (
-    params.rowGuard.check({
-      key: params.effectiveRequesterKey,
-      ...(params.effectiveRequesterAgentId ? { agentId: params.effectiveRequesterAgentId } : {}),
-    }).allowed
-  ) {
-    const requesterCandidate = {
-      key: params.effectiveRequesterKey,
-      ...(params.effectiveRequesterAgentId ? { agentId: params.effectiveRequesterAgentId } : {}),
-    } satisfies SearchSessionCandidate;
+  const admitCandidate = async (
+    row: SearchVisibilityRow,
+    sessionId?: unknown,
+  ): Promise<SearchSessionCandidate | undefined> => {
+    if (!hostScope) {
+      return params.rowGuard.check(row).allowed
+        ? { key: row.key, ...(row.agentId ? { agentId: row.agentId } : {}) }
+        : undefined;
+    }
+    // A host-bound invocation replaces tool visibility policy with its own grant, as
+    // sessions_list does; the granted incarnation later filters stale transcript hits.
+    const agentId = row.agentId ?? parseAgentSessionKey(row.key)?.agentId;
+    const grant = agentId
+      ? await resolveHostSessionAccess(hostScope, {
+          action: "search",
+          requesterSessionKey: params.effectiveRequesterKey,
+          reference: row.key,
+        })
+      : undefined;
+    if (
+      !grant ||
+      grant.sessionKey !== row.key ||
+      grant.agentId !== agentId ||
+      (typeof sessionId === "string" && sessionId !== grant.sessionId)
+    ) {
+      return undefined;
+    }
+    return { key: row.key, agentId: grant.agentId, expectedSessionId: grant.sessionId };
+  };
+  const requesterCandidate = await admitCandidate({
+    key: params.effectiveRequesterKey,
+    ...(params.effectiveRequesterAgentId ? { agentId: params.effectiveRequesterAgentId } : {}),
+  });
+  if (requesterCandidate) {
     candidates.set(candidateId(requesterCandidate), requesterCandidate);
   }
   const listPages = async (agentId?: string) => {
@@ -192,6 +225,7 @@ async function listVisibleSearchSessions(params: {
           sessions?: Array<{
             key?: unknown;
             agentId?: unknown;
+            sessionId?: unknown;
             ownerSessionKey?: unknown;
             parentSessionKey?: unknown;
             spawnedBy?: unknown;
@@ -207,9 +241,11 @@ async function listVisibleSearchSessions(params: {
             includeGlobal: !params.restrictToSpawned,
             includeUnknown: false,
             ...(agentId ? { agentId } : {}),
+            ...(hostScope ? { creatorId: hostScope.creatorProfileId } : {}),
             ...(params.restrictToSpawned ? { spawnedBy: params.effectiveRequesterKey } : {}),
           },
         });
+        hostScope?.assertCurrent();
         for (const row of Array.isArray(page.sessions) ? page.sessions : []) {
           if (typeof row.key !== "string" || (!agentId && parseAgentSessionKey(row.key) === null)) {
             continue;
@@ -233,12 +269,9 @@ async function listVisibleSearchSessions(params: {
                 ? { spawnedBy: params.effectiveRequesterKey }
                 : {}),
           };
-          if (params.rowGuard.check(visibilityRow).allowed) {
-            const id = candidateId(visibilityRow);
-            candidates.set(id, {
-              key: visibilityRow.key,
-              agentId: visibilityRow.agentId,
-            });
+          const candidate = await admitCandidate(visibilityRow, row.sessionId);
+          if (candidate) {
+            candidates.set(candidateId(candidate), candidate);
           }
         }
         if (
@@ -449,6 +482,7 @@ export function createSessionsSearchTool(opts?: {
           sessionTarget.expectedSessionId = access.expectedSessionId;
         }
       }
+      const hostScope = getHostSessionAccess();
       const searchSessions = (
         sessionTarget
           ? [
@@ -469,6 +503,7 @@ export function createSessionsSearchTool(opts?: {
               gatewayCall,
               rowGuard,
               restrictToSpawned,
+              ...(hostScope ? { hostScope } : {}),
             })
       )
         // Search excerpts are re-persisted in the caller transcript; incognito
@@ -537,7 +572,11 @@ export function createSessionsSearchTool(opts?: {
               continue;
             }
             const candidate = matchHit(hit.sessionKey);
-            if (!candidate) {
+            if (
+              !candidate ||
+              (hostScope &&
+                (!candidate.expectedSessionId || hit.sessionId !== candidate.expectedSessionId))
+            ) {
               continue;
             }
             const sanitized = sanitizeHit({
@@ -551,6 +590,8 @@ export function createSessionsSearchTool(opts?: {
           }
         }
       }
+      // Grants were taken per row, so confirm the host scope before any excerpt leaves the tool.
+      await hostScope?.revalidate();
       visibleHits.sort(compareSearchHits);
       const limited = visibleHits.slice(0, limit);
       const capped = capSearchHits(limited);

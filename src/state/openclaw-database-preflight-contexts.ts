@@ -30,7 +30,7 @@ export async function preflightOpenClawDatabaseSchemaContexts(options: {
   }[];
   supportedVersions: OpenClawSchemaVersions;
   preserveSourceArtifacts: boolean;
-  inspectCandidateProtectedFormats?: boolean;
+  inspectOwnProtectedFormats?: boolean;
 }): Promise<OpenClawDatabaseSchemaPreflight> {
   const groups: {
     env: NodeJS.ProcessEnv;
@@ -61,7 +61,7 @@ export async function preflightOpenClawDatabaseSchemaContexts(options: {
       env: group.env,
       supportedVersions: options.supportedVersions,
       preserveSourceArtifacts: options.preserveSourceArtifacts,
-      inspectCandidateProtectedFormats: options.inspectCandidateProtectedFormats,
+      inspectOwnProtectedFormats: options.inspectOwnProtectedFormats,
       configuredAgentDatabaseTargets: [],
       configuredAgentDatabaseCandidatePaths: [
         ...new Set(group.configuredAgentDatabaseCandidatePaths),

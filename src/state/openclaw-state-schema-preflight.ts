@@ -36,7 +36,7 @@ import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 export type StateSchemaInspectionInput = {
   pathname: string;
   supportedVersion: number;
-  inspectCandidateProtectedFormats?: boolean;
+  inspectOwnProtectedFormats?: boolean;
   requireStartupMigrationReadiness?: boolean;
   verifyCurrentSchemaShape?: boolean;
   scope?: "state";
@@ -80,7 +80,7 @@ export function inspectStateDatabaseSchema(
     const stateVersion = readSqliteUserVersion(database);
     let supportedVersion = input.supportedVersion;
     if (
-      input.inspectCandidateProtectedFormats &&
+      input.inspectOwnProtectedFormats &&
       stateVersion === PROTECTED_SHARED_STATE_SCHEMA_VERSION &&
       stateVersion > supportedVersion
     ) {

@@ -220,7 +220,7 @@ async function inspectUpdateAdmission(
             schemaVersions,
             [schemaContext],
             {
-              inspectCandidateProtectedFormats:
+              inspectOwnProtectedFormats:
                 schemaVersions.state === OPENCLAW_STATE_SCHEMA_VERSION &&
                 schemaVersions.agent === OPENCLAW_AGENT_SCHEMA_VERSION,
             },

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants, lstatSync, realpathSync } from "node:fs";
 import { open, lstat, unlink } from "node:fs/promises";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import {
   migrateAuthorizedUserFiles,
   verifyAuthorizedUserFiles,
@@ -86,11 +87,17 @@ export function requireProtectedStorageEncryption() {
   }
 }
 
-async function assertAgentDatabaseMayReceiveNewKey(databasePath: string): Promise<void> {
+async function assertDatabaseMayReceiveNewKey(
+  databasePath: string,
+  label: string,
+  encryptionTable: string,
+  supportedVersion: number,
+  readContentVersion?: (database: DatabaseSync, publishedVersion: number) => number,
+): Promise<void> {
   try {
     const fileStat = lstatSync(databasePath, { bigint: true });
     if (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.nlink !== 1n) {
-      throw new Error("Protected agent database is not a regular, unlinked file.");
+      throw new Error(`Protected ${label} database is not a regular, unlinked file.`);
     }
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
@@ -98,29 +105,23 @@ async function assertAgentDatabaseMayReceiveNewKey(databasePath: string): Promis
     }
     throw error;
   }
-  const [
-    { DatabaseSync },
-    { readSqliteUserVersion },
-    { PROTECTED_ENCRYPTION_TABLE },
-    { OPENCLAW_AGENT_SCHEMA_VERSION },
-  ] = await Promise.all([
+  const [{ DatabaseSync }, { readSqliteUserVersion }] = await Promise.all([
     import("node:sqlite"),
     import("../../src/infra/sqlite-user-version.js"),
-    import("../../src/state/openclaw-agent-db-schema-read.js"),
-    import("../../src/state/openclaw-agent-db-contract.js"),
   ]);
   // This maintenance-only read refuses encrypted state before it can create a key.
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const version = readSqliteUserVersion(database);
+    const publishedVersion = readSqliteUserVersion(database);
+    const version = readContentVersion?.(database, publishedVersion) ?? publishedVersion;
     const hasEncryptionMarker = Boolean(
       database
         .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
-        .get(PROTECTED_ENCRYPTION_TABLE),
+        .get(encryptionTable),
     );
-    if (hasEncryptionMarker || version > OPENCLAW_AGENT_SCHEMA_VERSION) {
+    if (hasEncryptionMarker || version > supportedVersion) {
       throw new Error(
-        "Protected agent storage may already be encrypted; refusing to generate a replacement key. Restore the original key.",
+        `Protected ${label} storage may already be encrypted; refusing to generate a replacement key. Restore the original key.`,
       );
     }
   } finally {
@@ -202,7 +203,32 @@ export async function provisionProtectedStorageKeyAndMigrate(
       assertCurrent,
       maxBytes: protectedMaxFileBytes,
     });
-    await assertAgentDatabaseMayReceiveNewKey(databasePath);
+    const [
+      { PROTECTED_ENCRYPTION_TABLE },
+      { OPENCLAW_AGENT_SCHEMA_VERSION },
+      { PROTECTED_SHARED_STATE_ENCRYPTION_TABLE, readStateSchemaContentVersion },
+      { OPENCLAW_STATE_SCHEMA_VERSION },
+      { resolveOpenClawStateSqlitePath },
+    ] = await Promise.all([
+      import("../../src/state/openclaw-agent-db-schema-read.js"),
+      import("../../src/state/openclaw-agent-db-contract.js"),
+      import("../../src/state/openclaw-state-db-schema-version.js"),
+      import("../../src/state/openclaw-state-db-contract.js"),
+      import("../../src/state/openclaw-state-db.paths.js"),
+    ]);
+    await assertDatabaseMayReceiveNewKey(
+      databasePath,
+      "agent",
+      PROTECTED_ENCRYPTION_TABLE,
+      OPENCLAW_AGENT_SCHEMA_VERSION,
+    );
+    await assertDatabaseMayReceiveNewKey(
+      resolveOpenClawStateSqlitePath(process.env),
+      "shared state",
+      PROTECTED_SHARED_STATE_ENCRYPTION_TABLE,
+      OPENCLAW_STATE_SCHEMA_VERSION,
+      readStateSchemaContentVersion,
+    );
     assertCurrent();
     await createProtectedStorageKey(keyPath, stateDir);
   }

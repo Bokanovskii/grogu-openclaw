@@ -21,6 +21,7 @@ import type { DB } from "./openclaw-state-db.generated.js";
 
 // Read-only clients need schema admission without loading updater publication policy.
 export const CONTENT_VERSION_KEY = "state.schema.contentVersion";
+export const PROTECTED_SHARED_STATE_ENCRYPTION_TABLE = "grogu_protected_shared_state";
 type StateSchemaVersionDatabase = Pick<DB, "config_machine_state">;
 export type StateSchemaContentVersionRowReader = (
   db: DatabaseSync,

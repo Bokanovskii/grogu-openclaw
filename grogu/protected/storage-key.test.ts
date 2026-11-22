@@ -11,6 +11,7 @@ import { PROTECTED_SESSION_ENTRY_TABLE } from "../../src/config/sessions/session
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { resolveOpenClawAgentSqlitePath } from "../../src/state/openclaw-agent-db.paths.js";
+import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import {
   loadStorageValueEncryptionFromFile,
@@ -189,4 +190,61 @@ void test("refuses to create a key when user files are already encrypted", async
   await assert.rejects(lstat(keyPath));
   await assert.rejects(lstat(resolveOpenClawAgentSqlitePath({ agentId: "protected", env })));
   assert.equal((await readFile(userFilePath)).includes(plaintext), false);
+});
+
+void test("refuses to replace a missing key when shared state may be encrypted", async (t) => {
+  // openclaw-temp-dir: allow provides an isolated HOME for the real maintenance subprocess
+  const home = await mkdtemp(path.join(os.tmpdir(), "protected-shared-key-"));
+  const stateDir = path.join(home, "state");
+  const configDir = path.join(home, "config");
+  const secretsDir = path.join(home, "secrets");
+  const keyPath = path.join(secretsDir, "storage-key");
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await Promise.all([
+    mkdir(stateDir, { recursive: true, mode: 0o700 }),
+    mkdir(configDir, { recursive: true, mode: 0o700 }),
+    mkdir(secretsDir, { recursive: true, mode: 0o700 }),
+  ]);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_CONFIG_PATH: path.join(configDir, "openclaw.json"),
+  };
+  delete env[PROTECTED_STORAGE_KEY_FILE_ENV];
+  const sharedPath = resolveOpenClawStateSqlitePath(env);
+  await mkdir(path.dirname(sharedPath), { recursive: true, mode: 0o700 });
+  const shared = new DatabaseSync(sharedPath);
+  shared.exec("PRAGMA user_version = 21");
+  shared.close();
+
+  const assertRefused = async () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "./scripts/tsx.mjs", "grogu/protected/maintain.ts", "provision-storage-key"],
+      { cwd: repoRoot, env, encoding: "utf8" },
+    );
+    assert.notEqual(result.status, 0);
+    await assert.rejects(lstat(keyPath));
+    assert.match(result.stderr, /shared state.*refusing to generate a replacement key/iu);
+    await assert.rejects(lstat(resolveOpenClawAgentSqlitePath({ agentId: "protected", env })));
+  };
+  await assertRefused();
+
+  const marked = new DatabaseSync(sharedPath);
+  marked.exec(
+    "PRAGMA user_version = 20; CREATE TABLE grogu_protected_shared_state (id INTEGER PRIMARY KEY)",
+  );
+  marked.close();
+  await assertRefused();
+
+  const deferred = new DatabaseSync(sharedPath);
+  deferred.exec(`
+    DROP TABLE grogu_protected_shared_state;
+    CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT);
+    INSERT INTO config_machine_state (state_key, value_json)
+      VALUES ('state.schema.contentVersion', '21');
+  `);
+  deferred.close();
+  await assertRefused();
 });

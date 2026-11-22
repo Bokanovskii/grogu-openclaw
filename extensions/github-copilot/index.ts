@@ -7,6 +7,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   applyAuthProfileConfig,
+  bindGithubCopilotToken,
   coerceSecretRef,
   ensureAuthProfileStore,
   listProfilesForProvider,
@@ -125,6 +126,7 @@ async function resolveInteractiveCopilotStarterModel(params: {
   ctx: ProviderAuthContext;
   githubToken: string;
   githubDomain: string;
+  boundGithubDomain?: string;
 }): Promise<Pick<ProviderAuthResult, "defaultModel" | "notes">> {
   if (params.ctx.credentialOnly) {
     return {};
@@ -137,6 +139,7 @@ async function resolveInteractiveCopilotStarterModel(params: {
         githubToken: params.githubToken,
         env: params.ctx.env ?? process.env,
         githubDomain: params.githubDomain,
+        ...(params.boundGithubDomain ? { boundGithubDomain: params.boundGithubDomain } : {}),
         config: params.ctx.config,
         ...(params.ctx.signal ? { signal: params.ctx.signal } : {}),
       }),
@@ -244,6 +247,7 @@ async function runGitHubCopilotNonInteractiveAuth(
 
   let profileId = DEFAULT_COPILOT_PROFILE_ID;
   let githubToken = resolved?.key ?? "";
+  let boundGithubDomain: string | undefined;
   if (resolved) {
     const useTokenRef = ctx.opts.secretInputMode === "ref" && resolved.source === "env";
     if (useTokenRef && !resolved.envVarName) {
@@ -269,6 +273,7 @@ async function runGitHubCopilotNonInteractiveAuth(
       profileId,
     });
     githubToken = existing.githubToken;
+    boundGithubDomain = existing.boundGithubDomain;
   }
 
   const resolvedDomain = resolveGithubCopilotDomain({ config: ctx.config });
@@ -286,6 +291,7 @@ async function runGitHubCopilotNonInteractiveAuth(
       githubToken,
       env: process.env,
       githubDomain: resolvedDomain,
+      ...(boundGithubDomain ? { boundGithubDomain } : {}),
       config: configWithDomain,
     });
   } else if (resolved) {
@@ -443,10 +449,12 @@ export default definePluginEntry({
           });
           ctx.signal?.throwIfAborted();
           ctx.assertCurrent?.();
+          const source = parseGithubCopilotApiKey((resolved ?? credential.token ?? "").trim());
           const starter = await resolveInteractiveCopilotStarterModel({
             ctx,
-            githubToken: (resolved ?? credential.token ?? "").trim(),
+            githubToken: source.githubToken,
             githubDomain: normalizedDomain,
+            ...(source.boundGithubDomain ? { boundGithubDomain: source.boundGithubDomain } : {}),
           });
           return { profiles: [existing], ...starter, ...(configPatch ? { configPatch } : {}) };
         }
@@ -525,10 +533,14 @@ export default definePluginEntry({
         return { profiles: [] };
       }
 
+      // The public flow binds its token to github.com so ambient enterprise
+      // settings cannot redirect it. Enterprise tenants keep config ownership.
+      const boundGithubDomain = isEnterprise ? undefined : normalizedDomain;
       const starter = await resolveInteractiveCopilotStarterModel({
         ctx,
         githubToken: result.accessToken,
         githubDomain: normalizedDomain,
+        ...(boundGithubDomain ? { boundGithubDomain } : {}),
       });
       const persistInline = ctx.secretInputMode === "plaintext";
       const notes = [
@@ -540,7 +552,14 @@ export default definePluginEntry({
           : []),
       ];
       return {
-        profiles: [buildCopilotTokenProfile(ctx, result.accessToken)],
+        profiles: [
+          buildCopilotTokenProfile(
+            ctx,
+            boundGithubDomain
+              ? bindGithubCopilotToken(result.accessToken, boundGithubDomain)
+              : result.accessToken,
+          ),
+        ],
         ...(starter.defaultModel ? { defaultModel: starter.defaultModel } : {}),
         ...(notes.length > 0 ? { notes } : {}),
         ...(configPatch ? { configPatch } : {}),
@@ -632,6 +651,7 @@ export default definePluginEntry({
             explicit: source.githubDomain,
             config: ctx.config,
           }),
+          ...(source.boundGithubDomain ? { boundGithubDomain: source.boundGithubDomain } : {}),
         });
         const headers = buildCopilotRuntimeHeaderParts({
           config: ctx.config,
@@ -656,6 +676,7 @@ export default definePluginEntry({
           resolveGithubCopilotDomain({
             env: ctx.env,
             explicit: source.githubDomain,
+            bound: source.boundGithubDomain,
             config: ctx.config,
           }),
         );

@@ -2,6 +2,8 @@
 import { resolveAuthProfileOrder } from "../agents/auth-profiles/order.js";
 import { normalizeGithubCopilotDomain } from "./github-copilot-domain.js";
 
+export { bindGithubCopilotToken, parseGithubCopilotBoundToken } from "./github-copilot-domain.js";
+
 export { resolveNonEnvSecretRefApiKeyMarker } from "../secrets/provider-credential-values.js";
 export type { OpenClawConfig } from "../config/config.js";
 export type { SecretInput } from "../config/types.secrets.js";

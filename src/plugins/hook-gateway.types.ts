@@ -1,5 +1,6 @@
 /** Gateway lifecycle and cron hook contracts shared by plugin hosts and consumers. */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { CronJobCreate, CronJobPatch } from "../cron/types.js";
 
 export type PluginHookGatewayContext = {
   port?: number;
@@ -163,9 +164,19 @@ export type PluginHookGatewayCronService = {
   /** Effective automatic scheduling state; older hosts may omit this observation. */
   isEnabled?: () => Promise<boolean>;
   list: (opts?: { includeDisabled?: boolean }) => Promise<PluginHookGatewayCronJob[]>;
-  add: (input: PluginHookGatewayCronCreateInput) => Promise<unknown>;
-  update: (id: string, patch: PluginHookGatewayCronUpdateInput) => Promise<unknown>;
-  remove: (id: string) => Promise<PluginHookGatewayCronRemoveResult>;
+  add: (
+    input: PluginHookGatewayCronCreateInput | CronJobCreate,
+    options?: { commitGuard?: () => void },
+  ) => Promise<unknown>;
+  update: (
+    id: string,
+    patch: PluginHookGatewayCronUpdateInput | CronJobPatch,
+    options?: { commitGuard?: () => void },
+  ) => Promise<unknown>;
+  remove: (
+    id: string,
+    options?: { commitGuard?: () => void },
+  ) => Promise<PluginHookGatewayCronRemoveResult>;
   removeStaleJobFamily: (family: {
     declarationKey: string;
     name: string;

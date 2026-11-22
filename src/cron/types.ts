@@ -343,6 +343,9 @@ export type CronTriggerEvaluationResult =
       sourceFailureKind?: CronTriggerSourceFailureKind;
     };
 
+/** Persisted routing marker for jobs that require a current plugin-service authority. */
+export const PLUGIN_SERVICE_CRON_JOB_PREFIX = "plugin-service:";
+
 /** Public cron job contract with spec fields and mutable run state. */
 export type CronJob = CronJobBase<
   CronSchedule,

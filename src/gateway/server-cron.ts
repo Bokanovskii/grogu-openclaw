@@ -38,10 +38,12 @@ import { toPublicCronJob } from "../cron/public-job.js";
 import { cronScriptFailureMetadata } from "../cron/script-failure.js";
 import { CronService, type CronEvent } from "../cron/service.js";
 import { applyJobPatch } from "../cron/service/jobs.js";
+import type { CronServiceDeps } from "../cron/service/state.js";
 import { resolveCronSessionTargetSessionKey } from "../cron/session-target.js";
 import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
 import { cronStreamScheduleKey } from "../cron/stream-schedule.js";
 import { createCronScriptRuntime } from "../cron/trigger-script.js";
+import { PLUGIN_SERVICE_CRON_JOB_PREFIX } from "../cron/types.js";
 import type { CronJob } from "../cron/types.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -157,6 +159,11 @@ export function buildGatewayCronService(params: {
   env?: NodeJS.ProcessEnv;
   resolveGatewayContext?: () => GatewayRequestContext | undefined;
   resolvePluginRegistry?: () => PluginRegistry | undefined;
+  resolvePluginServices?: () =>
+    | import("../plugins/services.js").PluginServicesHandle
+    | null
+    | undefined;
+  resolveJobExecutionAuthority?: CronServiceDeps["resolveJobExecutionAuthority"];
 }): GatewayCronState {
   const cronLogger = getChildLogger({ module: "cron" });
   const cronServiceLogger = toPinoLikeLogger(cronLogger, getResolvedLoggerSettings().level);
@@ -505,6 +512,16 @@ export function buildGatewayCronService(params: {
     cronConfig: params.cfg.cron,
     listConfiguredChannels: () => listConfiguredMessageChannels(getRuntimeConfig()),
     ...(scriptRuntime ? { evaluateCronTrigger: scriptRuntime.evaluateTrigger } : {}),
+    resolveJobExecutionAuthority:
+      params.resolveJobExecutionAuthority ??
+      (async ({ job }) => {
+        if (!job.declarationKey?.startsWith(PLUGIN_SERVICE_CRON_JOB_PREFIX)) {
+          return undefined;
+        }
+        const { resolvePluginServiceCronExecutionAuthority } =
+          await import("../plugins/service-cron-authority.js");
+        return resolvePluginServiceCronExecutionAuthority(params.resolvePluginServices?.(), job);
+      }),
     ...(defaultAgentId ? { defaultAgentId } : {}),
     resolveDefaultAgentId: () => tryResolveAmbientOwnerAgentId(getRuntimeConfig()),
     resolveSessionStoreAgentIds: () => {

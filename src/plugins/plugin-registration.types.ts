@@ -368,6 +368,8 @@ export type OpenClawPluginServiceContext = {
   serviceHealth?: OpenClawPluginServiceHealth;
   /** Gateway-owned timed work; required by the version 2 service contract. */
   scheduler?: PluginServiceSchedulerV1;
+  /** Native declaration-key namespace for this service's authorized jobs. */
+  cronJobPrefix?: string;
   /** Gateway-owned scheduler access, revoked when this service stops. */
   getCron?: () =>
     | (import("./hook-gateway.types.js").PluginHookGatewayCronService & {
@@ -375,6 +377,7 @@ export type OpenClawPluginServiceContext = {
         enqueueRun?: (
           id: string,
           mode?: import("../cron/service/state.js").CronRunMode,
+          options?: { commitGuard?: () => void },
         ) => Promise<import("../cron/service-contract.js").CronServiceRunResult>;
       })
     | undefined;
@@ -427,6 +430,10 @@ export type OpenClawPluginService = {
   id: string;
   /** Restart this service with committed config when one of these paths changes. */
   reload?: { configPrefixes: readonly string[] };
+  /** Reacquire live authority for this service's namespaced native jobs at dispatch. */
+  authorizeCronJob?: (
+    job: Readonly<import("../cron/types.js").CronJob>,
+  ) => Promise<import("../cron/service/state.js").CronJobExecutionAuthority>;
   start: (ctx: OpenClawPluginServiceContext) => void | Promise<void>;
   stop?: (ctx: OpenClawPluginServiceContext) => void | Promise<void>;
 };

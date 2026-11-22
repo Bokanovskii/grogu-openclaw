@@ -80,6 +80,54 @@ function createJob(name = family.name) {
 }
 
 describe("plugin service scheduler ownership", () => {
+  it("rechecks caller authority inside queued native mutations without revoking the service", async () => {
+    const original = await createScheduler();
+    const job = await original.cron.add(createJob());
+    const { context } = await startService(() => original.cron);
+    const service = expectDefined(context.getCron?.(), "Gateway scheduler");
+    let admitted = true;
+    const commitGuard = () => {
+      if (!admitted) {
+        throw new Error("member access revoked");
+      }
+    };
+    const entered = createDeferredCore();
+    const release = createDeferredCore();
+    const blocker = original.cron.updateWithPrecondition(job.id, {}, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    const results = Promise.allSettled([
+      service.add(
+        { ...createJob("another member"), declarationKey: "test-plugin:member" },
+        {
+          commitGuard,
+        },
+      ),
+      service.update(job.id, { enabled: true }, { commitGuard }),
+      service.remove(job.id, { commitGuard }),
+      expectDefined(service.enqueueRun, "native queue admission")(job.id, "force", { commitGuard }),
+    ]);
+    admitted = false;
+    release.resolve();
+    await blocker;
+    for (const result of await results) {
+      expect(result).toMatchObject({
+        status: "rejected",
+        reason: expect.objectContaining({ message: "member access revoked" }),
+      });
+    }
+    expect((await loadCronStore(original.storePath)).jobs).toMatchObject([
+      { id: job.id, enabled: false, name: family.name },
+    ]);
+    expect(await service.list({ includeDisabled: true })).toHaveLength(1);
+    await service.update(job.id, { name: "service remains available" });
+    expect((await service.list({ includeDisabled: true }))[0]?.name).toBe(
+      "service remains available",
+    );
+  });
+
   it("keeps one handle per scheduler and reconciles through a successor service", async () => {
     const { cron } = await createScheduler();
     const first = await startService(() => cron);

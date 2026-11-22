@@ -137,7 +137,12 @@ export type CronServiceDeps = {
     streamBatch?: string;
     abortSignal?: AbortSignal;
     executionIdentity?: CronExecutionIdentityAdmission;
+    executionAuthority?: CronJobExecutionAuthority;
   }) => Promise<CronTriggerEvaluationResult>;
+  /** Resolve owner-bound tools and live authority for this exact scheduled job. */
+  resolveJobExecutionAuthority?: (params: {
+    job: CronStoredJob;
+  }) => Promise<CronJobExecutionAuthority | undefined>;
   /** Default agent id for jobs without an agent id. */
   defaultAgentId?: string;
   /** Resolve the current default when runtime config can change after startup. */
@@ -209,6 +214,7 @@ export type CronServiceDeps = {
     onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
     onLaneWait?: (info?: { waiting?: boolean }) => void;
     executionIdentity?: CronExecutionIdentityAdmission;
+    executionAuthority?: CronJobExecutionAuthority;
   }) => Promise<
     CronRunOutcome &
       CronRunTelemetry &
@@ -272,6 +278,14 @@ export type CronServiceDeps = {
     onDeliverySettled: (outcome: CronFailureNotificationDelivery) => Promise<void>;
   }) => Promise<void>;
   onEvent?: (evt: CronEvent, context?: CronEventContext) => void;
+};
+
+/** Runtime-only authority; never persisted with the Cron job or sent over the wire. */
+export type CronJobExecutionAuthority = {
+  /** Exact current tool cap after checking the owner's saved cap against live grants. */
+  toolsAllow: readonly string[];
+  toolBindings: Readonly<Record<string, unknown>>;
+  assertInvocationCurrent: () => void;
 };
 
 export type CronExecutionIdentityAdmission = {

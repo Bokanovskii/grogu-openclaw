@@ -77,6 +77,18 @@ export async function executeJobCore(
       return { status: "skipped", error: "stream batch source no longer current" };
     }
   }
+  if (options?.assertRunCurrent) {
+    await options.assertRunCurrent();
+    if (options.activeJobMarker?.cancellation?.kind === "requested") {
+      return { status: "error", error: options.activeJobMarker.cancellation.reason };
+    }
+    if (abortSignal?.aborted) {
+      return resolveAbortError();
+    }
+    if (!isCronActiveJobMarkerCurrent(options.activeJobMarker)) {
+      return { status: "error", error: "Gateway restarting." };
+    }
+  }
   let effectiveJob = job;
   let triggerEval: CronTriggerEvalOutcome | undefined;
   if (job.trigger) {
@@ -96,6 +108,7 @@ export async function executeJobCore(
       streamBatch: options?.streamBatch,
       abortSignal,
       executionIdentity: options?.executionIdentity,
+      executionAuthority: options?.executionAuthority,
     });
     // Trigger scripts may settle after cancellation; never start payload work
     // or persist trigger results for a run that has already been aborted.
@@ -423,6 +436,7 @@ async function executeDetachedCronJob(
     onExecutionPhase: options?.onExecutionPhase,
     onLaneWait: options?.onLaneWait,
     executionIdentity: options?.executionIdentity,
+    executionAuthority: options?.executionAuthority,
   });
 
   if (abortSignal?.aborted) {

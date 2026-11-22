@@ -1,4 +1,6 @@
+import { attachToolAllowlistIntersection } from "../agents/tool-policy-shared.js";
 import { resolveCronScheduledToolPolicy } from "./scheduled-tool-policy.js";
+import type { CronJobExecutionAuthority } from "./service/state.js";
 import type { CronJob, CronStoredJob } from "./types.js";
 
 type CronToolRuntimeSpec = Pick<CronJob, "payload" | "trigger">;
@@ -39,7 +41,17 @@ export function resolveCronRunToolsAllow(
     | "runtimeAuthority"
     | "runtimeAuthorityRecoveryRequired"
   >,
+  executionAuthority?: Pick<CronJobExecutionAuthority, "toolsAllow">,
 ): string[] | undefined {
+  if (executionAuthority) {
+    const toolsAllow = [...executionAuthority.toolsAllow];
+    return job.payload.toolsAllow === undefined
+      ? toolsAllow
+      : attachToolAllowlistIntersection(toolsAllow, [
+          job.payload.toolsAllow,
+          [...executionAuthority.toolsAllow],
+        ]);
+  }
   return job.payload.kind === "agentTurn" &&
     job.payload.toolsAllowIsDefault === true &&
     !job.trigger?.script.trim() &&

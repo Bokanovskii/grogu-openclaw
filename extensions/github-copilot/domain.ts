@@ -50,15 +50,19 @@ function readConfiguredGithubCopilotDomain(config?: OpenClawConfig): string | un
 
 /**
  * Resolve the GitHub Copilot host for this provider from (in priority order) the
- * `COPILOT_GITHUB_DOMAIN` env override, the persisted
- * `models.providers.github-copilot.params.githubDomain` config, then public
+ * host a bound credential was minted on, the `COPILOT_GITHUB_DOMAIN` env
+ * override, the persisted `models.providers.github-copilot.params.githubDomain` config, then public
  * `github.com`. The provider allowlist rejects unsafe values.
  */
 export function resolveGithubCopilotDomain(params?: {
   env?: NodeJS.ProcessEnv;
   explicit?: string;
+  bound?: string;
   config?: OpenClawConfig;
 }): string {
+  if (params?.bound) {
+    return normalizeGithubCopilotDomain(params.bound);
+  }
   const env = params?.env ?? process.env;
   const fromEnv = env.COPILOT_GITHUB_DOMAIN?.trim();
   if (fromEnv) {

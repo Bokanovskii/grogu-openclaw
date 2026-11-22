@@ -256,6 +256,11 @@ identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not
 change the model or its reasoning defaults.
 
+On the macOS host, the operator can read up to 20 recent timing records with
+`sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run turn-timings`.
+The command returns only the numeric timing fields. It prints nothing when no
+recent records are available.
+
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read
 the chat again to find the saved reply. This does not replay the stream or start

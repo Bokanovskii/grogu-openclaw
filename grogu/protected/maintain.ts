@@ -1,3 +1,4 @@
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { root } from "../../src/infra/fs-safe.js";
@@ -31,6 +32,69 @@ async function main() {
   }
   const configDir = path.dirname(configPath);
   const runtimePath = path.join(configDir, "protected.json");
+  if (action === "turn-timings" && arg === undefined && rest.length === 0) {
+    const file = await open(path.join(stateDir, "logs", "runtime.stdout.log"), "r");
+    try {
+      const size = (await file.stat()).size;
+      const length = Math.min(size, 1024 * 1024);
+      const bytes = Buffer.alloc(length);
+      const { bytesRead } = await file.read(bytes, 0, length, size - length);
+      const lines = bytes.subarray(0, bytesRead).toString("utf8").split("\n");
+      if (size > length) {
+        lines.shift();
+      }
+      lines.pop();
+      const fields = [
+        "admissionMs",
+        "providerRequestStartMs",
+        "firstProviderOutputMs",
+        "firstClientVisibleOutputMs",
+        "accessChecks",
+        "accessValidationMs",
+        "completionMs",
+      ] as const;
+      const records: string[] = [];
+      for (const line of lines) {
+        const prefix = "[protected-turn-timing] ";
+        if (!line.startsWith(prefix)) {
+          continue;
+        }
+        let value: unknown;
+        try {
+          value = JSON.parse(line.slice(prefix.length));
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            continue;
+          }
+          throw error;
+        }
+        if (!value || typeof value !== "object") {
+          continue;
+        }
+        const record = value as Record<string, unknown>;
+        if (
+          !fields.every(
+            (field) =>
+              record[field] === null ||
+              (typeof record[field] === "number" &&
+                Number.isFinite(record[field]) &&
+                record[field] >= 0),
+          )
+        ) {
+          continue;
+        }
+        records.push(
+          JSON.stringify(Object.fromEntries(fields.map((field) => [field, record[field]]))),
+        );
+      }
+      if (records.length > 0) {
+        process.stdout.write(`${records.slice(-20).join("\n")}\n`);
+      }
+    } finally {
+      await file.close();
+    }
+    return;
+  }
   if (
     action === "init" &&
     arg === "--deploy-json" &&
@@ -136,7 +200,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID.",
+      "Supported commands: init --deploy-json FILE, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, turn-timings.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

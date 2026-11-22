@@ -6,6 +6,7 @@ const types = new Map([
   [".css", "text/css; charset=utf-8"],
   [".webmanifest", "application/manifest+json"],
   [".svg", "image/svg+xml"],
+  [".png", "image/png"],
   [".woff2", "font/woff2"],
 ]);
 const headers = {
@@ -18,7 +19,14 @@ const headers = {
 };
 const asset = /^assets\/(?:[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.(?:js|css)|[A-Za-z0-9_-]+\.woff2)$/u;
 const publicAsset = /^request-access\/assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]+\.(?:js|css|woff2)$/u;
-const standalone = new Set(["sw.js", "manifest.webmanifest", "notebook.svg"]);
+const standalone = new Set([
+  "sw.js",
+  "manifest.webmanifest",
+  "notebook.svg",
+  "alcove-180.png",
+  "alcove-192.png",
+  "alcove-512.png",
+]);
 const readOptions = {
   symlinks: "reject",
   hardlinks: "reject",

@@ -36,6 +36,7 @@ import {
 } from "../../src/gateway/session-transcript-derived-readers.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import {
+  isTranscriptOnlyOpenClawAssistantMessage,
   OPENCLAW_DELIVERY_MIRROR_MODEL,
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
   OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
@@ -278,6 +279,7 @@ export function createProtectedChats(options: {
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
     let replyMessage: Record<string, unknown> | undefined;
+    const toolReplies: ProtectedMessage[] = [];
     let reasoning: string[] = [];
     let activity = new Map<string, ProtectedActivity>();
     let turnStartedAt: number | undefined;
@@ -393,6 +395,7 @@ export function createProtectedChats(options: {
         projections = projectToolResult(undefined, undefined);
         reply = undefined;
         replyMessage = undefined;
+        toolReplies.length = 0;
         reasoning = [];
         activity = new Map();
         const timestamp =
@@ -449,6 +452,22 @@ export function createProtectedChats(options: {
         messages.push(projected);
       }
       if (message.role === "assistant") {
+        if (message.stopReason === "toolUse" && text.trim()) {
+          toolReplies.push(projected);
+        } else if (
+          completedReply ||
+          (message.stopReason === "stop" &&
+            typeof provider === "string" &&
+            provider !== OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
+            message.api !== OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
+            !isTranscriptOnlyOpenClawAssistantMessage(message))
+        ) {
+          // A completed turn also settles its earlier visible tool-call fragments.
+          for (const toolReply of toolReplies) {
+            toolReply.status = "complete";
+          }
+          toolReplies.length = 0;
+        }
         if (reply) {
           delete reply.sources;
           delete reply.widgets;

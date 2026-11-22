@@ -146,6 +146,48 @@ export function createProtectedChats(options: {
       },
     );
   };
+  const updateMetadata = async (
+    authority: ProtectedChatAuthority,
+    id: string,
+    version: string,
+    patch: Partial<Pick<SessionEntry, "displayName" | "protectedAgentId">>,
+    conflict: ProtectedError,
+  ): Promise<ProtectedChatSummary> => {
+    const current = await readEntry(authority, id);
+    if (String(current.updatedAt) !== version) {
+      throw conflict;
+    }
+    let committed = false;
+    const entry = await applySessionEntryOperation(
+      scope(authority, id),
+      {
+        kind: "fields",
+        expected: {
+          sessionId: id,
+          createdVia: "plugin",
+          createdActorProfileId: authority.profileId,
+          updatedAt: current.updatedAt,
+        },
+        patch: { ...patch, updatedAt: Math.max(Date.now(), current.updatedAt + 1) },
+      },
+      {
+        workerGuard: { assertCurrent: authority.assertCurrent },
+        requireWriteSuccess: true,
+        onCommitted: () => {
+          committed = true;
+        },
+      },
+    );
+    authority.assertCurrent();
+    if (!entry) {
+      return missing();
+    }
+    check(authority, id, entry);
+    if (!committed) {
+      throw conflict;
+    }
+    return summary(entry);
+  };
   const list = async (authority: ProtectedChatAuthority) => {
     authority.assertCurrent();
     const entries = await readSessionEntrySummariesInWorker({ agentId, env, storePath });
@@ -579,52 +621,31 @@ export function createProtectedChats(options: {
       version: string,
       selectedAgentId: string,
     ): Promise<ProtectedChatSummary> {
-      const current = await readEntry(authority, id);
-      if (String(current.updatedAt) !== version) {
-        throw new ProtectedError(
+      return updateMetadata(
+        authority,
+        id,
+        version,
+        { protectedAgentId: selectedAgentId },
+        new ProtectedError(
           409,
           "version_conflict",
           "This chat changed. Reload before changing its agent.",
-        );
-      }
-      const expectedUpdatedAt = current.updatedAt;
-      let committed = false;
-      const entry = await applySessionEntryOperation(
-        scope(authority, id),
-        {
-          kind: "fields",
-          expected: {
-            sessionId: id,
-            createdVia: "plugin",
-            createdActorProfileId: authority.profileId,
-            updatedAt: expectedUpdatedAt,
-          },
-          patch: {
-            protectedAgentId: selectedAgentId,
-            updatedAt: Math.max(Date.now(), expectedUpdatedAt + 1),
-          },
-        },
-        {
-          workerGuard: { assertCurrent: authority.assertCurrent },
-          requireWriteSuccess: true,
-          onCommitted: () => {
-            committed = true;
-          },
-        },
+        ),
       );
-      authority.assertCurrent();
-      if (!entry) {
-        return missing();
-      }
-      check(authority, id, entry);
-      if (!committed) {
-        throw new ProtectedError(
-          409,
-          "version_conflict",
-          "This chat changed. Reload before changing its agent.",
-        );
-      }
-      return summary(entry);
+    },
+    async rename(
+      authority: ProtectedChatAuthority,
+      id: string,
+      version: string,
+      title: string,
+    ): Promise<ProtectedChatSummary> {
+      return updateMetadata(
+        authority,
+        id,
+        version,
+        { displayName: title },
+        new ProtectedError(412, "version_conflict", "This chat changed. Reload before renaming."),
+      );
     },
     async delete(
       authority: ProtectedChatAuthority,

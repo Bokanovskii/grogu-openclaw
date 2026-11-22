@@ -195,6 +195,7 @@ export function createProtectedHttp(options: {
   onRemoveSubject?: (subject: string) => void;
   onPolicyChanged?: () => void;
   isPolicyInFlight?: (id: string) => boolean;
+  getPolicyStatus?: () => Promise<{ blocked: boolean; blockedPersonId?: string }>;
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
   answerAccessProof?: (request: Request) => Promise<Response>;
@@ -574,9 +575,9 @@ export function createProtectedHttp(options: {
         }
         await revalidate();
         const requests = await listProtectedAccessRequests(options.stateDir);
-        const { blocked: policyBlocked, blockedPersonId } = await listPendingProtectedPolicy(
-          options.stateDir,
-        );
+        const { blocked: policyBlocked, blockedPersonId } = await (options.getPolicyStatus
+          ? options.getPolicyStatus()
+          : listPendingProtectedPolicy(options.stateDir));
         assertCurrent();
         return json({ requests, policyBlocked, blockedPersonId });
       }
@@ -1554,6 +1555,33 @@ export function createProtectedHttp(options: {
           admitStorage?.deletedChat(profile.id, id);
           await revalidate();
           return noContent();
+        } finally {
+          mutations.delete(id);
+        }
+      }
+      if (rest === "title" && method === "PATCH") {
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(428, "version_required", "Reload the chat before renaming.");
+        }
+        const data = await body(request);
+        if (typeof data.title !== "string" || !data.title.trim() || data.title.length > 160) {
+          throw new ProtectedError(
+            422,
+            "invalid_title",
+            "Enter a chat title of at most 160 characters.",
+          );
+        }
+        if (runs.has(id) || mutations.has(id)) {
+          throw new ProtectedError(409, "busy", "Stop the current work before renaming.");
+        }
+        mutations.add(id);
+        try {
+          await revalidate();
+          await chats.rename(authority, id, version, data.title.trim());
+          const { chat } = await readChat(id);
+          await revalidate();
+          return json({ chat });
         } finally {
           mutations.delete(id);
         }

@@ -120,6 +120,7 @@ void test("policy updates serialize and never publish a stale approval", async (
   assert.ok(person);
   assert.equal(controller.isInFlight(person.id), true);
   assert.equal((await listPendingProtectedPolicy(stateDir)).blocked, true);
+  assert.equal((await controller.getStatus()).blocked, false);
   assert.equal(
     (await readProtectedAccessRequest(stateDir, submitted.receipt))?.policyState,
     "pending",
@@ -181,6 +182,10 @@ void test("uncertain policy writes block later updates until an owner retries", 
   const blocked = await listPendingProtectedPolicy(stateDir);
   assert.equal(blocked.blocked, true);
   assert.ok(blocked.blockedPersonId);
+  assert.deepEqual(await controller.getStatus(), {
+    blocked: true,
+    blockedPersonId: blocked.blockedPersonId,
+  });
   const retryStarted = createDeferredCore<void>();
   controller = createProtectedPolicySync(stateDir, async () => {
     retryStarted.resolve();

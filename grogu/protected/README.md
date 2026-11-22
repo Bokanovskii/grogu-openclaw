@@ -364,11 +364,14 @@ Subagent task and terminal-result text are excluded from this encryption path:
 the companion transient-run lifecycle repair removes their durable retention
 and keeps only cleanup identity in `subagent_runs`.
 
-Full-text transcript search is disabled for protected encrypted stores because
-its index would create a readable copy. Search reports this limit and directs
-agents to list sessions and read their history instead. Session reference lookup
-and deletion safety continue to use the non-content projection. User-requested
-exports may be readable to the user who requested them.
+Protected transcript search decrypts a bounded window in the existing reader
+worker. It never saves a plaintext search index. Each search reads at most 4,000
+recent active message rows and 4 MiB of transcript payloads from permitted chats.
+Matches return newest first, without full-text relevance scores. If the scan
+reaches a limit, `truncated: true` signals that older matches can be missing.
+Narrow to one chat or use `sessions_history` to read older text.
+Session reference lookup and deletion safety still use the non-content
+projection. User-requested exports can be readable to the user who requested them.
 
 The forward migration verifies encrypted read-back before replacing plaintext
 user files. It keeps only a transient encrypted staging copy, atomically
@@ -434,7 +437,7 @@ presentation hints for the client.
   working. Chats saved before agent selection was recorded still use Travel.
 
 Shared tools are `web_search`, `web_fetch`, `show_widget`, `sessions_list`,
-`sessions_history`, and `sessions_send`. They reach only the
+`sessions_search`, `sessions_history`, and `sessions_send`. They reach only the
 signed-in member's own chats, the public web, and widgets in the current chat.
 Session tools recheck the profile and exact chat incarnation, so another
 member's chats are unavailable. `sessions_send` can steer only an active

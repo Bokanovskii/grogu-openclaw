@@ -167,6 +167,7 @@ export const ProtectedModelSchema = node({
   provider: ProtectedProviderSchema,
   id,
   label: Type.String(),
+  vendor: Type.Optional(Type.String()),
   contextWindow: Type.Optional(Type.Integer({ minimum: 1 })),
   thinking: Type.Optional(
     node({

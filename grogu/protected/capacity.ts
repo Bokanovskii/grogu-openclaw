@@ -35,7 +35,6 @@ export type StorageAdmission = {
     next: ProtectedAutomationDraft,
     updated: boolean,
   ): void;
-  deletedAutomations(records: readonly ProtectedAutomationStorageUsage["entries"][number][]): void;
   assertResult(): void;
   files(files: AuthorizedUserFiles): AuthorizedUserFiles;
 };

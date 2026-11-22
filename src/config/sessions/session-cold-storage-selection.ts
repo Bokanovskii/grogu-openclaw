@@ -16,6 +16,7 @@ import { collectSessionStateIdsForEntry } from "./session-accessor.sqlite-refere
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
 import { readSessionColdStorageProtection } from "./session-cold-storage-eligibility.js";
 import { readSessionColdTranscript } from "./session-cold-storage-state.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import { collectSessionAdmissionReferences } from "./session-history-eviction-candidates.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 
@@ -134,7 +135,10 @@ export function readSessionAdmissionProtectionKeys(
   const db = getNodeSqliteKysely<DB>(database.db);
   for (const row of iterateSqliteQuerySync(
     database.db,
-    db.selectFrom("session_nodes").select(["session_key", "current_session_id", "entry_json"]),
+    db
+      .selectFrom("session_nodes")
+      .select(["session_key", "current_session_id"])
+      .select(sessionEntryJsonSql(database.db).as("entry_json")),
   )) {
     const entry = parseSessionEntryJson(row);
     if (

@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ProtectedCredential } from "@openclaw/gateway-protocol/protected";
+import {
+  bindGithubCopilotToken,
+  DEFAULT_GITHUB_COPILOT_DOMAIN,
+} from "../../src/plugin-sdk/github-copilot-domain.js";
 import { ProtectedError } from "./errors.js";
 
 export type RelayProvider = "github-copilot" | "openai";
@@ -140,7 +144,14 @@ export function createProviderRelay() {
               throw providerFailure();
             }
             assertCurrent();
-            flow.credential = { accessToken: result.accessToken };
+            // The relay always signs in on public github.com; bind the token so an
+            // ambient enterprise tenant cannot redirect it at discovery or inference.
+            flow.credential = {
+              accessToken: bindGithubCopilotToken(
+                result.accessToken,
+                DEFAULT_GITHUB_COPILOT_DOMAIN,
+              ),
+            };
           } else {
             const { loginOpenAICodexDeviceCode } = await import("../../extensions/openai/api.js");
             const result = await loginOpenAICodexDeviceCode({

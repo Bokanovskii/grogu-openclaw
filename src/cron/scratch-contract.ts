@@ -1,6 +1,10 @@
 /** Publicly stable limits for private per-job scratch content. */
 export const CRON_JOB_SCRATCH_MAX_BYTES = 256 * 1024;
 
+// OCSEAL1 text uses UTF-16LE, a 96-byte envelope, base64, and an 8-byte prefix.
+export const CRON_JOB_SCRATCH_PROTECTED_MAX_STORED_BYTES =
+  8 + 4 * Math.ceil((CRON_JOB_SCRATCH_MAX_BYTES * 2 + 96) / 3);
+
 type CronJobScratch = {
   content: string;
   revision: number;

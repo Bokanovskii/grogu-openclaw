@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { acpParentStreamEventStorageContext } from "../../agents/subagents/spawn/acp-parent-stream-storage.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -8,6 +9,12 @@ import {
 } from "../../infra/kysely-sync.js";
 import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import {
+  hasSqliteStorageValueEncryption,
+  openSqliteStorageText,
+  sealSqliteStorageText,
+} from "../../storage/sqlite-encryption.js";
+import { trajectoryRuntimeEventStorageContext } from "../../trajectory/storage-context.js";
 import { publishSessionEntryCacheInvalidation } from "./session-accessor.sqlite-entry-cache.js";
 import type {
   SqliteSessionGenerationClaim,
@@ -26,7 +33,11 @@ import {
   reconcileSessionTranscriptIndexInTransaction,
 } from "./session-transcript-index.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
-import { transcriptEventJsonSql, type TranscriptPayloadRecord } from "./transcript-payload.js";
+import {
+  createTranscriptEventInserter,
+  transcriptEventJsonSql,
+  type TranscriptPayloadRecord,
+} from "./transcript-payload.js";
 
 export function readSqliteSessionGenerationWindows(
   database: Pick<OpenClawAgentDatabase, "db">,
@@ -69,22 +80,42 @@ function readSqliteSessionGenerationRows(
         .selectAll()
         .where("session_id", "=", sessionId),
     ),
-    trajectoryEvents: iterateSqliteQuerySync(
-      database.db,
-      db
-        .selectFrom("trajectory_runtime_events")
-        .selectAll()
-        .where("session_id", "=", sessionId)
-        .orderBy("seq"),
+    trajectoryEvents: Array.from(
+      iterateSqliteQuerySync(
+        database.db,
+        db
+          .selectFrom("trajectory_runtime_events")
+          .selectAll()
+          .where("session_id", "=", sessionId)
+          .orderBy("seq"),
+      ),
+      (row) => ({
+        ...row,
+        event_json: openSqliteStorageText(
+          database.db,
+          row.event_json,
+          trajectoryRuntimeEventStorageContext(row.session_id, row.seq),
+        ),
+      }),
     ),
-    parentStreamEvents: iterateSqliteQuerySync(
-      database.db,
-      db
-        .selectFrom("acp_parent_stream_events")
-        .selectAll()
-        .where("session_id", "=", sessionId)
-        .orderBy("run_id")
-        .orderBy("seq"),
+    parentStreamEvents: Array.from(
+      iterateSqliteQuerySync(
+        database.db,
+        db
+          .selectFrom("acp_parent_stream_events")
+          .selectAll()
+          .where("session_id", "=", sessionId)
+          .orderBy("run_id")
+          .orderBy("seq"),
+      ),
+      (row) => ({
+        ...row,
+        event_json: openSqliteStorageText(
+          database.db,
+          row.event_json,
+          acpParentStreamEventStorageContext(row.session_id, row.run_id, row.seq),
+        ),
+      }),
     ),
   };
 }
@@ -276,39 +307,55 @@ export function copySqliteSessionGenerationRows(params: {
     .selectFrom("transcript_events")
     .where("session_id", "=", params.sessionId)
     .orderBy("seq");
-  const insertEvent = prepareSqliteQuerySync<
-    TranscriptPayloadRecord & { seq: number; created_at: number }
-  >(params.destination.db, (parameter) =>
-    destinationDb.insertInto("transcript_events").values({
-      session_id: params.sessionId,
-      seq: parameter((row) => row.seq),
-      created_at: parameter((row) => row.created_at),
-      event_json: parameter((row) => row.event_json),
-      event_zstd: parameter((row) => row.event_zstd),
-      event_utf8_bytes: parameter((row) => row.event_utf8_bytes),
-      navigation_json: parameter((row) => row.navigation_json),
-    }),
-  );
-  // UTF-16 destinations retain native TEXT byte accounting and JSON semantics.
-  // UTF-8 stores can preserve encoded payloads without another codec round trip.
-  const destinationEncoding = params.destination.db.prepare("PRAGMA encoding").get()?.encoding;
-  if (destinationEncoding !== "UTF-8") {
+  if (hasSqliteStorageValueEncryption(params.destination.db)) {
+    const insertEvent = createTranscriptEventInserter(params.destination.db, params.sessionId);
     for (const row of iterateSqliteQuerySync(
       params.source.db,
       eventQuery
-        .select(["session_id", "seq", "created_at"])
+        .select(["seq", "created_at"])
         .select(transcriptEventJsonSql(params.source.db).as("event_json")),
     )) {
       insertEvent({
-        ...row,
-        event_zstd: null,
-        event_utf8_bytes: null,
-        navigation_json: null,
+        seq: row.seq,
+        eventJson: row.event_json,
+        createdAt: row.created_at,
       });
     }
   } else {
-    for (const row of iterateSqliteQuerySync(params.source.db, eventQuery.selectAll())) {
-      insertEvent(row);
+    const insertEvent = prepareSqliteQuerySync<
+      TranscriptPayloadRecord & { seq: number; created_at: number }
+    >(params.destination.db, (parameter) =>
+      destinationDb.insertInto("transcript_events").values({
+        session_id: params.sessionId,
+        seq: parameter((row) => row.seq),
+        created_at: parameter((row) => row.created_at),
+        event_json: parameter((row) => row.event_json),
+        event_zstd: parameter((row) => row.event_zstd),
+        event_utf8_bytes: parameter((row) => row.event_utf8_bytes),
+        navigation_json: parameter((row) => row.navigation_json),
+      }),
+    );
+    // UTF-16 destinations retain native TEXT byte accounting and JSON semantics.
+    // UTF-8 stores can preserve encoded payloads without another codec round trip.
+    const destinationEncoding = params.destination.db.prepare("PRAGMA encoding").get()?.encoding;
+    if (destinationEncoding !== "UTF-8") {
+      for (const row of iterateSqliteQuerySync(
+        params.source.db,
+        eventQuery
+          .select(["session_id", "seq", "created_at"])
+          .select(transcriptEventJsonSql(params.source.db).as("event_json")),
+      )) {
+        insertEvent({
+          ...row,
+          event_zstd: null,
+          event_utf8_bytes: null,
+          navigation_json: null,
+        });
+      }
+    } else {
+      for (const row of iterateSqliteQuerySync(params.source.db, eventQuery.selectAll())) {
+        insertEvent(row);
+      }
     }
   }
   // Preserve recorded idempotency ownership, which cannot be inferred from the JSON.
@@ -336,13 +383,27 @@ export function copySqliteSessionGenerationRows(params: {
   for (const row of trajectoryEvents) {
     executeSqliteQuerySync(
       params.destination.db,
-      destinationDb.insertInto("trajectory_runtime_events").values(row),
+      destinationDb.insertInto("trajectory_runtime_events").values({
+        ...row,
+        event_json: sealSqliteStorageText(
+          params.destination.db,
+          row.event_json,
+          trajectoryRuntimeEventStorageContext(row.session_id, row.seq),
+        ),
+      }),
     );
   }
   for (const row of parentStreamEvents) {
     executeSqliteQuerySync(
       params.destination.db,
-      destinationDb.insertInto("acp_parent_stream_events").values(row),
+      destinationDb.insertInto("acp_parent_stream_events").values({
+        ...row,
+        event_json: sealSqliteStorageText(
+          params.destination.db,
+          row.event_json,
+          acpParentStreamEventStorageContext(row.session_id, row.run_id, row.seq),
+        ),
+      }),
     );
   }
   // Cross-store repair must atomically finish copied projections before publishing the new owner.

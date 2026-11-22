@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { SessionCanonicalKeyMigrationRequiredError } from "./session-canonical-key-error.js";
 import { parseSqliteSessionEntryRecord } from "./session-entry-json.js";
@@ -13,6 +14,7 @@ export type CanonicalSessionValidationRow = {
   current_session_id: string;
   entry_valid: number;
   entry_json: string;
+  protected_entry_json?: string | null;
   parent_session_key: string | null;
   spawned_by: string | null;
   fork_source_session_key: string | null;
@@ -31,13 +33,19 @@ export function canonicalSessionKeyMigrationRequiredError(
 export function validateCanonicalSessionRow(
   row: CanonicalSessionValidationRow,
   mode: "admission" | "read" = "admission",
+  database?: DatabaseSync,
 ): SessionEntry | undefined {
   const record =
     row.entry_valid === 1 || (mode === "read" && row.entry_valid === 0)
-      ? parseSqliteSessionEntryRecord({
-          entry_json: row.entry_json,
-          current_session_id: row.current_session_id,
-        })
+      ? parseSqliteSessionEntryRecord(
+          {
+            entry_json: row.entry_json,
+            protected_entry_json: row.protected_entry_json,
+            current_session_id: row.current_session_id,
+            session_key: row.session_key,
+          },
+          database,
+        )
       : null;
   return validateCanonicalSessionRowEntry(
     row,

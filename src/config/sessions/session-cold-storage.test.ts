@@ -728,6 +728,67 @@ describe("cold transcript storage workers", () => {
     },
   );
 
+  it("stores protected cold archives as encrypted SQLite blobs and restores them", async () => {
+    const root = tempDirs.make("openclaw-protected-cold-");
+    const stateDir = path.join(root, "state");
+    const storePath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const keyPath = path.join(root, "storage-key");
+    const priorStateDir = process.env.OPENCLAW_STATE_DIR;
+    const priorKeyPath = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(keyPath, Buffer.alloc(32, 0x52), { mode: 0o600 });
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+    await closeOpenClawStateDatabaseAsync();
+    databasePaths.push(storePath);
+    try {
+      const fixture = await createSessionColdStorageFixture(storePath);
+      const protectedBefore = fixture.snapshot();
+      const coldDirectory = path.dirname(
+        resolveSessionColdArchivePath(storePath, `${"0".repeat(64)}.jsonl.zst`),
+      );
+      await fs.mkdir(path.dirname(coldDirectory), { recursive: true });
+      await fs.writeFile(coldDirectory, "no plaintext staging");
+      await expect(
+        runSessionColdStorageMaintenance({
+          config: maintenanceConfig(storePath),
+        }),
+      ).resolves.toEqual({ archivedTranscripts: 1, externalizedTranscripts: 0 });
+      const descriptor = readSessionColdTranscript(fixture.database(), historicalId);
+      expect(descriptor?.storage).toBe("sqlite");
+      const archive = fixture
+        .database()
+        .prepare("SELECT archive_blob FROM session_transcript_cold_archives WHERE session_id = ?")
+        .get(historicalId);
+      if (!descriptor || !(archive?.archive_blob instanceof Uint8Array)) {
+        throw new Error("Protected transcript archive was not stored in SQLite");
+      }
+      const archiveBytes = Buffer.from(archive.archive_blob);
+      expect(archiveBytes.subarray(0, 8).toString("utf8")).toBe("OCSEAL1\n");
+      expect(archiveBytes.includes(Buffer.from("Preserved response"))).toBe(false);
+      const archivePath = resolveSessionColdArchivePath(storePath, descriptor.archive_name);
+      expect(path.dirname(archivePath)).toBe(coldDirectory);
+      expect(await fs.readFile(coldDirectory, "utf8")).toBe("no plaintext staging");
+      await restoreSessionColdTranscript(fixture.scope);
+      expect(fixture.snapshot()).toEqual(protectedBefore);
+      expect(JSON.stringify(transcriptRows(fixture, historicalId))).not.toContain(
+        "Preserved response",
+      );
+    } finally {
+      await closeOpenClawStateDatabaseAsync();
+      if (priorStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = priorStateDir;
+      }
+      if (priorKeyPath === undefined) {
+        delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+      } else {
+        process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = priorKeyPath;
+      }
+    }
+  });
+
   it("keeps recently active and running current transcripts hot", async () => {
     const fixture = await createFixture();
     const config = maintenanceConfig(fixture.scope.storePath);

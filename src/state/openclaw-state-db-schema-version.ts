@@ -14,13 +14,23 @@ import {
   createNewerSqliteSchemaVersionError,
   readSqliteUserVersion,
 } from "../infra/sqlite-user-version.js";
+import {
+  isSqliteStorageValueEncryptionStrict,
+  setSqliteStorageValueEncryptionStrict,
+} from "../storage/sqlite-encryption.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import { normalizeOpenClawStateSchemaReadError } from "./openclaw-state-db-schema-migration-required.js";
 import type { DB } from "./openclaw-state-db.generated.js";
+import {
+  PROTECTED_SHARED_STATE_SCHEMA_VERSION,
+  PROTECTED_SHARED_STATE_ENCRYPTION_TABLE,
+  readProtectedSharedStateMarker,
+} from "./openclaw-state-protected-marker.js";
 
 // Read-only clients need schema admission without loading updater publication policy.
 export const CONTENT_VERSION_KEY = "state.schema.contentVersion";
+export { PROTECTED_SHARED_STATE_ENCRYPTION_TABLE } from "./openclaw-state-protected-marker.js";
 type StateSchemaVersionDatabase = Pick<DB, "config_machine_state">;
 export type StateSchemaContentVersionRowReader = (
   db: DatabaseSync,
@@ -98,6 +108,12 @@ function parseContentVersion(valueJson: string | null | undefined): number {
 /** Valid only for the unchanged read snapshot that produced these versions. */
 export type StateSchemaVersionFacts = { userVersion: number; contentVersion: number };
 
+export function getAdmittedStateSchemaVersion(db: DatabaseSync): number {
+  return isSqliteStorageValueEncryptionStrict(db)
+    ? PROTECTED_SHARED_STATE_SCHEMA_VERSION
+    : OPENCLAW_STATE_SCHEMA_VERSION;
+}
+
 export function assertSupportedStateSchemaVersion(
   db: DatabaseSync,
   pathname: string,
@@ -109,17 +125,48 @@ export function assertSupportedStateSchemaVersion(
       prepared?.userVersion ??
       getAdmittedSqliteSchemaFacts(db)?.userVersion ??
       readSqliteUserVersion(db);
+    if (
+      isSqliteStorageValueEncryptionStrict(db) &&
+      userVersion < PROTECTED_SHARED_STATE_SCHEMA_VERSION
+    ) {
+      throw new Error(
+        `Protected shared-state database ${pathname} changed its schema version after admission.`,
+      );
+    }
+    if (
+      userVersion === PROTECTED_SHARED_STATE_SCHEMA_VERSION &&
+      !isSqliteStorageValueEncryptionStrict(db)
+    ) {
+      if (!tableExists(db, PROTECTED_SHARED_STATE_ENCRYPTION_TABLE)) {
+        throw createNewerSqliteSchemaVersionError(
+          "OpenClaw state database",
+          pathname,
+          userVersion,
+          OPENCLAW_STATE_SCHEMA_VERSION,
+        );
+      }
+      if (readProtectedSharedStateMarker(db).cleanupPending) {
+        throw new Error(
+          "Protected shared-state cleanup is pending; complete startup maintenance before opening the database.",
+        );
+      }
+      setSqliteStorageValueEncryptionStrict(db, true);
+    }
+    const supportedVersion =
+      userVersion === PROTECTED_SHARED_STATE_SCHEMA_VERSION
+        ? PROTECTED_SHARED_STATE_SCHEMA_VERSION
+        : OPENCLAW_STATE_SCHEMA_VERSION;
     const contentVersion =
       prepared?.contentVersion ??
-      (userVersion > OPENCLAW_STATE_SCHEMA_VERSION
+      (userVersion > supportedVersion
         ? userVersion
         : readStateSchemaContentVersion(db, userVersion, readRow));
-    if (contentVersion > OPENCLAW_STATE_SCHEMA_VERSION) {
+    if (contentVersion > supportedVersion) {
       throw createNewerSqliteSchemaVersionError(
         "OpenClaw state database",
         pathname,
         contentVersion,
-        OPENCLAW_STATE_SCHEMA_VERSION,
+        supportedVersion,
       );
     }
     return userVersion;

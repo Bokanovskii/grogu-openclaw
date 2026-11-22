@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
 import { getInvalidPersistedCronJobReason } from "../../../cron/persisted-shape.js";
+import { openCronJobValue } from "../../../cron/store/job-encryption.js";
 import { getCronStoreKysely } from "../../../cron/store/schema.js";
 import { executeSqliteQuerySync } from "../../../infra/kysely-sync.js";
 import type { PluginDoctorCronJob } from "../../../plugins/doctor-contract-module.js";
@@ -19,7 +20,12 @@ export function inspectCronOwnerRowsForDoctor(db: DatabaseSync, storeKey: string
       .where("store_key", "=", storeKey)
       .orderBy("sort_order")
       .orderBy("job_id"),
-  ).rows;
+  ).rows.map((row) => ({
+    job_id: row.job_id,
+    agent_id: row.agent_id,
+    sort_order: row.sort_order,
+    job_json: openCronJobValue(db, storeKey, row.job_id, "job_json", row.job_json),
+  }));
 }
 
 /** Raw inspection deliberately bypasses runtime loading and its repair/filter policies. */
@@ -36,8 +42,16 @@ export function inspectCronRowsForDoctor(db: DatabaseSync): PluginDoctorCronJob[
       .orderBy("sort_order")
       .orderBy("job_id"),
   ).rows.map((row) => {
-    const definition = safeParseJsonRecord(row.job_json) ?? null;
-    const state = safeParseJsonRecord(row.state_json);
+    const definitionJson = openCronJobValue(
+      db,
+      row.store_key,
+      row.job_id,
+      "job_json",
+      row.job_json,
+    );
+    const stateJson = openCronJobValue(db, row.store_key, row.job_id, "state_json", row.state_json);
+    const definition = safeParseJsonRecord(definitionJson) ?? null;
+    const state = safeParseJsonRecord(stateJson);
     const invalidReason = !definition
       ? "invalid-definition-json"
       : definition.id !== row.job_id
@@ -51,7 +65,7 @@ export function inspectCronRowsForDoctor(db: DatabaseSync): PluginDoctorCronJob[
       storeKey: row.store_key,
       id: row.job_id,
       sortOrder: row.sort_order,
-      definitionJson: row.job_json,
+      definitionJson,
       definition,
     };
     if (invalidReason) {

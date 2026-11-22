@@ -1,12 +1,23 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  migrateAuthorizedUserFiles,
+  verifyAuthorizedUserFiles,
+} from "../../src/infra/authorized-user-files.js";
 import { protectedResearchAgent } from "./agents.js";
+import { configureProtectedRuntimeWorkers, ProtectedWorkerBuildError } from "./runtime-workers.js";
 import {
   parseRuntimeSettings,
+  protectedMaxFileBytes,
   protectedOpenClawConfig,
   readSettingsJson,
   sparky,
 } from "./settings.js";
+import {
+  requireProtectedStorageEncryption,
+  resolveProtectedStorageKeyFile,
+} from "./storage-key.js";
 import type { ProtectedModel } from "./turns.js";
 
 const anthropic: ProtectedModel = {
@@ -41,6 +52,14 @@ async function main() {
   ) {
     throw new Error("Protected runtime requires isolated process state and an unprivileged user");
   }
+  const serviceRoot = fileURLToPath(new URL("../..", import.meta.url));
+  if (!existsSync(path.join(serviceRoot, "extensions", "duckduckgo", "openclaw.plugin.json"))) {
+    throw new ProtectedStartupError(
+      "The runtime archive is missing extensions/duckduckgo, which web search needs. Repackage it.",
+    );
+  }
+  resolveProtectedStorageKeyFile();
+  await configureProtectedRuntimeWorkers(serviceRoot);
   const { acquireProtectedStateOwner } = await import("./state-owner.js");
   const stateOwner = await acquireProtectedStateOwner(stateDir);
   if (!stateOwner) {
@@ -59,9 +78,30 @@ async function main() {
   await stateRoot.mkdir("users", { private: true });
   await stateRoot.mkdir("workspace", { private: true });
   const usersRoot = await root(path.join(stateRoot.rootReal, "users"));
+  const storageEncryption = requireProtectedStorageEncryption();
+  try {
+    await verifyAuthorizedUserFiles({
+      usersRoot,
+      assertCurrent: () => stateOwner.assertCurrent(),
+      maxBytes: protectedMaxFileBytes,
+      encryption: storageEncryption,
+    });
+    const { prepareProtectedSharedState } = await import("./state-worker-context.js");
+    await prepareProtectedSharedState(stateDir, () => stateOwner.assertCurrent());
+    const { admitProtectedPhysicalAgentStorage } = await import("./agent-storage.js");
+    admitProtectedPhysicalAgentStorage(() => stateOwner.assertCurrent());
+    await migrateAuthorizedUserFiles({
+      usersRoot,
+      assertCurrent: () => stateOwner.assertCurrent(),
+      maxBytes: protectedMaxFileBytes,
+      encryption: storageEncryption,
+    });
+  } finally {
+    storageEncryption.dispose();
+  }
   const workspaceDir = path.join(stateRoot.rootReal, "workspace");
   const agentDir = path.join(stateRoot.rootReal, "agents", "protected", "agent");
-  const config = protectedOpenClawConfig(stateRoot.rootReal);
+  const config = protectedOpenClawConfig(stateRoot.rootReal, serviceRoot);
   const { publishConfiguredModelRuntimeSnapshots } =
     await import("../../src/gateway/server-startup-model-runtime.js");
   await publishConfiguredModelRuntimeSnapshots({
@@ -147,7 +187,7 @@ async function main() {
       },
     },
     maxChatsPerUser: 100,
-    maxFileBytes: 2 * 1024 * 1024,
+    maxFileBytes: protectedMaxFileBytes,
     storageLimits: settings.storageLimits,
     agentExtensions: [protectedResearchAgent],
     verifyIdentity,
@@ -204,8 +244,15 @@ async function main() {
 
 void main().catch((error: unknown) => {
   releaseStateOwner();
+  const storageFailure =
+    error instanceof Error &&
+    /Protected storage key|Protected storage encryption|is encrypted but its key is unavailable|could not be opened with the configured storage key|invalid encryption key check/iu.test(
+      error.message,
+    );
   process.stderr.write(
-    `${error instanceof ProtectedStartupError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
+    storageFailure
+      ? "Protected runtime initialization failed. Restore the original storage key or provision it before startup; never replace a lost key.\n"
+      : `${error instanceof ProtectedStartupError || error instanceof ProtectedWorkerBuildError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
   );
   process.exitCode = 1;
 });

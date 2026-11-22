@@ -7,6 +7,7 @@ const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
 export const ProtectedAgentToolSchema = Type.Union([
+  Type.Literal("web_search"),
   Type.Literal("web_fetch"),
   Type.Literal("show_widget"),
   Type.Literal("sessions_list"),
@@ -22,6 +23,29 @@ export const ProtectedAgentSchema = node({
 export const ProtectedAgentCatalogSchema = node({
   defaultAgentId: protectedAgentId,
   agents: Type.Array(ProtectedAgentSchema),
+});
+// agents-v1 shapes are sent only to requests that list that capability; the legacy shapes above stay exact.
+export const ProtectedAgentSkillSchema = node({
+  id: protectedAgentId,
+  name: Type.String({ minLength: 1, maxLength: 80 }),
+  description: Type.String({ minLength: 1, maxLength: 240 }),
+});
+export const ProtectedAgentPresentationSchema = node({
+  icon: Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" }),
+  reasoningIndicator: Type.Union([Type.Literal("grogu-eater"), Type.Literal("standard")]),
+  widgetWidth: Type.Union([Type.Literal("standard"), Type.Literal("wide")]),
+});
+export const ProtectedAgentV1Schema = node({
+  ...ProtectedAgentSchema.properties,
+  tools: Type.Array(Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), { uniqueItems: true }),
+  selectable: Type.Boolean(),
+  examplePrompts: Type.Array(Type.String({ minLength: 1, maxLength: 160 }), { maxItems: 4 }),
+  skills: Type.Array(ProtectedAgentSkillSchema, { maxItems: 8 }),
+  presentation: ProtectedAgentPresentationSchema,
+});
+export const ProtectedAgentCatalogV1Schema = node({
+  defaultAgentId: protectedAgentId,
+  agents: Type.Array(ProtectedAgentV1Schema),
 });
 export const ProtectedAgentSelectionSchema = node({
   selectedAgentId: protectedAgentId,
@@ -161,8 +185,19 @@ export const ProtectedModelSchema = node({
   ),
 });
 export const ProtectedModelsSchema = node({ models: Type.Array(ProtectedModelSchema) });
+export const ProtectedProfileIconSchema = Type.Union([
+  node({ kind: Type.Literal("emoji"), emoji: Type.String({ minLength: 1, maxLength: 32 }) }),
+  node({
+    kind: Type.Literal("image"),
+    url: Type.String({
+      pattern: "^/api/protected/v1/people/[A-Za-z0-9_.:%-]+/icon\\?v=[A-Za-z0-9_-]{1,128}$",
+    }),
+  }),
+]);
+const profileIconField = Type.Union([ProtectedProfileIconSchema, Type.Null()]);
+const profileSetupFields = { setupRequired: Type.Boolean(), icon: profileIconField };
 export const ProtectedMeSchema = node({
-  user: node({ id, displayName: Type.String() }),
+  user: node({ id, displayName: Type.String(), ...profileSetupFields }),
   disclosure: Type.String(),
   models: Type.Array(ProtectedModelSchema),
   capabilities: node({
@@ -192,6 +227,9 @@ export const ProtectedAutomationScheduleSchema = Type.Union([
     tz: Type.String({ minLength: 1, maxLength: 64 }),
   }),
 ]);
+export const ProtectedAutomationIdSchema = Type.String({
+  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+});
 export const ProtectedAutomationCronCatalogSchema = node({
   format: Type.Literal("5-field"),
   repeats: Type.Array(
@@ -209,7 +247,7 @@ export const ProtectedAutomationCronCatalogSchema = node({
     repeatedLocalTime: Type.Literal("first"),
   }),
 });
-export const ProtectedAutomationCatalogSchema = node({
+const protectedAutomationCatalogFields = {
   capabilities: node({
     automations: ProtectedAutomationCapabilitiesSchema,
   }),
@@ -237,6 +275,11 @@ export const ProtectedAutomationCatalogSchema = node({
     whenToNotifyBytes: Type.Integer({ minimum: 1 }),
     doneWhenCodeUnits: Type.Integer({ minimum: 1 }),
   }),
+};
+export const ProtectedAutomationCatalogSchema = node(protectedAutomationCatalogFields);
+export const ProtectedAutomationCatalogV1Schema = node({
+  ...protectedAutomationCatalogFields,
+  agents: Type.Array(ProtectedAgentV1Schema),
 });
 const protectedAutomationDraftFields = {
   name: Type.String({ minLength: 1, maxLength: 80, pattern: "\\S" }),
@@ -264,11 +307,12 @@ export const ProtectedAutomationPatchRequestSchema = node({
   model: Type.Optional(protectedAutomationDraftFields.model),
   thinking: Type.Optional(Type.Union([ProtectedThinkLevelSchema, Type.Null()])),
   schedule: Type.Optional(ProtectedAutomationScheduleSchema),
+  enabled: Type.Optional(Type.Boolean()),
 });
 export const ProtectedAutomationRecordSchema = node({
   ...protectedAutomationDraftFields,
   thinking: ProtectedThinkLevelSchema,
-  id,
+  id: ProtectedAutomationIdSchema,
   version: Type.String({ minLength: 1, maxLength: 128 }),
   enabled: Type.Boolean(),
   state: Type.Union([Type.Literal("active"), Type.Literal("paused")]),
@@ -308,13 +352,24 @@ export const ProtectedDirectorySettingsSchema = node({
   description: Type.String({ maxLength: 140 }),
   hidden: Type.Boolean(),
 });
+const protectedAccountUser = node({
+  id,
+  // Empty only while the account still needs first-time setup.
+  displayName: Type.String({ maxLength: 40 }),
+  ...profileSetupFields,
+});
 export const ProtectedAccountSchema = node({
-  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+  user: protectedAccountUser,
   directory: ProtectedDirectorySettingsSchema,
 });
-export const ProtectedAccountNameResponseSchema = node({
-  user: node({ id, ...ProtectedAccountNameSchema.properties }),
+export const ProtectedAccountNameResponseSchema = node({ user: protectedAccountUser });
+export const ProtectedAccountIconSchema = node({
+  icon: Type.Union([
+    node({ kind: Type.Literal("emoji"), emoji: Type.String({ minLength: 1, maxLength: 32 }) }),
+    Type.Null(),
+  ]),
 });
+export const ProtectedAccountIconResponseSchema = node({ icon: profileIconField });
 export const ProtectedDirectorySettingsResponseSchema = node({
   directory: ProtectedDirectorySettingsSchema,
 });
@@ -324,6 +379,7 @@ export const ProtectedPeopleSchema = node({
       id,
       ...ProtectedAccountNameSchema.properties,
       description: Type.String({ maxLength: 140 }),
+      icon: profileIconField,
     }),
   ),
   nextCursor: Type.Union([id, Type.Null()]),
@@ -506,6 +562,10 @@ export const ProtectedFilesSchema = node({
 export type ProtectedCredential = Static<typeof ProtectedCredentialSchema>;
 export type ProtectedAgentTool = Static<typeof ProtectedAgentToolSchema>;
 export type ProtectedAgent = Static<typeof ProtectedAgentSchema>;
+export type ProtectedAgentSkill = Static<typeof ProtectedAgentSkillSchema>;
+export type ProtectedAgentPresentation = Static<typeof ProtectedAgentPresentationSchema>;
+export type ProtectedAgentV1 = Static<typeof ProtectedAgentV1Schema>;
+export type ProtectedAgentCatalogV1 = Static<typeof ProtectedAgentCatalogV1Schema>;
 export type ProtectedAgentCatalogDto = Static<typeof ProtectedAgentCatalogSchema>;
 export type ProtectedAgentSelection = Static<typeof ProtectedAgentSelectionSchema>;
 export type ProtectedAgentSelectionResponse = Static<typeof ProtectedAgentSelectionResponseSchema>;
@@ -521,6 +581,8 @@ export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
+export type ProtectedAutomationCatalogV1 = Static<typeof ProtectedAutomationCatalogV1Schema>;
+export type ProtectedAutomationId = Static<typeof ProtectedAutomationIdSchema>;
 export type ProtectedAutomationSchedule = Static<typeof ProtectedAutomationScheduleSchema>;
 export type ProtectedAutomationCronCatalog = Static<typeof ProtectedAutomationCronCatalogSchema>;
 export type ProtectedAutomationDraft = Static<typeof ProtectedAutomationDraftSchema>;
@@ -537,6 +599,9 @@ export type ProtectedAutomationDraftValidation = Static<
 >;
 export type ProtectedAccount = Static<typeof ProtectedAccountSchema>;
 export type ProtectedAccountName = Static<typeof ProtectedAccountNameSchema>;
+export type ProtectedProfileIcon = Static<typeof ProtectedProfileIconSchema>;
+export type ProtectedAccountIcon = Static<typeof ProtectedAccountIconSchema>;
+export type ProtectedAccountIconResponse = Static<typeof ProtectedAccountIconResponseSchema>;
 export type ProtectedAccountNameResponse = Static<typeof ProtectedAccountNameResponseSchema>;
 export type ProtectedDirectorySettings = Static<typeof ProtectedDirectorySettingsSchema>;
 export type ProtectedDirectorySettingsResponse = Static<
@@ -583,6 +648,10 @@ export type ProtectedDevicePrompt = Static<typeof ProtectedDevicePromptSchema>;
 export type ProtectedDevicePoll = Static<typeof ProtectedDevicePollSchema>;
 export const isProtectedTurnRequest = (value: unknown): value is ProtectedTurnRequest =>
   Value.Check(ProtectedTurnRequestSchema, value);
+export const isProtectedAutomationPatchRequest = (
+  value: unknown,
+): value is ProtectedAutomationPatchRequest =>
+  Value.Check(ProtectedAutomationPatchRequestSchema, value);
 export const isProtectedAgentSelection = (value: unknown): value is ProtectedAgentSelection =>
   Value.Check(ProtectedAgentSelectionSchema, value);
 export const isProtectedAgentMention = (value: unknown): value is ProtectedAgentMention =>
@@ -603,3 +672,5 @@ export const isProtectedDirectorySettings = (
   value: unknown,
 ): value is Static<typeof ProtectedDirectorySettingsSchema> =>
   Value.Check(ProtectedDirectorySettingsSchema, value);
+export const isProtectedAccountIcon = (value: unknown): value is ProtectedAccountIcon =>
+  Value.Check(ProtectedAccountIconSchema, value);

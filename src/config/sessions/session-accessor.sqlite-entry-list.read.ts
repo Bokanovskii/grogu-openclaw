@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely,
@@ -34,6 +35,7 @@ import {
   readWithCanonicalSessionReaderContinuation,
   type CanonicalSessionReaderContinuation,
 } from "./session-canonical-key.js";
+import { sessionEntryJsonSql } from "./session-entry-encryption.js";
 import { assertCapturedSessionEntryReadSource } from "./session-entry-read-source.js";
 import { resolveDeliveryProvenCanonicalSessionKey } from "./store-entry.js";
 
@@ -88,7 +90,11 @@ export function readSelectedSessionEntriesInDatabase(
         db
           .selectFrom("session_nodes")
           .select("session_key")
-          .where("label", "=", options.label.trim()),
+          .where(
+            sql<string>`json_extract(${sessionEntryJsonSql(database.db)}, '$.label')`,
+            "=",
+            options.label.trim(),
+          ),
       );
     }
     // Warm admission permits raw metadata changes. The listing contract still

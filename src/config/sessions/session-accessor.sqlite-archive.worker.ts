@@ -4,7 +4,6 @@ import { on } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { MessagePort, parentPort, threadId, workerData } from "node:worker_threads";
 import zlib from "node:zlib";
@@ -19,14 +18,22 @@ import { assertDatabasePathIdentity } from "../../infra/sqlite-worker-identity.j
 import { cancelWorkerIdleGc, scheduleWorkerIdleGc } from "../../infra/worker-idle-gc.js";
 import { routeLogsToStderr } from "../../logging/console.js";
 import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
-import { withFreshOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly-open.js";
-import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
+import {
+  openOpenClawAgentDatabaseReadOnly,
+  readOpenClawAgentDatabaseSnapshot,
+  withFreshOpenClawAgentDatabaseReadOnly,
+} from "../../state/openclaw-agent-db-readonly-open.js";
 import {
   hashSessionArchiveBytes,
   MAX_MATERIALIZED_ARCHIVE_BATCH_BYTES,
   publishEncodedSessionTranscriptArchive,
   resolveSqliteTranscriptArchivePath,
 } from "./session-accessor.sqlite-archive-artifact.js";
+import {
+  createArchiveByteLimitTransform,
+  encodeProtectedTranscriptArchive,
+  type TranscriptArchiveDatabase,
+} from "./session-accessor.sqlite-archive-encoding.js";
 import type {
   SqliteArchiveOneShotWorkerData,
   SqliteArchiveSessionRequest,
@@ -58,12 +65,8 @@ import type {
   SessionColdPreparationWorkerData,
   SessionColdWorkerData,
 } from "./session-cold-storage-worker.js";
+import { isProtectedSessionTranscriptArchiveStore } from "./session-transcript-archive-encryption.js";
 import { transcriptEventJsonSql } from "./transcript-payload.js";
-
-type TranscriptArchiveDatabase = Pick<
-  OpenClawAgentKyselyDatabase,
-  "session_transcript_archives" | "transcript_events"
->;
 
 const TRANSCRIPT_ARCHIVE_WRITE_BUFFER_BYTES = 64 * 1024;
 
@@ -118,32 +121,6 @@ function stageTranscriptArchiveContent(
   return rowCount;
 }
 
-function createArchiveByteLimitTransform(): Transform {
-  let encodedBytes = 0;
-  return new Transform({
-    transform(chunk: unknown, encoding, callback) {
-      let chunkBytes: number;
-      if (typeof chunk === "string") {
-        chunkBytes = Buffer.byteLength(chunk, encoding);
-      } else if (chunk instanceof Uint8Array) {
-        chunkBytes = chunk.byteLength;
-      } else {
-        callback(new TypeError("Archive encoder emitted an unsupported chunk type"));
-        return;
-      }
-      encodedBytes += chunkBytes;
-      if (encodedBytes > MAX_MATERIALIZED_ARCHIVE_BATCH_BYTES) {
-        callback(
-          new Error(
-            `Archive exceeds ${MAX_MATERIALIZED_ARCHIVE_BATCH_BYTES} bytes during encoding`,
-          ),
-        );
-        return;
-      }
-      callback(null, chunk);
-    },
-  });
-}
 async function encodeStagedTranscriptArchive(params: {
   archiveDirectory: string;
   generation: string;
@@ -208,56 +185,102 @@ export async function materializeTranscriptArchiveInWorker(
     }
     return { archive: null, sessionId: plan.sessionId };
   }
-  fs.mkdirSync(plan.archiveDirectory, { recursive: true, mode: 0o700 });
-  const stagedPath = `${resolveSqliteTranscriptArchivePath({
-    archiveDirectory: plan.archiveDirectory,
-    generation: plan.snapshot.generation ?? undefined,
-    identityOwner: "registry",
-    reason: plan.reason,
-    sessionId: plan.sessionId,
-  })}.${randomUUID()}.jsonl-stage`;
-  try {
-    const opened = withFreshOpenClawAgentDatabaseReadOnly(
-      (database) =>
-        runSqliteDeferredTransactionSync(
-          database.db,
-          () => {
-            const snapshot = readSessionStateDeleteSnapshot(database.db, plan.sessionId);
-            if (!sqliteSessionStateDeleteSnapshotsEqual(snapshot, plan.snapshot)) {
-              throw new Error(
-                `SQLite session state changed before archive materialization for ${plan.sessionId}`,
-              );
-            }
-            return stageTranscriptArchiveContent(database.db, plan.sessionId, stagedPath);
-          },
-          { databaseLabel: database.path, operationLabel: "session.archive.materialize" },
-        ),
-      { agentId: plan.agentId, path: plan.databasePath, env },
+  const opened = openOpenClawAgentDatabaseReadOnly({
+    agentId: plan.agentId,
+    path: plan.databasePath,
+    env,
+  });
+  if (!opened.found) {
+    throw new Error(
+      `Cannot archive SQLite transcript ${plan.sessionId}: ${opened.reason.replaceAll("-", " ")}`,
     );
-    if (!opened.found) {
+  }
+  let stagedPath: string | undefined;
+  try {
+    const prepared = readOpenClawAgentDatabaseSnapshot(opened.database, (database) => {
+      const snapshot = readSessionStateDeleteSnapshot(database.db, plan.sessionId);
+      if (!sqliteSessionStateDeleteSnapshotsEqual(snapshot, plan.snapshot)) {
+        throw new Error(
+          `SQLite session state changed before archive materialization for ${plan.sessionId}`,
+        );
+      }
+      const protectedStore = isProtectedSessionTranscriptArchiveStore(database.db);
+      if (protectedStore) {
+        return { protectedStore, rowCount: 0 };
+      }
+      fs.mkdirSync(plan.archiveDirectory, { recursive: true, mode: 0o700 });
+      stagedPath = `${resolveSqliteTranscriptArchivePath({
+        archiveDirectory: plan.archiveDirectory,
+        generation: plan.snapshot.generation ?? undefined,
+        identityOwner: "registry",
+        reason: plan.reason,
+        sessionId: plan.sessionId,
+      })}.${randomUUID()}.jsonl-stage`;
+      return {
+        protectedStore,
+        rowCount: stageTranscriptArchiveContent(database.db, plan.sessionId, stagedPath),
+      };
+    });
+    if (!prepared.found) {
       throw new Error(
-        `Cannot archive SQLite transcript ${plan.sessionId}: ${opened.reason.replaceAll("-", " ")}`,
+        `Cannot archive SQLite transcript ${plan.sessionId}: ${prepared.reason.replaceAll("-", " ")}`,
       );
     }
     const generation = plan.snapshot.generation;
-    if (opened.value > 0 && !generation) {
+    if (prepared.value.rowCount > 0 && !generation) {
       throw new Error(
         `Cannot archive SQLite transcript without a generation for ${plan.sessionId}`,
       );
     }
-    const archive =
-      opened.value > 0 && generation
-        ? await encodeStagedTranscriptArchive({
-            archiveDirectory: plan.archiveDirectory,
-            generation,
-            reason: plan.reason,
-            sessionId: plan.sessionId,
-            stagedPath,
-          })
-        : null;
-    return { archive, sessionId: plan.sessionId };
+    let archive: TranscriptArchiveWorkerResult["archive"];
+    if (prepared.value.protectedStore) {
+      const encoded = await encodeProtectedTranscriptArchive({
+        archiveDirectory: plan.archiveDirectory,
+        database: opened.database.db,
+        generation: generation ?? undefined,
+        reason: plan.reason,
+        sessionId: plan.sessionId,
+      });
+      if (encoded.rowCount > 0 && !generation) {
+        throw new Error(
+          `Cannot archive SQLite transcript without a generation for ${plan.sessionId}`,
+        );
+      }
+      const snapshot = readOpenClawAgentDatabaseSnapshot(opened.database, (database) =>
+        readSessionStateDeleteSnapshot(database.db, plan.sessionId),
+      );
+      if (
+        !snapshot.found ||
+        !sqliteSessionStateDeleteSnapshotsEqual(snapshot.value, plan.snapshot)
+      ) {
+        throw new Error(
+          `SQLite session state changed during archive materialization for ${plan.sessionId}`,
+        );
+      }
+      archive = encoded.archive;
+    } else {
+      opened.database.close();
+      if (prepared.value.rowCount > 0 && generation) {
+        if (!stagedPath) {
+          throw new Error(`Missing SQLite transcript staging file for ${plan.sessionId}`);
+        }
+        archive = await encodeStagedTranscriptArchive({
+          archiveDirectory: plan.archiveDirectory,
+          generation,
+          reason: plan.reason,
+          sessionId: plan.sessionId,
+          stagedPath,
+        });
+      } else {
+        archive = null;
+      }
+    }
+    return { archive: archive ?? null, sessionId: plan.sessionId };
   } finally {
-    fs.rmSync(stagedPath, { force: true });
+    opened.database.close();
+    if (stagedPath) {
+      fs.rmSync(stagedPath, { force: true });
+    }
   }
 }
 
@@ -268,65 +291,112 @@ async function materializeHistoryEvictionArchiveInWorker(
   const assertSource = () =>
     assertDatabasePathIdentity(input.databasePath, input.historyEviction.expectedIdentity);
   assertSource();
-  const stagedPath = `${resolveSqliteTranscriptArchivePath({
-    archiveDirectory: input.archiveDirectory,
-    identityOwner: "registry",
-    reason: input.reason,
-    sessionId: input.sessionId,
-  })}.${randomUUID()}.jsonl-stage`;
+  const opened = openOpenClawAgentDatabaseReadOnly({
+    agentId: input.agentId,
+    path: input.databasePath,
+    env,
+  });
+  if (!opened.found) {
+    throw new Error(`Cannot archive SQLite transcript ${input.sessionId}: ${opened.reason}`);
+  }
+  let stagedPath: string | undefined;
   try {
-    const opened = withFreshOpenClawAgentDatabaseReadOnly(
-      (database) =>
-        runSqliteDeferredTransactionSync(database.db, () => {
-          assertSource();
-          if (
-            isRecentHistoricalSessionId({
-              database,
-              sessionId: input.sessionId,
-              preserveRecentMs: input.historyEviction.preserveRecentMs,
-            })
-          ) {
-            return null;
-          }
-          const plan = planSessionStateDeleteIfUnreferenced({
-            ...input,
-            database,
-            referencedSessionIds: new Set(),
-          });
-          if (!plan) {
-            return null;
-          }
-          let rows = 0;
-          if (plan.snapshot.lastSeq !== null) {
-            fs.mkdirSync(input.archiveDirectory, { recursive: true, mode: 0o700 });
-            rows = stageTranscriptArchiveContent(database.db, input.sessionId, stagedPath);
-          }
-          return { plan, rows };
-        }),
-      { agentId: input.agentId, path: input.databasePath, env },
+    const prepared = runSqliteDeferredTransactionSync(
+      opened.database.db,
+      () => {
+        assertSource();
+        if (
+          isRecentHistoricalSessionId({
+            database: opened.database,
+            sessionId: input.sessionId,
+            preserveRecentMs: input.historyEviction.preserveRecentMs,
+          })
+        ) {
+          return null;
+        }
+        const plan = planSessionStateDeleteIfUnreferenced({
+          ...input,
+          database: opened.database,
+          referencedSessionIds: new Set(),
+        });
+        if (!plan) {
+          return null;
+        }
+        const protectedStore = isProtectedSessionTranscriptArchiveStore(opened.database.db);
+        let rows = 0;
+        if (plan.snapshot.lastSeq !== null && !protectedStore) {
+          fs.mkdirSync(input.archiveDirectory, { recursive: true, mode: 0o700 });
+          stagedPath = `${resolveSqliteTranscriptArchivePath({
+            archiveDirectory: input.archiveDirectory,
+            identityOwner: "registry",
+            reason: input.reason,
+            sessionId: input.sessionId,
+          })}.${randomUUID()}.jsonl-stage`;
+          rows = stageTranscriptArchiveContent(opened.database.db, input.sessionId, stagedPath);
+        }
+        return { plan, rows, protectedStore };
+      },
+      { databaseLabel: opened.database.path, operationLabel: "session.archive.history-eviction" },
     );
     assertSource();
-    if (!opened.found) {
-      throw new Error(`Cannot archive SQLite transcript ${input.sessionId}: ${opened.reason}`);
-    }
-    if (!opened.value) {
+    if (!prepared) {
       return { archive: null, sessionId: input.sessionId, preparedPlan: null };
     }
-    const { plan, rows } = opened.value;
+    const { plan, rows, protectedStore } = prepared;
     const generation = plan.snapshot.generation;
     if (rows > 0 && !generation) {
       throw new Error(
         `Cannot archive SQLite transcript without a generation for ${input.sessionId}`,
       );
     }
-    const archive =
-      rows > 0 && generation
-        ? await encodeStagedTranscriptArchive({ ...input, generation, stagedPath })
-        : null;
+    let archive: TranscriptArchiveWorkerResult["archive"];
+    if (protectedStore && plan.snapshot.lastSeq !== null) {
+      const encoded = await encodeProtectedTranscriptArchive({
+        archiveDirectory: input.archiveDirectory,
+        database: opened.database.db,
+        generation: generation ?? undefined,
+        reason: input.reason,
+        sessionId: input.sessionId,
+      });
+      if (encoded.rowCount > 0 && !generation) {
+        throw new Error(
+          `Cannot archive SQLite transcript without a generation for ${input.sessionId}`,
+        );
+      }
+      const snapshot = readOpenClawAgentDatabaseSnapshot(opened.database, (database) =>
+        readSessionStateDeleteSnapshot(database.db, input.sessionId),
+      );
+      if (
+        !snapshot.found ||
+        !sqliteSessionStateDeleteSnapshotsEqual(snapshot.value, plan.snapshot)
+      ) {
+        throw new Error(
+          `SQLite session state changed during archive materialization for ${input.sessionId}`,
+        );
+      }
+      archive = encoded.archive;
+    } else {
+      opened.database.close();
+      if (rows > 0 && generation) {
+        if (!stagedPath) {
+          throw new Error(`Missing SQLite transcript staging file for ${input.sessionId}`);
+        }
+        archive = await encodeStagedTranscriptArchive({
+          ...input,
+          generation,
+          stagedPath,
+        });
+      } else {
+        archive = null;
+      }
+    }
     assertSource();
-    return { archive, sessionId: input.sessionId, preparedPlan: plan };
+    return { archive: archive ?? null, sessionId: input.sessionId, preparedPlan: plan };
   } finally {
-    fs.rmSync(stagedPath, { force: true });
+    opened.database.close();
+    if (stagedPath) {
+      fs.rmSync(stagedPath, { force: true });
+    }
   }
 }
 

@@ -452,6 +452,7 @@ export async function finishGatewayStartup(params: {
     onReloadEnabledChange: tlsRenewal?.setEnabled,
     configRevisionProjector: gatewayRequestContext.configRevisionProjector,
     resolveGatewayContext: resolvePluginGatewayContext,
+    resolvePluginServices: () => kernel.pluginRuntimeGeneration.currentServices(),
     minimalTestGateway,
     initialConfig: cfgAtStart,
     initialPluginInstallRecords: pluginMetadataSnapshot?.index.installRecords,

@@ -7,22 +7,28 @@ import type {
   CronScratchReadCommand,
   CronScratchSnapshot,
 } from "./scratch-contract.js";
+import { openCronScratchContent } from "./scratch-encryption.js";
 import { loadedCronStoreFromRows, loadCronRows } from "./store/row-codec.js";
 import { getCronStoreKysely } from "./store/schema.js";
 
-function rowToState(row: {
-  content: string | null;
-  revision: number;
-  source_sha256: string | null;
-  updated_at_ms: number;
-}): CronJobScratchState {
+function rowToState(
+  db: DatabaseSync,
+  storeKey: string,
+  jobId: string,
+  row: {
+    content: string | null;
+    revision: number;
+    source_sha256: string | null;
+    updated_at_ms: number;
+  },
+): CronJobScratchState {
   if (row.content === null) {
     return { currentRevision: row.revision };
   }
   return {
     currentRevision: row.revision,
     scratch: {
-      content: row.content,
+      content: openCronScratchContent(db, storeKey, jobId, row.content),
       revision: row.revision,
       ...(row.source_sha256 ? { sourceSha256: row.source_sha256 } : {}),
       updatedAtMs: row.updated_at_ms,
@@ -44,7 +50,7 @@ export function readScratchStateFromDatabase(
       .where("store_key", "=", storeKey)
       .where("job_id", "=", jobId),
   ).rows[0];
-  return row ? rowToState(row) : { currentRevision: 0 };
+  return row ? rowToState(db, storeKey, jobId, row) : { currentRevision: 0 };
 }
 
 export function readHeartbeatMonitorScratchFromDatabase(
@@ -81,7 +87,7 @@ export function readHeartbeatMonitorScratchFromDatabase(
   }
   return {
     jobId: row.job_id,
-    state: rowToState({
+    state: rowToState(db, storeKey, row.job_id, {
       content: row.content,
       revision: row.revision,
       source_sha256: row.source_sha256,

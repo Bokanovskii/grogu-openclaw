@@ -61,6 +61,7 @@ import {
   createUserProfileWriteOperation,
   linkEmail,
   mergeProfiles,
+  clearAvatar,
   setAvatar,
   setDisplayName,
   setUserProfileRole,
@@ -191,6 +192,14 @@ const userProfileWriteOperations = {
         ? { ok: true as const, value: { profile: result.value, display: display() } }
         : result;
     },
+    (input) => input.profileId,
+  ),
+  "userProfiles.clearAvatar": createUserProfileWriteOperation(
+    "userProfiles.clearAvatar",
+    (input: { profileId: string }, owned, display) => ({
+      profile: clearAvatar(input.profileId, owned),
+      display: display(),
+    }),
     (input) => input.profileId,
   ),
 } satisfies WorkerOperationHandlers;
@@ -354,6 +363,7 @@ export const userProfileOperations = {
       preferenceKey: string;
       after: string | null;
       limit: number;
+      profileId?: string;
     },
     { open, stateOptions },
   ) => {
@@ -377,28 +387,26 @@ export const userProfileOperations = {
         .select([
           "p.id",
           "p.display_name",
-          sql<string>`CASE WHEN s.value_json IS NULL THEN '' ELSE json_extract(s.value_json, '$.description') END`.as(
-            "description",
-          ),
+          // List eligible members, but never publish a description they saved as hidden.
+          sql<string>`CASE
+            WHEN json_valid(s.value_json) IS NOT 1 THEN ''
+            WHEN json_type(s.value_json, '$.hidden') IS NOT 'false' THEN ''
+            WHEN json_type(s.value_json, '$.description') IS NOT 'text' THEN ''
+            WHEN length(json_extract(s.value_json, '$.description')) > 140 THEN ''
+            ELSE json_extract(s.value_json, '$.description') END`.as("description"),
         ])
         .where("i.provider", "=", `verified:${input.issuer}`)
         .where("i.subject", "in", [...input.subjects])
         .where("p.merged_into", "is", null)
         .where("d.profile_id", "is", null)
-        .where(
-          sql<boolean>`CASE WHEN s.value_json IS NULL THEN 1
-                WHEN json_valid(s.value_json) = 0 THEN 0
-                WHEN json_type(s.value_json) != 'object' THEN 0
-                WHEN json_type(s.value_json, '$.hidden') IS NOT 'false' THEN 0
-                WHEN json_type(s.value_json, '$.description') IS NOT 'text' THEN 0
-                WHEN length(json_extract(s.value_json, '$.description')) > 140 THEN 0
-                ELSE 1 END`,
-        )
         .groupBy(["p.id", "p.display_name", "s.value_json"])
         .orderBy("p.id", "asc")
         .limit(input.limit + 1);
       if (input.after !== null) {
         query = query.where("p.id", ">", input.after);
+      }
+      if (input.profileId !== undefined) {
+        query = query.where("p.id", "=", input.profileId);
       }
       const rows = executeSqliteQuerySync(database.db, query).rows;
       const page = rows.slice(0, input.limit);

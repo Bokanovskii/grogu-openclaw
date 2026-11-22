@@ -19,6 +19,7 @@ export const sparkyRef = {
 } satisfies SecretRef;
 export const subjectPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
 export const testClientIdPattern = /^[a-f0-9]{32}\.access$/u;
+export const protectedMaxFileBytes = 2 * 1024 * 1024;
 // Sparky streams long reasoning and large widget calls slowly when it shares its GPU; a two-minute
 // budget ended ordinary travel replies. Stop and identity revalidation still end a turn early.
 export const protectedTurnTimeoutMs = 15 * 60_000;
@@ -103,11 +104,16 @@ export function parseRuntimeSettings(value: unknown) {
   };
 }
 
-export function protectedOpenClawConfig(stateDir: string): OpenClawConfig {
+export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): OpenClawConfig {
   return {
-    tools: { web: { search: { enabled: false } } },
+    // Keyless public search only; the plugin is shipped as source because it has no bundled dist.
+    // The provider cache is process-wide, so a hit would reveal another member's identical query.
+    tools: { web: { search: { enabled: true, provider: "duckduckgo", cacheTtlMinutes: 0 } } },
     agents: {
       ownership: "explicit",
+      // Members cannot finish workspace onboarding; a seeded BOOTSTRAP.md would add a
+      // pending-bootstrap section to every later member prompt after the first child run.
+      defaults: { skipBootstrap: true },
       entries: {
         protected: {
           workspace: path.join(stateDir, "workspace"),
@@ -117,9 +123,11 @@ export function protectedOpenClawConfig(stateDir: string): OpenClawConfig {
       },
     },
     plugins: {
-      allow: ["anthropic", "github-copilot", "openai"],
+      allow: ["anthropic", "duckduckgo", "github-copilot", "openai"],
+      load: { paths: [path.join(serviceRoot, "extensions", "duckduckgo")] },
       entries: {
         anthropic: { enabled: true },
+        duckduckgo: { enabled: true },
         "github-copilot": { enabled: true },
         openai: { enabled: true },
       },

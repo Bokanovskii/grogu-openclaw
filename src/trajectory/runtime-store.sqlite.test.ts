@@ -7,6 +7,7 @@ import { trackSqliteStatementExecutions } from "../../test/helpers/sqlite-statem
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
+import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db-lifecycle.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../state/openclaw-agent-db.generated.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { useSessionStoreTempDirs } from "../test-utils/session-state-cleanup.js";
@@ -50,6 +51,7 @@ describe("SQLite trajectory runtime store", () => {
         return { ...events[0] };
       },
     });
+
     const counter = trackSqliteStatementExecutions(database.db, ["append"], (sql) =>
       /^insert into "trajectory_runtime_events"/i.test(sql) ? "append" : null,
     );
@@ -72,6 +74,57 @@ describe("SQLite trajectory runtime store", () => {
         .orderBy("seq", "asc"),
     ).rows;
     expect(rows).toEqual(events.map((_, seq) => ({ run_id: "run-1", seq })));
+  });
+
+  it("stores protected trajectory events as ciphertext and reads them through the owner", async () => {
+    const stateDir = path.join(tempDir, "protected-state");
+    const keyPath = path.join(tempDir, "protected-storage-key");
+    const protectedStorePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+    const priorStateDir = process.env.OPENCLAW_STATE_DIR;
+    const priorKeyPath = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keyPath, Buffer.alloc(32, 0x5d), { mode: 0o600 });
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+    try {
+      await replaceSessionEntry(
+        { sessionKey: "agent:main:protected", storePath: protectedStorePath },
+        { sessionId: "protected-session", updatedAt: 10 },
+      );
+      const event = createTrajectoryEvent({ type: "protected-trajectory-sentinel" });
+      appendSqliteTrajectoryRuntimeEvents(
+        { sessionId: "protected-session", storePath: protectedStorePath },
+        [event],
+      );
+      await expect(
+        loadSqliteTrajectoryRuntimeEvents({
+          sessionId: "protected-session",
+          storePath: protectedStorePath,
+        }),
+      ).resolves.toEqual([event]);
+      const database = openOpenClawAgentDatabase({
+        agentId: "main",
+        path: path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
+      });
+      const stored = database.db
+        .prepare("SELECT event_json FROM trajectory_runtime_events WHERE session_id = ?")
+        .get("protected-session")?.event_json;
+      expect(typeof stored).toBe("string");
+      expect(stored).not.toContain("protected-trajectory-sentinel");
+    } finally {
+      await closeOpenClawAgentDatabasesAsync(stateDir);
+      fs.rmSync(keyPath, { force: true });
+      if (priorStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = priorStateDir;
+      }
+      if (priorKeyPath === undefined) {
+        delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+      } else {
+        process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = priorKeyPath;
+      }
+    }
   });
 
   it("rolls back a later batch failure and retries without losing or duplicating events", async () => {

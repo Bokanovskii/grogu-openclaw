@@ -7,6 +7,7 @@ import type {
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db-contract.js";
 
 export const OPENCLAW_AGENT_SCHEMA_VERSION = 25;
+export const PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 1;
 export const CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION = 25;
 export const AGENT_STORAGE_SCHEMA_VERSION = 23;
 export const TRANSCRIPT_FTS_ROW_SCHEMA_VERSION = 22;
@@ -28,13 +29,20 @@ export type OpenClawAgentDatabaseOptions = OpenClawStateDatabaseOptions & {
   agentId: string;
 };
 
-/** Internal Doctor custody; never part of the plugin-facing database options. */
-export type OpenClawAgentDatabaseRepairAdmission = {
-  /** Bind repair admission to the physical database inspected and backed up by its owner. */
-  expectedIdentity?: DatabaseFileIdentity;
-  /** Live caller authority for native open and schema/registry admission mutations. */
-  assertCurrent?: () => void;
-};
+/** Internal existing-store custody; never part of the plugin-facing database options. */
+export type OpenClawAgentDatabaseRepairAdmission =
+  | {
+      expectedIdentity?: DatabaseFileIdentity;
+      assertCurrent?: () => void;
+      requireProtectedStorage?: never;
+    }
+  | {
+      /** Bind the check to an existing physical store and its live owner. */
+      expectedIdentity: DatabaseFileIdentity;
+      assertCurrent: () => void;
+      /** Refuse an unencrypted or unmarked store before schema convergence. */
+      requireProtectedStorage: true;
+    };
 
 /** Shared-state registry row describing an agent database seen by this process. */
 export type OpenClawRegisteredAgentDatabase = {

@@ -150,6 +150,11 @@ export type GatewayReloadHandlerParams = {
   resolveGatewayContext?: () =>
     | import("./server-methods/types.js").GatewayRequestContext
     | undefined;
+  resolveJobExecutionAuthority?: import("../cron/service/state.js").CronServiceDeps["resolveJobExecutionAuthority"];
+  resolvePluginServices?: () =>
+    | import("../plugins/services.js").PluginServicesHandle
+    | null
+    | undefined;
   getState: () => GatewayHotReloadState;
   setState: (state: GatewayHotReloadState) => void;
   getPluginMetadataSnapshot?: () => PluginMetadataSnapshot | undefined;

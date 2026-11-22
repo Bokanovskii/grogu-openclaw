@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir as osHomedir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseGithubCopilotBoundToken } from "openclaw/plugin-sdk/provider-auth";
 import { readNonEmptyStringPreservingWhitespace as readNonEmptyString } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 // The host resolves auth profiles; this adapter owns Copilot overrides, environment
@@ -82,7 +83,7 @@ export function resolveCopilotAuth(input: ResolveCopilotAuthInput): ResolvedCopi
     homeDir,
   });
 
-  const explicitToken = readNonEmptyString(input.auth?.gitHubToken);
+  const explicitToken = unwrapBoundToken(readNonEmptyString(input.auth?.gitHubToken));
   const explicitProfileId =
     readNonEmptyString(input.auth?.profileId) ?? readNonEmptyString(input.authProfileId);
   const explicitProfileVersion =
@@ -110,7 +111,7 @@ export function resolveCopilotAuth(input: ResolveCopilotAuthInput): ResolvedCopi
     };
   }
 
-  const contractToken = readNonEmptyString(input.resolvedApiKey);
+  const contractToken = unwrapBoundToken(readNonEmptyString(input.resolvedApiKey));
   if (contractToken) {
     const contractProfileId = readNonEmptyString(input.authProfileId);
     return {
@@ -202,6 +203,21 @@ function readEnvTokenFallback(
 }
 
 /** Pool invalidation fingerprint; never log it alongside an account id. */
+// The Copilot runtime only talks to github.com, so a token bound to another
+// host must not be sent there.
+function unwrapBoundToken(value: string | undefined): string | undefined {
+  const bound = value ? parseGithubCopilotBoundToken(value) : undefined;
+  if (!bound) {
+    return value;
+  }
+  if (bound.githubDomain !== "github.com") {
+    throw new Error(
+      `The Copilot runtime does not support GitHub Copilot accounts on ${bound.githubDomain}.`,
+    );
+  }
+  return bound.token;
+}
+
 export function tokenFingerprint(token: string): string {
   const hex = createHash("sha256").update(token).digest("hex").slice(0, 12);
   return `sha256:${hex}`;

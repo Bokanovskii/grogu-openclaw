@@ -10,6 +10,11 @@ import {
 import { supportsNodeSqliteJsonb } from "../../infra/node-sqlite.js";
 import { resolveZstdCodec } from "../../infra/zstd-codec.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
+import {
+  hasSqliteStorageValueEncryption,
+  openSqliteStorageText,
+  sealSqliteStorageText,
+} from "../../storage/sqlite-encryption.js";
 import { findSessionTranscriptHeader } from "./session-entry-codec.js";
 import {
   projectModelContextEventSql,
@@ -22,6 +27,7 @@ import { projectSessionTranscriptReportFacts } from "./session-transcript-report
 export const MAX_COMPRESSED_EVENT_BYTES = 4 * 1024 * 1024;
 const MAX_NAVIGATION_BYTES = 16 * 1024;
 const MIN_COMPRESS_BYTES = 1024;
+const PROTECTED_TRANSCRIPT_CONTEXT = "openclaw:protected-transcript";
 const DECODE_FUNCTION = "openclaw_transcript_payload_decode";
 const registeredDecoders = new WeakSet<DatabaseSync>();
 const storageEncodings = new WeakMap<DatabaseSync, string>();
@@ -41,6 +47,29 @@ export type PreparedTranscriptPayload = {
 };
 
 export type TranscriptPayloadAlias = "transcript_events" | "event" | "te" | "parent";
+
+export function protectTranscriptPayloadForStorage(
+  database: DatabaseSync,
+  sessionId: string,
+  seq: number,
+  payload: TranscriptPayloadRecord,
+): TranscriptPayloadRecord {
+  if (!hasSqliteStorageValueEncryption(database)) {
+    return payload;
+  }
+  if (payload.event_json === null) {
+    throw new Error("Protected transcript storage requires an identity payload.");
+  }
+  return {
+    ...payload,
+    event_json: sealSqliteStorageText(
+      database,
+      payload.event_json,
+      transcriptEventStorageContext(sessionId, seq),
+    ),
+    navigation_json: null,
+  };
+}
 
 /** Physical payload writes participate in the transcript owner's admitted transaction. */
 export function createTranscriptEventInserter(database: DatabaseSync, sessionId: string) {
@@ -72,27 +101,36 @@ export function createTranscriptEventInserter(database: DatabaseSync, sessionId:
       prepared.storageEncoding === readTranscriptStorageEncoding(database)
         ? prepared.payload
         : prepareTranscriptPayload(database, row.eventJson, row.parsedEvent);
-    return insert({ ...row, ...payload });
+    const storedPayload = protectTranscriptPayloadForStorage(database, sessionId, row.seq, payload);
+    return insert({ ...row, ...storedPayload });
   };
 }
 
 export function createTranscriptPayloadUpdater(database: DatabaseSync, sessionId: string) {
-  return prepareSqliteQuerySync<TranscriptPayloadRecord & { seq: number }>(database, (parameter) =>
-    getNodeSqliteKysely<Pick<DB, "transcript_events">>(database)
-      .updateTable("transcript_events")
-      .set({
-        event_json: parameter((row) => row.event_json),
-        event_zstd: parameter((row) => row.event_zstd),
-        event_utf8_bytes: parameter((row) => row.event_utf8_bytes),
-        navigation_json: parameter((row) => row.navigation_json),
-      })
-      .where("session_id", "=", sessionId)
-      .where(
-        "seq",
-        "=",
-        parameter((row) => row.seq),
-      ),
+  const update = prepareSqliteQuerySync<TranscriptPayloadRecord & { seq: number }>(
+    database,
+    (parameter) =>
+      getNodeSqliteKysely<Pick<DB, "transcript_events">>(database)
+        .updateTable("transcript_events")
+        .set({
+          event_json: parameter((row) => row.event_json),
+          event_zstd: parameter((row) => row.event_zstd),
+          event_utf8_bytes: parameter((row) => row.event_utf8_bytes),
+          navigation_json: parameter((row) => row.navigation_json),
+        })
+        .where("session_id", "=", sessionId)
+        .where(
+          "seq",
+          "=",
+          parameter((row) => row.seq),
+        ),
   );
+  return (row: TranscriptPayloadRecord & { seq: number }) => {
+    return update({
+      ...protectTranscriptPayloadForStorage(database, sessionId, row.seq, row),
+      seq: row.seq,
+    });
+  };
 }
 
 export function readTranscriptStorageEncoding(database: DatabaseSync): string {
@@ -225,6 +263,9 @@ export function prepareTranscriptPayload(
     event_utf8_bytes: utf8 ? rawBytes : null,
     navigation_json: null,
   };
+  if (hasSqliteStorageValueEncryption(database)) {
+    return identity;
+  }
   // Giant identity values stay available to native SQL without a second full buffer or projection.
   // SQLite and JS can disagree on escaped surrogates and embedded NUL; retain the native path.
   if (
@@ -310,8 +351,30 @@ function decodeCompressedTranscriptPayload(bytes: unknown, rawBytes: unknown): s
 /** Decode selected rows without copying expanded payloads back through SQLite. */
 export function readTranscriptPayload(
   row: Pick<TranscriptPayloadRecord, "event_json" | "event_zstd" | "event_utf8_bytes">,
+  context?: { database: DatabaseSync; sessionId: string; seq: number },
 ): string {
-  return row.event_json ?? decodeCompressedTranscriptPayload(row.event_zstd, row.event_utf8_bytes);
+  if (row.event_json !== null) {
+    return context
+      ? openSqliteStorageText(
+          context.database,
+          row.event_json,
+          transcriptEventStorageContext(context.sessionId, context.seq),
+        )
+      : row.event_json;
+  }
+  return decodeCompressedTranscriptPayload(row.event_zstd, row.event_utf8_bytes);
+}
+
+export function transcriptEventStorageContext(sessionId: string, seq: number): string {
+  return `${PROTECTED_TRANSCRIPT_CONTEXT}:${sessionId}:${seq}`;
+}
+
+export function sealTranscriptEventSql(
+  event: Expression<string>,
+  sessionId: string,
+  seq: number,
+): RawBuilder<string> {
+  return /* kysely-allow-raw: SQLite copies bind the ciphertext to the destination event identity. */ sql<string>`openclaw_storage_text_seal(${event}, ${transcriptEventStorageContext(sessionId, seq)})`;
 }
 
 /** Only selected bodies decode; identity TEXT remains inside SQLite for native repairs. */
@@ -321,7 +384,7 @@ export function transcriptEventJsonSql(
 ): RawBuilder<string> {
   registerDecoder(database);
   const identity =
-    /* kysely-allow-raw: closed transcript aliases select the canonical identity column. */ sql.ref(
+    /* kysely-allow-raw: closed transcript aliases select the canonical identity column. */ sql.ref<string>(
       `${alias}.event_json`,
     );
   const compressed =
@@ -332,11 +395,12 @@ export function transcriptEventJsonSql(
     /* kysely-allow-raw: closed transcript aliases select recorded canonical byte counts. */ sql.ref(
       `${alias}.event_utf8_bytes`,
     );
+  const openedIdentity = openTranscriptEventSql(identity, alias);
   const decode = getNodeSqliteKysely<Record<string, never>>(database).fn<string>(DECODE_FUNCTION, [
     compressed,
     bytes,
   ]);
-  return /* kysely-allow-raw: lazy selection evaluates identity expressions once and keeps giant TEXT out of the bounded JS decoder. */ sql<string>`coalesce(${identity}, ${decode})`;
+  return /* kysely-allow-raw: lazy selection evaluates identity expressions once and keeps giant TEXT out of the bounded JS decoder. */ sql<string>`coalesce(${openedIdentity}, ${decode})`;
 }
 
 export function transcriptEventNavigationSql(
@@ -346,7 +410,7 @@ export function transcriptEventNavigationSql(
     /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref<string>(
       `${alias}.event_json`,
     );
-  return storedProjectionSql("navigation", identity, alias);
+  return storedProjectionSql("navigation", openTranscriptEventSql(identity, alias), alias);
 }
 
 function storedProjectionSql(
@@ -369,7 +433,8 @@ export function transcriptEventResetNavigationSql(
     /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref<string>(
       `${alias}.event_json`,
     );
-  return storedProjectionSql("reset", projectResetBoundaryNavigationSql(identity), alias);
+  const opened = openTranscriptEventSql(identity, alias);
+  return storedProjectionSql("reset", projectResetBoundaryNavigationSql(opened), alias);
 }
 
 export function transcriptEventModelNavigationSql(
@@ -380,7 +445,27 @@ export function transcriptEventModelNavigationSql(
     /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref<string>(
       `${alias}.event_json`,
     );
-  return storedProjectionSql("model", projectModelContextNavigationSql(identity, entryType), alias);
+  const opened = openTranscriptEventSql(identity, alias);
+  return storedProjectionSql("model", projectModelContextNavigationSql(opened, entryType), alias);
+}
+
+function transcriptEventSqlContext(alias: TranscriptPayloadAlias) {
+  const sessionId =
+    /* kysely-allow-raw: closed transcript aliases select the canonical session identity. */ sql.ref(
+      `${alias}.session_id`,
+    );
+  const seq =
+    /* kysely-allow-raw: closed transcript aliases select the canonical event sequence. */ sql.ref(
+      `${alias}.seq`,
+    );
+  return /* kysely-allow-raw: closed transcript aliases bind values to their row owner. */ sql<string>`'openclaw:protected-transcript:' || ${sessionId} || ':' || ${seq}`;
+}
+
+function openTranscriptEventSql(
+  identity: Expression<string>,
+  alias: TranscriptPayloadAlias,
+): RawBuilder<string> {
+  return /* kysely-allow-raw: this owner-bound function is a no-op for plaintext stores and rejects ciphertext without its key. */ sql<string>`openclaw_storage_text_open(${identity}, ${transcriptEventSqlContext(alias)})`;
 }
 
 /** Model admission retains projected byte costs, which can be much smaller than canonical JSON. */
@@ -396,8 +481,9 @@ export function transcriptEventModelBytesSql(
     /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref<string>(
       `${alias}.event_json`,
     );
+  const opened = openTranscriptEventSql(identity, alias);
   return /* kysely-allow-raw: native fallback preserves UTF-16 byte units; metadata excludes the JSONL separator. */ sql<number>`CASE WHEN ${metadata} IS NULL
-    THEN octet_length(${projectModelContextEventSql(identity, omitCheckpoint)})
+    THEN octet_length(${projectModelContextEventSql(opened, omitCheckpoint)})
     ELSE json_extract(${metadata}, CASE WHEN ${omitCheckpoint} = 1
       THEN '$.modelWithoutCheckpointBytes' ELSE '$.modelBytes' END) END`;
 }
@@ -411,11 +497,12 @@ export function transcriptEventWithoutCustomDataBytesSql(
       `${alias}.navigation_json`,
     );
   const identity =
-    /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref(
+    /* kysely-allow-raw: closed transcript aliases select the native identity fallback. */ sql.ref<string>(
       `${alias}.event_json`,
     );
+  const opened = openTranscriptEventSql(identity, alias);
   return /* kysely-allow-raw: preserve the native json_remove cost used by retained-custom suffix projection. */ sql<number>`CASE WHEN ${metadata} IS NULL
-    THEN octet_length(json_remove(${identity}, '$.data'))
+    THEN octet_length(json_remove(${opened}, '$.data'))
     ELSE json_extract(${metadata}, '$.withoutCustomDataBytes') END`;
 }
 

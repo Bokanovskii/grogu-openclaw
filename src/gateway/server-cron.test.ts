@@ -57,6 +57,7 @@ import {
 
 type RunCronIsolatedAgentTurnMock = (params: {
   abortSignal?: AbortSignal;
+  executionAuthority?: import("../cron/service/state.js").CronJobExecutionAuthority;
 }) => Promise<{ status: "ok"; summary: string }>;
 
 const {
@@ -267,8 +268,14 @@ import {
   getSuspensionVisibleCronTaskRunCount,
 } from "../cron/service/active-run-cancellation.js";
 import { resetActiveCronTaskRunsForTests } from "../cron/service/active-run-cancellation.test-support.js";
-import type { CronServiceState } from "../cron/service/state.js";
+import type { CronServiceState, CronJobExecutionAuthority } from "../cron/service/state.js";
 import type { CronJob, CronJobCreate } from "../cron/types.js";
+import {
+  createRegistry,
+  startPluginServices,
+  type PluginServicesHandle,
+} from "../plugins/services.test-support.js";
+import type { OpenClawPluginServiceContext } from "../plugins/types.js";
 import { fireOnExitJob } from "./server-cron-event-dispatch.js";
 import { buildGatewayCronService as buildGatewayCronServiceRuntime } from "./server-cron.js";
 
@@ -554,6 +561,125 @@ describe("buildGatewayCronService", () => {
       hasHooks: (hookName: string) => hookName === "cron_changed",
       runCronChanged: runCronChangedMock,
     });
+  });
+
+  it("dispatches native agent turns through current plugin service authority across reload", async () => {
+    const cfg = createCronConfig("plugin-cron-dispatch");
+    let services: PluginServicesHandle | undefined;
+    let context: OpenClawPluginServiceContext | undefined;
+    let admitted = true;
+    let policyBarrier:
+      | {
+          entered: ReturnType<typeof createDeferred<void>>;
+          release: ReturnType<typeof createDeferred<void>>;
+        }
+      | undefined;
+    const authority: CronJobExecutionAuthority = {
+      toolsAllow: ["web_fetch"],
+      toolBindings: { web_fetch: { profileId: "synthetic-member" } },
+      assertInvocationCurrent: () => {
+        if (!admitted) {
+          throw new Error("member access revoked");
+        }
+      },
+    };
+    const state = loadCronService(cfg, { resolvePluginServices: () => services });
+    const registry = createRegistry(
+      [
+        {
+          id: "member-automations",
+          start: (ctx) => {
+            context = ctx;
+          },
+          authorizeCronJob: async () => {
+            const barrier = policyBarrier;
+            if (barrier) {
+              barrier.entered.resolve();
+              await barrier.release.promise;
+            }
+            return authority;
+          },
+        },
+      ],
+      "synthetic-alcove",
+    );
+    try {
+      services = await startPluginServices({
+        registry,
+        config: cfg,
+        getCronService: () => getConcreteCron(state),
+      });
+      const started = expectDefined(context, "started plugin context");
+      const native = expectDefined(started.getCron?.(), "native Cron capability");
+      const prefix = expectDefined(started.cronJobPrefix, "service job namespace");
+      const declarationKey = `${prefix}synthetic-definition`;
+      await native.add({
+        name: "Private paused Sparky job",
+        declarationKey,
+        enabled: false,
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        schedule: { kind: "every", everyMs: 60_000 },
+        payload: {
+          kind: "agentTurn",
+          message: "Read a public source.",
+          model: "sparky/synthetic",
+          toolsAllow: ["web_fetch"],
+        },
+        delivery: { mode: "none" },
+      });
+      const job = expectDefined(
+        (await native.list({ includeDisabled: true })).find(
+          (candidate) => candidate.declarationKey === declarationKey,
+        ),
+        "persisted native job",
+      );
+      expect(job).toMatchObject({
+        enabled: false,
+        payload: { kind: "agentTurn", model: "sparky/synthetic", toolsAllow: ["web_fetch"] },
+      });
+      await state.cron.run(job.id, "force");
+      const request = runCronIsolatedAgentTurnMock.mock.calls[0]?.[0];
+      const issued = expectDefined(request?.executionAuthority, "plugin-issued dispatch authority");
+      expect(issued.toolBindings).toBe(authority.toolBindings);
+      expect(issued.toolsAllow).toBe(authority.toolsAllow);
+
+      const barrier = { entered: createDeferred(), release: createDeferred() };
+      policyBarrier = barrier;
+      const resolving = state.cron.run(job.id, "force");
+      await barrier.entered.promise;
+      policyBarrier = undefined;
+      await services.reload(cfg, new Set(["member-automations"]));
+      barrier.release.resolve();
+      await resolving;
+      expect((await getConcreteCron(state).readJob(job.id))?.state.lastError).toContain(
+        "no longer active",
+      );
+      expect(issued.assertInvocationCurrent).toThrow();
+      await state.cron.run(job.id, "force");
+      expect(runCronIsolatedAgentTurnMock).toHaveBeenCalledTimes(2);
+      admitted = false;
+      await state.cron.run(job.id, "force");
+      expect((await getConcreteCron(state).readJob(job.id))?.state.lastError).toContain(
+        "member access revoked",
+      );
+      expect(runCronIsolatedAgentTurnMock).toHaveBeenCalledTimes(2);
+
+      await services.stop();
+      services = undefined;
+      await state.cron.run(job.id, "force");
+      expect((await getConcreteCron(state).readJob(job.id))?.state.lastError).toContain(
+        "authority service is unavailable",
+      );
+      const ordinary = await addAgentTurnJob(state, "Ordinary native control", "Control", {
+        delivery: { mode: "none" },
+      });
+      await state.cron.run(ordinary.id, "force");
+      expect(runCronIsolatedAgentTurnMock).toHaveBeenCalledTimes(3);
+    } finally {
+      await services?.stop();
+      state.cron.stop();
+    }
   });
 
   it("finishes an accepted config replacement without a second reconciliation request", async () => {

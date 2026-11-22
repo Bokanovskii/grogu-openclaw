@@ -13,6 +13,7 @@ import {
   assertSupportedStateSchemaVersion,
   type StateSchemaContentVersionRowReader,
 } from "./openclaw-state-db-schema-version.js";
+import { PROTECTED_SHARED_STATE_SCHEMA_VERSION } from "./openclaw-state-protected-marker.js";
 
 export function assertStateReadSchemaForPolicy(
   database: DatabaseSync,
@@ -49,7 +50,7 @@ export function admitStateReadSchemaFacts(database: DatabaseSync, pathname: stri
     } catch {
       throw normalizeOpenClawStateSchemaReadError(error, pathname);
     }
-    if (version > OPENCLAW_STATE_SCHEMA_VERSION) {
+    if (version > PROTECTED_SHARED_STATE_SCHEMA_VERSION) {
       throw createNewerSqliteSchemaVersionError(
         "OpenClaw state database",
         pathname,

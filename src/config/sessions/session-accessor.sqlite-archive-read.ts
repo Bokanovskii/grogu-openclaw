@@ -42,6 +42,7 @@ import type {
 } from "./session-accessor.sqlite-archive-types.js";
 import { MAX_VISIBLE_MESSAGE_MAX_MESSAGES } from "./session-accessor.sqlite-visible-cursor.js";
 import type { TranscriptEvent } from "./session-accessor.types.js";
+import { openSessionTranscriptArchiveBytes } from "./session-transcript-archive-encryption.js";
 import { readSessionTranscriptHeaderStartedAt } from "./transcript-header.js";
 
 type ArchiveDatabase = Pick<DB, "session_transcript_archives">;
@@ -184,7 +185,7 @@ export async function readTranscriptArchiveFinalInWorker(
         database.db,
         getNodeSqliteKysely<ArchiveDatabase>(database.db)
           .selectFrom("session_transcript_archives")
-          .select(["archive_blob", "archive_sha256", "encoding"])
+          .select(["archive_blob", "archive_sha256", "encoding", "generation"])
           .where("archive_name", "=", archive.archiveName)
           .where("session_id", "=", archive.sessionId)
           .where("session_key", "=", archive.sessionKey),
@@ -195,16 +196,17 @@ export async function readTranscriptArchiveFinalInWorker(
       if (hashSessionArchiveBytes(row.archive_blob) !== row.archive_sha256) {
         throw new Error("Archived transcript bytes do not match their registered hash.");
       }
-      await scanArchivedTranscript(
+      const bytes = openSessionTranscriptArchiveBytes(
+        database.db,
         row.archive_blob,
-        row.encoding === "zstd",
         archive.sessionId,
-        (event) => {
-          if (isVisibleAssistantResultEventForRun(event, plan.runId)) {
-            result.event = event;
-          }
-        },
+        row.generation,
       );
+      await scanArchivedTranscript(bytes, row.encoding === "zstd", archive.sessionId, (event) => {
+        if (isVisibleAssistantResultEventForRun(event, plan.runId)) {
+          result.event = event;
+        }
+      });
       if (result.event !== undefined) {
         break;
       }
@@ -408,6 +410,12 @@ export async function readTranscriptArchivePageInWorker(
         if (!row || hashSessionArchiveBytes(row.archive_blob) !== archive.archive_sha256) {
           throw new Error("Archived transcript bytes do not match their registered hash.");
         }
+        const bytes = openSessionTranscriptArchiveBytes(
+          database.db,
+          row.archive_blob,
+          archive.session_id,
+          archive.generation,
+        );
         const binding = {
           sessionId: archive.session_id,
           generation: archive.generation,
@@ -417,7 +425,7 @@ export async function readTranscriptArchivePageInWorker(
           [];
         await withTranscriptArchiveSelection(async (selection) => {
           const sessionStartedAt = await scanArchivedTranscript(
-            row.archive_blob,
+            bytes,
             row.encoding === "zstd",
             archive.session_id,
             (event, seq) => {
@@ -564,20 +572,20 @@ export async function readTranscriptArchivePageInWorker(
                   contextStopped = true;
                   return;
                 }
-                const bytes = Buffer.byteLength(JSON.stringify(event), "utf8");
-                if (selectedBytes + contextBytes + bytes > plan.maxBytes) {
+                const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+                if (selectedBytes + contextBytes + eventBytes > plan.maxBytes) {
                   contextStopped = true;
                   return;
                 }
                 // Newer recovery context takes priority over the older window.
-                trimPrecedingContext(bytes, 1);
+                trimPrecedingContext(eventBytes, 1);
                 contextEntries.push(visibleEntry);
-                contextBytes += bytes;
+                contextBytes += eventBytes;
                 return;
               }
               eligibleMessages += 1;
-              const bytes = Buffer.byteLength(JSON.stringify(event), "utf8");
-              if (bytes > plan.maxBytes) {
+              const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
+              if (eventBytes > plan.maxBytes) {
                 // Keep the same contiguous-suffix/omission contract as live history pages.
                 entries.length = 0;
                 selectedBytes = 0;
@@ -592,8 +600,8 @@ export async function readTranscriptArchivePageInWorker(
                 hasOlder = true;
                 oversizedSeq = undefined;
               }
-              entries.push({ ...visibleEntry, bytes });
-              selectedBytes += bytes;
+              entries.push({ ...visibleEntry, bytes: eventBytes });
+              selectedBytes += eventBytes;
               while (entries.length > plan.limit || selectedBytes > plan.maxBytes) {
                 const removed = entries.shift()!;
                 selectedBytes -= removed.bytes;

@@ -1,5 +1,6 @@
 // Copilot tests cover auth bridge plugin behavior.
 import { join, resolve } from "node:path";
+import { bindGithubCopilotToken } from "openclaw/plugin-sdk/provider-auth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveCopilotAuth, tokenFingerprint } from "./auth-bridge.js";
 
@@ -182,6 +183,21 @@ describe("resolveCopilotAuth - contract-resolved auth (resolvedApiKey + authProf
     expect(result.gitHubToken).toBe("contract-token-xyz");
     expect(result.authProfileId).toBe("pi:resolved");
     expect(result.authProfileVersion).toBe(tokenFingerprint("contract-token-xyz"));
+  });
+
+  it("sends the raw GitHub token from a github.com-bound device sign-in", () => {
+    const result = resolveAuth({
+      resolvedApiKey: bindGithubCopilotToken("member-token", "github.com"),
+      authProfileId: "github-copilot:github",
+    });
+    expect(result.gitHubToken).toBe("member-token");
+    expect(result.authProfileVersion).toBe(tokenFingerprint("member-token"));
+    expect(() =>
+      resolveAuth({
+        resolvedApiKey: bindGithubCopilotToken("tenant-token", "acme.ghe.com"),
+        authProfileId: "github-copilot:github",
+      }),
+    ).toThrow("does not support GitHub Copilot accounts on acme.ghe.com");
   });
 
   it("auth.useLoggedInUser=true takes precedence over contract resolvedApiKey", () => {

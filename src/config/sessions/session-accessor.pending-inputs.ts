@@ -23,7 +23,6 @@ import {
 } from "./session-accessor.pending-input-request.js";
 import {
   prepareCurrentSessionPendingInputDedupeRecovery,
-  isFinalInputCompletion,
   parseSessionPendingInputMessage,
   hasRegisteredSessionPendingInputOwner,
   registerSessionPendingInputOwner,
@@ -44,6 +43,7 @@ import {
 } from "./session-accessor.sqlite-scope.js";
 import { redactTranscriptMessageForStorage } from "./session-accessor.sqlite-transcript-store.js";
 import { captureIncognitoSessionOperation } from "./session-incognito-binding.js";
+import { isFinalInputCompletion } from "./session-input-completion-store.js";
 import {
   withCurrentPendingInputAuthority,
   type SessionPendingInputAuthority,

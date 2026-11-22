@@ -2,13 +2,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
 import { asRecord } from "@openclaw/normalization-core/record-coerce";
 import { RETIRED_SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
-import {
-  deleteCronJobRowInDatabase,
-  fingerprintCronJobRows,
-  fingerprintCronRuntimeRows,
-  loadedCronStoreFromRows,
-  loadCronRows,
-} from "./row-codec.js";
+import { fingerprintCronJobRows, fingerprintCronRuntimeRows } from "./fingerprint.js";
+import { deleteCronJobRowInDatabase, loadedCronStoreFromRows, loadCronRows } from "./row-codec.js";
 import {
   loadCronRuntimeAuthorities,
   repairCronRuntimeAuthorityRows,

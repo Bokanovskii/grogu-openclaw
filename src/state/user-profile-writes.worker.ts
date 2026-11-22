@@ -558,3 +558,26 @@ export function setAvatar(
   );
   return ok(value);
 }
+
+/** Remove uploaded avatar bytes so a replaced image is not retained. */
+export function clearAvatar(profileId: string, options: UserProfileMutationOptions = {}) {
+  ensureUserProfilesSchema(options);
+  return runUserProfileWriteTransaction(
+    ({ db }) => {
+      const profile = requireResolvedUserProfileMetadataById(db, profileId);
+      options.mutation?.before(db, profile.id);
+      executeSqliteQuerySync(
+        db,
+        userProfilesDb(db)
+          .updateTable("user_profiles")
+          .set({ avatar: null, avatar_mime: null, avatar_sha256: null, updated_at: Date.now() })
+          .where("id", "=", profile.id),
+      );
+      options.mutation?.publish(profile.id);
+      publishUserProfilesChange(db, profile.id);
+      return selectUserProfileListItemById(db, profile.id);
+    },
+    options,
+    { operationLabel: "user-profiles.clear-avatar" },
+  );
+}

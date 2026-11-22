@@ -52,6 +52,7 @@ export async function prepareDoctorDatabasePreflight(
     scope,
     openStateSchemaReadAdmission: openDoctorStateSchemaReadAdmission,
     preserveSourceArtifacts,
+    inspectOwnProtectedFormats: true,
     ...(cfg
       ? {
           // Custom stores go through the artifact-preserving header reader; discovery

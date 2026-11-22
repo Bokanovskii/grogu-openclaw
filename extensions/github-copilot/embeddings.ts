@@ -288,6 +288,7 @@ export const githubCopilotMemoryEmbeddingProviderAdapter: MemoryEmbeddingProvide
     const githubDomain = resolveGithubCopilotDomain({
       env: process.env,
       explicit: profileAuth?.githubDomain,
+      bound: profileAuth?.boundGithubDomain,
       config: options.config,
     });
     // A custom endpoint owns its own explicit credential. Never resolve a
@@ -298,6 +299,9 @@ export const githubCopilotMemoryEmbeddingProviderAdapter: MemoryEmbeddingProvide
         githubToken: value,
         env: process.env,
         githubDomain,
+        ...(profileAuth?.boundGithubDomain
+          ? { boundGithubDomain: profileAuth.boundGithubDomain }
+          : {}),
       }));
     const baseUrl = runtimeAuth.baseUrl || DEFAULT_COPILOT_API_BASE_URL;
     const ssrfPolicy = buildRemoteBaseUrlPolicy(baseUrl);

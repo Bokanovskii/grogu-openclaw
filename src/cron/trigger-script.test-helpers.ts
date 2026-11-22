@@ -1,6 +1,6 @@
 import type { CronCompletionDeliveryFence } from "./delivery-attempt-fence.js";
 import { makeCronJob } from "./delivery.test-helpers.js";
-import type { CronExecutionIdentityAdmission } from "./service/state.js";
+import type { CronExecutionIdentityAdmission, CronJobExecutionAuthority } from "./service/state.js";
 import { createCronScriptRuntime } from "./trigger-script.js";
 import type { CronStoredJob } from "./types.js";
 
@@ -16,6 +16,7 @@ type ScriptFixture = Omit<
   toolBudget?: number;
   abortSignal?: AbortSignal;
   executionIdentity?: CronExecutionIdentityAdmission;
+  executionAuthority?: CronJobExecutionAuthority;
   deliveryAttemptFence?: CronCompletionDeliveryFence | null;
 };
 
@@ -51,6 +52,7 @@ export function createCronScriptRuntimeFixture(deps: RuntimeDeps) {
         streamBatch: params.streamBatch,
         abortSignal: params.abortSignal,
         executionIdentity: params.executionIdentity,
+        executionAuthority: params.executionAuthority,
       }),
     executePayload: (params: ScriptFixture) =>
       runtime.executePayload({

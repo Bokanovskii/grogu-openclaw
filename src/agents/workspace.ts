@@ -115,7 +115,10 @@ const RETIRED_GENERATED_TEMPLATE_SHA256: Readonly<Record<string, readonly string
   [DEFAULT_SOUL_FILENAME]: ["4f9042f259b076e429d0f01ce39340030f47ea5b7f5befe306296c36baf1f60f"],
 };
 
-async function isGeneratedTemplateContent(fileName: string, content: string): Promise<boolean> {
+export async function isGeneratedTemplateContent(
+  fileName: string,
+  content: string,
+): Promise<boolean> {
   if (content === (await loadTemplate(fileName))) {
     return true;
   }

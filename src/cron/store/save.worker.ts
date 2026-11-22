@@ -4,9 +4,9 @@ import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-con
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import type { CronStoreFile } from "../types.js";
+import { readCronStoreFingerprints } from "./fingerprint.js";
 import { readCronJobNamesInDatabase } from "./job-name.kernel.js";
 import { retainCronReceiptAuthorityPublication } from "./receipt-authority-publication.js";
-import { readCronStoreFingerprints } from "./row-codec.js";
 import { serializeCronSaveError } from "./save-error.js";
 import type { CronStoreSaveWorkerOperations } from "./save-worker.types.js";
 import { saveCronStoreChangesInDatabase, saveCronStoreInDatabase } from "./save.kernel.js";

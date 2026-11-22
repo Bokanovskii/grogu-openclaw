@@ -44,12 +44,21 @@ export function createPluginServiceCronGetter(params: {
         throw new Error("Plugin service cron scheduler was replaced");
       }
     };
+    const mutationGuard = (options?: { commitGuard?: () => void }) => {
+      const assertCallerCurrent = options?.commitGuard;
+      return () => {
+        commitGuard();
+        assertCallerCurrent?.();
+        commitGuard();
+      };
+    };
     // A retained handle owns one scheduler. Recheck at the store lock, not only
     // before awaiting it, so replacement cannot admit an old queued write.
     const service: PluginServiceCron = {
-      enqueueRun: async (id, mode) => {
-        commitGuard();
-        return await runScheduled(() => cron.enqueueRun(id, mode, { commitGuard }));
+      enqueueRun: async (id, mode, options) => {
+        const assertCurrent = mutationGuard(options);
+        assertCurrent();
+        return await runScheduled(() => cron.enqueueRun(id, mode, { commitGuard: assertCurrent }));
       },
       isEnabled: async () => {
         commitGuard();
@@ -63,25 +72,28 @@ export function createPluginServiceCronGetter(params: {
         commitGuard();
         return jobs;
       },
-      add: async (input) => {
-        commitGuard();
+      add: async (input, options) => {
+        const assertCurrent = mutationGuard(options);
+        assertCurrent();
         const normalized = normalizeCronJobCreate(input);
         if (!normalized) {
           throw new Error("Plugin service cron create input is invalid");
         }
-        return await cron.add(normalized, { commitGuard });
+        return await cron.add(normalized, { commitGuard: assertCurrent });
       },
-      update: async (id, patch) => {
-        commitGuard();
+      update: async (id, patch, options) => {
+        const assertCurrent = mutationGuard(options);
+        assertCurrent();
         const normalized = normalizeCronJobPatch(patch);
         if (!normalized) {
           throw new Error("Plugin service cron update input is invalid");
         }
-        return await cron.update(id, normalized, { commitGuard });
+        return await cron.update(id, normalized, { commitGuard: assertCurrent });
       },
-      remove: async (id) => {
-        commitGuard();
-        return await cron.remove(id, { commitGuard });
+      remove: async (id, options) => {
+        const assertCurrent = mutationGuard(options);
+        assertCurrent();
+        return await cron.remove(id, { commitGuard: assertCurrent });
       },
       removeStaleJobFamily: async (family) => {
         commitGuard();

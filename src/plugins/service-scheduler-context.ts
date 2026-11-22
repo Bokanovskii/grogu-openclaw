@@ -27,7 +27,7 @@ export function createPluginServiceSchedulerRunner(owner: {
         inheritRequestScope: false,
       });
   const runScheduled = createScheduledGatewayRunner(resolveGatewayContext);
-  return (work: () => void | Promise<unknown>) =>
+  return <T>(work: () => T | Promise<T>) =>
     runOutsideOperatorToolGatewayAuthority(() =>
       runScheduled(async () =>
         pluginInstanceInvocation.exit(() => {

@@ -12,7 +12,10 @@ import { cleanupTempDirs, makeTempDir } from "../../test/helpers/temp-dir.js";
 import { readSessionArchiveContentSync } from "../config/sessions/archive-compression.js";
 import { resolveSqliteTranscriptArchiveDirectory } from "../config/sessions/session-accessor.sqlite-scope.js";
 import { reconcileSessionTranscriptIndexInTransaction } from "../config/sessions/session-transcript-index.js";
-import { prepareTranscriptPayload } from "../config/sessions/transcript-payload.js";
+import {
+  prepareTranscriptPayload,
+  transcriptEventJsonSql,
+} from "../config/sessions/transcript-payload.js";
 import {
   AGENT_DATABASE_MAINTENANCE_LEASE,
   assertAgentDatabaseMaintenanceAuthority,
@@ -32,6 +35,8 @@ import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
+import { withEnvAsync } from "../test-utils/env.js";
+import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "./kysely-sync.js";
 import { openNodeSqliteDatabase, requireNodeSqlite } from "./node-sqlite.js";
 import { TRANSCRIPT_DIRECTIVE_MIGRATION_BATCH_SIZE } from "./state-migrations.transcript-directives-archives.js";
 import { migrateHistoricalTranscriptDirectives } from "./state-migrations.transcript-directives.js";
@@ -204,6 +209,66 @@ afterEach(() => {
 });
 
 describe("historical transcript directive migration", () => {
+  it("migrates directives in an authenticated protected agent database", async () => {
+    const root = makeTempDir(tempDirs, "protected-transcript-directives-");
+    const stateDir = path.join(root, "state");
+    const keyPath = path.join(root, "key");
+    fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    await withEnvAsync(
+      { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined, OPENCLAW_STATE_DIR: stateDir },
+      async () => {
+        const env = { OPENCLAW_STATE_DIR: stateDir };
+        const opened = openOpenClawAgentDatabase({ agentId: "main", env });
+        const databasePath = opened.path;
+        insertSession(opened.db, {
+          events: [
+            messageEvent({
+              id: "protected-assistant",
+              role: "assistant",
+              timestamp: 10,
+              content: [{ type: "text", text: "[[reply_to: message-7]] Protected answer" }],
+            }),
+          ],
+          generation: "before",
+          sessionId: "protected-session",
+        });
+        closeOpenClawAgentDatabasesForTest();
+        await withEnvAsync({ OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath }, async () => {
+          const protectedEnv = { ...env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath };
+          const protectedDb = openOpenClawAgentDatabase({ agentId: "main", env: protectedEnv });
+          expect(protectedDb.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+          closeOpenClawAgentDatabasesForTest();
+
+          const result = await migrateHistoricalTranscriptDirectives({ env: protectedEnv });
+          expect(result.warnings).toEqual([]);
+          expect(result.changes).toHaveLength(1);
+
+          const database = openNodeSqliteDatabase(databasePath, { readOnly: true });
+          try {
+            const db =
+              getNodeSqliteKysely<import("../state/openclaw-agent-db.generated.js").DB>(database);
+            const row = executeSqliteQueryTakeFirstSync(
+              database,
+              db
+                .selectFrom("transcript_events")
+                .select(transcriptEventJsonSql(database).as("event_json"))
+                .where("session_id", "=", "protected-session")
+                .where("seq", "=", 0),
+            );
+            expect(JSON.parse(row?.event_json ?? "")).toMatchObject({
+              message: {
+                content: [{ type: "text", text: "Protected answer" }],
+                openclawDelivery: { replyToId: "message-7" },
+              },
+            });
+          } finally {
+            database.close();
+          }
+        });
+      },
+    );
+  });
+
   it.each(["identity", "zstd"])(
     "migrates %s assistant rows and archives while preserving code and derived indexes",
     async (storage) => {

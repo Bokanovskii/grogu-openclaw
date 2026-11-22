@@ -6,6 +6,7 @@ import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion"
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { tryResolveCronJobEffectiveAgentId } from "../../../cron/agent-id.js";
 import { noteCronJobsStoreCommit } from "../../../cron/store.js";
+import { sealCronJobValue } from "../../../cron/store/job-encryption.js";
 import { cronStoreKey } from "../../../cron/store/key.js";
 import { inspectCronJobsReadOnly } from "../../../cron/store/read-only.js";
 import {
@@ -100,7 +101,7 @@ export async function repairLegacyCronJobOwnersForDoctor(
             .updateTable("cron_jobs")
             .set((eb) => ({
               agent_id: change.agentId,
-              job_json: change.definition,
+              job_json: sealCronJobValue(db, storeKey, change.jobId, "job_json", change.definition),
               grant_definition_revision: null,
               grant_definition_generation: eb.fn<number>("max", [
                 eb(eb.fn.coalesce("grant_definition_generation", eb.val(0)), "+", 1),

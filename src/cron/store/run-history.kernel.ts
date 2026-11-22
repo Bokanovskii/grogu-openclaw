@@ -5,6 +5,7 @@ import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { normalizeSqliteNumber } from "../../infra/sqlite-number.js";
 import type { DB } from "../../state/openclaw-state-db.generated.js";
+import { isSqliteStorageValueEncryptionStrict } from "../../storage/sqlite-encryption.js";
 import {
   compareCronRunRecordsNewestFirst,
   cronRunRecordStoreKey,
@@ -12,6 +13,11 @@ import {
   parseCronRunDetailJson,
   resolveCronRunRecordTimestamp,
 } from "../run-history-detail.js";
+import {
+  openCronHistoryValue,
+  registerCronHistoryDetailProjection,
+  sealCronHistoryValue,
+} from "./run-history-encryption.js";
 import type { CronRunHistoryWrite, CronRunRecord } from "./run-history.types.js";
 import type { CronRunReceiptWriteSchema } from "./run-receipt-write-admission.js";
 
@@ -64,6 +70,17 @@ export function readCronRunRecordsInDatabase(
   options?: { planningOnly?: boolean; taskIds?: readonly string[] },
 ): CronRunRecord[] {
   const planningOnly = options?.planningOnly === true;
+  const protectedPlanning = planningOnly && isSqliteStorageValueEncryptionStrict(db);
+  if (protectedPlanning) {
+    registerCronHistoryDetailProjection(db);
+  }
+  const planningDetail = protectedPlanning
+    ? /* kysely-allow-raw: Decrypt inside SQLite so only maintenance identities leave the projection. */ sql<
+        string | null
+      >`openclaw_cron_history_detail_open(detail_json, task_id)`
+    : /* kysely-allow-raw: Personal history retains its released JSON projection. */ sql<
+        string | null
+      >`detail_json`;
   let select = query(db)
     .selectFrom("task_runs")
     .select([
@@ -91,9 +108,9 @@ export function readCronRunRecordsInDatabase(
       planningOnly
         ? /* kysely-allow-raw: Project only the two JSON members used for maintenance planning. */ sql<
             string | null
-          >`CASE WHEN json_valid(detail_json) THEN json_object(
-            'storeKey', json_extract(detail_json, '$.storeKey'),
-            'kind', json_extract(detail_json, '$.kind')
+          >`CASE WHEN json_valid(${planningDetail}) THEN json_object(
+            'storeKey', json_extract(${planningDetail}, '$.storeKey'),
+            'kind', json_extract(${planningDetail}, '$.kind')
           ) END`.as("detail_json")
         : "detail_json",
     ])
@@ -139,6 +156,11 @@ export function readCronRunRecordsInDatabase(
       "notify policy",
     );
 
+    const error = openCronHistoryValue(db, row.task_id, "error", row.error);
+    const summary = openCronHistoryValue(db, row.task_id, "terminal_summary", row.terminal_summary);
+    const detail = planningOnly
+      ? row.detail_json
+      : openCronHistoryValue(db, row.task_id, "detail_json", row.detail_json);
     return normalizeCronRunTimestamps({
       id: row.task_id,
       jobId: row.source_id || null,
@@ -151,9 +173,9 @@ export function readCronRunRecordsInDatabase(
       lastEventAt: normalizeSqliteNumber(row.last_event_at),
       cleanupAfter: normalizeSqliteNumber(row.cleanup_after),
       status: row.status,
-      error: row.error || undefined,
-      summary: row.terminal_summary ?? undefined,
-      detail: row.detail_json === null ? undefined : parseCronRunDetailJson(row.detail_json),
+      error: error || undefined,
+      summary: summary ?? undefined,
+      detail: detail === null ? undefined : parseCronRunDetailJson(detail),
     });
   });
 }
@@ -177,15 +199,26 @@ export function recordCronRunInDatabase(db: DatabaseSync, input: CronRunHistoryW
   ) {
     return;
   }
+  const taskId = existing?.id ?? randomUUID();
   const terminal = {
     child_session_key: input.sessionKey ?? null,
     status: existing?.status === "cancelled" ? "cancelled" : input.status,
     ended_at: input.endedAt,
     last_event_at: input.endedAt,
     cleanup_after: input.endedAt + RETENTION_MS,
-    error: existing?.status === "cancelled" ? (existing.error ?? null) : (input.error ?? null),
-    terminal_summary: input.summary ?? existing?.summary ?? null,
-    detail_json: JSON.stringify(input.detail),
+    error: sealCronHistoryValue(
+      db,
+      taskId,
+      "error",
+      existing?.status === "cancelled" ? (existing.error ?? null) : (input.error ?? null),
+    ),
+    terminal_summary: sealCronHistoryValue(
+      db,
+      taskId,
+      "terminal_summary",
+      input.summary ?? existing?.summary ?? null,
+    ),
+    detail_json: sealCronHistoryValue(db, taskId, "detail_json", JSON.stringify(input.detail)),
   };
   if (existing) {
     executeSqliteQuerySync(
@@ -202,13 +235,13 @@ export function recordCronRunInDatabase(db: DatabaseSync, input: CronRunHistoryW
       query(db)
         .insertInto("task_runs")
         .values({
-          task_id: randomUUID(),
+          task_id: taskId,
           runtime: "cron",
           task_kind: "automation_run",
           requester_session_key: "",
           owner_key: "",
           scope_kind: "system",
-          task: input.jobId,
+          task: sealCronHistoryValue(db, taskId, "task", input.jobId),
           delivery_status: "not_applicable",
           notify_policy: "silent",
           source_id: input.jobId,
@@ -406,9 +439,19 @@ export function reconcileCronRunHistoryInDatabase(
           ended_at: next.endedAt ?? null,
           last_event_at: next.lastEventAt ?? null,
           cleanup_after: next.cleanupAfter ?? null,
-          error: next.error ?? null,
-          terminal_summary: next.summary ?? null,
-          detail_json: next.detail === undefined ? null : JSON.stringify(next.detail),
+          error: sealCronHistoryValue(db, row.id, "error", next.error ?? null),
+          terminal_summary: sealCronHistoryValue(
+            db,
+            row.id,
+            "terminal_summary",
+            next.summary ?? null,
+          ),
+          detail_json: sealCronHistoryValue(
+            db,
+            row.id,
+            "detail_json",
+            next.detail === undefined ? null : JSON.stringify(next.detail),
+          ),
         })
         .where("runtime", "=", "cron")
         .where("task_id", "=", row.id),

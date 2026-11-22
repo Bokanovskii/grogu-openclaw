@@ -231,6 +231,7 @@ export async function prepareGatewayLifecycle(params: {
       broadcast,
       resolveGatewayContext: runtime.resolvePluginGatewayContext,
       resolvePluginRegistry: () => pluginRuntime.registry,
+      resolvePluginServices: () => runtimeStateRef.current?.pluginServices,
     }),
     gatewayMethods: listActiveGatewayMethods(pluginRuntime.baseGatewayMethods),
   });

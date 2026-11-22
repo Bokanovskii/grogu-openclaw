@@ -1,5 +1,5 @@
-import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
 import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
+import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 export function recordProtectedUsage(
   stateDir: string,
@@ -13,22 +13,22 @@ export function recordProtectedUsage(
     now: number;
   },
 ) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedUsage.record", input },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedUsage.record",
+    input,
+  });
 }
 
 export function listProtectedUsage(stateDir: string, profileId: string, now: number) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedUsage.list", input: { profileId, now } },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedUsage.list",
+    input: { profileId, now },
+  });
 }
 
 export function pruneProtectedUsage(stateDir: string, now: number) {
-  return executeOpenClawStateWorker(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { type: "protectedUsage.prune", input: { now } },
-  );
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedUsage.prune",
+    input: { now },
+  });
 }

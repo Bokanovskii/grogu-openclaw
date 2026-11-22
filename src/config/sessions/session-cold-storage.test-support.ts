@@ -5,12 +5,17 @@ import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import type { AgentsConfig } from "../types.agents.js";
 import { replaceSessionEntrySync } from "./session-accessor.js";
 import { replaceTranscriptEvents } from "./session-accessor.sqlite-transcript-write.js";
 import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 import { waitForSessionTranscriptIndexReconcile } from "./session-transcript-reconcile.js";
-import { prepareTranscriptPayload, transcriptEventJsonSql } from "./transcript-payload.js";
+import {
+  createTranscriptPayloadUpdater,
+  prepareTranscriptPayload,
+  transcriptEventJsonSql,
+} from "./transcript-payload.js";
 import { CURRENT_SESSION_VERSION } from "./version.js";
 
 export const historicalId = "cold-history-window";
@@ -72,17 +77,21 @@ export async function createSessionColdStorageFixture(
         .where("session_id", "=", historicalId),
     );
     // Importers preserve raw JSON spacing and identity metadata independently of event payloads.
+    createTranscriptPayloadUpdater(
+      database,
+      historicalId,
+    )({
+      seq: 0,
+      ...prepareTranscriptPayload(
+        database,
+        `{ "type" : "session", "id" : "cold-history-window", "version" : ${CURRENT_SESSION_VERSION} }`,
+      ),
+    });
     executeSqliteQuerySync(
       database,
       db
         .updateTable("transcript_events")
-        .set({
-          ...prepareTranscriptPayload(
-            database,
-            `{ "type" : "session", "id" : "cold-history-window", "version" : ${CURRENT_SESSION_VERSION} }`,
-          ),
-          created_at: 7,
-        })
+        .set({ created_at: 7 })
         .where("session_id", "=", historicalId)
         .where("seq", "=", 0),
     );
@@ -140,9 +149,13 @@ export async function createSessionColdStorageFixture(
     expect.objectContaining({ message_idempotency_key: "original-idempotency-key" }),
   );
   expect(original.active).toContainEqual(expect.objectContaining({ session_id: historicalId }));
-  expect(original.search).toContainEqual(
-    expect.objectContaining({ message_id: "history-user", timestamp: 10 }),
-  );
+  if (hasSqliteStorageValueEncryption(database())) {
+    expect(original.search).toEqual([]);
+  } else {
+    expect(original.search).toContainEqual(
+      expect.objectContaining({ message_id: "history-user", timestamp: 10 }),
+    );
+  }
   return { options, scope, database, snapshot, original };
 }
 

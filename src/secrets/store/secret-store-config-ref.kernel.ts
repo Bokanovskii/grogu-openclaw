@@ -11,6 +11,7 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../../state/openclaw-state-db.js";
+import { sealSecretStoreValue } from "./secret-store-encryption.js";
 
 type SecretStoreDatabase = Pick<DB, "secret_store_entries">;
 
@@ -69,7 +70,12 @@ export function writeSecretStoreEntryForConfigRefInDatabase(
             scope_kind: TEAM_SCOPE.scopeKind,
             scope_id: TEAM_SCOPE.scopeId,
             name,
-            value: input.value,
+            value: sealSecretStoreValue(
+              sqlite,
+              { scope_kind: TEAM_SCOPE.scopeKind, scope_id: TEAM_SCOPE.scopeId, name },
+              input.value,
+              "secret",
+            ),
             kind: "secret",
             created_at_ms: input.now,
             updated_at_ms: input.now,

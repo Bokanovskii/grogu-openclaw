@@ -1,4 +1,4 @@
-// Full-text search over per-agent transcript rows. Appends index themselves
+// Transcript search over per-agent rows. Unencrypted appends index themselves
 // inside the accessor's write transactions (session-transcript-index.ts);
 // this module owns the query path and schedules the shared reconcile owner
 // when doctor imports or out-of-band writes leave derived rows behind.
@@ -10,6 +10,7 @@ import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
+  prepareSqliteQueryTakeFirstSync,
   sqliteStringSet,
 } from "../../infra/kysely-sync.js";
 import {
@@ -30,6 +31,7 @@ import {
   captureOpenClawAgentDatabaseExecution,
   supportsOpenClawAgentDatabaseExecution,
 } from "../../state/openclaw-agent-execution.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import {
   captureLifecycleDatabaseScope,
@@ -41,7 +43,9 @@ import {
   prepareIncognitoSessionHistoryRead,
   type IncognitoSessionHistoryBinding,
 } from "./session-incognito-history-read.js";
+import { extractTranscriptIndexEntry } from "./session-transcript-projection-append.js";
 import { readSessionTranscriptIndexStatus } from "./session-transcript-projection-writer.js";
+import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 import {
   isSessionTranscriptIndexReconcileRunning,
   startSessionTranscriptIndexReconcile,
@@ -53,10 +57,13 @@ import type {
 } from "./session-transcript-search.types.js";
 import { transcriptSearchLane } from "./session-transcript-worker-resources.js";
 import { withSessionHistoryWorkerDatabase } from "./session-transcript-worker-runtime.js";
+import { readTranscriptPayload, type TranscriptPayloadRecord } from "./transcript-payload.js";
 
 const SEARCH_SNIPPET_MAX_CHARS = 500;
 const SEARCH_LIMIT_MAX = 25;
 const SEARCH_QUERY_MAX_CHARS = 4096;
+const ENCRYPTED_SEARCH_MAX_ROWS = 4_000;
+const ENCRYPTED_SEARCH_MAX_BYTES = 4 * 1024 * 1024;
 // SQLite data_version values are comparable only on the same live connection.
 const searchConnections = new WeakMap<DatabaseSync, string>();
 
@@ -99,6 +106,45 @@ function toFtsQuery(query: string, match: SessionTranscriptSearchParams["match"]
         `"${token.replaceAll('"', '""')}"${match === "prefix" && index === tokens.length - 1 ? "*" : ""}`,
     )
     .join(" AND ");
+}
+
+function searchWords(text: string) {
+  return Array.from(text.matchAll(/[\p{L}\p{N}\p{Co}\p{M}]+/gu), (word) => ({
+    value: word[0].normalize("NFD").replace(/\p{M}/gu, "").toLowerCase(),
+    offset: word.index,
+  })).filter((word) => word.value.length > 0);
+}
+
+function encryptedSearchSnippet(
+  text: string,
+  terms: string[][],
+  match: SessionTranscriptSearchParams["match"],
+): string | undefined {
+  if (!terms.length) {
+    return undefined;
+  }
+  const words = searchWords(text);
+  let firstOffset = text.length;
+  for (const [termIndex, term] of terms.entries()) {
+    const matchedWord = words.find((_, index) =>
+      term.every((value, part) => {
+        const candidate = words[index + part]?.value;
+        return match === "prefix" && termIndex === terms.length - 1 && part === term.length - 1
+          ? candidate?.startsWith(value)
+          : candidate === value;
+      }),
+    );
+    if (!matchedWord) {
+      return undefined;
+    }
+    firstOffset = Math.min(firstOffset, matchedWord.offset);
+  }
+  const prefix = firstOffset > 0 ? "…" : "";
+  const tail = text.slice(firstOffset);
+  const budget = SEARCH_SNIPPET_MAX_CHARS - prefix.length;
+  return tail.length > budget
+    ? `${prefix}${truncateUtf16Safe(tail, budget - 1)}…`
+    : `${prefix}${tail}`;
 }
 
 /** Query a captured disk owner off-thread; reconciliation remains host-owned. */
@@ -321,8 +367,8 @@ export function searchSessionTranscriptsReadOnlySync(
   const query = validateSearchQuery(params.query);
   const scope = preparedDatabase ? { agentId: params.agentId } : resolveSqliteReadScope(params);
   const databaseOptions = preparedDatabase ?? toDatabaseOptions(scope);
-  const result = withOpenClawAgentDatabaseReadOnly(
-    (database) => ({
+  const result = withOpenClawAgentDatabaseReadOnly((database) => {
+    return {
       // Capture before BEGIN to detect commits during or after the hit snapshot.
       revision: readSearchRevision(database.db),
       ...runSqliteDeferredTransactionSync(
@@ -357,6 +403,108 @@ export function searchSessionTranscriptsReadOnlySync(
                 .innerJoin(selectedWindows.as("window"), "window.session_id", "cold.session_id")
                 .select((eb) => eb.fn.countAll<number>().as("count")),
             )?.count ?? 0;
+          if (hasSqliteStorageValueEncryption(database.db)) {
+            // Scope metadata before hydrating ciphertext. Only the active, clean
+            // projection is eligible, just as for the unencrypted FTS query.
+            const candidates = executeSqliteQuerySync(
+              database.db,
+              db
+                .selectFrom(selectedWindows.as("window"))
+                .innerJoin(
+                  "session_transcript_active_events as active",
+                  "active.session_id",
+                  "window.session_id",
+                )
+                .innerJoin("session_transcript_index_state as state", (join) =>
+                  join
+                    .onRef("state.session_id", "=", "active.session_id")
+                    .on("state.needs_rebuild", "=", 0),
+                )
+                .innerJoin("transcript_events as event", (join) =>
+                  join
+                    .onRef("event.session_id", "=", "active.session_id")
+                    .onRef("event.seq", "=", "active.event_seq"),
+                )
+                .where("active.message_position", "is not", null)
+                .select([
+                  "window.session_key",
+                  "event.session_id",
+                  "event.seq",
+                  "event.created_at",
+                  transcriptEventReadBytesSql("event").as("read_bytes"),
+                ])
+                .orderBy("event.created_at", "desc")
+                .orderBy("event.seq", "desc")
+                .limit(ENCRYPTED_SEARCH_MAX_ROWS + 1),
+            ).rows;
+            const readPayload = prepareSqliteQueryTakeFirstSync<
+              { sessionId: string; seq: number },
+              TranscriptPayloadRecord
+            >(database.db, (parameter) =>
+              db
+                .selectFrom("transcript_events")
+                .select(["event_json", "event_zstd", "event_utf8_bytes", "navigation_json"])
+                .where(
+                  "session_id",
+                  "=",
+                  parameter((row) => row.sessionId),
+                )
+                .where(
+                  "seq",
+                  "=",
+                  parameter((row) => row.seq),
+                ),
+            );
+            const terms = query
+              .split(/\s+/u)
+              .map((term) => searchWords(term).map((word) => word.value))
+              .filter((term) => term.length > 0);
+            const hits: SessionTranscriptSearchResult["hits"] = [];
+            let truncated = candidates.length > ENCRYPTED_SEARCH_MAX_ROWS;
+            let readBytes = 0;
+            for (const row of candidates.slice(0, ENCRYPTED_SEARCH_MAX_ROWS)) {
+              readBytes += row.read_bytes;
+              if (readBytes > ENCRYPTED_SEARCH_MAX_BYTES) {
+                truncated = true;
+                break;
+              }
+              const payload = readPayload({ sessionId: row.session_id, seq: row.seq });
+              if (!payload) {
+                throw new Error("Transcript search lost a row within its read snapshot");
+              }
+              const event: unknown = JSON.parse(
+                readTranscriptPayload(payload, {
+                  database: database.db,
+                  sessionId: row.session_id,
+                  seq: row.seq,
+                }),
+              );
+              const entry = extractTranscriptIndexEntry(event, row.created_at);
+              if (!entry || (params.role && entry.role !== params.role)) {
+                continue;
+              }
+              const snippet = encryptedSearchSnippet(entry.text, terms, params.match);
+              if (snippet === undefined) {
+                continue;
+              }
+              hits.push({
+                sessionKey: row.session_key,
+                sessionId: row.session_id,
+                messageId: entry.messageId,
+                role: entry.role,
+                timestamp: entry.timestamp,
+                snippet,
+                score: 0,
+              });
+            }
+            hits.sort((left, right) => right.timestamp - left.timestamp);
+            return {
+              found: true,
+              hits: hits.slice(0, limit),
+              truncated: truncated || hits.length > limit,
+              ...(archivedTranscriptsExcluded > 0 ? { archivedTranscriptsExcluded } : {}),
+            };
+          }
           const match =
             /* kysely-allow-raw: FTS5 table MATCH with a bound search query. */
             sql<boolean>`session_transcript_fts MATCH ${toFtsQuery(query, params.match)}`;
@@ -473,8 +621,7 @@ export function searchSessionTranscriptsReadOnlySync(
         },
         { databaseLabel: database.path, operationLabel: "session transcript search" },
       ),
-    }),
-    databaseOptions,
-  );
+    };
+  }, databaseOptions);
   return result.found ? result.value : { found: false, hits: [], truncated: false };
 }

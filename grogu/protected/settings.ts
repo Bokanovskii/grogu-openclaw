@@ -106,7 +106,8 @@ export function parseRuntimeSettings(value: unknown) {
 export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): OpenClawConfig {
   return {
     // Keyless public search only; the plugin is shipped as source because it has no bundled dist.
-    tools: { web: { search: { enabled: true, provider: "duckduckgo" } } },
+    // The provider cache is process-wide, so a hit would reveal another member's identical query.
+    tools: { web: { search: { enabled: true, provider: "duckduckgo", cacheTtlMinutes: 0 } } },
     agents: {
       ownership: "explicit",
       entries: {

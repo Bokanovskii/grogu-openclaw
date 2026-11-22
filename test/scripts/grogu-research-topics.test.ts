@@ -226,6 +226,13 @@ describe("research_topics v2", () => {
       throw new Error("Expected member research tools");
     }
     try {
+      expect(one.description).toContain("never send texts or use the message tool");
+      expect(one.description).toContain("Do not assume inbox delivery is available");
+      expect(one.description).toContain("deliver only to the owner's protected inbox");
+      expect(one.description).toContain("never send updates to conversations");
+      expect(one.description).toContain("every destination has a native receipt");
+      expect(one.description).not.toContain("then the normal message tool");
+      expect(one.description).not.toContain("notify_main sends a text candidate");
       expect(factory.create({ ...firstSession, assertInvocationCurrent: () => {} })).toBeNull();
       await one.execute("add", { action: "add", id: "private", title: "Private topic" });
       expect((await two.execute("list", { action: "list" })).details).toMatchObject({ topics: [] });
@@ -367,6 +374,7 @@ describe("research_topics v2", () => {
       throw new Error("Expected a research tool and shutdown owner");
     }
     try {
+      expect(tool.description).toContain("then the normal message tool");
       await tool.execute("source", {
         action: "source_set",
         id: "shared",

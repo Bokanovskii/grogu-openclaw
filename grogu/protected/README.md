@@ -398,7 +398,14 @@ run-chat binding. Deleting a published automation also unpublishes it and
 removes its followers and their notification opt-ins in the same transaction,
 retiring those follow entries from the followers' storage; a follower's delete
 request returns 404. The member's run chat and authoring chat remain available
-as ordinary chats.
+after deletion. The run chat remains read only.
+
+Run chats are records of automation runs. Member turns, steering, and stop requests
+return `409 run_chat_read_only`. Automation runs can still write to their
+run chat. Clients that send `X-Alcove-Capabilities: automation-runs-v1`
+receive `automationRun: { automationId }` in run-chat list and detail responses.
+Deleting a run chat does not delete the automation. Its next run recreates the
+chat with the same ID.
 
 Member removal with automation history requires the storage-aware authority
 adapter in `admission-store.ts`. Fence and stop the target profile's writers,

@@ -68,6 +68,9 @@ function summary(entry: SessionEntry): ProtectedChatSummary {
       /^[a-z][a-z0-9-]{0,47}$/u.test(entry.protectedAgentId)
         ? entry.protectedAgentId
         : legacyDefaultProtectedAgentId,
+    ...(entry.protectedAutomationRunId
+      ? { automationRun: { automationId: entry.protectedAutomationRunId } }
+      : {}),
     ...(entry.protectedAuthoringKind === "automation"
       ? {
           authoring: {

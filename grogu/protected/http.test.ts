@@ -434,6 +434,46 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(stillPaused.enabled, false);
   assert.equal(stillPaused.version, automation.version);
   assert.equal(stillPaused.nextCheckAt, null);
+  assert.ok(firstManualRun.runChatId);
+  const runChatRoute = `/chats/${firstManualRun.runChatId}`;
+  const legacyRunChat = (await (await call(runChatRoute)).json()).chat;
+  assert.equal(legacyRunChat.automationRun, undefined);
+  const runChat = (await (await automationCall(runChatRoute)).json()).chat;
+  assert.deepEqual(runChat.automationRun, { automationId: automation.id });
+  assert.ok(runChat.messages.some((message: { role: string }) => message.role === "assistant"));
+  const legacyList = (await (await call("/chats")).json()).chats;
+  assert.equal(
+    legacyList.find((item: { id: string }) => item.id === firstManualRun.runChatId).automationRun,
+    undefined,
+  );
+  const negotiatedList = (await (await automationCall("/chats")).json()).chats;
+  assert.deepEqual(
+    negotiatedList.find((item: { id: string }) => item.id === firstManualRun.runChatId)
+      .automationRun,
+    { automationId: automation.id },
+  );
+  const deniedTurn = await call(`${runChatRoute}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": user.id },
+    body: JSON.stringify({ provider: "sparky", model: "synthetic", text: "Unexpected turn" }),
+  });
+  assert.equal(deniedTurn.status, 409);
+  assert.deepEqual((await deniedTurn.json()).error, {
+    code: "run_chat_read_only",
+    message: "This chat is a record of an automation run. It is read only.",
+  });
+  const fakeRun = randomUUID();
+  for (const [method, suffix] of [
+    ["POST", "steer"],
+    ["DELETE", `steer/${randomUUID()}`],
+    ["POST", "stop"],
+  ] as const) {
+    const deniedControl = await call(`${runChatRoute}/runs/${fakeRun}/${suffix}`, {
+      method,
+    });
+    assert.equal(deniedControl.status, 409);
+    assert.equal((await deniedControl.json()).error.code, "run_chat_read_only");
+  }
   const enabled = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": automation.version },
@@ -472,6 +512,7 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(scheduledRun.status, "succeeded");
   assert.ok(scheduledRun.resultId);
   assert.ok(scheduledRun.runChatId);
+  assert.equal(scheduledRun.runChatId, firstManualRun.runChatId);
   const automationRequest = requests[automationRequestStart];
   assert.match(JSON.stringify(automationRequest?.messages), /Summarize synthetic public news/u);
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_search"));
@@ -557,6 +598,26 @@ void test("Protected turns load skills on request and retain credentials during 
   const resultRows = (await results.json()).runs as Array<{ runId: string; text: string }>;
   assert.equal(resultRows.find((row) => row.runId === scheduledRun.id)?.text, "Synthetic answer.");
   assert.equal(resultRows.find((row) => row.runId === manualRun.id)?.text, "Synthetic answer.");
+  const beforeRunChatDeletion = (await (await call(runChatRoute)).json()).chat;
+  const deleteRunChat = await call(runChatRoute, {
+    method: "DELETE",
+    headers: { "if-match": beforeRunChatDeletion.version },
+  });
+  assert.equal(deleteRunChat.status, 204, await deleteRunChat.clone().text());
+  const recreatedDelivery = waitForDelivery("manual", [
+    firstManualRun.id,
+    lostQueue.runId,
+    manualRun.id,
+  ]);
+  const recreateRun = await automationCall(`/automations/${automation.id}/run`, {
+    method: "POST",
+  });
+  assert.equal(recreateRun.status, 202);
+  const recreatedRun = await recreatedDelivery;
+  assert.equal(recreatedRun.runChatId, scheduledRun.runChatId);
+  assert.deepEqual((await (await automationCall(runChatRoute)).json()).chat.automationRun, {
+    automationId: automation.id,
+  });
   const inbox = await automationCall("/automations/inbox");
   const inboxBody = await inbox.json();
   assert.ok(Value.Check(ProtectedAutomationInboxResponseSchema, inboxBody));
@@ -593,6 +654,7 @@ void test("Protected turns load skills on request and retain credentials during 
     firstManualRun.id,
     lostQueue.runId,
     manualRun.id,
+    recreatedRun.id,
   ]);
   const activeRun = await automationCall(`/automations/${automation.id}/run`, { method: "POST" });
   assert.equal(activeRun.status, 202);

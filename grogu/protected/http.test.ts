@@ -2269,6 +2269,31 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
   await running.text();
   await parentRun.text();
 
+  // Every new send is charged to the member. A full account refuses it, but a retry still answers.
+  await seed(aliceId, sideChat.id, "x".repeat(10_000));
+  const longReply = (await readChat("alice", sideChat.id)).chat.messages.findLast(
+    (message: { role: string }) => message.role === "assistant",
+  );
+  const beforeSends = (await readChat("alice", parent.id)).chat.messages.length;
+  let accepted = 0;
+  let refused: Response | undefined;
+  while (!refused && accepted < 60) {
+    const next = await sendBack("alice", aliceId, sideChat.id, {
+      requestId: randomUUID(),
+      messageIds: [longReply.id],
+    });
+    if (next.status === 413) {
+      refused = next;
+    } else {
+      assert.equal(next.status, 200);
+      accepted++;
+    }
+  }
+  assert.ok(refused, "the account never reached its storage limit");
+  assert.equal((await refused.json()).error.code, "quota_exceeded");
+  assert.equal((await readChat("alice", parent.id)).chat.messages.length, beforeSends + accepted);
+  assert.equal((await sendBack("alice", aliceId, sideChat.id, sendRequest)).status, 200);
+
   const deleted = await call("alice", `/chats/${parent.id}`, {
     method: "DELETE",
     headers: { "if-match": (await readChat("alice", parent.id)).chat.version },

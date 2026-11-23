@@ -5601,11 +5601,31 @@ export function createProtectedHttp(options: {
         mutations.add(id);
         try {
           await revalidate();
-          const sent = await chats.returnSide(authority, id, {
-            requestId: data.requestId,
-            messageIds: data.messageIds,
-            ...(data.note === undefined ? {} : { note: data.note }),
-          });
+          const sent = await chats.returnSide(
+            authority,
+            id,
+            {
+              requestId: data.requestId,
+              messageIds: data.messageIds,
+              ...(data.note === undefined ? {} : { note: data.note }),
+            },
+            // Like a turn's transcript writes: admitted against the quotas and charged by size.
+            async (append) => {
+              const storage = await admitStorage?.(
+                profile.id,
+                assertCurrent,
+                "turn",
+                await storageLimit(assertCurrent),
+              );
+              try {
+                return await (storage
+                  ? withTranscriptWriteBudget(storage.charge, append)
+                  : append());
+              } finally {
+                storage?.release();
+              }
+            },
+          );
           await revalidate();
           const response: ProtectedReturnSideChatResponse = sent;
           return json(response);

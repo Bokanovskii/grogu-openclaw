@@ -18,6 +18,7 @@ import {
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
 import { createProtectedAgentCatalog, protectedResearchAgent } from "./agents.js";
 import { createProtectedChats } from "./chats.js";
+import { ProtectedError } from "./errors.js";
 import { sideReturnTextLimit, sideReturnTruncationMarker } from "./side-return.js";
 
 async function createChats(t: TestContext) {
@@ -566,14 +567,42 @@ void test("sending side replies adds one cited message to the parent without a m
 void test("sending side replies again with the same request returns the same message", async (t) => {
   const { chats, authority, parent, side, replies } = await seedSideReturn(t);
   const requestId = randomUUID();
-  const first = await chats.returnSide(authority, side.id, {
-    requestId,
-    messageIds: [replies[0]!.id],
-  });
+  const admitted: string[] = [];
+  const withStorage = async <T>(append: () => Promise<T>) => {
+    admitted.push("admit");
+    return await append();
+  };
+  const first = await chats.returnSide(
+    authority,
+    side.id,
+    { requestId, messageIds: [replies[0]!.id] },
+    withStorage,
+  );
+  assert.deepEqual(admitted, ["admit"]);
   const count = (await chats.read(authority, parent.id)).messages.length;
   assert.deepEqual(
-    await chats.returnSide(authority, side.id, { requestId, messageIds: [replies[2]!.id] }),
+    await chats.returnSide(
+      authority,
+      side.id,
+      { requestId, messageIds: [replies[2]!.id] },
+      withStorage,
+    ),
     first,
+  );
+  assert.deepEqual(admitted, ["admit"]);
+  assert.equal((await chats.read(authority, parent.id)).messages.length, count);
+
+  // A refused admission leaves the parent unchanged.
+  await assert.rejects(
+    chats.returnSide(
+      authority,
+      side.id,
+      { requestId: randomUUID(), messageIds: [replies[1]!.id] },
+      async () => {
+        throw new ProtectedError(413, "quota_exceeded", "Full.");
+      },
+    ),
+    { status: 413, code: "quota_exceeded" },
   );
   assert.equal((await chats.read(authority, parent.id)).messages.length, count);
 

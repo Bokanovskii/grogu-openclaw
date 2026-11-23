@@ -990,6 +990,8 @@ export function createProtectedChats(options: {
       authority: ProtectedChatAuthority,
       sideId: string,
       input: { requestId: string; messageIds: string[]; note?: string },
+      // Wraps only a new append, so a replay never needs storage admission.
+      withStorage: <T>(append: () => Promise<T>) => Promise<T> = (append) => append(),
     ): Promise<{ parent: { id: string; version: string }; message: ProtectedMessage }> {
       authority.assertCurrent();
       const side = await readEntry(authority, sideId);
@@ -1071,14 +1073,16 @@ export function createProtectedChats(options: {
         protectedSideNote: { chatId: string; title: string };
         protectedSideWidgets: Widget[];
       };
-      const saved = await appendExactAssistantMessageToSessionTranscript({
-        ...scope(authority, parentId),
-        expectedSessionId: parentId,
-        expectedLifecycleRevision: source.entry.lifecycleRevision ?? null,
-        idempotencyKey,
-        message,
-        assertCurrent: authority.assertCurrent,
-      });
+      const saved = await withStorage(() =>
+        appendExactAssistantMessageToSessionTranscript({
+          ...scope(authority, parentId),
+          expectedSessionId: parentId,
+          expectedLifecycleRevision: source.entry.lifecycleRevision ?? null,
+          idempotencyKey,
+          message,
+          assertCurrent: authority.assertCurrent,
+        }),
+      );
       authority.assertCurrent();
       if (!saved.ok) {
         throw new ProtectedError(500, "save_failed", "The reply could not be sent.");

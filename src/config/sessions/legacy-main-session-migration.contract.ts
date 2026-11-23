@@ -15,7 +15,6 @@ type LegacyMainSessionMigrationOutcomeKind =
   | "canonical-exists-identical"
   | "divergent-canonical"
   | "divergent-aliases"
-  | "protected-suggestions-unsupported"
   | "legacy-json-store"
   | "store-unreadable";
 

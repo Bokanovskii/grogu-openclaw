@@ -209,8 +209,6 @@ function describeLegacySessionOutcome(outcome: LegacyMainSessionMigrationOutcome
       return `${outcome.kind} for ${outcome.canonicalKey ?? "the canonical session"}; preserved claims ${claims.join(", ") || "could not be reconciled"} must be quarantined`;
     case "legacy-json-store":
       return `legacy JSON session store ${outcome.paths?.join(", ") ?? "requires import"}`;
-    case "protected-suggestions-unsupported":
-      return `protected cross-store suggestion migration is unsupported for ${outcome.canonicalKey ?? "the session"}; no data was deleted`;
     case "store-unreadable":
       return `unreadable session store ${outcome.paths?.join(", ") ?? "unknown"}${outcome.detail ? ` (${outcome.detail})` : ""}`;
     case "migrated-in-place":

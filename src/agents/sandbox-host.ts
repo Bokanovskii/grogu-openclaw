@@ -23,6 +23,20 @@ function buildProtectedWidgetBridgeHtml(): string {
   const post=window.parent.postMessage.bind(window.parent);
   const channel=new MessageChannel();
   const send=channel.port1.postMessage.bind(channel.port1);
+  const scrollRoot=Object.getOwnPropertyDescriptor(Document.prototype,"scrollingElement").get.bind(document);
+  const scrollTop=Object.getOwnPropertyDescriptor(Element.prototype,"scrollTop").get;
+  const apply=Reflect.apply;
+  let lastAtTop;
+  const reportTop=()=>{
+    const root=scrollRoot();
+    if(!root)return;
+    const atTop=apply(scrollTop,root,[])<=1;
+    if(atTop===lastAtTop)return;
+    lastAtTop=atTop;
+    send({type:"openclaw:widget-scroll-top",atTop});
+  };
+  window.addEventListener("scroll",reportTop,{passive:true});
+  window.addEventListener("load",reportTop,{once:true});
   const activation=navigator.userActivation;
   const descriptor=globalThis.UserActivation&&Object.getOwnPropertyDescriptor(UserActivation.prototype,"isActive");
   const active=descriptor?.get?.bind(activation);

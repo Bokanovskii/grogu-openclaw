@@ -7,6 +7,7 @@ export type ProtectedWidgetOptions = {
   sandboxUrl?: string;
   draft?: boolean;
   onReady?: () => void;
+  onScrollTopChange?: (atTop: boolean) => void;
   onPrompt: (text: string) => void;
   onError: (error: Error) => void;
 };
@@ -55,14 +56,21 @@ export function createWidgetHost(frame: HTMLIFrameElement, options: ProtectedWid
         promptPort = offeredPromptPort;
         promptPort.addEventListener("message", (message) => {
           const value = message.data;
+          if (disposed) {
+            return;
+          }
           if (
-            !disposed &&
             value?.type === "openclaw:widget-prompt" &&
             typeof value.prompt === "string" &&
             value.prompt.trim() &&
             value.prompt.length <= 8_000
           ) {
             options.onPrompt(value.prompt);
+          } else if (
+            value?.type === "openclaw:widget-scroll-top" &&
+            typeof value.atTop === "boolean"
+          ) {
+            options.onScrollTopChange?.(value.atTop);
           }
         });
         promptPort.start();

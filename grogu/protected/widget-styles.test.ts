@@ -40,11 +40,13 @@ void test(
         window.mount = (html, theme, draft, baseline, themeTokens) => {
           window.host?.dispose();
           document.body.dataset.readyCount = "0";
+          delete document.body.dataset.atTop;
           const frame = document.createElement("iframe");
           window.host = WidgetHost.createWidgetHost(frame, {
             html, theme, draft, themeTokens,
             sandboxUrl: baseline ? "/api/protected/v1/widget-sandbox?baseline" : undefined,
             onReady() { document.body.dataset.readyCount = String(Number(document.body.dataset.readyCount) + 1); },
+            onScrollTopChange(atTop) { document.body.dataset.atTop = String(atTop); },
             onPrompt() {}, onError(error) { document.body.dataset.error = error.message; }
           });
           document.querySelector("#slot").replaceChildren(frame);
@@ -105,6 +107,26 @@ void test(
       await inner.locator(selector).first().waitFor();
       return inner;
     }
+    await t.test(
+      "a saved artifact reports when its own viewport leaves and returns to the top",
+      async () => {
+        const tall = await mount(
+          '<!doctype html><main style="height:4000px">Tall page</main>',
+          "light",
+          false,
+          "main",
+        );
+        await page.locator('body[data-ready-count="1"]').waitFor();
+        const scrollPage = (y: number) =>
+          tall.locator("main").evaluate((_main, top) => window.scrollTo(0, top), y);
+        await scrollPage(650);
+        assert.ok(await tall.locator("main").evaluate(() => window.scrollY > 0));
+        await page.locator('body[data-at-top="false"]').waitFor({ timeout: 4000 });
+        await scrollPage(0);
+        await page.locator('body[data-at-top="true"]').waitFor({ timeout: 4000 });
+        assert.equal(await page.evaluate(() => window.scrollY), 0);
+      },
+    );
     const draft = await mount(fragment, "light", true);
     await page.locator('body[data-ready-count="1"]').waitFor();
     assert.equal(await draft.locator("body").getAttribute("data-ran"), null);

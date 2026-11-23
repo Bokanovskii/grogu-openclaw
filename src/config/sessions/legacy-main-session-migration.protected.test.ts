@@ -296,6 +296,50 @@ describe("protected legacy main session migration", () => {
     },
   );
 
+  it("fences the copy writer after an ambiguous COMMIT and failed close until it is settled", async () => {
+    const { fixture, env, source, destination, entry, destinationOptions } =
+      await prepareProtectedCrossStore();
+    insertProtectedSuggestion(source, env, "moved", "moved text");
+    const writer = openOpenClawAgentDatabase(destinationOptions).db;
+    const exec = writer.exec.bind(writer);
+    let ambiguous = false;
+    // The COMMIT is durable but reports failure; ROLLBACK then fails naturally and close fails.
+    vi.spyOn(writer, "exec").mockImplementation((sql) => {
+      exec(sql);
+      if (sql === "COMMIT" && !ambiguous) {
+        ambiguous = true;
+        throw new Error("COMMIT outcome unknown");
+      }
+    });
+    vi.spyOn(writer, "close").mockImplementation(() => {
+      throw new Error("close failed");
+    });
+    const migrate = () =>
+      migrateLegacyMainSessionKeys({ cfg: fixture.cfg, env, mode: "doctor-fix" }).then(
+        (result) => ({ complete: result.complete, kinds: outcomeKinds(result) }),
+        (error: unknown) => ({ complete: false, kinds: [String(error)] }),
+      );
+
+    for (const attempt of [await migrate(), await migrate()]) {
+      expect(attempt.complete).toBe(false);
+      expect(writer.isOpen).toBe(true);
+      expect(readClaim(source)?.entry).toMatchObject(entry);
+      expect(readProtectedSuggestions(source, env)).toHaveLength(1);
+    }
+    expect(ambiguous).toBe(true);
+
+    vi.restoreAllMocks();
+    await closeOpenClawAgentDatabasesAsync();
+    const settled = await migrate();
+
+    expect(settled.complete).toBe(true);
+    expect(settled.kinds).toContain("canonical-exists-identical");
+    expect(readClaim(source)).toBeUndefined();
+    expect(readProtectedSuggestions(destination, env)).toEqual([
+      expect.objectContaining({ id: "moved", session_key: destination.key, text: "moved text" }),
+    ]);
+  });
+
   it("does not copy a protected suggestion added after the claim scan", async () => {
     const { fixture, env, source, destination, entry, destinationOptions } =
       await prepareProtectedCrossStore();

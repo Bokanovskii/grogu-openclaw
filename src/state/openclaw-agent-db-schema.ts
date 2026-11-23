@@ -102,6 +102,7 @@ import {
 import { migrateSessionParticipantsSchema } from "./openclaw-agent-participants-migration.js";
 import {
   admitProtectedAgentStorage,
+  assertProtectedAgentMigrationPredecessor,
   cleanupProtectedAgentStorageIfNeeded,
   isProtectedStorageMigration,
   migrateProtectedAgentStorageIfNeeded,
@@ -397,6 +398,7 @@ function ensureAgentSchema(
       assertExistingAgentSchemaOwner(readExistingAgentSchemaMeta(db), agentId, pathname);
       assertSupportedAgentSchemaVersion(db, pathname);
       const previousVersion = readSqliteUserVersion(db);
+      assertProtectedAgentMigrationPredecessor(db, previousVersion);
       if (identityMigration && readExistingAgentSchemaMeta(db)?.schemaVersion !== previousVersion) {
         throw new Error(
           `Agent schema markers disagree for ${pathname}; repair ownership metadata before migration.`,

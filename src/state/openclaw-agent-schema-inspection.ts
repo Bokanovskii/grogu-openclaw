@@ -17,6 +17,7 @@ import { configureSqliteReadOnlyPragmas } from "../infra/sqlite-wal.js";
 import { isValidAgentId } from "../routing/session-key.js";
 import {
   OPENCLAW_AGENT_SCHEMA_VERSION,
+  isProtectedAgentSchemaVersion,
   PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
 } from "./openclaw-agent-db-contract.js";
 import { assertOpenClawAgentDatabaseForMaintenance } from "./openclaw-agent-db-maintenance.js";
@@ -133,7 +134,7 @@ function inspectOwnProtectedAgentFormat(
 ): boolean {
   if (
     !input.inspectOwnProtectedFormats ||
-    version !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION ||
+    !isProtectedAgentSchemaVersion(version) ||
     version <= input.supportedVersion
   ) {
     return false;
@@ -218,6 +219,7 @@ export function inspectAgentDatabaseSchema(
     if (input.requireStartupMigrationReadiness) {
       const migrationPending =
         (version !== input.supportedVersion && !ownProtectedFormat) ||
+        (ownProtectedFormat && version !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION) ||
         hasPendingCurrentVersionAgentDatabaseMigration(database);
       if (
         canReuseOpenClawAgentIntegrityVerification(

@@ -21,6 +21,10 @@ import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
+import {
+  openSqliteStorageText,
+  protectedStorageValueContext,
+} from "../../storage/sqlite-encryption.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { migrateLegacyMainSessionKeys } from "./legacy-main-session-migration.js";
@@ -39,6 +43,7 @@ import { writeSessionEntry } from "./session-accessor.sqlite-entry-store.js";
 import { appendTranscriptEventInTransaction } from "./session-accessor.sqlite-transcript-store.js";
 import * as retirement from "./session-retirement-read.js";
 import type { SessionRetirementReadOperation } from "./session-retirement-read.types.js";
+import { sealSessionSuggestionFields } from "./session-suggestion-encryption.js";
 import { runSessionStartupMigration } from "./startup-migration.js";
 
 const { tempDirs, createFixture } = setupLegacyMainSessionMigrationTests();
@@ -88,7 +93,188 @@ async function prepareProtectedCrossStore() {
   return { fixture, env, source, destination, entry, destinationOptions };
 }
 
+function insertProtectedSuggestion(
+  target: { databaseAgentId: string; databasePath: string; key: string },
+  env: NodeJS.ProcessEnv,
+  id: string,
+  text: string,
+) {
+  runOpenClawAgentWriteTransaction(
+    (database) => {
+      const row = sealSessionSuggestionFields(database.db, {
+        id,
+        session_key: target.key,
+        author_id: "author",
+        author_label: "Author",
+        text,
+      });
+      database.db
+        .prepare(
+          "INSERT INTO session_suggestions (id, session_key, author_id, author_label, text, created_at, state) VALUES (?, ?, ?, ?, ?, 1, 'pending')",
+        )
+        .run(row.id, row.session_key, row.author_id, row.author_label, row.text);
+    },
+    { agentId: target.databaseAgentId, path: target.databasePath, env },
+  );
+}
+
+function serializeStore(
+  target: { databaseAgentId: string; databasePath: string },
+  env: NodeJS.ProcessEnv,
+) {
+  return runOpenClawAgentWriteTransaction(({ db }) => db.serialize(), {
+    agentId: target.databaseAgentId,
+    path: target.databasePath,
+    env,
+  });
+}
+
 describe("legacy main session migration", () => {
+  it.each(["source", "destination", "both"] as const)(
+    "refuses protected cross-store suggestions in %s without changing either database",
+    async (suggestionsIn) => {
+      const { fixture, env, source, destination, entry } = await prepareProtectedCrossStore();
+      seedClaim({ ...destination, entry });
+      if (suggestionsIn !== "destination") {
+        insertProtectedSuggestion(source, env, "shared-id", "source text");
+      }
+      if (suggestionsIn !== "source") {
+        insertProtectedSuggestion(destination, env, "shared-id", "destination text");
+      }
+      const before = [source, destination].map((target) => serializeStore(target, env));
+
+      const result = await migrateLegacyMainSessionKeys({
+        cfg: fixture.cfg,
+        env,
+        mode: "doctor-fix",
+      });
+
+      expect(result.complete).toBe(false);
+      expect(result.outcomes).toContainEqual(
+        expect.objectContaining({
+          kind: "protected-suggestions-unsupported",
+          canonicalKey: destination.key,
+          sourceKeys: [source.key],
+        }),
+      );
+      expect(result.warnings).toContain(
+        `session: Protected cross-store suggestion migration is unsupported for ${destination.key}; no data was deleted.`,
+      );
+      expect([source, destination].map((target) => serializeStore(target, env))).toEqual(before);
+    },
+  );
+
+  it("does not copy a protected suggestion added after the cross-store pre-check", async () => {
+    const { fixture, env, source, destination, entry, destinationOptions } =
+      await prepareProtectedCrossStore();
+    const before = serializeStore(destination, env);
+    let injected = false;
+
+    const result = await migrateLegacyMainSessionKeys({
+      cfg: fixture.cfg,
+      env,
+      mode: "doctor-fix",
+      beforePersistentApply: () => {
+        if (!injected) {
+          injected = true;
+          insertProtectedSuggestion(source, env, "late", "late suggestion");
+        }
+      },
+    });
+
+    expect(injected).toBe(true);
+    expect(result.complete).toBe(false);
+    // The copy transaction's claim fingerprint sees the new suggestion and refuses the copy.
+    expect(outcomeKinds(result)).toEqual(["divergent-canonical"]);
+    expect(readClaim(source)?.entry).toMatchObject(entry);
+    expect(serializeStore(destination, destinationOptions.env)).toEqual(before);
+  });
+
+  it("rolls back every protected suggestion rekey when an in-place move is interrupted", async () => {
+    const root = tempDirs.make("protected-in-place-migration-");
+    const storePath = path.join(root, "sessions.sqlite");
+    const keyPath = path.join(root, "key");
+    fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    vi.stubEnv("OPENCLAW_PROTECTED_STORAGE_KEY_FILE", keyPath);
+    const fixture = createFixture({
+      agents: { entries: { ops: {} } },
+      session: { store: storePath },
+    });
+    const options = { agentId: "main", path: storePath, env: fixture.env };
+    const preparatory = openNodeSqliteDatabase(storePath);
+    try {
+      await withAgentDatabaseMaintenanceLease({ env: fixture.env }, async () => {
+        ensureOpenClawAgentDatabaseSchema(preparatory, options);
+      });
+    } finally {
+      preparatory.close();
+    }
+    const sourceKey = "agent:main:chat";
+    const destinationKey = "agent:ops:chat";
+    const source = { databaseAgentId: "main", databasePath: storePath, key: sourceKey };
+    seedClaim(source);
+    // More rows than one rekey batch prove the whole move shares one transaction.
+    for (let index = 0; index < 65; index++) {
+      insertProtectedSuggestion(
+        source,
+        fixture.env,
+        String(index).padStart(3, "0"),
+        `suggestion ${index}`,
+      );
+    }
+    runOpenClawAgentWriteTransaction(
+      (database) =>
+        database.db.exec(`
+          CREATE TRIGGER interrupt_suggestion_move BEFORE UPDATE OF session_key ON session_suggestions
+          WHEN OLD.id = '064'
+          BEGIN SELECT RAISE(ABORT, 'interrupted suggestion move'); END;
+        `),
+      options,
+    );
+    const assertRows = (expectedKey: string, wrongKey: string) =>
+      runOpenClawAgentWriteTransaction((database) => {
+        const rows = database.db
+          .prepare(
+            "SELECT id, session_key, author_id, author_label, text FROM session_suggestions ORDER BY id",
+          )
+          .all();
+        expect(rows).toHaveLength(65);
+        for (const [index, row] of rows.entries()) {
+          expect(row.session_key).toBe(expectedKey);
+          for (const [column, plaintext] of [
+            ["author_id", "author"],
+            ["author_label", "Author"],
+            ["text", `suggestion ${index}`],
+          ] as const) {
+            const context = (key: string) =>
+              protectedStorageValueContext("session_suggestions", column, [key, String(row.id)]);
+            expect(
+              openSqliteStorageText(database.db, String(row[column]), context(expectedKey)),
+            ).toBe(plaintext);
+            expect(() =>
+              openSqliteStorageText(database.db, String(row[column]), context(wrongKey)),
+            ).toThrow();
+          }
+        }
+      }, options);
+
+    await expect(
+      recordHarnessDeletions(() =>
+        migrateLegacyMainSessionKeys({ cfg: fixture.cfg, env: fixture.env, mode: "doctor-fix" }),
+      ),
+    ).rejects.toThrow("interrupted suggestion move");
+    assertRows(sourceKey, destinationKey);
+    runOpenClawAgentWriteTransaction(
+      (database) => database.db.exec("DROP TRIGGER interrupt_suggestion_move"),
+      options,
+    );
+    const { result } = await recordHarnessDeletions(() =>
+      migrateLegacyMainSessionKeys({ cfg: fixture.cfg, env: fixture.env, mode: "doctor-fix" }),
+    );
+    expect(outcomeKinds(result)).toContain("migrated-in-place");
+    assertRows(destinationKey, sourceKey);
+  });
+
   it.each(["normal", "blocked-checkpoint", "denied-checkpoint", "incomplete-checkpoint"] as const)(
     "checkpoints a protected cross-store copy before deleting the source with %s",
     async (scenario) => {

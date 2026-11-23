@@ -19,6 +19,12 @@ export const AUTOMATIONS_CHAT_TOOL_NAMES = [
   "automations_propose_create",
   "automations_propose_patch",
 ] as const;
+/** Authoring turns get only these tools; ordinary automation chats keep the proposal tools. */
+export const AUTOMATIONS_AUTHORING_TOOL_NAMES = [
+  "automation_draft_read",
+  "automation_draft_update",
+  "automation_draft_save",
+] as const;
 
 export const AutomationsChatListParametersSchema = node({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
@@ -37,6 +43,14 @@ export const AutomationsChatProposePatchParametersSchema = node({
   automationId: ProtectedAutomationIdSchema,
   expectedVersion: Type.String({ minLength: 1, maxLength: 16, pattern: "^[1-9]\\d*$" }),
   patch: AutomationsChatProposalPatchSchema,
+});
+
+export const AutomationsAuthoringReadParametersSchema = node({});
+export const AutomationsAuthoringUpdateParametersSchema = node({
+  draft: ProtectedAutomationDraftSchema,
+});
+export const AutomationsAuthoringSaveParametersSchema = node({
+  draftRevision: Type.String({ minLength: 1, maxLength: 16, pattern: "^[1-9]\\d*$" }),
 });
 
 export type AutomationsChatListParameters = Static<typeof AutomationsChatListParametersSchema>;
@@ -89,6 +103,60 @@ export type AutomationsChatBindings = {
     | { status: "unavailable"; writeApplied: false; reason: "automation_active" }
   >;
 };
+
+export type AutomationsAuthoringUpdateParameters = Static<
+  typeof AutomationsAuthoringUpdateParametersSchema
+>;
+export type AutomationsAuthoringSaveParameters = Static<
+  typeof AutomationsAuthoringSaveParametersSchema
+>;
+
+/** Draft results are unsaved (writeApplied:false); only save reports a committed record. */
+export type AutomationsAuthoringBindings = {
+  authoring: "automation";
+  read: () => Promise<{
+    status: "ok";
+    writeApplied: false;
+    draftRevision: string;
+    draft: ProtectedAutomationDraft;
+    saved: ProtectedAutomationRecord | null;
+  }>;
+  update: (input: AutomationsAuthoringUpdateParameters) => Promise<
+    | {
+        status: "draft_updated";
+        writeApplied: false;
+        draftRevision: string;
+        draft: ProtectedAutomationDraft;
+      }
+    | { status: "invalid"; writeApplied: false; errors: ValidationErrors }
+  >;
+  save: (input: AutomationsAuthoringSaveParameters) => Promise<
+    | { status: "saved"; writeApplied: true; automation: ProtectedAutomationRecord }
+    | { status: "invalid"; writeApplied: false; errors: ValidationErrors }
+    | {
+        status: "refused";
+        writeApplied: false;
+        reason:
+          | "draft_changed"
+          | "version_mismatch"
+          | "not_found"
+          | "automation_active"
+          | "unavailable";
+      }
+  >;
+};
+
+export function isAutomationsAuthoringUpdateParameters(
+  value: unknown,
+): value is AutomationsAuthoringUpdateParameters {
+  return Value.Check(AutomationsAuthoringUpdateParametersSchema, value);
+}
+
+export function isAutomationsAuthoringSaveParameters(
+  value: unknown,
+): value is AutomationsAuthoringSaveParameters {
+  return Value.Check(AutomationsAuthoringSaveParametersSchema, value);
+}
 
 export function isAutomationsChatListParameters(
   value: unknown,

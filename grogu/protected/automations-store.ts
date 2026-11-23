@@ -1,5 +1,8 @@
 import type {
+  ProtectedAutomationCatalog,
   ProtectedAutomationDraft,
+  ProtectedAutomationDraftValidation,
+  ProtectedAutomationPatchRequest,
   ProtectedAutomationRecord,
 } from "../../packages/gateway-protocol/src/protected.js";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
@@ -9,6 +12,7 @@ import {
   type ProtectedAutomationMutationAuthority,
 } from "../../src/state/protected-automation-operations.js";
 import type { ProtectedAutomationStorageRecord } from "../../src/state/protected-automations.js";
+import { applyProtectedAutomationPatch, validateProtectedAutomationDraft } from "./automations.js";
 import type { StorageAdmission } from "./capacity.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
@@ -101,7 +105,12 @@ export async function readProtectedAutomationStorageUsage(
 
 export async function createProtectedAutomationRecord(
   stateDir: string,
-  input: { profileId: string; definition: ProtectedAutomationDraft; now: number },
+  input: {
+    profileId: string;
+    definition: ProtectedAutomationDraft;
+    now: number;
+    automationId?: string;
+  },
   authority: ProtectedAutomationMutationAuthority,
   storage: Pick<
     StorageAdmission,
@@ -117,7 +126,7 @@ export async function createProtectedAutomationRecord(
     onStorageAborted: ({ nextStoredBytes }) =>
       storage.settleAutomationCreate(nextStoredBytes, false),
   });
-  const created = result.status === "created";
+  const created = result.status === "created" || result.status === "exists";
   storage.assertResult();
   if (!created) {
     return undefined;
@@ -163,4 +172,98 @@ export async function patchProtectedAutomationRecord(
   });
   storage.assertResult();
   return result.status === "updated" ? record(result.automation) : result;
+}
+
+export type SaveProtectedAutomationPatchResult =
+  | { status: "updated"; automation: ProtectedAutomationRecord }
+  | { status: "not_found" }
+  | { status: "version_mismatch"; currentVersion?: string }
+  | { status: "scheduler_required" }
+  | { status: "invalid"; validation: Extract<ProtectedAutomationDraftValidation, { valid: false }> }
+  | { status: "member_inactive" }
+  | { status: "storage_unavailable" };
+
+/** The one versioned save path for paused-draft edits from fields and from authoring chats. */
+export async function saveProtectedAutomationPatch(
+  stateDir: string,
+  input: {
+    automationId: string;
+    expectedVersion: string;
+    patch: ProtectedAutomationPatchRequest;
+    catalog: ProtectedAutomationCatalog;
+    retainedAgent: (agentId: string) => { id: string } | undefined;
+  },
+  authority: ProtectedAutomationMutationAuthority,
+  deps: {
+    revalidate: () => Promise<void>;
+    admitStorage?: () => Promise<
+      Pick<
+        StorageAdmission,
+        "chargeAutomationPatch" | "settleAutomationPatch" | "assertResult" | "release"
+      >
+    >;
+  },
+): Promise<SaveProtectedAutomationPatchResult> {
+  if (
+    !/^[1-9]\d*$/u.test(input.expectedVersion) ||
+    !Number.isSafeInteger(Number(input.expectedVersion))
+  ) {
+    return { status: "version_mismatch" };
+  }
+  await deps.revalidate();
+  const current = await readProtectedAutomationRecord(
+    stateDir,
+    { profileId: authority.profileId, automationId: input.automationId },
+    authority,
+  );
+  if (!current) {
+    return { status: "not_found" };
+  }
+  if (current.version !== input.expectedVersion) {
+    return { status: "version_mismatch", currentVersion: current.version };
+  }
+  if (input.patch.enabled === true || current.enabled) {
+    return { status: "scheduler_required" };
+  }
+  const validation = validateProtectedAutomationDraft(
+    applyProtectedAutomationPatch(current, input.patch),
+    input.catalog,
+    input.retainedAgent(current.agentId),
+  );
+  if (!validation.valid) {
+    return { status: "invalid", validation };
+  }
+  await deps.revalidate();
+  if (!deps.admitStorage) {
+    return { status: "storage_unavailable" };
+  }
+  const storage = await deps.admitStorage();
+  try {
+    const updated = await patchProtectedAutomationRecord(
+      stateDir,
+      {
+        profileId: authority.profileId,
+        automationId: input.automationId,
+        expectedRevision: Number(input.expectedVersion),
+        definition: validation.draft,
+        now: Date.now(),
+      },
+      authority,
+      storage,
+    );
+    if (!("status" in updated)) {
+      authority.assertCurrent();
+      return { status: "updated", automation: updated };
+    }
+    switch (updated.status) {
+      case "member_inactive":
+      case "version_mismatch":
+      case "scheduler_required":
+        return { status: updated.status };
+      default:
+        return { status: "not_found" };
+    }
+  } finally {
+    storage.release();
+  }
 }

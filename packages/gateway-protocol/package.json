@@ -57,6 +57,11 @@
       "import": "./dist/protected.mjs",
       "default": "./dist/protected.mjs"
     },
+    "./protected-authoring": {
+      "types": "./dist/protected-authoring.d.mts",
+      "import": "./dist/protected-authoring.mjs",
+      "default": "./dist/protected-authoring.mjs"
+    },
     "./gateway-error-details": {
       "types": "./dist/gateway-error-details.d.mts",
       "import": "./dist/gateway-error-details.mjs",

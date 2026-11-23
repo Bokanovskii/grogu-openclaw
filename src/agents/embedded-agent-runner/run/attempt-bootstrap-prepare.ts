@@ -46,7 +46,9 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
       ? params.setup.effectiveWorkspace
       : bootstrapWorkspaceDir;
   const suppressAmbientContext =
-    params.isRawModelRun || attempt.operation === "settled-tool-finalization";
+    params.isRawModelRun ||
+    attempt.operation === "settled-tool-finalization" ||
+    attempt.contextIsolation === "isolated";
   const contextInjectionMode = resolveContextInjectionMode(
     attempt.config,
     params.setup.sessionAgentId,
@@ -71,7 +73,8 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
   const resolveBootstrapRouting = (bootstrapFiles?: readonly WorkspaceBootstrapFile[]) =>
     resolveWorkspaceBootstrapRouting({
       ...attempt,
-      isWorkspaceBootstrapPending,
+      isWorkspaceBootstrapPending:
+        attempt.contextIsolation === "isolated" ? async () => false : isWorkspaceBootstrapPending,
       bootstrapFiles,
       isPrimaryRun: isPrimaryBootstrapRun(attempt.sessionKey),
       effectiveWorkspace: params.setup.effectiveWorkspace,

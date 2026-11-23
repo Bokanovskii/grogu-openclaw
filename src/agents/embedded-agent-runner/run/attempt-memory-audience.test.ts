@@ -87,6 +87,19 @@ describe("embedded attempt memory audience", () => {
     expect(mocks.warn).not.toHaveBeenCalled();
   });
 
+  it("does not resolve a private audience or read lineage for an isolated run", async () => {
+    mocks.providerRuntime = {};
+    const { params } = spawnedChildAttempt();
+    const resolved = await resolveEmbeddedAttemptMemoryAudience({
+      ...params,
+      contextIsolation: "isolated",
+    });
+
+    expect(resolved.memoryAudience).toBeUndefined();
+    expect(fakeSessionOwner.workerReads).toEqual([]);
+    expect(fakeSessionOwner.activeLeases).toBe(0);
+  });
+
   it("warns with the respawn repair when a parent reset leaves a child's lineage stale", async () => {
     mocks.providerRuntime = {};
     const { parent, params } = spawnedChildAttempt();

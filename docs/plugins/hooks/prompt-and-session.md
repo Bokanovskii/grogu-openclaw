@@ -95,6 +95,10 @@ that a later model call consumes the context. The field is optional for SDK
 compatibility; a plugin that requires it must handle an unsupported host
 explicitly instead of substituting its own copy of the timeout budget.
 
+When `ctx.contextIsolation` is `"isolated"`, hooks must not read or write
+personal memory or other sessions, or add that data to the prompt. A missing
+field does not indicate isolation.
+
 ### Authorized prompt enrichment
 
 Register `before_prompt_build` with `requiresToolAuthority: true` when a plugin

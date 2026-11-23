@@ -298,6 +298,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     sessionKey: params.sessionKey,
     storePath: params.sessionTarget?.storePath,
     toolsAllow: params.toolsAllow,
+    contextIsolation: params.contextIsolation,
   });
   assertActiveRun();
   let skillsSnapshot = resolveSessionSkillResourceSnapshot(params.skillsSnapshot);
@@ -334,6 +335,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
   const { memoryAudience, release: releaseMemoryAudience } =
     await resolveEmbeddedAttemptMemoryAudience({
       memoryAudience: params.memoryAudience,
+      contextIsolation: params.contextIsolation,
       config: params.config,
       agentId: workspaceResolution.agentId,
       sessionKey: resolvedSessionKey,
@@ -402,6 +404,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     sessionId,
     sessionKey: resolvedSessionKey,
     memoryAudience,
+    contextIsolation: params.contextIsolation,
     conversationRecall: params.conversationRecall,
     promptCacheKey: params.promptCacheKey,
     sandboxSessionKey: params.sandboxSessionKey,

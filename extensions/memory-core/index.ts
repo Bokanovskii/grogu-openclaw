@@ -367,7 +367,11 @@ export default definePluginEntry({
     );
 
     api.on("before_prompt_build", async (event, ctx) => {
-      if (ctx.trigger !== "user" || ctx.memoryAudience?.kind === "member-private") {
+      if (
+        ctx.contextIsolation === "isolated" ||
+        ctx.trigger !== "user" ||
+        ctx.memoryAudience?.kind === "member-private"
+      ) {
         return undefined;
       }
       try {
@@ -412,7 +416,10 @@ export default definePluginEntry({
     api.on(
       "before_agent_reply",
       async (_event, ctx) => {
-        if (ctx.trigger !== "heartbeat" && ctx.trigger !== "cron") {
+        if (
+          ctx.contextIsolation === "isolated" ||
+          (ctx.trigger !== "heartbeat" && ctx.trigger !== "cron")
+        ) {
           return undefined;
         }
         try {

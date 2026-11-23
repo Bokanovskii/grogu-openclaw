@@ -234,14 +234,17 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
     return {
       preparedMemoryPrompt: await prepareAgentMemoryPrompt({
         ...toolContext,
-        enabled: effectivePromptMode === "full" && includeMemorySection,
+        enabled:
+          attempt.contextIsolation !== "isolated" &&
+          effectivePromptMode === "full" &&
+          includeMemorySection,
         citationsMode: attempt.config?.memory?.citations,
         agentId: runtimePrompt.runtimeInfo.agentId,
         agentSessionKey: runtimePrompt.runtimeInfo.sessionKey,
       }),
       preparedWatchedSessions: await prepareWatchedSessionsPromptAsync({
         ...toolContext,
-        enabled: effectivePromptMode === "full",
+        enabled: attempt.contextIsolation !== "isolated" && effectivePromptMode === "full",
         config: attempt.config,
         sessionKey: attempt.sessionKey,
         assertCurrent: assertPreparationCurrent,
@@ -255,7 +258,9 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
   );
   const activeProjectKeys = attempt.preparedModelRuntime?.activeProjectKeys ?? [];
   const projectMemoryBootstrap =
-    effectivePromptMode === "full" && activeProjectKeys.length > 0
+    attempt.contextIsolation !== "isolated" &&
+    effectivePromptMode === "full" &&
+    activeProjectKeys.length > 0
       ? await prepareProjectMemoryBootstrap({
           cfg: attempt.config ?? {},
           agentId: params.setup.sessionAgentId,
@@ -277,9 +282,10 @@ export async function prepareEmbeddedAttemptSystemPrompt(params: {
             : undefined,
         })
       : [];
-  const projectMemoryWriteInstruction = buildProjectMemoryWriteInstruction(
-    attempt.preparedModelRuntime?.projectKey,
-  );
+  const projectMemoryWriteInstruction =
+    attempt.contextIsolation === "isolated"
+      ? undefined
+      : buildProjectMemoryWriteInstruction(attempt.preparedModelRuntime?.projectKey);
   const extraSystemPrompt = joinPresentTextSegments([
     attempt.extraSystemPrompt,
     projectMemoryWriteInstruction,

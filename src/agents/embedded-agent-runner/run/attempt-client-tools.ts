@@ -14,25 +14,80 @@ import { resolveToolLoopDetectionConfig } from "../../agent-tools.js";
 import { isCodeModeExecTool } from "../../code-mode-control-tools.js";
 import { isCoreToolResultMediaTrustedName } from "../../embedded-agent-tool-media.js";
 import type { AgentTool } from "../../runtime/index.js";
+import type { CreateAgentSessionOptions } from "../../sessions/index.js";
 import {
   createToolDefinitionFromAgentTool,
   wrapToolDefinition,
 } from "../../sessions/tools/tool-definition-wrapper.js";
-import { normalizeToolPolicyName } from "../../tool-policy-shared.js";
+import {
+  isIsolatedContextForbiddenTool,
+  normalizeToolPolicyName,
+} from "../../tool-policy-shared.js";
 import {
   collectReplaySafeToolNames,
   collectSideEffectToolOwners,
   isAgentToolReplaySafe,
 } from "../../tool-replay-safety.js";
 import { addClientToolsToToolCatalog } from "../../tool-search-catalog.js";
-import { resolveToolSearchConfig, type ToolSearchCatalogRef } from "../../tool-search.js";
+import {
+  resolveToolSearchCatalogTool,
+  resolveToolSearchConfig,
+  type ToolSearchCatalogRef,
+} from "../../tool-search.js";
 import { log } from "../logger.js";
 import {
   AGENT_RESERVED_TOOL_NAMES,
   collectRegisteredToolNames,
   toSessionToolAllowlist,
 } from "../tool-name-allowlist.js";
+import { withEmbeddedAttemptToolActivity } from "./tool-activity-heartbeat.js";
 import type { EmbeddedAttemptClientToolCallSlot, EmbeddedRunAttemptParams } from "./types.js";
+
+export function createDeferredAttemptToolResolver(params: {
+  attempt: EmbeddedRunAttemptParams;
+  preparation: Omit<Parameters<typeof prepareEmbeddedAttemptClientTools>[0], "attempt">;
+  runAbortSignal: AbortSignal;
+  sessionAgentId: string;
+}): CreateAgentSessionOptions["resolveDeferredTool"] {
+  const { attempt, preparation } = params;
+  if (attempt.contextIsolation !== "isolated" && !preparation.deferredDirectoryToolsCallable) {
+    return undefined;
+  }
+  return ({ toolCall }) => {
+    if (attempt.contextIsolation === "isolated" && isIsolatedContextForbiddenTool(toolCall.name)) {
+      throw new Error("Memory and other sessions are unavailable in isolated automations.");
+    }
+    if (!preparation.deferredDirectoryToolsCallable) {
+      return undefined;
+    }
+    const toolAbortSignal = preparation.getToolAbortSignal?.() ?? params.runAbortSignal;
+    const tool = resolveToolSearchCatalogTool(
+      {
+        config: attempt.config,
+        runtimeConfig: attempt.config,
+        agentId: params.sessionAgentId,
+        sessionKey: preparation.sandboxSessionKey,
+        sessionId: attempt.sessionId,
+        runId: attempt.runId,
+        catalogRef: preparation.toolSearchCatalogRef,
+        abortSignal: toolAbortSignal,
+      },
+      toolCall.name,
+    );
+    // Keep the captured permission generation on hydrated tool hooks.
+    const definition = tool
+      ? toToolDefinitions([tool], preparation.catalogToolHookContext, toolAbortSignal)[0]
+      : undefined;
+    const hydratedTool = definition ? wrapToolDefinition(definition) : undefined;
+    if (hydratedTool) {
+      log.info(`tool-search: hydrated deferred directory tool ${toolCall.name}`);
+      const originalExecute = hydratedTool.execute;
+      hydratedTool.execute = (...args: Parameters<typeof originalExecute>) =>
+        withEmbeddedAttemptToolActivity(attempt.runId, () => originalExecute(...args));
+    }
+    return hydratedTool;
+  };
+}
 
 export function prepareEmbeddedAttemptClientTools(params: {
   attempt: EmbeddedRunAttemptParams;
@@ -153,11 +208,17 @@ export function prepareEmbeddedAttemptClientTools(params: {
       throw createClientToolNameConflictError(clientToolNameConflicts);
     }
 
-    let clientToolDefs = sourceClientToolDefs.map((definition) =>
-      createToolDefinitionFromAgentTool(
-        wrapToolWithAbortSignal(wrapToolDefinition(definition), params.getToolAbortSignal?.()),
-      ),
-    );
+    let clientToolDefs = sourceClientToolDefs
+      .filter(
+        (definition) =>
+          params.attempt.contextIsolation !== "isolated" ||
+          !isIsolatedContextForbiddenTool(definition.name),
+      )
+      .map((definition) =>
+        createToolDefinitionFromAgentTool(
+          wrapToolWithAbortSignal(wrapToolDefinition(definition), params.getToolAbortSignal?.()),
+        ),
+      );
     // Terminal observations are name-only, so ownership is valid only when one
     // concrete OpenClaw or client tool owns the normalized name.
     const sideEffectToolOwners = collectSideEffectToolOwners(

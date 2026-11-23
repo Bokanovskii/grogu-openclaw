@@ -89,6 +89,9 @@ export async function compactEmbeddedRunForRecovery(
   },
 ) {
   const { runParams } = input;
+  if (runParams.contextIsolation === "isolated") {
+    throw new Error("Isolated run recovery cannot compact without an isolated context engine.");
+  }
   const owner = input.prepareRecoveryOwner();
   const activeSession = owner.session;
   const requestAdmission = runParams.userTurnTranscriptRecorder?.getAdmissionReceipt();

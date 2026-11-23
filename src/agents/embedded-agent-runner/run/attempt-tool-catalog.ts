@@ -17,6 +17,7 @@ import {
 import {
   createToolExecutionMatcher,
   formatToolExecutionGatedMessage,
+  isIsolatedContextForbiddenTool,
 } from "../../tool-policy-shared.js";
 import {
   withRuntimeToolSchemaQuarantine,
@@ -67,9 +68,13 @@ export async function prepareEmbeddedAttemptToolCatalog(input: {
     // but executes only the allowed tools. Wrap before catalog compaction so a
     // tool hidden behind tool_call/exec is gated too; the catalog controls stay
     // callable because they only dispatch into the gated tools.
+    const admittedTools =
+      attempt.contextIsolation === "isolated"
+        ? uncompactedEffectiveTools.filter((tool) => !isIsolatedContextForbiddenTool(tool.name))
+        : uncompactedEffectiveTools;
     let effectiveTools = attempt.toolExecutionAllow
-      ? gateToolExecution(uncompactedEffectiveTools, attempt.toolExecutionAllow)
-      : uncompactedEffectiveTools;
+      ? gateToolExecution(admittedTools, attempt.toolExecutionAllow)
+      : admittedTools;
     const catalogToolHookContext = preparedToolBase.toolHookContext;
     const compacted = preparedToolBase.toolSurfaceRuntime.compactTools(effectiveTools, {
       hookContext: catalogToolHookContext,

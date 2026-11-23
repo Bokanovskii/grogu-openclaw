@@ -455,6 +455,27 @@ describe("standing-intent admitted operations", () => {
     expectNoHostStandingIntentSql(observation);
   });
 
+  it("does not inject or spend standing intents for an isolated run", async () => {
+    const existing = await seed();
+    const { runner } = await registerHooks();
+    const result = await runner.runBeforePromptBuild(
+      { prompt: "launch", messages: [] },
+      { ...context, trigger: "user", contextIsolation: "isolated" },
+    );
+    expect(result?.prependContext).toBeUndefined();
+    expect(readStored(existing.id)).toMatchObject({ status: "armed", fire_count: 0 });
+  });
+
+  it("does not sweep standing intents for an isolated scheduled run", async () => {
+    const existing = await seed(true);
+    const { runner } = await registerHooks();
+    await runner.runBeforeAgentReply(
+      { cleanedBody: "scheduled" },
+      { ...context, trigger: "cron", contextIsolation: "isolated" },
+    );
+    expect(readStored(existing.id)).toMatchObject({ status: "armed", fire_count: 0 });
+  });
+
   it("keeps rejected prompt matching fail-open without spending its fire budget", async () => {
     const existing = await seed();
     const { runner, logger } = await registerHooks();

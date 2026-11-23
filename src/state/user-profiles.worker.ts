@@ -50,6 +50,11 @@ import {
   settleProtectedPolicy,
 } from "./protected-policy-store.js";
 import {
+  readProtectedProfileStorageLimit,
+  readProtectedStorageLimit,
+  setProtectedStorageLimit,
+} from "./protected-storage-limits.js";
+import {
   listProtectedUsage,
   pruneProtectedUsage,
   recordProtectedUsage,
@@ -303,6 +308,18 @@ export const userProfileOperations = {
     input: { id: string; email: string; revision: number; state: "synced" | "failed" | "unknown" },
     { open },
   ) => settleProtectedPolicy(open(), input),
+  "protectedAccess.storageLimit.read": (
+    input: Parameters<typeof readProtectedStorageLimit>[1],
+    { open },
+  ) => readProtectedStorageLimit(open(), input),
+  "protectedAccess.storageLimit.forProfile": (
+    input: Parameters<typeof readProtectedProfileStorageLimit>[1],
+    { open },
+  ) => readProtectedProfileStorageLimit(open(), input),
+  "protectedAccess.storageLimit.set": (
+    input: Parameters<typeof setProtectedStorageLimit>[1],
+    { open },
+  ) => setProtectedStorageLimit(open(), input),
   "protectedAccess.retryPolicy": (input: { id: string; issuer: string }, { open }) =>
     retryProtectedPolicy(open(), input),
   "protectedUsage.record": (

@@ -35,6 +35,7 @@ export const FIRST_USE_STATE_TABLES = [
   "protected_admission_migrations",
   "protected_policy_sync",
   "protected_policy_barrier",
+  "protected_storage_limits",
   "protected_usage_daily",
   "protected_usage_runs",
   "protected_feedback_runs",

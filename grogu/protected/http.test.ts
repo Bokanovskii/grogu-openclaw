@@ -4236,3 +4236,182 @@ void test("automation definitions consume member and global storage quota", asyn
   );
   assert.equal(disabledCreate.status, 404);
 });
+
+void test("the owner sets member storage limits and is exempt from them", async (t) => {
+  const stateDir = path.resolve(".artifacts", `storage-limit-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://limits.example";
+  const issuer = "https://identity.example";
+  const expiresAt = Date.now() + 120_000;
+  const MiB = 1024 * 1024;
+  const options = {
+    origin,
+    stateDir,
+    accessIssuer: issuer,
+    ownerSubject: "alice",
+    directory: { issuer, allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer,
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run() {
+        assert.fail("Storage limit proof does not run an agent.");
+      },
+      async steer() {
+        assert.fail("Storage limit proof does not steer an agent.");
+      },
+    },
+  };
+  const app = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 64 * MiB, userBytes: 32 * MiB, freeFloorBytes: 1 },
+  });
+  t.after(() => app.shutdown());
+  const fetchFrom = (target: typeof app) => (subject: string, route: string, init?: RequestInit) =>
+    target.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  const call = fetchFrom(app);
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(await addProtectedSubject(stateDir, { issuer, subject }), "added");
+    await call(subject, "/me");
+  }
+  const people = (await (await call("alice", "/admin/people")).json()).people as {
+    id: string;
+    subject?: string;
+  }[];
+  const bobId = people.find((person) => person.subject === "bob")!.id;
+  const aliceId = people.find((person) => person.subject === "alice")!.id;
+  const route = (id: string) => `/admin/people/${id}/storage-limit`;
+  const errorCode = async (response: Response) => (await response.json()).error.code;
+
+  assert.equal((await call("bob", route(bobId))).status, 403);
+  const initial = await (await call("alice", route(bobId))).json();
+  assert.deepEqual(
+    { ...initial, usedBytes: typeof initial.usedBytes },
+    {
+      usedBytes: "number",
+      limitBytes: 32 * MiB,
+      defaultLimitBytes: 32 * MiB,
+      customLimitBytes: null,
+      exempt: false,
+      minLimitBytes: 16 * MiB,
+      maxLimitBytes: 64 * MiB,
+      version: "default",
+    },
+  );
+  const put = (id: string, value: unknown, version?: string) =>
+    call("alice", route(id), {
+      method: "PUT",
+      headers: version ? { "if-match": version } : {},
+      body: JSON.stringify(value),
+    });
+  const missingVersion = await put(bobId, { limitBytes: 20 * MiB });
+  assert.equal(missingVersion.status, 428);
+  assert.equal(await errorCode(missingVersion), "version_required");
+  for (const value of [
+    { limitBytes: 1 },
+    { limitBytes: 65 * MiB },
+    { limitBytes: 20 * MiB, x: 1 },
+  ]) {
+    const rejected = await put(bobId, value, "default");
+    assert.equal(rejected.status, 400);
+    assert.equal(await errorCode(rejected), "invalid_limit");
+  }
+  const updated = await put(bobId, { limitBytes: 20 * MiB }, initial.version);
+  assert.equal(updated.status, 200);
+  const custom = await updated.json();
+  assert.equal(custom.limitBytes, 20 * MiB);
+  assert.equal(custom.customLimitBytes, 20 * MiB);
+  assert.notEqual(custom.version, initial.version);
+  const stale = await put(bobId, { limitBytes: 24 * MiB }, initial.version);
+  assert.equal(stale.status, 409);
+  assert.equal(await errorCode(stale), "version_conflict");
+
+  // Quota admission and the member's storage view read the same effective limit.
+  assert.equal((await (await call("bob", "/storage/chats")).json()).limitBytes, 20 * MiB);
+  assert.equal((await (await call("alice", "/storage/chats")).json()).limitBytes, null);
+
+  const owner = await (await call("alice", route(aliceId))).json();
+  assert.equal(owner.exempt, true);
+  assert.equal(owner.limitBytes, null);
+  const exempt = await put(aliceId, { limitBytes: 20 * MiB }, owner.version);
+  assert.equal(exempt.status, 409);
+  assert.equal(await errorCode(exempt), "limit_exempt");
+
+  const reset = await call("alice", route(bobId), {
+    method: "DELETE",
+    headers: { "if-match": custom.version },
+  });
+  assert.equal(reset.status, 200);
+  const restored = await reset.json();
+  assert.equal(restored.customLimitBytes, null);
+  assert.equal(restored.limitBytes, 32 * MiB);
+  const unknown = await call("alice", route(randomUUID()));
+  assert.equal(unknown.status, 404);
+  assert.equal(await errorCode(unknown), "person_not_found");
+
+  // With a tiny budget the owner can exceed both limits; members then see the shared-budget reason.
+  const small = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 12_000, userBytes: 8_000, freeFloorBytes: 1 },
+  });
+  t.after(() => small.shutdown());
+  const smallCall = fetchFrom(small);
+  const draft = {
+    name: "Synthetic limit test",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  for (let index = 0; index < 3; index += 1) {
+    const created = await smallCall("alice", "/automations", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    assert.equal(created.status, 201);
+  }
+  const blocked = await smallCall("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(blocked.status, 413);
+  const blockedError = (await blocked.json()).error;
+  assert.equal(blockedError.code, "quota_exceeded");
+  assert.match(blockedError.message, /shared storage/u);
+});

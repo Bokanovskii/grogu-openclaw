@@ -2729,6 +2729,12 @@ CREATE TABLE IF NOT EXISTS protected_policy_barrier (
   revision INTEGER NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS protected_storage_limits (
+  admission_id TEXT NOT NULL PRIMARY KEY,
+  limit_bytes INTEGER NOT NULL CHECK (limit_bytes > 0),
+  updated_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS protected_usage_daily (
   profile_id TEXT NOT NULL,
   day TEXT NOT NULL,

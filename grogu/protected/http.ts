@@ -60,8 +60,11 @@ import {
   listProtectedAccessRequests,
   readProtectedAccessRequest,
   removeProtectedAdmission,
+  readProtectedProfileStorageLimit,
+  readProtectedStorageLimit,
   retryProtectedPolicy,
   setProtectedRequestStatus,
+  setProtectedStorageLimit,
   submitProtectedAccessRequest,
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
@@ -131,6 +134,11 @@ import {
 import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
+import {
+  parseStorageLimitBytes,
+  parseStorageLimitVersion,
+  storageLimitView,
+} from "./storage-limit-route.js";
 import { widgetIdPattern } from "./tool-events.js";
 import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
@@ -360,6 +368,22 @@ export function createProtectedHttp(options: {
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
     : undefined;
+  // The effective admit() member limit: null exempts the owner from member and shared budgets;
+  // members use their override or the default.
+  const storageLimitFor = async (
+    profile: { id: string; owner: boolean },
+    assertCurrent: () => void,
+  ) => {
+    if (profile.owner || !options.storageLimits) {
+      return null;
+    }
+    const custom = await readProtectedProfileStorageLimit(options.stateDir, {
+      profileId: profile.id,
+      issuer: options.accessIssuer,
+    });
+    assertCurrent();
+    return custom ?? options.storageLimits.userBytes;
+  };
   const automationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,
@@ -660,6 +684,8 @@ export function createProtectedHttp(options: {
         await checkGrant();
         assertCurrent();
       };
+      const storageLimit = (assert: () => void) =>
+        storageLimitFor({ id: profile.id, owner: isOwner }, assert);
       if (pathname === "/admin/push/key" && method === "GET") {
         if (!isOwner) {
           throw new ProtectedError(403, "owner_required", "Owner access is required.");
@@ -753,6 +779,62 @@ export function createProtectedHttp(options: {
           lastActiveAt: person.lastActiveAt ?? null,
           lastChatActivityAt: storage?.lastChatActivityAt ?? null,
         });
+      }
+      const storageLimitPerson = /^\/admin\/people\/([a-f0-9-]{36})\/storage-limit$/u.exec(
+        pathname,
+      );
+      if (storageLimitPerson && ["GET", "PUT", "DELETE"].includes(method)) {
+        if (!isOwner || !options.ownerSubject) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const limits = options.storageLimits;
+        const target = {
+          id: storageLimitPerson[1]!,
+          issuer: options.accessIssuer,
+          ownerSubject: options.ownerSubject,
+        };
+        let next: number | null | undefined;
+        let expectedLimitBytes: number | null = null;
+        if (method !== "GET") {
+          expectedLimitBytes = parseStorageLimitVersion(request.headers.get("if-match"));
+          next =
+            method === "PUT" && limits ? parseStorageLimitBytes(await body(request), limits) : null;
+        }
+        await revalidate();
+        let limit = limits ? await readProtectedStorageLimit(options.stateDir, target) : undefined;
+        if (!limit || !limits) {
+          throw new ProtectedError(404, "person_not_found", "Person not found.");
+        }
+        if (next !== undefined) {
+          if (limit.exempt) {
+            throw new ProtectedError(409, "limit_exempt", "Admins have no storage limit.");
+          }
+          await revalidate();
+          const result = await setProtectedStorageLimit(
+            options.stateDir,
+            { ...target, expectedLimitBytes, limitBytes: next },
+            assertCurrent,
+          );
+          if (result === "exempt") {
+            throw new ProtectedError(409, "limit_exempt", "Admins have no storage limit.");
+          }
+          if (result === "version_conflict") {
+            throw new ProtectedError(
+              409,
+              "version_conflict",
+              "The storage limit changed. Reload it.",
+            );
+          }
+          if (!result) {
+            throw new ProtectedError(404, "person_not_found", "Person not found.");
+          }
+          limit = result;
+        }
+        const storage = limit.profileId
+          ? await measureProtectedStorage(storageMeasurement, limit.profileId, assertCurrent, false)
+          : undefined;
+        assertCurrent();
+        return json(storageLimitView(limit, limits, storage?.personalBytes ?? null));
       }
       if (pathname === "/admin/reports" && method === "GET") {
         if (!feedbackCapability) {
@@ -1517,7 +1599,12 @@ export function createProtectedHttp(options: {
         if (!admitStorage) {
           return notFound();
         }
-        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        const storage = await admitStorage(
+          profile.id,
+          assertCurrent,
+          "automation",
+          await storageLimit(assertCurrent),
+        );
         try {
           const automation = await createProtectedAutomationRecord(
             options.stateDir,
@@ -1628,7 +1715,12 @@ export function createProtectedHttp(options: {
         if (!admitStorage) {
           return notFound();
         }
-        const storage = await admitStorage(profile.id, assertCurrent, "automation");
+        const storage = await admitStorage(
+          profile.id,
+          assertCurrent,
+          "automation",
+          await storageLimit(assertCurrent),
+        );
         try {
           const updated = await patchProtectedAutomationRecord(
             options.stateDir,
@@ -1773,9 +1865,10 @@ export function createProtectedHttp(options: {
           false,
           (item) => items.push(item),
         );
+        const limitBytes = await storageLimit(assertCurrent);
         await revalidate();
         return json({
-          limitBytes: options.storageLimits?.userBytes ?? null,
+          limitBytes,
           usedBytes: personalBytes,
           chats: items.toSorted(
             (a, b) => b.approximateBytes - a.approximateBytes || a.id.localeCompare(b.id),
@@ -1809,7 +1902,12 @@ export function createProtectedHttp(options: {
             throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
           }
           await revalidate();
-          storage = await admitStorage?.(profile.id, assertCurrent, "create");
+          storage = await admitStorage?.(
+            profile.id,
+            assertCurrent,
+            "create",
+            await storageLimit(assertCurrent),
+          );
           const chat = await chats.create(
             authority,
             data.title === undefined ? undefined : text(data.title, 160),
@@ -2008,7 +2106,12 @@ export function createProtectedHttp(options: {
           const current = await listProtectedFeedback(options.stateDir, profile.id, id);
           await revalidate();
           if (input.rating !== null && !current.some((entry) => entry.responseId === responseId)) {
-            storage = await admitStorage?.(profile.id, assertCurrent, "stored-data");
+            storage = await admitStorage?.(
+              profile.id,
+              assertCurrent,
+              "stored-data",
+              await storageLimit(assertCurrent),
+            );
             reservation = storage?.reserveStoredData(storageEntryOverheadBytes + 1024);
           }
           const result = await setProtectedFeedback(options.stateDir, {
@@ -2107,7 +2210,12 @@ export function createProtectedHttp(options: {
         let reservation: ReturnType<StorageAdmission["reserveStoredData"]> | undefined;
         let reservationSettled = false;
         try {
-          storage = await admitStorage?.(profile.id, assertCurrent, "stored-data");
+          storage = await admitStorage?.(
+            profile.id,
+            assertCurrent,
+            "stored-data",
+            await storageLimit(assertCurrent),
+          );
           reservation = storage?.reserveStoredData(16 * 1024);
           const result = await submitProtectedFeedbackReport(options.stateDir, {
             profileId: profile.id,
@@ -2383,7 +2491,12 @@ export function createProtectedHttp(options: {
             }
             profileAuthority.assertCurrent();
             // Storage charges continue after the client disconnects, so they check only the grant.
-            storage = await admitStorage?.(profile.id, assertGrant, "turn");
+            storage = await admitStorage?.(
+              profile.id,
+              assertGrant,
+              "turn",
+              await storageLimit(assertGrant),
+            );
             if (shutdown.signal.aborted || runs.has(id)) {
               throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
             }
@@ -2970,6 +3083,7 @@ export function createProtectedHttp(options: {
     recoverTransient(assertCurrent: () => void) {
       return chats.recoverTransient(assertCurrent);
     },
+    storageLimitFor,
     async shutdown() {
       shutdown.abort();
       options.providerRelay?.close();

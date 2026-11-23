@@ -363,11 +363,12 @@ function replayFeedbackReport(responseId: string, prior: { id: string; createdAt
     feedback: { responseId, rating: "down", reportId: prior.id },
   });
 }
-async function body(request: Request) {
-  if (
-    request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json" ||
-    !request.body
-  ) {
+async function body(request: Request, optional = false) {
+  const isJson = request.headers.get("content-type")?.split(";")[0]?.trim() === "application/json";
+  if (!request.body) {
+    return optional ? {} : invalid();
+  }
+  if (!optional && !isJson) {
     return invalid();
   }
   const reader = request.body.getReader();
@@ -379,11 +380,17 @@ async function body(request: Request) {
       if (done) {
         break;
       }
+      if (value.byteLength > 0 && !isJson) {
+        return invalid();
+      }
       bytes += value.byteLength;
       if (bytes > maxBodyBytes) {
         throw new ProtectedError(413, "request_too_large", "The request is too large.");
       }
       chunks.push(value);
+    }
+    if (optional && bytes === 0) {
+      return {};
     }
     let value: unknown;
     try {
@@ -4120,7 +4127,7 @@ export function createProtectedHttp(options: {
           return noContent();
         }
         if (target === "follow") {
-          const input = request.body ? await body(request) : {};
+          const input = await body(request, true);
           if (!isProtectedAutomationFollowRequest(input)) {
             return invalid();
           }

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { constants } from "node:sqlite";
+import { constants, DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sqlite from "../../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
@@ -43,46 +43,52 @@ type LegacyMainSessionMigrationOutcomeKind = Awaited<
   ReturnType<typeof migrateLegacyMainSessionKeys>
 >["outcomes"][number]["kind"];
 
+async function prepareProtectedCrossStore() {
+  const fixture = createFixture();
+  const keyPath = path.join(path.dirname(fixture.stateDir), "key");
+  fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+  vi.stubEnv("OPENCLAW_PROTECTED_STORAGE_KEY_FILE", keyPath);
+  const env = { ...fixture.env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath };
+  const source = {
+    databaseAgentId: "main",
+    databasePath: databasePath(fixture.stateDir, "main"),
+    key: "agent:main:chat",
+  };
+  const destination = {
+    databaseAgentId: "ops",
+    databasePath: databasePath(fixture.stateDir, "ops"),
+    key: "agent:ops:chat",
+  };
+  for (const target of [source, destination]) {
+    fs.mkdirSync(path.dirname(target.databasePath), { recursive: true });
+    const preparatory = openNodeSqliteDatabase(target.databasePath);
+    try {
+      await withAgentDatabaseMaintenanceLease({ env }, async () => {
+        ensureOpenClawAgentDatabaseSchema(preparatory, {
+          agentId: target.databaseAgentId,
+          path: target.databasePath,
+          env,
+        });
+      });
+    } finally {
+      preparatory.close();
+    }
+  }
+  const entry = seedClaim(source);
+  const destinationOptions = {
+    agentId: destination.databaseAgentId,
+    path: destination.databasePath,
+    env,
+  };
+  return { fixture, env, source, destination, entry, destinationOptions };
+}
+
 describe("legacy main session migration", () => {
   it.each(["normal", "blocked-checkpoint", "denied-checkpoint", "incomplete-checkpoint"] as const)(
     "checkpoints a protected cross-store copy before deleting the source with %s",
     async (scenario) => {
-      const fixture = createFixture();
-      const keyPath = path.join(path.dirname(fixture.stateDir), "key");
-      fs.writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
-      vi.stubEnv("OPENCLAW_PROTECTED_STORAGE_KEY_FILE", keyPath);
-      const env = { ...fixture.env, OPENCLAW_PROTECTED_STORAGE_KEY_FILE: keyPath };
-      const source = {
-        databaseAgentId: "main",
-        databasePath: databasePath(fixture.stateDir, "main"),
-        key: "agent:main:chat",
-      };
-      const destination = {
-        databaseAgentId: "ops",
-        databasePath: databasePath(fixture.stateDir, "ops"),
-        key: "agent:ops:chat",
-      };
-      for (const target of [source, destination]) {
-        fs.mkdirSync(path.dirname(target.databasePath), { recursive: true });
-        const preparatory = openNodeSqliteDatabase(target.databasePath);
-        try {
-          await withAgentDatabaseMaintenanceLease({ env }, async () => {
-            ensureOpenClawAgentDatabaseSchema(preparatory, {
-              agentId: target.databaseAgentId,
-              path: target.databasePath,
-              env,
-            });
-          });
-        } finally {
-          preparatory.close();
-        }
-      }
-      const entry = seedClaim(source);
-      const destinationOptions = {
-        agentId: destination.databaseAgentId,
-        path: destination.databasePath,
-        env,
-      };
+      const { fixture, env, source, destination, entry, destinationOptions } =
+        await prepareProtectedCrossStore();
       let injected = false;
       if (scenario === "blocked-checkpoint") {
         runOpenClawAgentWriteTransaction(({ db }) => {
@@ -174,6 +180,57 @@ describe("legacy main session migration", () => {
       expect(readClaim(destination)?.entry).toMatchObject(entry);
     },
   );
+
+  it("holds the destination write lock through every source commit and recovers after revocation", async () => {
+    const { fixture, env, source, destination, entry } = await prepareProtectedCrossStore();
+    const probe = new DatabaseSync(destination.databasePath, { timeout: 0 });
+    const destinationLock = () => {
+      try {
+        probe.exec("BEGIN IMMEDIATE");
+        probe.exec("ROLLBACK");
+        return "free";
+      } catch (error) {
+        if (!/locked|busy/i.test(String(error))) {
+          throw error;
+        }
+        return "held";
+      }
+    };
+    const observed: string[] = [];
+    const revoked = new Error("Doctor SQLite maintenance authority has expired.");
+    const migrate = (revoke: boolean) =>
+      migrateLegacyMainSessionKeys({
+        cfg: fixture.cfg,
+        env,
+        mode: "doctor-fix",
+        beforePersistentApply: () => {
+          const state = destinationLock();
+          observed.push(state);
+          if (revoke && state === "held") {
+            throw revoked;
+          }
+        },
+      });
+    try {
+      await expect(migrate(true)).rejects.toBe(revoked);
+      expect(readClaim(source)?.entry).toMatchObject(entry);
+      expect(destinationLock()).toBe("free");
+
+      observed.length = 0;
+      const result = await migrate(false);
+      expect(result.complete).toBe(true);
+      expect(outcomeKinds(result)).toContain("canonical-exists-identical");
+      // Every source commit guard after verification ran while independent writers were excluded.
+      const guarded = observed.slice(observed.indexOf("held"), observed.lastIndexOf("held") + 1);
+      expect(guarded.length).toBeGreaterThan(1);
+      expect(guarded.every((state) => state === "held")).toBe(true);
+      expect(destinationLock()).toBe("free");
+      expect(readClaim(source)).toBeUndefined();
+      expect(readClaim(destination)?.entry).toMatchObject(entry);
+    } finally {
+      probe.close();
+    }
+  });
 
   it("migrates an in-place alias atomically to the owner key", async () => {
     const storePath = path.join(tempDirs.make("in-place-migration-"), "sessions.sqlite");

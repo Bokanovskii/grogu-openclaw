@@ -12,12 +12,17 @@ import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { retireTransientSubagentRun } from "../../src/agents/subagents/registry/subagent-registry-transient-recovery.js";
 import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
+import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
 import {
   createSessionEntryWithTranscript,
   deleteSessionEntryLifecycle,
   loadTranscriptEvents,
 } from "../../src/config/sessions/session-accessor.js";
 import { applySessionEntryOperation } from "../../src/config/sessions/session-accessor.sqlite-entry.js";
+import {
+  buildForkedChildTranscriptEvents,
+  resolveParentForkSourceTranscript,
+} from "../../src/config/sessions/session-accessor.sqlite-parent-fork.js";
 import {
   readSessionEntrySummariesInWorker,
   withSessionEntryReadOnlyInWorker,
@@ -57,7 +62,14 @@ function validId(id: string) {
   return /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(id);
 }
 
+function sideOf(entry: SessionEntry) {
+  return entry.protectedSideParentId && entry.protectedSideForkedAt
+    ? { parentId: entry.protectedSideParentId, forkedAt: { ...entry.protectedSideForkedAt } }
+    : undefined;
+}
+
 function summary(entry: SessionEntry): ProtectedChatSummary {
+  const side = sideOf(entry);
   return {
     id: entry.sessionId,
     title: entry.displayName ?? "New chat",
@@ -79,6 +91,7 @@ function summary(entry: SessionEntry): ProtectedChatSummary {
           },
         }
       : {}),
+    ...(side ? { side } : {}),
   };
 }
 
@@ -217,24 +230,23 @@ export function createProtectedChats(options: {
     }
     return summary(entry);
   };
-  const list = async (authority: ProtectedChatAuthority) => {
+  const ownedEntries = async (authority: ProtectedChatAuthority) => {
     authority.assertCurrent();
     const entries = await readSessionEntrySummariesInWorker({ agentId, env, storePath });
     authority.assertCurrent();
-    return entries.flatMap(({ sessionKey, entry }) => {
-      if (
-        sessionKey !== `${prefix(authority.profileId)}${entry.sessionId}` ||
-        !validId(entry.sessionId) ||
-        entry.createdVia !== "plugin" ||
-        entry.createdActor?.type !== "human" ||
-        entry.createdActor.source !== "profile" ||
-        entry.createdActor.id !== authority.profileId
-      ) {
-        return [];
-      }
-      return [summary(entry)];
-    });
+    return entries.flatMap(({ sessionKey, entry }) =>
+      sessionKey !== `${prefix(authority.profileId)}${entry.sessionId}` ||
+      !validId(entry.sessionId) ||
+      entry.createdVia !== "plugin" ||
+      entry.createdActor?.type !== "human" ||
+      entry.createdActor.source !== "profile" ||
+      entry.createdActor.id !== authority.profileId
+        ? []
+        : [entry],
+    );
   };
+  const list = async (authority: ProtectedChatAuthority) =>
+    (await ownedEntries(authority)).map(summary);
   const capacityEntries = async () => {
     const entries = await readSessionEntrySummariesInWorker({ agentId, env, storePath });
     return entries.flatMap<{
@@ -295,12 +307,13 @@ export function createProtectedChats(options: {
       ];
     });
   };
+  const maxTranscriptEventBytes = 2 * 1024 * 1024;
   const readTranscriptSource = async (authority: ProtectedChatAuthority, id: string) => {
     const entry = await readEntry(authority, id);
     const events = await loadTranscriptEvents({
       ...scope(authority, id),
       sessionId: entry.sessionId,
-      maxEventBytes: 2 * 1024 * 1024,
+      maxEventBytes: maxTranscriptEventBytes,
     });
     authority.assertCurrent();
     return { entry, events };
@@ -555,15 +568,19 @@ export function createProtectedChats(options: {
         replyMessage = message;
       }
     }
+    const visible = messages.filter(
+      (message) =>
+        message.role === "user" ||
+        message.text.trim() ||
+        message.widgets?.length ||
+        message.status !== "failed",
+    );
     const chat: ProtectedChat = {
       ...summary(entry),
-      messages: messages.filter(
-        (message) =>
-          message.role === "user" ||
-          message.text.trim() ||
-          message.widgets?.length ||
-          message.status !== "failed",
-      ),
+      // The forked prefix stays in the transcript for the model and is never re-sent to the client.
+      messages: entry.protectedSideForkedAt
+        ? visible.slice(entry.protectedSideForkedAt.messageCount)
+        : visible,
     };
     return { chat, usage };
   };
@@ -578,6 +595,9 @@ export function createProtectedChats(options: {
     scope,
     readEntry,
     list,
+    async sideChatsOf(authority: ProtectedChatAuthority, parentId: string) {
+      return (await list(authority)).filter((chat) => chat.side?.parentId === parentId);
+    },
     read: async (authority: ProtectedChatAuthority, id: string) =>
       (await readWithUsage(authority, id)).chat,
     readWithUsage,
@@ -792,6 +812,109 @@ export function createProtectedChats(options: {
         throw new ProtectedError(500, "save_failed", "The chat could not be saved.");
       }
       return { ...summary(result.entry), messages: [] };
+    },
+    /**
+     * Forks the owner's chat transcript up to its last completed reply into a new chat. The model
+     * sees that prefix, byte for byte, followed by the side chat's own messages.
+     */
+    async createSide(
+      authority: ProtectedChatAuthority,
+      parentId: string,
+      input: { requestId: string; title?: string; selectedAgentId?: string },
+    ): Promise<{ chat: ProtectedChatSummary; created: boolean }> {
+      authority.assertCurrent();
+      const requested = await readEntry(authority, parentId);
+      // One level only: a side chat branches from the chat it was forked from.
+      const parent = requested.protectedSideParentId
+        ? await readEntry(authority, requested.protectedSideParentId)
+        : requested;
+      if (parent.protectedAutomationRunId || parent.protectedAuthoringKind) {
+        throw new ProtectedError(422, "side_unavailable", "This chat cannot have side chats.");
+      }
+      const owned = await ownedEntries(authority);
+      const replay = owned.find((entry) => entry.protectedSideRequestId === input.requestId);
+      if (replay) {
+        if (replay.protectedSideParentId !== parent.sessionId) {
+          throw new ProtectedError(
+            409,
+            "request_conflict",
+            "This request already created a side chat for another chat.",
+          );
+        }
+        return { chat: summary(replay), created: false };
+      }
+      if (owned.length >= options.maxChatsPerUser) {
+        throw new ProtectedError(
+          413,
+          "quota_exceeded",
+          "Your chat budget is full. Export or delete a chat.",
+        );
+      }
+      const parentAgentId = summary(parent).selectedAgentId;
+      const selectedAgentId =
+        input.selectedAgentId ??
+        (parentAgentId && options.agentCatalog.getSelectable(parentAgentId)
+          ? parentAgentId
+          : options.agentCatalog.defaultAgentId);
+      if (!options.agentCatalog.getSelectable(selectedAgentId)) {
+        throw new ProtectedError(422, "agent_unavailable", "This agent is not available.");
+      }
+      const parentEvents = await loadTranscriptEvents({
+        ...scope(authority, parent.sessionId),
+        sessionId: parent.sessionId,
+        maxEventBytes: maxTranscriptEventBytes,
+      });
+      authority.assertCurrent();
+      const source = resolveParentForkSourceTranscript(parentEvents, "last-completed");
+      const id = randomUUID();
+      const now = Date.now();
+      const entry: SessionEntry = {
+        sessionId: id,
+        updatedAt: now,
+        createdAt: now,
+        displayName: input.title ?? "Side chat",
+        protectedAgentId: selectedAgentId,
+        protectedSideParentId: parent.sessionId,
+        protectedSideRequestId: input.requestId,
+        createdVia: "plugin",
+        createdActor: { type: "human", source: "profile", id: authority.profileId },
+      };
+      const forkEvents = source
+        ? buildForkedChildTranscriptEvents({
+            parentSessionFile: formatSqliteSessionFileMarker({
+              agentId,
+              sessionId: parent.sessionId,
+              storePath,
+            }),
+            source,
+            targetSessionId: id,
+          })
+        : [];
+      const inherited = projectTranscriptSource(entry, forkEvents).chat.messages;
+      const last = inherited.at(-1);
+      if (!last) {
+        throw new ProtectedError(
+          422,
+          "side_unavailable",
+          "Send a message in this chat before starting a side chat.",
+        );
+      }
+      entry.protectedSideForkedAt = { messageId: last.id, messageCount: inherited.length };
+      const result = await createSessionEntryWithTranscript(
+        scope(authority, id),
+        ({ existingEntry }) => {
+          authority.assertCurrent();
+          return existingEntry
+            ? { ok: false, error: "Chat identity collision" }
+            : { ok: true, entry, transcriptEvents: forkEvents };
+        },
+        { requireWriteSuccess: true, commitGuard: authority.assertCurrent },
+      );
+      authority.assertCurrent();
+      if (!result.ok) {
+        throw new ProtectedError(500, "save_failed", "The chat could not be saved.");
+      }
+      return { chat: summary(result.entry), created: true };
     },
     async selectAgent(
       authority: ProtectedChatAuthority,

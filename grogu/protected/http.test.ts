@@ -32,7 +32,9 @@ import {
   ProtectedAutomationLifecycleListResponseSchema,
 } from "../../packages/gateway-protocol/src/protected-automation-results.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
+import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
 import { createCanvasDocument } from "../../src/canvas/documents.js";
+import { appendTranscriptMessages } from "../../src/config/sessions/session-accessor.transcript-turn.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import {
   authorizedUserFilesDirectory,
@@ -61,6 +63,7 @@ import {
 } from "../../src/storage/encryption.js";
 import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
 import {
+  createProtectedAgentCatalog,
   protectedAgentTools,
   protectedResearchAgent,
   type ProtectedAgentExtension,
@@ -70,6 +73,7 @@ import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifec
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import type { ProtectedBrowserBroker } from "./browser/broker.js";
+import { createProtectedChats } from "./chats.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -1997,6 +2001,218 @@ void test("deleting another member's chat frees quota for a running turn", async
   proceed.resolve();
   await written.promise;
   await running.text();
+});
+
+void test("side chats fork their parent, stay hidden without negotiation, and are deleted with it", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-side-chats-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
+  const started = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  t.after(() => proceed.resolve());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const usersRoot = await root(stateDir);
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 60_000,
+    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    turns: {
+      models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+      async run(turn) {
+        started.resolve();
+        await proceed.promise;
+        await turn.delta("Done.");
+      },
+      async steer() {
+        assert.fail("Steering is not used by this fixture.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const negotiated = "side-chats-v1";
+  const call = (user: string, route: string, init?: RequestInit, capabilities = negotiated) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", user);
+    headers.set("content-type", "application/json");
+    if (capabilities) {
+      headers.set("x-alcove-capabilities", capabilities);
+    }
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  // The fixture turns write no transcript, so history is seeded through the same chat store.
+  const seeder = createProtectedChats({
+    stateDir,
+    maxChatsPerUser: 3,
+    agentCatalog: createProtectedAgentCatalog([protectedResearchAgent]),
+    usersRoot,
+    maxFileBytes: 60_000,
+  });
+  const seed = (profileId: string, chatId: string, question: string) =>
+    appendTranscriptMessages(
+      { ...seeder.scope({ profileId, assertCurrent() {} }, chatId), sessionId: chatId },
+      {
+        messages: [
+          { role: "user", content: question, timestamp: Date.now() },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: `Answer to ${question}` }],
+            api: "openai-completions",
+            provider: "sparky",
+            model: "synthetic",
+            usage: makeZeroUsageSnapshot(),
+            stopReason: "stop",
+            timestamp: Date.now(),
+          },
+        ].map((message) => ({ message })),
+      },
+    );
+  const profileOf = async (user: string) => (await (await call(user, "/me")).json()).user.id;
+  const aliceId = await profileOf("alice");
+  const bobId = await profileOf("bob");
+  assert.equal((await (await call("alice", "/me")).json()).capabilities.sideChats, true);
+  assert.equal(
+    (await (await call("alice", "/me", {}, "")).json()).capabilities.sideChats,
+    undefined,
+  );
+
+  const createChat = async (user: string) => {
+    const response = await call(user, "/chats", { method: "POST", body: "{}" });
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json()).chat as { id: string; version: string };
+  };
+  const startSide = (
+    user: string,
+    profileId: string,
+    chatId: string,
+    body: Record<string, unknown>,
+    capabilities = negotiated,
+  ) =>
+    call(
+      user,
+      `/chats/${chatId}/side`,
+      { method: "POST", headers: { "x-grogu-profile": profileId }, body: JSON.stringify(body) },
+      capabilities,
+    );
+  const readChat = async (user: string, chatId: string, capabilities = negotiated) => {
+    const response = await call(user, `/chats/${chatId}`, {}, capabilities);
+    return { status: response.status, chat: (await response.json()).chat };
+  };
+  const listed = async (user: string, capabilities = negotiated) =>
+    (await (await call(user, "/chats", {}, capabilities)).json()).chats as {
+      id: string;
+      side?: unknown;
+    }[];
+
+  const parent = await createChat("alice");
+  const requestId = randomUUID();
+  const empty = await startSide("alice", aliceId, parent.id, { requestId });
+  assert.equal(empty.status, 422);
+  assert.equal((await empty.json()).error.code, "side_unavailable");
+
+  await seed(aliceId, parent.id, "Plan the trip");
+  assert.equal((await startSide("alice", aliceId, parent.id, { requestId }, "")).status, 404);
+  assert.equal((await startSide("alice", aliceId, parent.id, {})).status, 400);
+  assert.equal((await startSide("alice", bobId, parent.id, { requestId })).status, 403);
+  assert.equal((await startSide("bob", bobId, parent.id, { requestId })).status, 404);
+
+  const created = await startSide("alice", aliceId, parent.id, { requestId, title: "Detour" });
+  assert.equal(created.status, 201);
+  const sideChat = (await created.json()).chat;
+  assert.equal(sideChat.title, "Detour");
+  assert.equal(sideChat.side.parentId, parent.id);
+  assert.equal(sideChat.side.forkedAt.messageCount, 2);
+  const replayed = await startSide("alice", aliceId, parent.id, { requestId, title: "Detour" });
+  assert.equal(replayed.status, 201);
+  assert.equal((await replayed.json()).chat.id, sideChat.id);
+
+  const read = await readChat("alice", sideChat.id);
+  assert.equal(read.chat.side.parentId, parent.id);
+  assert.deepEqual(read.chat.messages, []);
+  assert.equal((await readChat("alice", sideChat.id, "")).chat.side, undefined);
+  assert.deepEqual(
+    (await listed("alice")).map(({ id }) => id).toSorted(),
+    [parent.id, sideChat.id].toSorted(),
+  );
+  const legacyList = await listed("alice", "");
+  assert.deepEqual(
+    legacyList.map(({ id }) => id),
+    [parent.id],
+  );
+  assert.equal(legacyList[0]?.side, undefined);
+
+  // A side chat's own side chat branches from the same parent; the third chat fills the budget.
+  const second = await startSide("alice", aliceId, sideChat.id, { requestId: randomUUID() });
+  assert.equal(second.status, 201);
+  const secondChat = (await second.json()).chat;
+  assert.equal(secondChat.side.parentId, parent.id);
+  const full = await startSide("alice", aliceId, parent.id, { requestId: randomUUID() });
+  assert.equal(full.status, 413);
+  assert.equal((await full.json()).error.code, "quota_exceeded");
+
+  // Deleting the parent waits while any of its side chats is running.
+  const running = await call("alice", `/chats/${secondChat.id}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": aliceId },
+    body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
+  });
+  assert.equal(running.status, 200);
+  await started.promise;
+  const busy = await call("alice", `/chats/${parent.id}`, {
+    method: "DELETE",
+    headers: { "if-match": (await readChat("alice", parent.id)).chat.version },
+  });
+  assert.equal(busy.status, 409);
+  assert.equal((await readChat("alice", sideChat.id)).status, 200);
+  proceed.resolve();
+  await running.text();
+
+  const deleted = await call("alice", `/chats/${parent.id}`, {
+    method: "DELETE",
+    headers: { "if-match": (await readChat("alice", parent.id)).chat.version },
+  });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(
+    (await deleted.json()).deletedSideChats.toSorted(),
+    [sideChat.id, secondChat.id].toSorted(),
+  );
+  for (const id of [parent.id, sideChat.id, secondChat.id]) {
+    assert.equal((await readChat("alice", id)).status, 404);
+  }
+
+  // Clients that did not negotiate side chats keep the empty delete response; the cascade still runs.
+  const legacyParent = await createChat("alice");
+  await seed(aliceId, legacyParent.id, "Another plan");
+  const legacySide = (
+    await (await startSide("alice", aliceId, legacyParent.id, { requestId: randomUUID() })).json()
+  ).chat;
+  const legacyDelete = await call(
+    "alice",
+    `/chats/${legacyParent.id}`,
+    {
+      method: "DELETE",
+      headers: { "if-match": (await readChat("alice", legacyParent.id)).chat.version },
+    },
+    "",
+  );
+  assert.equal(legacyDelete.status, 204);
+  assert.equal((await readChat("alice", legacySide.id)).status, 404);
 });
 
 void test("artifact pages expose only owned saved content through guarded reads", async (t) => {

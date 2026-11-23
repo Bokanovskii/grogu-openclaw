@@ -5,6 +5,7 @@ import {
   isProtectedAgentSelection,
   isProtectedAutomationPatchRequest,
   isProtectedCreateChat,
+  isProtectedCreateSideChat,
   isProtectedAccountIcon,
   isProtectedAccountName,
   isProtectedDirectorySettings,
@@ -21,6 +22,8 @@ import {
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
   type ProtectedChatSummary,
+  type ProtectedCreateSideChatResponse,
+  type ProtectedDeleteChatResponse,
   type ProtectedMessage,
   type ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
@@ -217,6 +220,7 @@ const automationsAuthoringCapability = "automations-authoring-v1";
 const automationResultsCapability = "automation-results-v1";
 const automationRunsCapability = "automation-runs-v1";
 const automationContextCapability = "automations-context-v1";
+const sideChatsCapability = "side-chats-v1";
 
 function assertRunChatWritable(
   entry: { protectedAutomationRunId?: string },
@@ -428,6 +432,11 @@ function supportsAutomationsAuthoring(request: Request) {
     supportsAutomationsChat(request) &&
     hasClientCapability(request.headers, automationsAuthoringCapability)
   );
+}
+
+/** Side chats are listed and linked to their parents only for clients that negotiated them. */
+function supportsSideChats(request: Request) {
+  return hasClientCapability(request.headers, sideChatsCapability);
 }
 
 export function createProtectedHttp(options: {
@@ -3185,6 +3194,10 @@ export function createProtectedHttp(options: {
         signal = request.signal,
         profileId = profile.id,
       ) => withProtectedFiles(profileId, use, assert, signal);
+      const visibleChats = async () => {
+        const owned = await chats.list(authority);
+        return supportsSideChats(request) ? owned : owned.filter((chat) => !chat.side);
+      };
       const readChat = async (id: string, owner = authority) => {
         const { chat, usage } = await chats.readWithUsage(owner, id);
         if (!hasClientCapability(request.headers, "specialist-stream-v1")) {
@@ -3197,6 +3210,9 @@ export function createProtectedHttp(options: {
         }
         if (!hasClientCapability(request.headers, automationRunsCapability)) {
           delete chat.automationRun;
+        }
+        if (!supportsSideChats(request)) {
+          delete chat.side;
         }
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(
@@ -3323,6 +3339,7 @@ export function createProtectedHttp(options: {
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
             ...(reportChatCapability ? { reportChat: true } : {}),
             ...(sharingCapability ? { sharing: identity.kind !== "development" } : {}),
+            ...(supportsSideChats(request) ? { sideChats: true } : {}),
             ...(memoryV2 || hasClientCapability(request.headers, "memory-v1")
               ? {
                   memory: {
@@ -4633,7 +4650,7 @@ export function createProtectedHttp(options: {
         } satisfies ProtectedChatStorage);
       }
       if (pathname === "/chats" && method === "GET") {
-        const result = await chats.list(authority);
+        const result = await visibleChats();
         await revalidate();
         for (const chat of result) {
           // Clients that did not negotiate authoring parse chats against strict V1 schemas.
@@ -4687,7 +4704,7 @@ export function createProtectedHttp(options: {
       }
       if (pathname === "/export" && method === "GET") {
         const result = [];
-        for (const chat of await chats.list(authority)) {
+        for (const chat of await visibleChats()) {
           await revalidate();
           result.push((await readChat(chat.id)).chat);
         }
@@ -4696,7 +4713,7 @@ export function createProtectedHttp(options: {
       }
       if (pathname === "/artifacts" && method === "GET") {
         requireProfile();
-        const ownedChats = await chats.list(authority);
+        const ownedChats = await visibleChats();
         return await files(async (owned) => {
           const result = await listProtectedArtifacts({
             files: owned,
@@ -4712,7 +4729,7 @@ export function createProtectedHttp(options: {
         try {
           return await files(async (owned) => {
             const result = [];
-            for (const chat of await chats.list(authority)) {
+            for (const chat of await visibleChats()) {
               const dir = chatArtifactsDirectory(chat.id);
               try {
                 for (const name of (await owned.list(dir)).filter(validFilename)) {
@@ -4873,6 +4890,7 @@ export function createProtectedHttp(options: {
           const { chat } = await readChat(chatId, owner);
           delete chat.activeRun;
           delete chat.authoring;
+          delete chat.side;
           await check();
           const response: ProtectedSharedChatResponse = {
             chat,
@@ -5315,26 +5333,58 @@ export function createProtectedHttp(options: {
         if (runs.has(id) || mutations.has(id)) {
           throw new ProtectedError(409, "busy", "Stop the current work before deleting.");
         }
+        // Locking the parent first stops a concurrent side chat creation from missing the cascade.
+        const locked = [id];
         mutations.add(id);
-        try {
-          await chats.delete(authority, id, version, async () => {
-            await files((owned) => removeChatFilesDirectory(owned, id));
+        const deleteChat = async (chatId: string, chatVersion: string) => {
+          await chats.delete(authority, chatId, chatVersion, async () => {
+            await files((owned) => removeChatFilesDirectory(owned, chatId));
             await revalidate();
           });
-          await removeProtectedChatFeedback(options.stateDir, profile.id, id);
+          await removeProtectedChatFeedback(options.stateDir, profile.id, chatId);
           retireSharing(
             await sharing("protectedSharing.delete", {
               ownerProfileId: profile.id,
-              chatId: id,
+              chatId,
               storageOverheadBytes: storageEntryOverheadBytes,
             }),
           );
           await revalidate();
-          admitStorage?.deletedChat(profile.id, id);
+          admitStorage?.deletedChat(profile.id, chatId);
           await revalidate();
-          return noContent();
+        };
+        try {
+          const sideChats = await chats.sideChatsOf(authority, id);
+          for (const sideChat of sideChats) {
+            if (runs.has(sideChat.id) || mutations.has(sideChat.id)) {
+              throw new ProtectedError(409, "busy", "Stop the current work before deleting.");
+            }
+            mutations.add(sideChat.id);
+            locked.push(sideChat.id);
+          }
+          await deleteChat(id, version);
+          // Side chats go with their parent. The parent's version check comes first, so a stale
+          // delete removes nothing. A side chat that is already gone or changed stays deletable alone.
+          const deletedSideChats: string[] = [];
+          for (const sideChat of sideChats) {
+            try {
+              await deleteChat(sideChat.id, sideChat.version);
+              deletedSideChats.push(sideChat.id);
+            } catch (error) {
+              if (!(error instanceof ProtectedError && [404, 409].includes(error.status))) {
+                throw error;
+              }
+            }
+          }
+          if (!supportsSideChats(request)) {
+            return noContent();
+          }
+          const response: ProtectedDeleteChatResponse = { deletedSideChats };
+          return json(response);
         } finally {
-          mutations.delete(id);
+          for (const chatId of locked) {
+            mutations.delete(chatId);
+          }
         }
       }
       if (rest === "title" && method === "PATCH") {
@@ -5401,6 +5451,53 @@ export function createProtectedHttp(options: {
           requireProfile();
         }
         return widgetResponse(id, widgetId);
+      }
+      if (rest === "side" && method === "POST") {
+        // Only the owner's own chats reach this route; recipients have no side route.
+        if (!supportsSideChats(request)) {
+          return notFound();
+        }
+        requireProfile();
+        const data = await body(request);
+        if (!isProtectedCreateSideChat(data)) {
+          return invalid();
+        }
+        const parentId = chatEntry.protectedSideParentId ?? id;
+        if (creating.has(profile.id)) {
+          throw new ProtectedError(409, "busy", "Another chat is being created.");
+        }
+        if (mutations.has(parentId)) {
+          throw new ProtectedError(409, "busy", "Try the side chat again in a moment.");
+        }
+        creating.add(profile.id);
+        mutations.add(parentId);
+        let storage;
+        try {
+          await revalidate();
+          storage = await admitStorage?.(
+            profile.id,
+            assertCurrent,
+            "create",
+            await storageLimit(assertCurrent),
+          );
+          const { chat, created } = await chats.createSide(authority, id, {
+            requestId: data.requestId,
+            ...(data.title === undefined ? {} : { title: text(data.title, 160) }),
+            ...(data.selectedAgentId === undefined
+              ? {}
+              : { selectedAgentId: data.selectedAgentId }),
+          });
+          if (created) {
+            storage?.recordCreatedChat(chat.id, chats.scope(authority, chat.id).sessionKey);
+          }
+          await revalidate();
+          const response: ProtectedCreateSideChatResponse = { chat };
+          return json(response, 201);
+        } finally {
+          storage?.release();
+          mutations.delete(parentId);
+          creating.delete(profile.id);
+        }
       }
       if (rest === "turns" && method === "POST") {
         requireProfile();

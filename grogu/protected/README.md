@@ -317,6 +317,39 @@ entry each. The tables store only profile, chat, and link ids, and no chat text.
 `grogu/protected/sharing-store.ts` exports `canMemberReadChat` and
 `canMemberReadChatArtifact` for other routes that need the same read authority.
 
+### Side chats
+
+Clients opt in with `x-alcove-capabilities: side-chats-v1`; `/me` then reports
+`capabilities.sideChats: true`. Without the capability `POST .../side` returns
+404, side chats are left out of `GET /chats`, export, artifacts, and files, and
+chat reads omit `side`.
+
+`POST /api/protected/v1/chats/:parentId/side` requires `x-grogu-profile` and a
+body of `{requestId, title?, selectedAgentId?}`. It reads the parent through the
+normal chat read authority, so another member's or a missing chat returns the
+same 404. It returns 201 `{chat}`, where `chat.side` is
+`{parentId, forkedAt: {messageId, messageCount}}`. A replayed `requestId` on the
+same parent returns the same chat; on another parent it returns 409
+`request_conflict`. Run chats, authoring chats, and parents with no completed
+reply return 422 `side_unavailable`. Creating a side chat from a side chat
+branches from the same parent, so depth stays one. A side chat counts as a
+normal chat for the member's chat quota (413 `quota_exceeded`) and storage.
+`selectedAgentId` defaults to the parent's agent.
+
+The side chat is a fork of the parent: its transcript starts with the parent's
+visible history up to its last completed reply, copied with the original entry
+ids so the prefix stays byte-identical and prompt-prefix caching can reuse it.
+Turns on the side chat continue that history. Only a real compaction can
+rewrite it. `GET /chats/:sideId` returns just the side chat's own messages;
+the client shows the shared prefix from the parent. Isolated automation runs
+never carry this history, because only chats created through this route
+reference a parent.
+
+`DELETE /chats/:parentId` also deletes its side chats and returns 409 `busy`
+while the parent or any side chat has a run. Negotiating clients get 200
+`{deletedSideChats: [ids]}`; others keep 204. Deleting a side chat deletes only
+that chat.
+
 ### Public automations
 
 Automation definitions can record `contextAccess` as `isolated` or `member`.

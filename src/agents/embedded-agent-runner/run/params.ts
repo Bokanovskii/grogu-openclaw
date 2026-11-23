@@ -60,6 +60,8 @@ export type RunEmbeddedAgentParams = {
   userFileScope?: import("../../openclaw-tools.types.js").OpenClawToolsOptions["userFileScope"];
   /** Host-minted parent audience inherited by a trusted internal child run. */
   memoryAudience?: import("../../../plugins/memory-provider-types.js").MemoryAudience;
+  /** Run-owned work that must succeed before its conversation is compacted. */
+  beforeCompaction?: () => Promise<void>;
   /** Detached runs may read session identity but never write its durable transcript or metadata. */
   sessionPersistence?: "durable" | "detached";
   /** Storage-neutral transcript/session target. Defaults to sessionId/sessionKey/agentId. */

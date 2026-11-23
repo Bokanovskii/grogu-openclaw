@@ -5,6 +5,7 @@ import {
   resolveEffectiveCompactionReserveTokens,
   SILENT_REPLY_TOKEN,
   type MemoryFlushPlan,
+  type MemoryProviderFlushPlanResolver,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { resolveMemoryCoreNowMs } from "./time.js";
@@ -60,6 +61,11 @@ function normalizeNonNegativeInt(value: unknown): number | null {
   return int >= 0 ? int : null;
 }
 
+export function resolveMemoryNotePath(cfg: OpenClawConfig, nowMs: number): string {
+  const { userTimezone } = resolveCronStyleNow(cfg, nowMs);
+  return `memory/${formatDateStampInTimezone(nowMs, userTimezone)}.md`;
+}
+
 export function buildMemoryFlushPlan(
   params: {
     cfg?: OpenClawConfig;
@@ -92,9 +98,9 @@ export function buildMemoryFlushPlan(
     );
   }
 
-  const { timeLine, userTimezone } = resolveCronStyleNow(cfg ?? {}, nowMs);
-  const dateStamp = formatDateStampInTimezone(nowMs, userTimezone);
-  const relativePath = `memory/${dateStamp}.md`;
+  const { timeLine } = resolveCronStyleNow(cfg ?? {}, nowMs);
+  const relativePath = resolveMemoryNotePath(cfg ?? {}, nowMs);
+  const dateStamp = relativePath.slice("memory/".length, -".md".length);
 
   return {
     softThresholdTokens,
@@ -106,3 +112,22 @@ export function buildMemoryFlushPlan(
     relativePath,
   };
 }
+
+export const buildMemoryProviderFlushPlan: MemoryProviderFlushPlanResolver = (params) => {
+  const plan = buildMemoryFlushPlan(params);
+  if (!plan || params.memoryAudience?.kind !== "member-private") {
+    return plan;
+  }
+  const { relativePath: _relativePath, ...timing } = plan;
+  return {
+    ...timing,
+    prompt: [
+      "Pre-compaction memory flush. Use memory_store to append durable member memories.",
+      `If nothing to store, reply with ${SILENT_REPLY_TOKEN}.`,
+    ].join(" "),
+    systemPrompt:
+      "Pre-compaction memory flush turn. Store durable member memories only through memory_store.",
+    persistenceToolNames: ["memory_store"],
+    lookupToolNames: ["memory_search", "memory_get"],
+  };
+};

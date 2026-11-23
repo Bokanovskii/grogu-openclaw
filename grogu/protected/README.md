@@ -134,6 +134,7 @@ toward it, and the free-space floor applies to everyone. When the shared budget
 is full, members get `413 quota_exceeded` with a message that names the server's
 shared storage, not their own limit. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts. It also counts
+member memory notes, even after their chats are deleted, and counts
 each saved automation definition against its owner profile and the global
 budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
 entry overhead as stored files. The runtime limits growth per operation and
@@ -206,6 +207,23 @@ then restart the listener:
 ```sh
 sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
 ```
+
+### Member memory
+
+Grogu and Travel chats can save and search the signed-in member's memory. Notes
+are shared across that member's chats, not with other members or personal Grogu.
+The service encrypts notes as member-owned files; the running service and its
+administrator can read them. Search uses a temporary in-memory keyword index,
+not a paid embedding service. Existing chats are not backfilled.
+
+Clients opt in with `x-alcove-capabilities: memory-v1`; `/me` then reports
+`capabilities.memory.review`. To review notes, send `x-grogu-profile` with the
+current profile ID to `GET /api/protected/v1/memory`, then read a listed note at
+`GET /api/protected/v1/memory/:id`. List entries contain `id`, `name`, `bytes`,
+and `updatedAt` in epoch milliseconds; reads return `{ note, text }`. Note IDs
+are opaque and change when the service restarts. Refresh the list after a 404.
+An account mismatch returns 403 `profile_mismatch`; an unavailable review owner
+returns 503 `unavailable`.
 
 `PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
 Send the current chat `version` in `If-Match` and a JSON body with `title`.

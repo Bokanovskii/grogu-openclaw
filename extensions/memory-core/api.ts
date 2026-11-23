@@ -1,4 +1,15 @@
 export type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+export type {
+  MemberMemoryBinding,
+  MemberMemoryFiles,
+  MemberMemoryReadFiles,
+} from "./src/member-memory-binding.js";
+export {
+  closeMemberMemory,
+  createMemberMemoryNoteReader,
+  openMemberMemory,
+  retireMemberMemory,
+} from "./src/member-memory.js";
 export { prewarmMemorySearchWorker } from "./prewarm-api.js";
 export type {
   MemoryEmbeddingProbeResult,

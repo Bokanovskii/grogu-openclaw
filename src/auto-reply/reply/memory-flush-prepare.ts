@@ -2,15 +2,23 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { prepareSystemAgentRunAdmission } from "../../agents/admitted-run-context.js";
 import { resolveDefaultAgentId } from "../../agents/agent-scope-config.js";
 import type { MemoryFlushToolRunContext } from "../../agents/agent-tools.memory-flush.types.js";
+import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
+import {
+  resolveRequestModelCredential,
+  type RequestModelCredential,
+} from "../../agents/request-model-credential.js";
 import { resolveSessionStorePathForScope } from "../../config/sessions/session-store-path.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
+  assertMemoryAudienceCurrent,
+  assertMemoryAudienceSession,
   delegateMemoryAudience,
   type MemoryAudienceGrant,
   resolveMemoryAudienceFromEntry,
 } from "../../plugins/memory-audience.js";
+import type { MemoryAudience } from "../../plugins/memory-provider-types.js";
 import { getMemoryProviderRuntime } from "../../plugins/memory-state.js";
 import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-turn-transcript.types.js";
 import { resolveModelFallbackOptions } from "./agent-runner-utils.js";
@@ -23,6 +31,14 @@ import {
 import type { FollowupRun } from "./queue.js";
 
 const log = createSubsystemLogger("auto-reply/memory-flush");
+
+export type MemberMemoryFlushAuthority = {
+  audience: Extract<MemoryAudience, { kind: "member-private" }>;
+  assertCurrent: () => void;
+  requestModelCredential: RequestModelCredential;
+  userFileScope: NonNullable<RunEmbeddedAgentParams["userFileScope"]>;
+  bindDelegated: (audience: MemoryAudience) => unknown;
+};
 
 // A flush-specific model is exact: it never inherits the source fallback chain.
 function resolveMemoryFlushModelFallbackOptions(
@@ -58,15 +74,18 @@ export async function prepareMemoryFlushAttempt(params: {
   flushRunId: string;
   contextWindowTokens: number;
   memoryFlushWritable: boolean;
+  memberMemory?: MemberMemoryFlushAuthority;
   abortSignal?: AbortSignal;
   assertCurrent: () => void;
   recordPersistenceToolSuccess: () => void;
+  recordPersistenceToolFailure?: () => void;
 }) {
   params.assertCurrent();
   const resolution = resolveMemoryFlushPlanForRun({
     cfg: params.cfg,
     nowMs: Date.now(),
     contextWindowTokens: params.contextWindowTokens,
+    memoryAudience: params.memberMemory?.audience,
   });
   if (!resolution) {
     return null;
@@ -80,13 +99,26 @@ export async function prepareMemoryFlushAttempt(params: {
     throw new Error("Memory flush has no current transcript target.");
   }
   const agentId = followupRun.run.agentId ?? resolveDefaultAgentId(params.cfg);
+  if (params.memberMemory) {
+    params.memberMemory.assertCurrent();
+    assertMemoryAudienceCurrent(params.memberMemory.audience);
+    assertMemoryAudienceSession(params.memberMemory.audience, sessionKey);
+    if (
+      params.memberMemory.audience.agentId !== agentId ||
+      !isToolsMemoryFlushPlan(plan) ||
+      resolution.pluginId !== "memory-core"
+    ) {
+      throw new Error("Member memory flush requires its selected Memory Core tool owner.");
+    }
+  }
   const sourceStorePath = resolveSessionStorePathForScope(
     { agentId, sessionKey, storePath: params.storePath },
     params.cfg,
   );
   // Only a native provider consumes audiences; other tool-plan owners resolve none.
-  const sourceAudience =
-    isToolsMemoryFlushPlan(plan) && getMemoryProviderRuntime()
+  const sourceAudience = params.memberMemory
+    ? { status: "granted" as const, audience: params.memberMemory.audience, release: () => {} }
+    : isToolsMemoryFlushPlan(plan) && getMemoryProviderRuntime()
       ? await resolveMemoryAudienceFromEntry(
           {
             agentId,
@@ -149,6 +181,14 @@ export async function prepareMemoryFlushAttempt(params: {
       plan.model,
       params.cfg,
     );
+    if (params.memberMemory) {
+      resolveRequestModelCredential(
+        params.memberMemory.requestModelCredential,
+        selection.provider,
+        selection.model,
+      );
+      selection.fallbacksOverride = [];
+    }
     // Delegation shares source revocation while binding tool use to the detached session.
     params.assertCurrent();
     delegated = sourceAudience
@@ -170,6 +210,7 @@ export async function prepareMemoryFlushAttempt(params: {
           persistenceToolNames: plan.persistenceToolNames,
           lookupToolNames: plan.lookupToolNames,
           recordPersistenceToolSuccess: params.recordPersistenceToolSuccess,
+          recordPersistenceToolFailure: params.recordPersistenceToolFailure,
         }
       : undefined;
     const preparedRunAdmission = prepareSystemAgentRunAdmission(
@@ -188,6 +229,10 @@ export async function prepareMemoryFlushAttempt(params: {
       preparedRunAdmission,
       memorySession,
       memoryAudience: delegated?.audience,
+      memberMemoryBinding:
+        params.memberMemory && delegated
+          ? params.memberMemory.bindDelegated(delegated.audience)
+          : undefined,
       memoryFlushTools,
       release,
     };

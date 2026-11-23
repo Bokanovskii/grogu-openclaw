@@ -228,7 +228,21 @@ export const ProtectedMeSchema = node({
     admin: Type.Boolean(),
     feedback: Type.Optional(Type.Boolean()),
     telemetry: Type.Optional(Type.Boolean()),
+    memory: Type.Optional(node({ review: Type.Boolean() })),
   }),
+});
+export const ProtectedMemoryNoteSchema = node({
+  id: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }),
+  name: Type.String({ minLength: 1 }),
+  bytes: Type.Integer({ minimum: 0 }),
+  updatedAt: Type.Integer({ minimum: 0 }),
+});
+export const ProtectedMemoryListResponseSchema = node({
+  notes: Type.Array(ProtectedMemoryNoteSchema),
+});
+export const ProtectedMemoryReadResponseSchema = node({
+  note: ProtectedMemoryNoteSchema,
+  text: Type.String(),
 });
 export const ProtectedAutomationCapabilitiesSchema = node({
   catalog: Type.Boolean(),
@@ -613,6 +627,9 @@ export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
+export type ProtectedMemoryNote = Static<typeof ProtectedMemoryNoteSchema>;
+export type ProtectedMemoryListResponse = Static<typeof ProtectedMemoryListResponseSchema>;
+export type ProtectedMemoryReadResponse = Static<typeof ProtectedMemoryReadResponseSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
 export type ProtectedAutomationCatalogV1 = Static<typeof ProtectedAutomationCatalogV1Schema>;

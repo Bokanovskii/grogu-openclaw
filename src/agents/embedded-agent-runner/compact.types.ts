@@ -40,6 +40,8 @@ export type CompactEmbeddedAgentSessionParams = Pick<
   | "scheduledToolPolicy"
   | "workspaceDir"
   | "bootstrapWorkspaceDir"
+  | "bootstrapContextMode"
+  | "bootstrapContextRunKind"
   | "cwd"
   | "permissionMode"
   | "sessionRoot"

@@ -69,9 +69,18 @@ export const agentSessionSetContextReplacementHook: unique symbol = Symbol.for(
   "openclaw.agent-session.set-context-replacement-hook",
 );
 
+export const agentSessionSetBeforeAutomaticCompaction: unique symbol = Symbol.for(
+  "openclaw.agent-session.set-before-automatic-compaction",
+);
+
 export abstract class AgentSessionCompaction extends AgentSessionInspection {
   private onContextReplaced?: (tokensAfter: number, tokensBefore: number) => void;
   private assertContextReplacementActive?: () => void;
+  private beforeAutomaticCompaction?: () => Promise<void>;
+
+  [agentSessionSetBeforeAutomaticCompaction](callback: (() => Promise<void>) | undefined): void {
+    this.beforeAutomaticCompaction = callback;
+  }
 
   [agentSessionSetContextReplacementHook](
     callback: ((tokensAfter: number, tokensBefore: number) => void) | undefined,
@@ -626,6 +635,8 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
     this.autoCompactionAbortController = abortController;
 
     try {
+      await this.beforeAutomaticCompaction?.();
+      abortController.signal.throwIfAborted();
       const outcome = await this.runCompactionWork({
         itemId,
         mode: "auto",

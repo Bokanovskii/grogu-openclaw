@@ -105,6 +105,11 @@ export async function compactEmbeddedRunForRecovery(
   };
   const recoveryKind = recovery.trigger === "timeout_recovery" ? "timeout" : recovery.trigger;
   const reason = `${recoveryKind === "budget" ? "context budget" : recoveryKind} recovery`;
+  if (runParams.memoryAudience?.kind === "member-private" && runParams.memoryFlushTools) {
+    throw new Error("Member memory flush cannot compact before saving the conversation.");
+  }
+  await runParams.beforeCompaction?.();
+  owner.assertActive();
   await input.runOwnsCompactionBeforeHook(reason);
   owner.assertActive();
   const runtimeContext = {

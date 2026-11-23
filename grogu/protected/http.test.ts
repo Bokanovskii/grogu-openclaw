@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promis
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { after, before as beforeTests, mock, test } from "node:test";
+import { after, before as beforeTests, mock, test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ProtectedAgentCatalogSchema,
@@ -17,6 +17,8 @@ import {
   ProtectedAutomationResponseSchema,
   ProtectedMeSchema,
   type ProtectedAutomationDraft,
+  ProtectedMemoryListResponseSchema,
+  ProtectedMemoryReadResponseSchema,
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
@@ -25,7 +27,10 @@ import type { ProtectedAuthoringTurnEvent } from "../../packages/gateway-protoco
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { createCanvasDocument } from "../../src/canvas/documents.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
-import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
+import {
+  authorizedUserFilesDirectory,
+  createAuthorizedUserFiles,
+} from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
@@ -40,7 +45,10 @@ import {
   mergeCanonicalUserProfiles,
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
-import { createStorageValueEncryption } from "../../src/storage/encryption.js";
+import {
+  createStorageValueEncryption,
+  isStorageValueEncrypted,
+} from "../../src/storage/encryption.js";
 import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
 import {
   protectedAgentTools,
@@ -50,6 +58,8 @@ import {
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
+import { createProtectedMemberMemory } from "./member-memory.js";
+import { createProtectedMemoryReview } from "./memory-review.js";
 import { withThinking } from "./models.js";
 import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
@@ -504,6 +514,18 @@ void test("protected responses use neutral service wording", async (t) => {
     disclosure,
     "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
   );
+  const memoryCapability = await app.fetch(
+    new Request(`${origin}/api/protected/v1/me`, {
+      headers: { "x-alcove-capabilities": "profile-v1,memory-v1" },
+    }),
+  );
+  assert.deepEqual((await memoryCapability.json()).capabilities.memory, { review: false });
+  const unavailableMemory = await app.fetch(
+    new Request(`${origin}/api/protected/v1/memory`, {
+      headers: { "x-grogu-profile": user.id },
+    }),
+  );
+  assert.equal(unavailableMemory.status, 503);
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
       new Request(`${origin}/api/protected/v1${route}`, {
@@ -528,6 +550,686 @@ void test("protected responses use neutral service wording", async (t) => {
     ],
   );
 });
+
+void test("member memory review reads only the current member's encrypted notes", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-memory-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    encryption,
+    memoryReview: createProtectedMemoryReview(),
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [],
+      async run() {},
+      async steer() {
+        assert.fail("This fixture does not steer turns.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, headers: Record<string, string> = {}) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        headers: { origin, cookie: user, ...headers },
+      }),
+    );
+  const legacyMe = await (await call("alice", "/me")).json();
+  assert.equal(legacyMe.capabilities.memory, undefined);
+  const meResponse = await call("alice", "/me", {
+    "x-alcove-capabilities": "profile-v1,memory-v1",
+  });
+  assert.equal(meResponse.status, 200, await meResponse.clone().text());
+  const me = await meResponse.json();
+  assert.deepEqual(me.capabilities.memory, { review: true });
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const owned = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: me.user.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  t.after(() => owned.dispose());
+  const content = `Synthetic private memory: ${"x".repeat(13_000)}`;
+  await owned.write("member-memory/memory/2026-01-01.md", content);
+  const aliceHeaders = { "x-grogu-profile": me.user.id };
+  const list = await (await call("alice", "/memory", aliceHeaders)).json();
+  assert.ok(Value.Check(ProtectedMemoryListResponseSchema, list));
+  assert.equal(list.notes.length, 1);
+  const read = await (await call("alice", `/memory/${list.notes[0].id}`, aliceHeaders)).json();
+  assert.ok(Value.Check(ProtectedMemoryReadResponseSchema, read));
+  assert.equal(read.text, content);
+  const bobHeaders = { "x-grogu-profile": bob.id };
+  assert.deepEqual((await (await call("bob", "/memory", bobHeaders)).json()).notes, []);
+  assert.equal((await call("bob", `/memory/${list.notes[0].id}`, bobHeaders)).status, 404);
+  assert.equal((await call("bob", "/memory", aliceHeaders)).status, 403);
+});
+
+void test("member memory follows the authenticated member across protected chats", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "cross-chat");
+});
+
+void test("a failed member memory flush stops overflow compaction", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "overflow-failure");
+});
+
+void test("in-turn compaction flushes member memory before summarizing", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "threshold");
+});
+
+async function exerciseMemberMemoryBoundary(
+  t: TestContext,
+  scenario: "cross-chat" | "overflow-failure" | "threshold",
+) {
+  const stateRoot = process.env.OPENCLAW_STATE_DIR;
+  assert.ok(
+    stateRoot &&
+      path.relative(path.resolve(".artifacts"), stateRoot).startsWith("protected-proof-"),
+  );
+  const stateDir = path.join(stateRoot, scenario);
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  t.after(() => {
+    process.env.OPENCLAW_STATE_DIR = stateRoot;
+  });
+  protectedTestStateDirs.add(stateDir);
+  const usersDir = path.join(stateDir, "users");
+  const workspaceDir = path.join(stateDir, "workspace");
+  const agentDir = path.join(stateDir, "agents", "protected", "agent");
+  await Promise.all(
+    [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
+  );
+  await writeFile(path.join(workspaceDir, "MEMORY.md"), "Synthetic forbidden workspace memory.");
+  const requests: Array<{
+    messages: Array<{ role: string; content?: unknown }>;
+    tools?: Array<{ function: { name: string } }>;
+    authorization?: string;
+  }> = [];
+  let failFlush = false;
+  let failOverflowFlush = false;
+  let failThresholdFlush = false;
+  let overflowThresholdFlush = false;
+  let overflowPending = false;
+  const provider = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      requests.push({ ...body, authorization: request.headers.authorization });
+      const messages = body.messages as Array<{ role: string; content?: unknown }>;
+      const last = messages.at(-1);
+      const prompt = messages.toReversed().find((message) => message.role === "user")?.content;
+      const command = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+      const isFlush = command.includes("Pre-compaction memory flush");
+      const isSummary = messages.some(
+        (message) =>
+          message.role === "system" &&
+          typeof message.content === "string" &&
+          message.content.includes("context summarization assistant"),
+      );
+      if (
+        overflowThresholdFlush &&
+        isFlush &&
+        JSON.stringify(messages).includes("Trigger threshold flush overflow")
+      ) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      if (overflowPending && command.includes("Trigger overflow") && !isFlush && !isSummary) {
+        overflowPending = false;
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      const tool = isFlush
+        ? {
+            name: "memory_store",
+            arguments: JSON.stringify({
+              content:
+                failFlush ||
+                (failOverflowFlush &&
+                  JSON.stringify(messages).includes("Trigger overflow failure")) ||
+                (failThresholdFlush &&
+                  JSON.stringify(messages).includes("Trigger threshold failure"))
+                  ? " "
+                  : JSON.stringify(messages).includes("Trigger overflow")
+                    ? "Synthetic in-turn compaction memory"
+                    : "Synthetic flush preserved memory",
+            }),
+          }
+        : command.includes("Remember")
+          ? {
+              name: "memory_store",
+              arguments: JSON.stringify({ content: "Synthetic blue lighthouse preference" }),
+            }
+          : command.includes("Read")
+            ? {
+                name: "memory_get",
+                arguments: JSON.stringify({
+                  path: command.slice(command.indexOf("Read ") + 5).split(/\s/u)[0],
+                }),
+              }
+            : {
+                name: "memory_search",
+                arguments: JSON.stringify({
+                  query: command.includes("forbidden") ? "forbidden workspace" : "lighthouse",
+                }),
+              };
+      const delta = isSummary
+        ? { role: "assistant", content: "Synthetic conversation summary." }
+        : last?.role === "tool"
+          ? { role: "assistant", content: isFlush ? "NO_REPLY" : JSON.stringify(last.content) }
+          : {
+              role: "assistant",
+              tool_calls: [
+                { index: 0, id: "memory-call", type: "function", function: tool },
+                ...(command.includes("Remember and inspect my automations")
+                  ? [
+                      {
+                        index: 1,
+                        id: "automation-call",
+                        type: "function",
+                        function: { name: "automations_list", arguments: "{}" },
+                      },
+                    ]
+                  : []),
+                ...(command.includes("Recall in authoring")
+                  ? [
+                      {
+                        index: 1,
+                        id: "authoring-call",
+                        type: "function",
+                        function: { name: "automation_draft_read", arguments: "{}" },
+                      },
+                    ]
+                  : []),
+              ],
+            };
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}\n\n`,
+      );
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: isSummary || last?.role === "tool" ? "stop" : "tool_calls",
+            },
+          ],
+          ...(command.includes("Trigger threshold") && last?.role === "tool" && !isFlush
+            ? { usage: { prompt_tokens: 31_999, completion_tokens: 1, total_tokens: 32_000 } }
+            : {}),
+        })}\n\n`,
+      );
+      response.end("data: [DONE]\n\n");
+    })().catch(() => response.destroy());
+  });
+  const providerOrigin = await listen(provider);
+  t.after(() => close(provider));
+  const serviceRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const base = protectedOpenClawConfig(stateDir, serviceRoot);
+  const config: OpenClawConfig = {
+    ...base,
+    agents: {
+      ...base.agents,
+      defaults: {
+        ...base.agents?.defaults,
+        compaction: { keepRecentTokens: 128, memoryFlush: { forceFlushTranscriptBytes: 1 } },
+      },
+      entries: {
+        protected: { workspace: workspaceDir, agentDir, memory: { search: { enabled: false } } },
+      },
+    },
+    models: {
+      mode: "replace",
+      providers: {
+        sparky: {
+          baseUrl: `${providerOrigin}/v1`,
+          api: "openai-completions",
+          request: { allowPrivateNetwork: true },
+          models: [
+            {
+              id: "synthetic",
+              name: "Synthetic",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 32_000,
+              maxTokens: 1024,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 300_000;
+  const memory = createProtectedMemberMemory();
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://synthetic.example",
+    stateDir,
+    usersRoot: await root(usersDir),
+    encryption,
+    memberMemory: memory,
+    memoryReview: createProtectedMemoryReview(),
+    maxChatsPerUser: 4,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
+    directory: { issuer: "https://synthetic.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => {
+      const subject = request.headers.get("cookie")!;
+      return {
+        issuer: "https://synthetic.example",
+        subject,
+        kind: "human",
+        expiresAt,
+        sessionId: createHash("sha256").update(subject).digest("hex"),
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    turns: createCanonicalProtectedTurns({
+      config,
+      workspaceDir,
+      agentDir,
+      memberMemory: memory,
+      models: [
+        {
+          provider: "sparky",
+          id: "synthetic",
+          label: "Synthetic",
+          thinking: { levels: ["low", "medium", "ultra"], default: "ultra" },
+        },
+      ],
+      resolveSparkyKey: async () => "synthetic-request-only-key",
+    }),
+  });
+  const server = createProtectedServer(origin, app.fetch);
+  const url = await listen(server);
+  t.after(() => closeProtectedServer(server, app, stateDir));
+  const call = (user: string, route: string, init?: RequestInit) =>
+    fetch(`${url}/api/protected/v1${route}`, {
+      ...init,
+      headers: { origin, cookie: user, "content-type": "application/json", ...init?.headers },
+    });
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const chat = async (user: string, selectedAgentId: string) => {
+    const response = await call(user, "/chats", {
+      method: "POST",
+      body: JSON.stringify({ selectedAgentId }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json()).chat.id as string;
+  };
+  const turn = async (
+    user: string,
+    profileId: string,
+    id: string,
+    text: string,
+    expectFailure = false,
+    automationsChat = false,
+  ) => {
+    const response = await call(user, `/chats/${id}/turns`, {
+      method: "POST",
+      headers: {
+        "x-grogu-profile": profileId,
+        ...(automationsChat ? { "x-alcove-capabilities": "automations-chat-v1" } : {}),
+      },
+      body: JSON.stringify({ provider: "sparky", text }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const events = await response.text();
+    assert.match(
+      events,
+      expectFailure ? /"type":"error".*"code":"unavailable"/u : /"type":"done"/u,
+      events,
+    );
+    return events;
+  };
+  const aliceGrogu = await chat("alice", "grogu");
+  if (scenario === "overflow-failure") {
+    await turn("alice", alice.id, aliceGrogu, "Remember my lighthouse preference");
+    const beforeFailedOverflow = requests.length;
+    failOverflowFlush = true;
+    overflowPending = true;
+    await turn("alice", alice.id, aliceGrogu, "Trigger overflow failure", true);
+    const failedRequests = requests.slice(beforeFailedOverflow);
+    assert.ok(
+      failedRequests.some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") &&
+          messages.includes("Trigger overflow failure")
+        );
+      }),
+      "the failed overflow must attempt to save the current conversation",
+    );
+    assert.ok(
+      failedRequests.every(
+        (request) => !JSON.stringify(request.messages).includes("context summarization assistant"),
+      ),
+      "a failed member flush must prevent compaction",
+    );
+    return;
+  }
+  if (scenario === "threshold") {
+    await turn("alice", alice.id, aliceGrogu, "Remember my lighthouse preference");
+    const beforeThreshold = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold");
+    const thresholdRequests = requests.slice(beforeThreshold);
+    const summaryIndex = thresholdRequests.findIndex((request) =>
+      JSON.stringify(request.messages).includes("context summarization assistant"),
+    );
+    assert.notEqual(summaryIndex, -1, "the turn must reach in-turn compaction");
+    assert.equal(
+      thresholdRequests[summaryIndex].authorization,
+      "Bearer synthetic-request-only-key",
+    );
+    assert.ok(
+      thresholdRequests.slice(0, summaryIndex).some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") && messages.includes("Trigger threshold")
+        );
+      }),
+      "in-turn compaction must flush the current conversation first",
+    );
+    failThresholdFlush = true;
+    const beforeFailure = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold failure");
+    const failureRequests = requests.slice(beforeFailure);
+    assert.ok(
+      failureRequests.some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") &&
+          messages.includes("Trigger threshold failure")
+        );
+      }),
+    );
+    assert.ok(
+      failureRequests.every(
+        (request) => !JSON.stringify(request.messages).includes("context summarization assistant"),
+      ),
+      "a failed in-turn flush must prevent compaction",
+    );
+    failThresholdFlush = false;
+    overflowThresholdFlush = true;
+    const beforeFlushOverflow = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold flush overflow");
+    const flushOverflowRequests = requests.slice(beforeFlushOverflow);
+    const failedFlushIndex = flushOverflowRequests.findIndex((request) => {
+      const messages = JSON.stringify(request.messages);
+      return (
+        messages.includes("Pre-compaction memory flush") &&
+        messages.includes("Trigger threshold flush overflow")
+      );
+    });
+    assert.notEqual(
+      failedFlushIndex,
+      -1,
+      "the current conversation must reach the overflowing flush",
+    );
+    assert.ok(
+      flushOverflowRequests
+        .slice(failedFlushIndex)
+        .every(
+          (request) =>
+            !JSON.stringify(request.messages).includes("context summarization assistant"),
+        ),
+      "an overflowing member flush must not compact its detached snapshot",
+    );
+    assert.doesNotMatch(JSON.stringify(requests), /Synthetic forbidden workspace memory/u);
+    return;
+  }
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const aliceTravel = await chat("alice", "travel");
+  const bobGrogu = await chat("bob", "grogu");
+  const bobTravel = await chat("bob", "travel");
+  const automationCatalogResponse = await call("alice", "/automations/catalog", {
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": "automations-chat-v1",
+    },
+  });
+  assert.equal(
+    automationCatalogResponse.status,
+    200,
+    await automationCatalogResponse.clone().text(),
+  );
+  const automationCatalog = await automationCatalogResponse.json();
+  assert.equal(automationCatalog.capabilities.automations.chat?.list, true);
+  const beforeCombined = requests.length;
+  await turn("alice", alice.id, aliceGrogu, "Remember and inspect my automations", false, true);
+  const combinedRequests = requests.slice(beforeCombined);
+  const toolSets = combinedRequests.map((request) =>
+    (request.tools ?? []).map((tool) => tool.function.name),
+  );
+  assert.ok(
+    toolSets.some((names) => names.includes("memory_store") && names.includes("automations_list")),
+    JSON.stringify(toolSets),
+  );
+  const toolOutputs = combinedRequests.flatMap((request) =>
+    request.messages.flatMap((message) =>
+      message.role === "tool" && typeof message.content === "string"
+        ? [JSON.parse(message.content)]
+        : [],
+    ),
+  );
+  assert.ok(toolOutputs.some((output) => output.writeApplied === false));
+  const authoringCapabilities = "automations-chat-v1, automations-authoring-v1";
+  const authoringResponse = await call("alice", "/automations/authoring", {
+    method: "POST",
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": authoringCapabilities,
+    },
+  });
+  assert.equal(authoringResponse.status, 201, await authoringResponse.clone().text());
+  const authoringChat = (await authoringResponse.json()).chat;
+  const beforeAuthoring = requests.length;
+  const authoringTurn = await call("alice", `/chats/${authoringChat.id}/turns`, {
+    method: "POST",
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": authoringCapabilities,
+    },
+    body: JSON.stringify({
+      provider: "sparky",
+      text: "Recall in authoring",
+      authoring: {
+        draftRevision: "1",
+        draft: {
+          name: "Synthetic authoring draft",
+          instructions: "Summarize public project updates.",
+          whenToNotify: "Only when there is a meaningful update.",
+          agentId: "travel",
+          model: { provider: "sparky", id: "synthetic" },
+          thinking: "low",
+          schedule: { kind: "every", everyMs: 60_000 },
+        },
+      },
+    }),
+  });
+  assert.equal(authoringTurn.status, 200, await authoringTurn.clone().text());
+  assert.match(await authoringTurn.text(), /"type":"done"/u);
+  const authoringRequests = requests.slice(beforeAuthoring);
+  assert.ok(
+    authoringRequests.some((request) => {
+      const names = new Set((request.tools ?? []).map((tool) => tool.function.name));
+      return names.has("memory_search") && names.has("automation_draft_read");
+    }),
+    "authoring must offer both member memory and draft tools",
+  );
+  const authoringOutputs = authoringRequests.flatMap((request) =>
+    request.messages
+      .filter((message) => message.role === "tool" && typeof message.content === "string")
+      .map((message) => message.content),
+  );
+  assert.match(JSON.stringify(authoringOutputs), /Synthetic blue lighthouse preference/u);
+  assert.match(JSON.stringify(authoringOutputs), /Synthetic authoring draft/u);
+  await turn("alice", alice.id, aliceGrogu, "Recall lighthouse");
+  const list = await (
+    await call("alice", "/memory", { headers: { "x-grogu-profile": alice.id } })
+  ).json();
+  assert.equal(list.notes.length, 1);
+  assert.match(
+    await turn("alice", alice.id, aliceTravel, "Recall lighthouse"),
+    /Synthetic blue lighthouse preference/u,
+  );
+  const bobSearch = await turn("bob", bob.id, bobGrogu, "Recall lighthouse");
+  assert.match(bobSearch, /results/u);
+  assert.doesNotMatch(bobSearch, /Synthetic blue lighthouse preference/u);
+  const bobRead = await turn("bob", bob.id, bobTravel, `Read ${list.notes[0].name}`);
+  assert.match(bobRead, /not_found/u);
+  assert.doesNotMatch(bobRead, /Synthetic blue lighthouse preference/u);
+  const note = await (
+    await call("alice", `/memory/${list.notes[0].id}`, { headers: { "x-grogu-profile": alice.id } })
+  ).json();
+  assert.match(note.text, /Synthetic blue lighthouse preference/u);
+  assert.match(note.text, /Synthetic flush preserved memory/u);
+  const ciphertext = await readFile(
+    path.join(
+      usersDir,
+      authorizedUserFilesDirectory(alice.id),
+      "member-memory",
+      list.notes[0].name,
+    ),
+  );
+  assert.equal(isStorageValueEncrypted(ciphertext), true);
+  assert.equal(ciphertext.includes("Synthetic blue lighthouse preference"), false);
+  assert.deepEqual(
+    (await (await call("bob", "/memory", { headers: { "x-grogu-profile": bob.id } })).json()).notes,
+    [],
+  );
+  assert.equal(
+    (await call("bob", `/memory/${list.notes[0].id}`, { headers: { "x-grogu-profile": bob.id } }))
+      .status,
+    404,
+  );
+  assert.doesNotMatch(
+    await turn("bob", bob.id, bobTravel, "Recall forbidden workspace"),
+    /Synthetic forbidden workspace memory/u,
+  );
+  assert.equal(
+    (
+      await call("bob", `/chats/${aliceGrogu}/turns`, {
+        method: "POST",
+        headers: { "x-grogu-profile": alice.id },
+        body: JSON.stringify({ provider: "sparky", text: "Recall lighthouse" }),
+      })
+    ).status,
+    404,
+  );
+  assert.equal(
+    (await call("bob", "/memory", { headers: { "x-grogu-profile": alice.id } })).status,
+    403,
+  );
+  const beforeOverflow = requests.length;
+  overflowPending = true;
+  await turn("alice", alice.id, aliceGrogu, "Trigger overflow");
+  const overflowRequests = requests.slice(beforeOverflow);
+  const summaryIndex = overflowRequests.findIndex((request) =>
+    JSON.stringify(request.messages).includes("context summarization assistant"),
+  );
+  assert.notEqual(summaryIndex, -1, "the overflow must reach native compaction");
+  assert.equal(overflowRequests[summaryIndex].authorization, "Bearer synthetic-request-only-key");
+  assert.ok(
+    overflowRequests.slice(0, summaryIndex).some((request) => {
+      const messages = JSON.stringify(request.messages);
+      return (
+        messages.includes("Pre-compaction memory flush") && messages.includes("Trigger overflow")
+      );
+    }),
+    "native compaction must flush the current member conversation first",
+  );
+  assert.ok(
+    requests.some((request) =>
+      request.tools?.some((tool) => tool.function.name === "memory_store"),
+    ),
+  );
+  const failureChat = await chat("alice", "grogu");
+  await turn("alice", alice.id, failureChat, "Recall lighthouse");
+  failFlush = true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await turn("alice", alice.id, failureChat, "Recall lighthouse", true);
+  }
+  failFlush = false;
+  await turn("alice", alice.id, failureChat, "Recall lighthouse");
+  const notePath = path.join(
+    usersDir,
+    authorizedUserFilesDirectory(alice.id),
+    "member-memory",
+    list.notes[0].name,
+  );
+  const beforeRevocation = await readFile(notePath);
+  assert.equal(await app.revokeProfile(alice.id), true);
+  assert.notEqual(
+    (await call("alice", "/memory", { headers: { "x-grogu-profile": alice.id } })).status,
+    200,
+  );
+  assert.deepEqual(await readFile(notePath), beforeRevocation);
+  assert.doesNotMatch(JSON.stringify(requests), /Synthetic forbidden workspace memory/u);
+}
 
 void test("deleting another member's chat frees quota for a running turn", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-quota-http-${randomUUID()}`);

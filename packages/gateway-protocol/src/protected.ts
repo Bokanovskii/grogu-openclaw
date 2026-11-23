@@ -161,6 +161,9 @@ export const ProtectedChatSummarySchema = node({
   updatedAt: Type.Number(),
   selectedAgentId: Type.Optional(protectedAgentId),
   activeRun: Type.Optional(node({ id })),
+  automationRun: Type.Optional(
+    node({ automationId: Type.String({ pattern: protectedAutomationIdPattern }) }),
+  ),
   authoring: Type.Optional(
     node({
       kind: Type.Literal("automation"),

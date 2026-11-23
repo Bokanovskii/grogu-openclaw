@@ -216,6 +216,19 @@ const automationsChatCapability = "automations-chat-v1";
 const automationsAuthoringCapability = "automations-authoring-v1";
 const automationResultsCapability = "automation-results-v1";
 const automationRunsCapability = "automation-runs-v1";
+
+function assertRunChatWritable(
+  entry: { protectedAutomationRunId?: string },
+  automationId?: string,
+) {
+  if (entry.protectedAutomationRunId && entry.protectedAutomationRunId !== automationId) {
+    throw new ProtectedError(
+      409,
+      "run_chat_read_only",
+      "This chat is a record of an automation run. It is read only.",
+    );
+  }
+}
 const authoringAgentId = "grogu";
 type Run = {
   id: string;
@@ -755,6 +768,7 @@ export function createProtectedHttp(options: {
     ) => Promise<T>;
     startedAt: number;
     textLimit?: number;
+    automationId?: string;
   }): Promise<{ response: Response; completion: Promise<ProtectedTurnCompletion> }> => {
     const {
       request,
@@ -953,6 +967,7 @@ export function createProtectedHttp(options: {
           request.signal.throwIfAborted();
         }
         const currentEntry = await chats.readEntry(authority, id);
+        assertRunChatWritable(currentEntry, context.automationId);
         const authoring = await admitAuthoringTurn(currentEntry);
         const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
         const selectedAgent = agentCatalog.get(selectedAgentId);
@@ -1564,6 +1579,7 @@ export function createProtectedHttp(options: {
       ...authority,
       startedAt: performance.now(),
       textLimit: 32_000,
+      automationId: automation.id,
     });
     await turn.response.body?.cancel();
     return await turn.completion;
@@ -3122,6 +3138,9 @@ export function createProtectedHttp(options: {
         if (!supportsAutomationsAuthoring(request)) {
           delete chat.authoring;
         }
+        if (!hasClientCapability(request.headers, automationRunsCapability)) {
+          delete chat.automationRun;
+        }
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(
             async (owned) => {
@@ -4486,6 +4505,9 @@ export function createProtectedHttp(options: {
           if (!supportsAutomationsAuthoring(request)) {
             delete chat.authoring;
           }
+          if (!hasClientCapability(request.headers, automationRunsCapability)) {
+            delete chat.automationRun;
+          }
           const active = runs.get(chat.id);
           if (active?.profileId === profile.id && active.sessionHash === identity.sessionId) {
             chat.activeRun = { id: active.id };
@@ -4764,8 +4786,9 @@ export function createProtectedHttp(options: {
       }
       const [, id, rest] = match;
       const feedbackReport = /^responses\/([^/]+)\/reports$/u.exec(rest ?? "");
+      let chatEntry: Awaited<ReturnType<typeof chats.readEntry>>;
       try {
-        await chats.readEntry(authority, id);
+        chatEntry = await chats.readEntry(authority, id);
       } catch (error) {
         const responseId = feedbackReport?.[1];
         if (
@@ -4802,6 +4825,13 @@ export function createProtectedHttp(options: {
         throw error;
       }
       await revalidate();
+      if (
+        (rest === "turns" && method === "POST") ||
+        (/^runs\/[^/]+\/(?:steer|stop)$/u.test(rest ?? "") && method === "POST") ||
+        (/^runs\/[^/]+\/steer\/[^/]+$/u.test(rest ?? "") && method === "DELETE")
+      ) {
+        assertRunChatWritable(chatEntry);
+      }
       if (!rest && method === "GET") {
         const { chat, usage } = await readChat(id);
         await revalidate();

@@ -17,6 +17,7 @@ import {
   type ProtectedAutomationCatalog,
   type ProtectedAutomationCatalogV1,
   type ProtectedAutomationListResponse,
+  type ProtectedAutomationRecord,
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
   type ProtectedChatSummary,
@@ -127,6 +128,7 @@ import {
   readProtectedAutomationRecord,
   readProtectedAutomationStorageUsage,
   saveProtectedAutomationPatch,
+  type StoredAutomationRecord,
 } from "./automations-store.js";
 import {
   createProtectedAutomationCatalog,
@@ -1057,6 +1059,7 @@ export function createProtectedHttp(options: {
           retainedAgent: (agentId) => agentCatalog.get(agentId),
           authority: runAuthority,
           revalidate: checkRun,
+          present: presentAutomation,
           chatId: id,
           ...(authoring.automationId === undefined
             ? {}
@@ -1087,6 +1090,7 @@ export function createProtectedHttp(options: {
             catalog: automationCatalog,
             authority: runAuthority,
             revalidate: checkRun,
+            present: presentAutomation,
           })
         : undefined;
     const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
@@ -1750,6 +1754,13 @@ export function createProtectedHttp(options: {
     }
   });
   let automationSchedulerStarted = false;
+  const presentAutomation = (automation: StoredAutomationRecord): ProtectedAutomationRecord => {
+    const atMs =
+      automation.enabled && automationSchedulerStarted
+        ? automationScheduler.nextCheckAtMs(automation.id, automation.version)
+        : null;
+    return { ...automation, nextCheckAt: atMs === null ? null : new Date(atMs).toISOString() };
+  };
   const refreshProtectedAutomation = async (member: AutomationMember, automationId: string) => {
     const revision = (automationRefreshes.get(automationId) ?? 0) + 1;
     automationRefreshes.set(automationId, revision);
@@ -3618,7 +3629,9 @@ export function createProtectedHttp(options: {
         await revalidate();
         const automations = await listProtectedAutomationRecords(options.stateDir, authority);
         assertCurrent();
-        const result: ProtectedAutomationListResponse = { automations };
+        const result: ProtectedAutomationListResponse = {
+          automations: automations.map(presentAutomation),
+        };
         return json(result);
       }
       if (hasClientCapability(request.headers, automationRunsCapability) && method === "GET") {
@@ -3724,7 +3737,7 @@ export function createProtectedHttp(options: {
             }
           }
           assertCurrent();
-          const result: ProtectedAutomationResponse = { automation };
+          const result: ProtectedAutomationResponse = { automation: presentAutomation(automation) };
           return json(result, 201);
         } finally {
           storage?.release();
@@ -3781,7 +3794,10 @@ export function createProtectedHttp(options: {
             if (bound) {
               const { chat } = await readChat(bound.id);
               await revalidate();
-              const result: ProtectedAutomationAuthoringResponse = { chat, automation };
+              const result: ProtectedAutomationAuthoringResponse = {
+                chat,
+                automation: presentAutomation(automation),
+              };
               return json(result);
             }
           }
@@ -3801,7 +3817,7 @@ export function createProtectedHttp(options: {
           await revalidate();
           const result: ProtectedAutomationAuthoringResponse = {
             chat,
-            ...(automation ? { automation } : {}),
+            ...(automation ? { automation: presentAutomation(automation) } : {}),
           };
           return json(result, 201);
         } finally {
@@ -3955,7 +3971,7 @@ export function createProtectedHttp(options: {
           return notFound();
         }
         assertCurrent();
-        const result: ProtectedAutomationResponse = { automation };
+        const result: ProtectedAutomationResponse = { automation: presentAutomation(automation) };
         return json(result);
       }
       if (automationMatch && method === "PATCH") {
@@ -4042,7 +4058,9 @@ export function createProtectedHttp(options: {
               }
               await refreshProtectedAutomation(member, saved.automation.id);
             }
-            const result: ProtectedAutomationResponse = { automation: saved.automation };
+            const result: ProtectedAutomationResponse = {
+              automation: presentAutomation(saved.automation),
+            };
             return json(result);
           }
           case "invalid":

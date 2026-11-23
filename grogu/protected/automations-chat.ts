@@ -17,6 +17,7 @@ import {
   listProtectedAutomationRecords,
   readProtectedAutomationRecord,
   saveProtectedAutomationPatch,
+  type StoredAutomationRecord,
 } from "./automations-store.js";
 import { applyProtectedAutomationPatch, validateProtectedAutomationDraft } from "./automations.js";
 
@@ -37,6 +38,7 @@ export function createProtectedAutomationsChatBindings(input: {
   catalog: ProtectedAutomationCatalog;
   authority: Authority;
   revalidate: () => Promise<void>;
+  present: (automation: StoredAutomationRecord) => ProtectedAutomationRecord;
 }): AutomationsChatBindings {
   const runCurrent = async <T>(run: () => Promise<T>): Promise<T> => {
     input.authority.assertCurrent();
@@ -65,7 +67,7 @@ export function createProtectedAutomationsChatBindings(input: {
           total: automations.length,
           offset,
           limit,
-          automations: automations.slice(offset, offset + limit),
+          automations: automations.slice(offset, offset + limit).map(input.present),
         };
       });
     },
@@ -73,7 +75,11 @@ export function createProtectedAutomationsChatBindings(input: {
       return runCurrent(async () => {
         const automation = await readOwned(automationId);
         return automation
-          ? { status: "found" as const, writeApplied: false as const, automation }
+          ? {
+              status: "found" as const,
+              writeApplied: false as const,
+              automation: input.present(automation),
+            }
           : { status: "not_found" as const, writeApplied: false as const };
       });
     },
@@ -162,6 +168,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
   retainedAgent: (agentId: string) => { id: string } | undefined;
   authority: Authority;
   revalidate: () => Promise<void>;
+  present: (automation: StoredAutomationRecord) => ProtectedAutomationRecord;
   chatId: string;
   boundAutomationId?: string;
   sent: { draft: ProtectedAutomationDraft; draftRevision: string; automationVersion?: string };
@@ -187,13 +194,12 @@ export function createProtectedAutomationAuthoringBindings(input: {
   };
   const readSaved = async () => {
     const automationId = input.boundAutomationId ?? input.chatId;
-    return (
-      (await readProtectedAutomationRecord(
-        input.stateDir,
-        { profileId: input.authority.profileId, automationId },
-        input.authority,
-      )) ?? null
+    const automation = await readProtectedAutomationRecord(
+      input.stateDir,
+      { profileId: input.authority.profileId, automationId },
+      input.authority,
     );
+    return automation ? input.present(automation) : null;
   };
   const validate = (draft: ProtectedAutomationDraft, saved: ProtectedAutomationRecord | null) =>
     validateProtectedAutomationDraft(
@@ -327,10 +333,11 @@ export function createProtectedAutomationAuthoringBindings(input: {
               errors: validation.errors,
             };
           }
-          automation = await create(validation.draft);
-          if (!automation) {
+          const created = await create(validation.draft);
+          if (!created) {
             return refuse("unavailable");
           }
+          automation = input.present(created);
           await input.bind(automation.id);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
@@ -365,7 +372,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
           );
           switch (result.status) {
             case "updated":
-              automation = result.automation;
+              automation = input.present(result.automation);
               break;
             case "invalid":
               await refuse("invalid");
@@ -409,7 +416,7 @@ function placeholderFields(draft: ProtectedAutomationDraft) {
   });
 }
 
-export function savesDraft(automation: ProtectedAutomationRecord, draft: ProtectedAutomationDraft) {
+export function savesDraft(automation: StoredAutomationRecord, draft: ProtectedAutomationDraft) {
   return isDeepStrictEqual(definitionOf(automation), withoutUndefined(draft));
 }
 
@@ -417,16 +424,8 @@ function withoutUndefined<T extends object>(value: T) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
-function definitionOf(automation: ProtectedAutomationRecord) {
-  const {
-    id: _id,
-    version: _version,
-    enabled: _enabled,
-    state: _state,
-    nextCheckAt: _next,
-    ...definition
-  } = automation;
-  return withoutUndefined(definition);
+function definitionOf(automation: StoredAutomationRecord) {
+  return withoutUndefined(applyProtectedAutomationPatch(automation, {}));
 }
 
 function isExpectedVersion(value: string) {

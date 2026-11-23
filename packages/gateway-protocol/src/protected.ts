@@ -251,6 +251,7 @@ export const ProtectedAutomationCapabilitiesSchema = node({
   draftValidation: Type.Boolean(),
   list: Type.Boolean(),
   create: Type.Boolean(),
+  delete: Type.Optional(Type.Boolean()),
   scheduleControl: Type.Boolean(),
   run: Type.Boolean(),
   sharing: Type.Boolean(),

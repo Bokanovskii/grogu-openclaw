@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import type { Generated, Selectable } from "kysely";
+import { sql, type Generated, type Selectable } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import {
   deferSqliteWorkerCommitReceipt,
@@ -30,6 +30,7 @@ import {
   type ProtectedAutomationResultDatabase,
 } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
+import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
 export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase & {
   protected_automation_run_chats: {
@@ -85,7 +86,9 @@ const ensureSchema = createOpenClawStateSchemaEnsurer({
 });
 
 export function typed(db: DatabaseSync) {
-  return getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase>(db);
+  return getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase & ProtectedAutomationDatabase>(
+    db,
+  );
 }
 export function admit(database: OpenClawStateDatabase) {
   admitResults(database);
@@ -148,6 +151,7 @@ export type PrepareProtectedAutomationLifecycleOutcome =
         | "busy"
         | "disabled"
         | "definition-changed"
+        | "version-mismatch"
         | "result-missing";
     }
   | { status: "unchanged" }
@@ -169,7 +173,7 @@ export function prepareProtectedAutomationLifecycle(
   if (!Number.isSafeInteger(entryOverheadBytes) || entryOverheadBytes < 0) {
     throw new Error("Protected automation entry overhead is invalid.");
   }
-  if (command.kind !== "delete" && command.kind !== "provision") {
+  if (command.kind !== "delete" && command.kind !== "remove" && command.kind !== "provision") {
     boundedId(command.runId);
     timestamp(command.now);
   }
@@ -285,7 +289,54 @@ export function prepareProtectedAutomationLifecycle(
     ) {
       return { status: "busy" };
     }
-  } else if (command.kind === "delete") {
+  } else if (command.kind === "delete" || command.kind === "remove") {
+    if (command.kind === "remove") {
+      if (automation.definitionRevision !== command.expectedRevision) {
+        return { status: "version-mismatch" };
+      }
+      const k = typed(database.db);
+      const definition = executeSqliteQuerySync(
+        database.db,
+        k
+          .selectFrom("protected_automations")
+          .select([
+            "id",
+            "central_owner_profile_id as profileId",
+            "visibility",
+            /* kysely-allow-raw: SQLite BLOB length counts stored UTF-8 bytes. */
+            sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+          ])
+          .where("id", "=", command.automationId)
+          .where("central_owner_profile_id", "=", command.profileId),
+      ).rows[0];
+      if (!definition || definition.visibility !== "private") {
+        return { status: "not-owner" };
+      }
+      const binding = executeSqliteQuerySync(
+        database.db,
+        k
+          .selectFrom("protected_automation_job_bindings")
+          .select("job_id")
+          .where("automation_id", "=", command.automationId),
+      ).rows[0];
+      const otherOwner = executeSqliteQuerySync(
+        database.db,
+        k
+          .selectFrom("protected_automation_members")
+          .select("profile_id")
+          .where("automation_id", "=", command.automationId)
+          .where("role", "=", "owner")
+          .where("profile_id", "!=", command.profileId),
+      ).rows[0];
+      if (binding || otherOwner) {
+        return { status: "busy" };
+      }
+      write.retiredDefinition = {
+        id: definition.id,
+        profileId: definition.profileId,
+        definitionBytes: definition.definitionBytes,
+      };
+    }
     if (rows.some((row) => row.status === "queued" || row.status === "running")) {
       return { status: "busy" };
     }
@@ -401,6 +452,7 @@ export function prepareProtectedAutomationLifecycle(
   prepareProtectedAutomationLifecycleRetirements(database, write, rows, chat);
   if (
     command.kind !== "delete" &&
+    command.kind !== "remove" &&
     write.pruneRunIds.some((id) =>
       rows.some((row) => row.id === id && (row.status === "queued" || row.status === "running")),
     )
@@ -428,13 +480,18 @@ function matchingResult(database: OpenClawStateDatabase, row: RunRow, id: string
 export function commitProtectedAutomationLifecycle(
   database: OpenClawStateDatabase,
   write: ProtectedAutomationLifecycleWrite,
-): { status: "committed" } {
+) {
   admit(database);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
       requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: write });
       const current = prepareProtectedAutomationLifecycle(database, write);
       if (current.status !== "prepared" || !isDeepStrictEqual(current.write, write)) {
+        if (write.command.kind === "remove") {
+          return {
+            status: current.status === "prepared" ? ("busy" as const) : current.status,
+          };
+        }
         throw new Error(
           "Protected automation lifecycle plan changed; prepare again after settlement.",
         );
@@ -485,13 +542,23 @@ function applyWrite(database: OpenClawStateDatabase, write: ProtectedAutomationL
         .where("id", "in", write.pruneRunIds),
     );
   }
-  if (command.kind === "delete") {
+  if (command.kind === "delete" || command.kind === "remove") {
     executeSqliteQuerySync(
       db,
       k
         .deleteFrom("protected_automation_run_chats")
         .where("automation_id", "=", command.automationId),
     );
+    if (command.kind === "remove") {
+      executeSqliteQuerySync(
+        db,
+        k
+          .deleteFrom("protected_automations")
+          .where("id", "=", command.automationId)
+          .where("central_owner_profile_id", "=", command.profileId)
+          .where("definition_revision", "=", command.expectedRevision),
+      );
+    }
   } else if (command.kind === "provision") {
     const [poolEntry] = write.entries;
     if (!poolEntry) {

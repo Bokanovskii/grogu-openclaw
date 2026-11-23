@@ -42,7 +42,10 @@ import { root } from "../../src/infra/fs-safe.js";
 import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
 import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
-import { createProtectedAutomationWithAdmission } from "../../src/state/protected-automation-operations.js";
+import {
+  bindProtectedAutomationJobWithAdmission,
+  createProtectedAutomationWithAdmission,
+} from "../../src/state/protected-automation-operations.js";
 import {
   getCanonicalUserPreferences,
   setCanonicalUserPreferences,
@@ -62,6 +65,8 @@ import {
   protectedResearchAgent,
   type ProtectedAgentExtension,
 } from "./agents.js";
+import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
+import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
@@ -72,7 +77,10 @@ import { withThinking } from "./models.js";
 import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
 import { protectedOpenClawConfig } from "./settings.js";
-import { prepareProtectedSharedState } from "./state-worker-context.js";
+import {
+  captureProtectedStateWorkerContext,
+  prepareProtectedSharedState,
+} from "./state-worker-context.js";
 import { createProtectedStaticClient } from "./static-client.js";
 import { installFixtureFetch } from "./test-fetch-guard.js";
 import { createCanonicalProtectedTurns } from "./turns.js";
@@ -105,6 +113,7 @@ void test("Protected turns load skills on request and retain credentials during 
     tools?: Array<{ function: { name: string } }>;
   }> = [];
   let overflow = false;
+  let blockedAutomation: { entered: () => void; wait: Promise<void> } | undefined;
   const previousAmbientKey = process.env.SPARKY_API_KEY;
   process.env.SPARKY_API_KEY = "synthetic-ambient-key";
   t.after(() => {
@@ -123,6 +132,10 @@ void test("Protected turns load skills on request and retain credentials during 
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       requests.push({ ...body, authorization: request.headers.authorization });
       const messages = JSON.stringify(body.messages);
+      if (blockedAutomation && messages.includes("Summarize synthetic public news.")) {
+        blockedAutomation.entered();
+        await blockedAutomation.wait;
+      }
       if (!overflow && messages.includes("Trigger synthetic overflow")) {
         overflow = true;
         response.writeHead(400, { "content-type": "application/json" });
@@ -510,6 +523,23 @@ void test("Protected turns load skills on request and retain credentials during 
       .entries,
     [],
   );
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  t.after(() => release.resolve());
+  blockedAutomation = { entered: entered.resolve, wait: release.promise };
+  const nextDelivery = waitForDelivery("manual", [lostQueue.runId, manualRun.id]);
+  const activeRun = await automationCall(`/automations/${automation.id}/run`, { method: "POST" });
+  assert.equal(activeRun.status, 202);
+  await entered.promise;
+  const busyDelete = await automationCall(`/automations/${automation.id}`, {
+    method: "DELETE",
+    headers: { "if-match": (await enabled.clone().json()).automation.version },
+  });
+  assert.equal(busyDelete.status, 409);
+  assert.equal((await busyDelete.json()).error.code, "automation_busy");
+  blockedAutomation = undefined;
+  release.resolve();
+  await nextDelivery;
   const memberCreated = await automationCall("/automations", {
     method: "POST",
     headers: foreignHeaders,
@@ -572,6 +602,30 @@ void test("Protected turns load skills on request and retain credentials during 
     afterRestart.runs.filter((run: { trigger: string }) => run.trigger === "scheduled").length,
     2,
   );
+  const beforeDeletion = await readProtectedAutomationLifecycleStorageUsage(stateDir, () => {});
+  const beforeResults = await readProtectedAutomationResultStorageUsage(stateDir, () => {});
+  const ownerVersion = (await enabled.json()).automation.version;
+  const deletion = await automationCall(`/automations/${automation.id}`, {
+    method: "DELETE",
+    headers: { "if-match": ownerVersion },
+  });
+  assert.equal(deletion.status, 204, await deletion.clone().text());
+  assert.equal((await automationCall(`/automations/${automation.id}/runs`)).status, 404);
+  assert.equal((await automationCall(`/automations/${automation.id}/run-history`)).status, 404);
+  const remainingInbox = (await (await automationCall("/automations/inbox")).json()).entries;
+  assert.ok(
+    remainingInbox.every((entry: { automationId: string }) => entry.automationId !== automation.id),
+  );
+  assert.equal((await call(`/chats/${scheduledRun.runChatId}`)).status, 200);
+  const afterDeletion = await readProtectedAutomationLifecycleStorageUsage(stateDir, () => {});
+  const afterResults = await readProtectedAutomationResultStorageUsage(stateDir, () => {});
+  assert.ok(
+    beforeDeletion.some((entry) => entry.id === `protected-automation-chat:${automation.id}`),
+  );
+  assert.ok(
+    !afterDeletion.some((entry) => entry.id === `protected-automation-chat:${automation.id}`),
+  );
+  assert.ok(beforeResults.length > afterResults.length);
   const people = (await (await call("/admin/people")).json()).people as Array<{
     id: string;
     subject?: string;
@@ -5750,6 +5804,7 @@ void test("automation definitions consume member and global storage quota", asyn
   const stateDir = path.resolve(".artifacts", `automation-quota-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
   const origin = "https://quota.example";
   const expiresAt = Date.now() + 120_000;
   const options = {
@@ -5811,7 +5866,7 @@ void test("automation definitions consume member and global storage quota", asyn
       }),
     );
   await call("alice", "/me");
-  await call("bob", "/me");
+  const bob = (await (await call("bob", "/me")).json()).user;
   for (const subject of ["alice", "bob"]) {
     assert.equal(
       await addProtectedSubject(stateDir, { issuer: "https://identity.example", subject }),
@@ -5830,7 +5885,7 @@ void test("automation definitions consume member and global storage quota", asyn
     method: "POST",
     body: JSON.stringify(draft),
   });
-  assert.equal(firstCreated.status, 201);
+  assert.equal(firstCreated.status, 201, await firstCreated.clone().text());
   const firstAutomation = (await firstCreated.json()).automation;
 
   const secondAliceCreate = await call("alice", "/automations", {
@@ -5845,6 +5900,7 @@ void test("automation definitions consume member and global storage quota", asyn
     body: JSON.stringify(draft),
   });
   assert.equal(firstBobCreate.status, 201);
+  const bobAutomation = (await firstBobCreate.json()).automation;
 
   const secondBobCreate = await call("bob", "/automations", {
     method: "POST",
@@ -5864,6 +5920,52 @@ void test("automation definitions consume member and global storage quota", asyn
   const unchangedAutomation = (await unchanged.json()).automation;
   assert.equal(unchangedAutomation.version, firstAutomation.version);
   assert.equal(unchangedAutomation.instructions, draft.instructions);
+
+  await app.startAutomations(() => {});
+  const legacyCatalog = await (await call("alice", "/automations/catalog")).json();
+  assert.equal(legacyCatalog.capabilities.automations.delete, undefined);
+  const deleteCatalog = await (
+    await call("alice", "/automations/catalog", {
+      headers: { "x-alcove-capabilities": "automation-delete-v1" },
+    })
+  ).json();
+  assert.equal(deleteCatalog.capabilities.automations.delete, true);
+  const binding = await bindProtectedAutomationJobWithAdmission(
+    captureProtectedStateWorkerContext(stateDir),
+    {
+      profileId: bob.id,
+      automationId: bobAutomation.id,
+      jobId: randomUUID(),
+      definitionRevision: Number(bobAutomation.version),
+      now: Date.now(),
+    },
+    { profileId: bob.id, assertCurrent() {} },
+  );
+  assert.equal(binding.status, "bound");
+  const boundDelete = await call("bob", `/automations/${bobAutomation.id}`, {
+    method: "DELETE",
+    headers: { "if-match": bobAutomation.version },
+  });
+  assert.equal(boundDelete.status, 409);
+  assert.equal((await boundDelete.json()).error.code, "automation_busy");
+  const route = `/automations/${firstAutomation.id}`;
+  const deleteAutomation = (subject: string, version?: string) =>
+    call(subject, route, {
+      method: "DELETE",
+      headers: version === undefined ? {} : { "if-match": version },
+    });
+  assert.equal((await deleteAutomation("alice")).status, 428);
+  assert.equal((await deleteAutomation("bob", firstAutomation.version)).status, 404);
+  const staleDelete = await deleteAutomation("alice", "999");
+  assert.equal(staleDelete.status, 412);
+  assert.equal((await staleDelete.json()).error.code, "version_mismatch");
+  assert.equal((await deleteAutomation("alice", firstAutomation.version)).status, 204);
+  assert.equal((await deleteAutomation("alice", firstAutomation.version)).status, 404);
+  const replacement = await call("alice", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(replacement.status, 201);
 
   const withoutStorageLimits = createProtectedHttp(options);
   t.after(() => withoutStorageLimits.shutdown());

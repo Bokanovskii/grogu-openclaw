@@ -42,5 +42,11 @@ Fill the template with real plan data:
 - Put only `https://` links to real sources or official booking pages in `href`.
 - Keep the style block. Use only the host color variables it already uses, so the
   dashboard works in light and dark mode.
+- Make the fragment self-contained. Alcove blocks external scripts, stylesheets,
+  fonts, images, embedded maps, and network requests. Use inline CSS and assets;
+  link to maps or official pages instead of embedding them.
+- Write the visible itinerary directly in HTML, as the template does. Never leave
+  an empty container for a script or external resource to fill. Optional inline
+  JavaScript may enhance controls, but the plan must remain visible if it fails.
 
 {{template}}

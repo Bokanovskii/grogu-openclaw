@@ -67,6 +67,7 @@ import {
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
 import { listProtectedArtifacts, validFilename, validGeneratedFilename } from "./artifacts.js";
+import { createProtectedAutomationsChatBindings } from "./automations-chat.js";
 import {
   createProtectedAutomationRecord,
   listProtectedAutomationRecords,
@@ -137,6 +138,7 @@ const commonHeaders = { "cache-control": "no-store", "x-content-type-options": "
 const maxBodyBytes = 48_000;
 const directoryPreference = "grogu.protected.directory";
 const loadProtectedPush = createLazyRuntimeModule(() => import("./push.js"));
+const automationsChatCapability = "automations-chat-v1";
 type Run = {
   id: string;
   profileId: string;
@@ -310,6 +312,9 @@ function accessReceipt(request: Request): string | undefined {
     .find((part) => part.startsWith("protected_access_receipt="));
   const value = cookie?.slice("protected_access_receipt=".length);
   return value && /^[A-Za-z0-9_-]{43}$/u.test(value) ? value : undefined;
+}
+function supportsAutomationsChat(request: Request) {
+  return hasClientCapability(request.headers, automationsChatCapability);
 }
 
 export function createProtectedHttp(options: {
@@ -1481,7 +1486,27 @@ export function createProtectedHttp(options: {
           hasClientCapability(request.headers, "agents-v1")
             ? { ...automationCatalog, agents: agentCatalog.listV1() }
             : automationCatalog;
-        return profileJson(catalog);
+        const chatAvailable =
+          supportsAutomationsChat(request) && catalog.capabilities.automations.list;
+        return profileJson(
+          chatAvailable
+            ? {
+                ...catalog,
+                capabilities: {
+                  ...catalog.capabilities,
+                  automations: {
+                    ...catalog.capabilities.automations,
+                    chat: {
+                      list: true,
+                      read: true,
+                      proposeCreate: true,
+                      proposePatch: true,
+                    },
+                  },
+                },
+              }
+            : catalog,
+        );
       }
       if (pathname === "/automations/drafts/validate" && method === "POST") {
         if (!automationCatalog) {
@@ -2493,6 +2518,17 @@ export function createProtectedHttp(options: {
           assertRun();
         };
         const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
+        const automationChat =
+          supportsAutomationsChat(request) &&
+          model.provider === "sparky" &&
+          automationCatalog?.capabilities.automations.list
+            ? createProtectedAutomationsChatBindings({
+                stateDir: options.stateDir,
+                catalog: automationCatalog,
+                authority: runAuthority,
+                revalidate: checkRun,
+              })
+            : undefined;
         const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
         const profileSessionPrefix = chats.scope(runAuthority, "").sessionKey;
         const ownedChildSessionKeys = new Set<string>();
@@ -2615,6 +2651,7 @@ export function createProtectedHttp(options: {
                           lifecycleRevision: parentLifecycleRevision,
                         },
                         input,
+                        ...(automationChat ? { automationChat } : {}),
                         mentionedAgents,
                         agent: selectedAgent,
                         routing: agentRouting,

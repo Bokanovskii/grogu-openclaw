@@ -417,6 +417,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     gatewayUiCommandTarget: params.gatewayUiCommandTarget,
     inlineWidgetAuthoring: params.inlineWidgetAuthoring,
     toolBindings: params.toolBindings,
+    toolRuntimeBindings: params.toolRuntimeBindings,
     assertInvocationCurrent: params.assertInvocationCurrent,
     userFileScope: params.userFileScope,
     chatType: params.chatType,

@@ -32,6 +32,7 @@ export async function prepareCompactionSessionAgent(params: {
   effectiveWorkspace: string;
   agentDir: string;
   runtimePlan?: AgentRuntimePlan;
+  assertCurrent?: () => void;
 }) {
   const transportApiKey = params.authStorage
     ? await resolveEmbeddedAgentApiKey({
@@ -39,6 +40,7 @@ export async function prepareCompactionSessionAgent(params: {
         provider: params.effectiveModel.provider,
       })
     : params.resolvedApiKey;
+  params.assertCurrent?.();
   params.session.agent.streamFn = resolveEmbeddedAgentStream({
     ...params,
     currentStreamFn: resolveEmbeddedAgentBaseStreamFn({ session: params.session }),

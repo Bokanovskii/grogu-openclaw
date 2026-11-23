@@ -17,6 +17,7 @@ type ChildConstraints = Pick<
   RunEmbeddedAgentInternalParams,
   | "requestModelCredential"
   | "memoryAudience"
+  | "contextIsolation"
   | "toolRuntimeBindings"
   | "assertInvocationCurrent"
   | "userFileScope"
@@ -32,6 +33,7 @@ type ChildConstraints = Pick<
 export type RequestScopedChildExecution = {
   provider: string;
   model: string;
+  contextIsolation?: "isolated";
   signal: AbortSignal;
   assertCurrent: () => void;
   revalidate: () => Promise<void>;

@@ -284,6 +284,7 @@ export const ProtectedAutomationCapabilitiesSchema = node({
   run: Type.Boolean(),
   sharing: Type.Boolean(),
   notifications: Type.Boolean(),
+  contextAccess: Type.Optional(Type.Boolean()),
   chat: Type.Optional(
     node({
       list: Type.Boolean(),
@@ -374,6 +375,7 @@ const protectedAutomationDraftFields = {
     id,
   }),
   thinking: Type.Optional(ProtectedThinkLevelSchema),
+  contextAccess: Type.Optional(Type.Union([Type.Literal("isolated"), Type.Literal("member")])),
   schedule: ProtectedAutomationScheduleSchema,
 };
 export const ProtectedAutomationDraftSchema = node(protectedAutomationDraftFields);

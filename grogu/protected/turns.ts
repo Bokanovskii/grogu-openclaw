@@ -106,6 +106,7 @@ export type ProtectedTurn = {
   id: string;
   runId: string;
   profileId: string;
+  automationContextAccess?: "isolated" | "member";
   target: {
     agentId: string;
     sessionKey: string;
@@ -266,6 +267,9 @@ async function runMentionedAgent(
   const scope = {
     provider: turn.input.provider,
     model: turn.input.model,
+    ...(turn.automationContextAccess === "isolated"
+      ? { contextIsolation: "isolated" as const }
+      : {}),
     signal: turn.signal,
     assertCurrent: turn.assertCurrent,
     revalidate: turn.revalidate,
@@ -297,6 +301,9 @@ async function runMentionedAgent(
         },
         requestModelCredential: credential.handle,
         memoryAudience: child.memoryGrant?.audience,
+        ...(turn.automationContextAccess === "isolated"
+          ? { contextIsolation: "isolated" as const }
+          : {}),
         ...(memberMemory && child.memoryGrant
           ? {
               toolRuntimeBindings: {
@@ -715,6 +722,13 @@ export function createCanonicalProtectedTurns(options: {
   return {
     models: options.models,
     async run(turn: ProtectedTurn) {
+      if (turn.automationContextAccess === "isolated") {
+        throw new ProtectedError(
+          503,
+          "automation_isolation_unavailable",
+          "Isolated automation execution is unavailable until its memory boundary is ready.",
+        );
+      }
       const { provider, model } = turn.input;
       const accessToken =
         provider === "sparky"

@@ -319,6 +319,16 @@ entry each. The tables store only profile, chat, and link ids, and no chat text.
 
 ### Public automations
 
+Automation definitions can record `contextAccess` as `isolated` or `member`.
+Definitions without the field retain member access, including new definitions
+created by existing clients. Isolated runs return 503 until the privacy boundary
+is ready. Requests to create isolated definitions also return 503. The later
+enablement must default new definitions to isolated access
+without changing stored definitions that omit the field. Omitted access never
+qualifies an automation for publication.
+Only clients that send `automations-context-v1` receive the access field. Those
+clients see `capabilities.automations.contextAccess: false` until activation.
+
 Public automation is disabled until the automation origin and model-request
 isolation boundary is verified. Clients that send
 `x-alcove-capabilities: automations-public-v1` see all three capability flags

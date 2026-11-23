@@ -65,7 +65,10 @@ import {
   protectedResearchAgent,
   type ProtectedAgentExtension,
 } from "./agents.js";
-import { ALCOVE_BROWSER_TOOL_NAMES } from "./alcove-browser/contract.js";
+import {
+  ALCOVE_BROWSER_HANDOFF_TOOL_NAME,
+  ALCOVE_BROWSER_TOOL_NAMES,
+} from "./alcove-browser/contract.js";
 import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
@@ -243,10 +246,11 @@ void test("Protected turns load skills on request and retain credentials during 
   });
   const origin = "https://family.example";
   const expiresAt = Date.now() + 3_600_000;
-  const browserSessions = { opened: 0, open: 0 };
+  const browserSessions = { opened: 0, open: 0, handoffs: 0 };
   const browser: ProtectedBrowserBroker = {
-    openSession() {
+    openSession({ handoff }) {
       browserSessions.opened += 1;
+      browserSessions.handoffs += handoff ? 1 : 0;
       browserSessions.open += 1;
       const unused = async () => ({ status: "unavailable" as const, reason: "synthetic" });
       return {
@@ -256,6 +260,7 @@ void test("Protected turns load skills on request and retain credentials during 
           snapshot: unused,
           followLink: unused,
           back: unused,
+          ...(handoff ? { requestUser: unused } : {}),
         },
         async close() {
           browserSessions.open -= 1;
@@ -271,6 +276,7 @@ void test("Protected turns load skills on request and retain credentials during 
     origin,
     accessIssuer: "https://synthetic.example",
     ownerSubject: "synthetic-discovery",
+    browser: { handoff: true },
     stateDir,
     usersRoot: await root(usersDir),
     encryption,
@@ -362,15 +368,38 @@ void test("Protected turns load skills on request and retain credentials during 
     ...ALCOVE_BROWSER_TOOL_NAMES,
   ]);
   assert.ok(toolNames.every((name) => allowedTools.has(name)));
+  // Member browser control exists only for clients that negotiated it.
+  assert.ok(!toolNames.includes(ALCOVE_BROWSER_HANDOFF_TOOL_NAME));
+  assert.equal(browserSessions.handoffs, 0);
+  const handoffHeaders = {
+    "x-grogu-profile": user.id,
+    "x-alcove-capabilities": "browser-handoff-v2",
+  };
+  assert.deepEqual(
+    (await (await call("/me", { headers: handoffHeaders })).json()).capabilities.browserHandoff,
+    { version: 2 },
+  );
+  assert.equal((await (await call("/me")).json()).capabilities.browserHandoff, undefined);
+  const finishedHandoff = await call(
+    `/chats/${chat.id}/runs/synthetic-run/browser-handoffs/AAAAAAAAAAAAAAAAAAAAAA/claim`,
+    { method: "POST", headers: handoffHeaders, body: '{"origin":"https://synthetic.example"}' },
+  );
+  assert.equal(finishedHandoff.status, 404);
 
   const overflowStart = requests.length;
   const recovered = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Trigger synthetic overflow"}',
-    headers: { "x-grogu-profile": user.id },
+    headers: handoffHeaders,
   });
   const recoveredTrace = await recovered.text();
   const recoveryRequests = requests.slice(overflowStart);
+  assert.equal(browserSessions.handoffs, 1);
+  assert.ok(
+    recoveryRequests[0]?.tools?.some(
+      (tool) => tool.function.name === ALCOVE_BROWSER_HANDOFF_TOOL_NAME,
+    ),
+  );
   assert.ok(overflow);
   const summaryRequest = recoveryRequests.find((request) =>
     JSON.stringify(request.messages).includes("context summarization assistant"),

@@ -830,9 +830,73 @@ content. At most four browser sessions run at once, and Chromium exits
 after a minute without sessions. Page text and frames are not logged. A listener restart
 closes every browser.
 
-The agent cannot type into pages, sign in, or ask the member to take control.
-Sites that need a password, one-time code, or passkey are unsupported. There
-is no persistent or owner profile in this version.
+The agent cannot type into pages or sign in. Sites that need a password,
+one-time code, or passkey are unsupported, and so is provider device sign-in.
+There is no persistent or owner profile in this version.
+
+#### Member browser control
+
+Member control is a synthetic-only prototype, **not deployable**. The service
+always disables it, and a `browserHandoff` deployment setting is rejected with an
+explicit error. No real account or retained owner profile is connected.
+The draft adapter negotiates clients that send
+`X-Alcove-Capabilities: browser-handoff-v2`; `/me` then reports
+`capabilities.browserHandoff: { "version": 2 }`. This future run-scoped contract
+is not compatible with the existing chat-scoped v1 client; there is no alias.
+Only then does the turn get
+`browser_request_user`, which pauses the agent's browser on the current https
+page so the member can make a choice there. The model's request text is not
+shown to the member.
+
+The turn stream sends `browser-handoff` events (`waiting`, `active`,
+`origin-changed`, `returned`, `cancelled`, `expired`, `revoked`) with the
+committed https origin of the top-level page and a display form that shows
+look-alike Unicode hosts next to their ASCII name. Routes live under
+`/chats/:chatId/runs/:runId/browser-handoffs/:handoffId/` and require the same
+member, `X-Grogu-Profile`, sign-in session, and run that started the turn:
+
+- `POST claim` with `{ "origin" }` returns a new controller token, replacing
+  any earlier one. The origin must match the page.
+- `GET frame` with `X-Alcove-Browser-Controller` returns a no-store JPEG with
+  `X-Alcove-Browser-Origin`, `-Sequence`, and `-Field` (`none`, `secret`, or
+  `unsupported`). Origin and controller are checked after capture, but this
+  does **not** prove atomic image provenance across browser/compositor navigation.
+- `POST input` with `{ "origin", "kind": "tap", "x", "y" }`,
+  `{ "origin", "kind": "scroll", "dy" }`, or
+  `{ "origin", "kind": "key", "key": "Enter" | "Tab" }`. Taps on text, secret,
+  or embedded-frame fields, and keys while such a field has focus, return 422.
+  There is no text entry.
+- `POST return` with `{ "origin" }` and the controller hands the browser back.
+  Only this resumes the agent, which then sees the page title and address without its
+  query or fragment.
+- `POST cancel` with `{ "origin" }` and the current controller ends the turn.
+  Stop remains the accessible exit without a valid controller.
+
+A stale controller or changed origin returns 409 and never resumes the agent.
+Any top-level navigation drops the controller and sends `origin-changed`; the
+member must claim again. Cancel, five idle minutes, a ten-minute cap, Stop,
+and page close end the turn. A stream disconnect during handoff ends the turn;
+a handoff requested after disconnection is immediately revoked.
+The adapter does not log or store frames, inputs, or request bodies. This is not
+a guarantee about Chrome/process diagnostics, service proxies, or client
+analytics; those deployment paths have not been audited for sensitive input.
+Field checks run in an isolated script world, but inspection followed by input
+dispatch does **not** atomically bind the recipient if the page mutates.
+Focused-field classification cannot detect page-visible secrets or device
+verification codes. The JPEG view is not screen-reader accessible; Cancel and
+Stop are the accessible exits, not an accessible sign-in alternative.
+
+Synthetic broker checks:
+`node --import ./scripts/tsx.mjs --test --test-concurrency=1 --test-timeout=90000 grogu/protected/browser/*.test.ts`.
+The client fixture uses the same HTTP action adapter:
+`node --import ./scripts/tsx.mjs grogu/protected/browser/handoff.fixture.ts`.
+It prints a loopback `/fixture` URL with the synthetic profile, chat, run, and
+handoff IDs. Use `X-Grogu-Profile: synthetic-member`; `/events` streams the
+negotiated event shapes. Every Chromium request is fulfilled locally with a
+nonsecret seat-selection page or a 404. It never reaches a real website.
+`/fixture` reports whether Return resumed the run or Cancel ended it.
+Terminate the fixture with Ctrl-C when finished. This proves the shared adapter,
+not production authentication or browser host isolation.
 
 Prerequisite: install Chromium as the service account with
 `npx playwright-core install chromium` (about 150 MB). If Chromium is missing,

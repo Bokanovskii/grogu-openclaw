@@ -59,6 +59,11 @@ export function parseRuntimeSettings(value: unknown) {
   if (!isRecord(value)) {
     throw new Error("Invalid protected runtime settings");
   }
+  if (value.browserHandoff !== undefined) {
+    throw new Error(
+      "Browser handoff is not available for deployment. Image provenance and input recipient isolation remain unproven.",
+    );
+  }
   const { stateDir, allowedSubjects, sparkySecret, ownerSubject, browser } = value;
   const testClientId =
     value.testClientId === undefined ||

@@ -207,6 +207,7 @@ async function main() {
   const browser = settings.browser === "fresh" ? createProtectedBrowserBroker() : undefined;
   const app = createProtectedHttp({
     origin,
+    ...(browser ? { browser: { handoff: false } } : {}),
     stateDir,
     accessIssuer,
     ownerSubject: settings.ownerSubject,

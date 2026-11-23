@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, watch, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
 import { after, before as beforeTests, mock, test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { deserialize } from "node:v8";
+import { Worker } from "node:worker_threads";
 import {
   ProtectedAgentCatalogSchema,
   ProtectedAgentCatalogV1Schema,
@@ -22,8 +24,13 @@ import {
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { Value } from "typebox/value";
 import type { ProtectedAuthoringTurnEvent } from "../../packages/gateway-protocol/src/protected-authoring.js";
+import {
+  ProtectedAutomationInboxResponseSchema,
+  ProtectedAutomationLifecycleListResponseSchema,
+} from "../../packages/gateway-protocol/src/protected-automation-results.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { createCanvasDocument } from "../../src/canvas/documents.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
@@ -55,6 +62,7 @@ import {
   protectedResearchAgent,
   type ProtectedAgentExtension,
 } from "./agents.js";
+import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -64,6 +72,7 @@ import { withThinking } from "./models.js";
 import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
 import { protectedOpenClawConfig } from "./settings.js";
+import { prepareProtectedSharedState } from "./state-worker-context.js";
 import { createProtectedStaticClient } from "./static-client.js";
 import { installFixtureFetch } from "./test-fetch-guard.js";
 import { createCanonicalProtectedTurns } from "./turns.js";
@@ -208,40 +217,57 @@ void test("Protected turns load skills on request and retain credentials during 
   };
   const encryption = createStorageValueEncryption(randomBytes(32));
   t.after(() => encryption.dispose());
+  await prepareProtectedSharedState(stateDir, () => {});
+  await addProtectedSubject(stateDir, {
+    issuer: "https://synthetic.example",
+    subject: "synthetic-discovery",
+  });
+  await addProtectedSubject(stateDir, {
+    issuer: "https://synthetic.example",
+    subject: "synthetic-other",
+  });
   const origin = "https://family.example";
-  const expiresAt = Date.now() + 120_000;
+  const expiresAt = Date.now() + 3_600_000;
   const { publishConfiguredModelRuntimeSnapshots } =
     await import("../../src/gateway/server-startup-model-runtime.js");
   await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
-  const app = createProtectedHttp({
+  const appOptions = {
     origin,
     accessIssuer: "https://synthetic.example",
+    ownerSubject: "synthetic-discovery",
     stateDir,
     usersRoot: await root(usersDir),
     encryption,
     maxChatsPerUser: 3,
     maxFileBytes: 64_000,
     storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
-    directory: { issuer: "https://synthetic.example", allowedSubjects: ["synthetic-discovery"] },
-    verifyIdentity: async () => ({
+    directory: {
       issuer: "https://synthetic.example",
-      subject: "synthetic-discovery",
-      kind: "human",
-      expiresAt,
-      sessionId: createHash("sha256").update("synthetic-discovery-session").digest("hex"),
-      assertCurrent() {},
-      async revalidate() {},
-    }),
+      allowedSubjects: ["synthetic-discovery", "synthetic-other"],
+    },
+    verifyIdentity: async (request) => {
+      const subject = request.headers.get("x-synthetic-subject") ?? "synthetic-discovery";
+      return {
+        issuer: "https://synthetic.example",
+        subject,
+        kind: "human",
+        expiresAt,
+        sessionId: createHash("sha256").update(`${subject}-session`).digest("hex"),
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
     turns: createCanonicalProtectedTurns({
       config,
       workspaceDir,
       agentDir,
-      models: [{ provider: "sparky", id: "synthetic", label: "Synthetic" }],
+      models: [withThinking({ provider: "sparky", id: "synthetic", label: "Synthetic" })],
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
-  });
-  const server = createProtectedServer(origin, app.fetch);
-  const url = await listen(server);
+  } satisfies Parameters<typeof createProtectedHttp>[0];
+  let app = createProtectedHttp(appOptions);
+  let server = createProtectedServer(origin, app.fetch);
+  let url = await listen(server);
   t.after(() => closeProtectedServer(server, app, stateDir));
   const call = (route: string, init?: RequestInit) =>
     fetch(`${url}/api/protected/v1${route}`, {
@@ -311,6 +337,257 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(summaryRequest.authorization, "Bearer synthetic-request-only-key");
   assert.equal(summaryRequest.model, "synthetic");
   assert.match(recoveredTrace, /"type":"done"/u);
+
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  await app.startAutomations(() => {});
+  const capabilities = "automation-runs-v1, automation-results-v1";
+  const automationCall = (route: string, init?: RequestInit) =>
+    call(route, {
+      ...init,
+      headers: { "x-alcove-capabilities": capabilities, ...init?.headers },
+    });
+  const createdAutomation = await automationCall("/automations", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Synthetic news",
+      instructions: "Summarize synthetic public news.",
+      whenToNotify: "After each briefing.",
+      agentId: "grogu",
+      model: { provider: "sparky", id: "synthetic" },
+      schedule: { kind: "every", everyMs: 60_000 },
+    }),
+  });
+  assert.equal(createdAutomation.status, 201, await createdAutomation.clone().text());
+  const automation = (await createdAutomation.json()).automation;
+  const enabled = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": automation.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(enabled.status, 200, await enabled.clone().text());
+  const waitForDelivery = async (trigger: "scheduled" | "manual", excluded: string[] = []) => {
+    for await (const event of watch(stateDir, { recursive: true })) {
+      void event;
+      const history = await automationCall(`/automations/${automation.id}/run-history`);
+      assert.equal(history.status, 200, await history.clone().text());
+      const historyBody = await history.json();
+      assert.ok(Value.Check(ProtectedAutomationLifecycleListResponseSchema, historyBody));
+      const runs = historyBody.runs as Array<{
+        id: string;
+        trigger: string;
+        status: string;
+        resultId: string | null;
+        runChatId: string | null;
+        delivery: string | null;
+        errorCode: string | null;
+      }>;
+      const failed = runs.find(
+        (entry) =>
+          entry.trigger === trigger &&
+          ["failed", "skipped"].includes(entry.status) &&
+          !excluded.includes(entry.id),
+      );
+      assert.equal(failed, undefined, `Automation ${trigger} failed: ${failed?.errorCode}`);
+      const run = runs.find(
+        (entry) =>
+          entry.trigger === trigger &&
+          entry.delivery === "delivered" &&
+          !excluded.includes(entry.id),
+      );
+      if (run) {
+        return run;
+      }
+    }
+    throw new Error("Automation storage watcher stopped before delivery.");
+  };
+  const scheduledDelivery = waitForDelivery("scheduled");
+  const automationRequestStart = requests.length;
+  t.mock.timers.tick(60_000);
+  const scheduledRun = await scheduledDelivery;
+  assert.equal(scheduledRun.status, "succeeded");
+  assert.ok(scheduledRun.resultId);
+  assert.ok(scheduledRun.runChatId);
+  const automationRequest = requests[automationRequestStart];
+  assert.match(JSON.stringify(automationRequest?.messages), /Summarize synthetic public news/u);
+  assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_search"));
+  assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_fetch"));
+  const originalPost = Worker.prototype.postMessage;
+  const originalEmit = Worker.prototype.emit;
+  const heldQueue = Promise.withResolvers<{ worker: Worker; runId: string }>();
+  let target: { worker: Worker; requestId: number; runId: string } | undefined;
+  t.mock.method(
+    Worker.prototype,
+    "postMessage",
+    function (this: Worker, request: unknown, transferList?: Parameters<Worker["postMessage"]>[1]) {
+      if (isRecord(request) && request.type === "execute" && request.input instanceof Uint8Array) {
+        const operation: unknown = deserialize(request.input);
+        if (
+          isRecord(operation) &&
+          operation.type === "protectedAutomationLifecycle.commit" &&
+          isRecord(operation.input) &&
+          isRecord(operation.input.command) &&
+          operation.input.command.kind === "queue" &&
+          typeof operation.input.command.runId === "string" &&
+          typeof request.id === "number" &&
+          operation.input.command.automationId === automation.id
+        ) {
+          target = { worker: this, requestId: request.id, runId: operation.input.command.runId };
+        }
+      }
+      return Reflect.apply(originalPost, this, [request, transferList]);
+    },
+  );
+  t.mock.method(
+    Worker.prototype,
+    "emit",
+    function (this: Worker, event: string | symbol, ...args: unknown[]) {
+      const reply = args[0];
+      const current = target;
+      if (
+        current &&
+        current.worker === this &&
+        event === "message" &&
+        isRecord(reply) &&
+        reply.id === current.requestId &&
+        reply.ok === true
+      ) {
+        heldQueue.resolve({ worker: this, runId: current.runId });
+        target = undefined;
+        return true;
+      }
+      return Reflect.apply(originalEmit, this, [event, ...args]);
+    },
+  );
+  const uncertainRequest = automationCall(`/automations/${automation.id}/run`, { method: "POST" });
+  const lostQueue = await heldQueue.promise;
+  await lostQueue.worker.terminate();
+  const uncertainResponse = await uncertainRequest;
+  assert.notEqual(uncertainResponse.status, 202);
+  t.mock.restoreAll();
+  const manualDelivery = waitForDelivery("manual", [lostQueue.runId]);
+  const runNow = await automationCall(`/automations/${automation.id}/run`, { method: "POST" });
+  assert.equal(runNow.status, 202, await runNow.clone().text());
+  const recoveredHistory = (await (
+    await automationCall(`/automations/${automation.id}/run-history`)
+  ).json()) as { runs: Array<{ id: string; status: string; errorCode: string | null }> };
+  assert.partialDeepStrictEqual(
+    recoveredHistory.runs.find((run) => run.id === lostQueue.runId),
+    { id: lostQueue.runId, status: "failed", errorCode: "interrupted" },
+  );
+  const manualRun = await manualDelivery;
+  assert.equal(manualRun.status, "succeeded");
+  assert.equal(manualRun.runChatId, scheduledRun.runChatId);
+  const results = await automationCall(`/automations/${automation.id}/runs`);
+  assert.equal(results.status, 200);
+  const resultRows = (await results.json()).runs as Array<{ runId: string; text: string }>;
+  assert.equal(resultRows.find((row) => row.runId === scheduledRun.id)?.text, "Synthetic answer.");
+  assert.equal(resultRows.find((row) => row.runId === manualRun.id)?.text, "Synthetic answer.");
+  const inbox = await automationCall("/automations/inbox");
+  const inboxBody = await inbox.json();
+  assert.ok(Value.Check(ProtectedAutomationInboxResponseSchema, inboxBody));
+  const inboxRows = inboxBody.entries as Array<{ runId: string; push: string }>;
+  assert.equal(inboxRows.filter((row) => row.runId === scheduledRun.id).length, 1);
+  assert.equal(inboxRows.filter((row) => row.runId === manualRun.id).length, 1);
+  assert.ok(inboxRows.every((row) => row.push === "not-started"));
+  const foreignHeaders = { "x-synthetic-subject": "synthetic-other" };
+  assert.equal((await call("/me", { headers: foreignHeaders })).status, 200);
+  assert.equal(
+    (await automationCall(`/automations/${automation.id}/run-history`, { headers: foreignHeaders }))
+      .status,
+    404,
+  );
+  assert.equal(
+    (await automationCall(`/automations/${automation.id}/runs`, { headers: foreignHeaders }))
+      .status,
+    404,
+  );
+  assert.equal(
+    (await call(`/chats/${scheduledRun.runChatId}`, { headers: foreignHeaders })).status,
+    404,
+  );
+  assert.deepEqual(
+    (await (await automationCall("/automations/inbox", { headers: foreignHeaders })).json())
+      .entries,
+    [],
+  );
+  const memberCreated = await automationCall("/automations", {
+    method: "POST",
+    headers: foreignHeaders,
+    body: JSON.stringify({
+      name: "Synthetic member news",
+      instructions: "Summarize synthetic public news.",
+      whenToNotify: "After each briefing.",
+      agentId: "grogu",
+      model: { provider: "sparky", id: "synthetic" },
+      schedule: { kind: "every", everyMs: 60_000 },
+    }),
+  });
+  assert.equal(memberCreated.status, 201, await memberCreated.clone().text());
+  const memberAutomation = (await memberCreated.json()).automation;
+  const memberEnabled = await automationCall(`/automations/${memberAutomation.id}`, {
+    method: "PATCH",
+    headers: { ...foreignHeaders, "if-match": memberAutomation.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(memberEnabled.status, 200, await memberEnabled.clone().text());
+  await close(server);
+  await app.shutdown();
+  t.mock.timers.tick(5 * 60_000);
+  app = createProtectedHttp({
+    ...appOptions,
+    storageLimits: { ...appOptions.storageLimits, userBytes: 280_000 },
+  });
+  server = createProtectedServer(origin, app.fetch);
+  url = await listen(server);
+  const overdueDelivery = waitForDelivery("scheduled", [scheduledRun.id]);
+  const quotaRefusal = (async () => {
+    for await (const event of watch(stateDir, { recursive: true })) {
+      void event;
+      const history = await automationCall(`/automations/${memberAutomation.id}/run-history`, {
+        headers: foreignHeaders,
+      });
+      assert.equal(history.status, 200, await history.clone().text());
+      const runs = (await history.json()).runs as Array<{
+        status: string;
+        errorCode: string | null;
+      }>;
+      const run = runs.find((entry) => entry.status === "skipped");
+      if (run) {
+        return run;
+      }
+      assert.ok(!runs.some((entry) => entry.status === "failed" || entry.status === "succeeded"));
+    }
+    throw new Error("Automation storage watcher stopped before quota refusal.");
+  })();
+  await app.startAutomations(() => {});
+  t.mock.timers.tick(0);
+  const overdue = await overdueDelivery;
+  assert.equal((await quotaRefusal).errorCode, "quota_exceeded");
+  assert.notEqual(overdue.id, scheduledRun.id);
+  t.mock.timers.tick(0);
+  const afterRestart = await (
+    await automationCall(`/automations/${automation.id}/run-history`)
+  ).json();
+  assert.equal(
+    afterRestart.runs.filter((run: { trigger: string }) => run.trigger === "scheduled").length,
+    2,
+  );
+  const people = (await (await call("/admin/people")).json()).people as Array<{
+    id: string;
+    subject?: string;
+  }>;
+  const member = people.find((person) => person.subject === "synthetic-other");
+  assert.ok(member);
+  const removal = await call(`/admin/people/${member.id}/remove`, { method: "POST" });
+  assert.equal(removal.status, 200, await removal.clone().text());
+  const requestCount = requests.length;
+  const inactiveRun = await automationCall(`/automations/${memberAutomation.id}/run`, {
+    method: "POST",
+    headers: foreignHeaders,
+  });
+  assert.equal(inactiveRun.status, 401);
+  assert.equal(requests.length, requestCount);
+  t.mock.timers.reset();
 });
 
 beforeTests(async () => {
@@ -5795,6 +6072,7 @@ void test("automation authoring chats hold a server binding and save only the se
   const stateDir = path.resolve(".artifacts", `automation-authoring-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
   const origin = "https://authoring.example";
   const expiresAt = Date.now() + 120_000;
   const routed: boolean[] = [];
@@ -6082,6 +6360,46 @@ void test("automation authoring chats hold a server binding and save only the se
       await call("alice", "/automations", { method: "POST", body: JSON.stringify(draft) })
     ).json()
   ).automation;
+  const finished = await commitProtectedAutomationFinishedResult(
+    stateDir,
+    {
+      automationId: formSaved.id,
+      definitionRevision: Number(formSaved.version),
+      centralOwnerProfileId: profiles.alice!,
+      jobId: "synthetic-job",
+      runAtMs: 1_000,
+      runId: randomUUID(),
+      completedAtMs: 2_000,
+      automationName: draft.name,
+      privateFinalText: "Synthetic result.",
+      transcript: { sessionKey: "synthetic-session", sessionId: randomUUID() },
+    },
+    {
+      profileId: profiles.alice!,
+      revalidate: async () => {},
+      assertCurrent: () => {},
+      enrollPublication: () => ({ finish: () => {} }),
+      reserveStorage: async () => ({ settle: () => {}, release: () => {} }),
+      retainUncertainCommit: () => {
+        assert.fail("Unexpected uncertain result commit.");
+      },
+    },
+  );
+  assert.equal(finished.status, "created");
+  if (finished.status !== "created") {
+    throw new Error("Synthetic result was not saved.");
+  }
+  const runsPath = `/automations/${formSaved.id}/runs`;
+  const runCapabilities = `${negotiated}, automation-results-v1`;
+  assert.equal((await call("alice", runsPath)).status, 404);
+  const runs = await call("alice", runsPath, {}, runCapabilities);
+  assert.equal(runs.status, 200);
+  assert.equal((await runs.json()).runs[0].text, "Synthetic result.");
+  const result = await call("alice", `${runsPath}/${finished.id}`, {}, runCapabilities);
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).run.id, finished.id);
+  assert.equal((await call("bob", runsPath, {}, runCapabilities)).status, 404);
+  assert.equal((await call("bob", `${runsPath}/${finished.id}`, {}, runCapabilities)).status, 404);
   const first = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
   assert.equal(first.status, 201);
   const firstBody = await first.json();

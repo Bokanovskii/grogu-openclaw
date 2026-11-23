@@ -504,6 +504,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     protectedAuthoringKind?: "automation";
     /** Saved protected automation bound to an authoring chat; set at most once, never changed. */
     protectedAutomationId?: string;
+    /** Automation whose scheduled and manual runs share this protected chat. */
+    protectedAutomationRunId?: string;
     /**
      * Tracks whether the persisted model selection came from an explicit user
      * action (`/model`, `sessions.patch`), a temporary runtime fallback, or an

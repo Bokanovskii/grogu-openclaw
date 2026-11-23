@@ -306,20 +306,16 @@ unavailable, the automation catalog route returns 404; older servers also
 return 404, so clients can keep the feature unavailable without breaking sign-in.
 `catalog` and `draftValidation` are true when the model catalog is available.
 `list` and `create` are true only when the protected storage budget is
-configured. Without it, list and write routes return 404. Schedule control, run,
-sharing, and notification capabilities remain false. The catalog advertises
-interval and fixed calendar schedules for draft validation only; those schedules
-are not active jobs.
+configured. Without it, list and write routes return 404. Schedule control and
+Run now require a running scheduler and the negotiated run capability.
+Sharing and notification capabilities remain false.
 
 `POST /api/protected/v1/automations/drafts/validate` accepts an in-memory draft:
 `name`, `instructions`, `whenToNotify`, optional `doneWhen`, `agentId`,
 `model: { provider: "sparky", id }`, optional `thinking`, and
 either `schedule: { kind: "every", everyMs }` or the advertised fixed
-`schedule: { kind: "cron", expr, tz }` shape. The protocol also defines
-saved-record DTOs for the future owner-enabled surface, but these types do not
-enable or mount automation routes. A catalog advertises only schedules
-supported by draft validation; its schedule kinds do not indicate that a
-schedule can be saved or run. The stateless validator accepts only the daily,
+`schedule: { kind: "cron", expr, tz }` shape. Saved automations can be enabled
+and run when the scheduler is available. The stateless validator accepts only the daily,
 weekdays, and Saturday cron forms advertised in the catalog. Names are limited
 to 80 JavaScript
 string code units; instructions to 16,384 UTF-8 bytes; notification rules to
@@ -341,30 +337,57 @@ and `POST /api/protected/v1/automations` saves a validated draft. Creation
 always starts paused; an `enabled` field is not accepted on create. `PATCH
 /api/protected/v1/automations/:id` accepts partial draft fields and the
 canonical optional `enabled` boolean, and requires the current `version` in
-`If-Match`. Stale versions return 412. Paused definitions can be edited; a
-request to enable an automation returns `503 scheduler_unavailable` without
-changing the record because no native Cron control bridge is wired yet. Thus
-`scheduleControl` remains false and no saved automation can run on a schedule.
+`If-Match`. Stale versions return 412. Paused definitions can be edited.
+Clients that negotiate `automation-runs-v1` can enable scheduling after the
+protected scheduler starts. Other clients cannot enable an automation.
 The existing per-profile and global storage budgets cover both operations.
 Creation charges the definition's stored UTF-8 bytes and the existing per-entry
 overhead. An edit charges only positive definition growth, so an edit that
-reduces storage can free budget. A quota refusal returns `413 quota_exceeded`
-before the state worker writes. The PATCH route is not a substitute scheduler.
+reduces storage can free budget. Enabling also reserves bounded run-metadata
+capacity. A quota refusal returns `413 quota_exceeded` before the state worker
+writes.
 
-When an administrator removes an admitted member, the removal transaction deletes
-that member's saved private, paused definitions and their sole-owner memberships.
-It leaves other members' definitions, shared or co-owned definitions, enabled
-definitions, and definitions with native job bindings intact. Access revocation
-and active-turn interruption do not wait for broader retirement work. Legacy
-stores without automation definitions still support removal. This save-only
-cleanup does not delete chats, files, profiles, or scheduler jobs.
+Member removal with automation history requires the storage-aware authority
+adapter in `admission-store.ts`. Fence and stop the target profile's writers,
+and settle enrolled automation publication before calling it. Supply the
+current admission revision and accounting profile; worker transaction and commit
+grants recheck current configured-owner authority and the writer fence. A changed
+target snapshot refuses removal rather than applying a fence for another profile.
+
+The same worker transaction revokes admission and deletes that member's private
+sole-owned definitions (paused or enabled), lifecycle records, sealed results,
+run-chat bindings, inbox entries, and memberships. Its committed receipt carries
+exact storage and definition retirements. Only then does the host settle quota
+and publish removal; uncertain outcomes stay with the shared recovery owner.
+Other members' storage is untouched.
+The same fenced adapter can retire leftovers for an already-removed admission
+using its current revision. That recovery keeps the member removed; it never
+grants member write permission or reactivates the account.
+
+Calls without retirement authority support only save-only drafts or legacy
+stores without retained automation data. Remaining shared, co-owned, or
+native-job-bound automation custody must first be retired or transferred by its
+existing owner; removal rolls back rather than leaving it orphaned. This
+transaction does not delete actual chats, files, profiles, or native scheduler
+jobs.
 
 The internal state owner stores automation definitions, owners, followers,
 visibility, the paused/enabled state, and native Cron job bindings in the
 shared-state worker. A binding ties one native job to the current central owner
 and definition revision. Reads and mutations require an active admission and
 private definitions are exposed only to their owners. Shared definitions,
-results, runs, account grants, and notifications are not exposed by HTTP.
+account grants, and notifications are not exposed by HTTP.
+Clients that send `X-Alcove-Capabilities: automation-results-v1` can read
+existing owner-private finished results at `GET /automations/:id/runs` and
+`GET /automations/:id/runs/:runId`. Foreign and unknown records return 404.
+These routes do not start runs or enable scheduling.
+Clients that also negotiate `automation-runs-v1` can enable and pause eligible
+automations, start a run with `POST /automations/:id/run`, inspect lifecycle
+history at `GET /automations/:id/run-history`, and read the owner's inbox at
+`GET /automations/inbox`. Runs use the owner's protected turn and one dedicated
+chat per automation. At most 50 runs and results per automation and 200 inbox
+entries per recipient are retained, oldest first. Push is not started; an inbox
+delivery that cannot fit remains pending for retry.
 The first release stores no Research Topics reference and does not give
 automation turns the Research Topics tool. Automation IDs are canonical
 lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines

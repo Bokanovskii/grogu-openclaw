@@ -14,6 +14,10 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
+import {
+  protectedAutomationResultHistoryFull,
+  protectedAutomationResultLifecycleCurrent,
+} from "./protected-automation-lifecycle-retention.js";
 import type { ProtectedAutomationResultWriteFacts } from "./protected-automation-results-admission.js";
 import {
   assertProtectedAutomationResultConnection,
@@ -28,7 +32,7 @@ import type {
 } from "./protected-automation-results.types.js";
 import { readProtectedAutomation } from "./protected-automations.js";
 
-type ResultDatabase = {
+export type ProtectedAutomationResultDatabase = {
   protected_automation_runs: {
     sequence: Generated<number>;
     id: string;
@@ -45,18 +49,18 @@ type ResultDatabase = {
   };
 };
 
-type RunRow = Selectable<ResultDatabase["protected_automation_runs"]>;
+type RunRow = Selectable<ProtectedAutomationResultDatabase["protected_automation_runs"]>;
 
 const ensureSchema = createOpenClawStateSchemaEnsurer({
   table: "protected_automation_runs",
-  indexes: ["idx_protected_automation_runs_owner"],
+  indexes: ["idx_protected_automation_runs_owner", "idx_protected_automation_runs_history"],
   endMarker:
     "  ON protected_automation_runs(central_owner_profile_id, automation_id, completed_at_ms DESC, sequence DESC);\n",
   operationLabel: "protected.automationResults.schema",
 });
 
 export function typedDatabase(db: DatabaseSync) {
-  return getNodeSqliteKysely<ResultDatabase>(db);
+  return getNodeSqliteKysely<ProtectedAutomationResultDatabase>(db);
 }
 
 // The row id is immutable, so it alone binds the sealed payload; owner and automation may change.
@@ -145,7 +149,7 @@ function matchesExisting(
 
 export type PrepareProtectedAutomationResultOutcome =
   | { status: "duplicate"; id: string; version: string }
-  | { status: "conflict" | "not-owner" }
+  | { status: "conflict" | "not-owner" | "retention-required" }
   | { status: "prepared"; input: ProtectedAutomationResultSealedWrite };
 
 export function prepareProtectedAutomationResult(
@@ -163,6 +167,14 @@ export function prepareProtectedAutomationResult(
     return matchesExisting(database.db, existing, input)
       ? { status: "duplicate", id: existing.id, version: existing.version }
       : { status: "conflict" };
+  }
+  // Lifecycle admission retires the oldest run and its result before publication.
+  // Legacy result-only callers must not grow storage while that owner is absent.
+  if (protectedAutomationResultHistoryFull(database, input)) {
+    return { status: "retention-required" };
+  }
+  if (!protectedAutomationResultLifecycleCurrent(database, input)) {
+    return { status: "conflict" };
   }
   const id = randomUUID();
   return {
@@ -225,6 +237,12 @@ export function commitProtectedAutomationResult(
           "Protected automation result already exists; reconcile its native identity.",
         );
       }
+      if (protectedAutomationResultHistoryFull(database, input)) {
+        throw new Error("Protected automation result retention must settle before publication.");
+      }
+      if (!protectedAutomationResultLifecycleCurrent(database, input)) {
+        throw new Error("Protected automation result run is no longer current.");
+      }
       openProtectedAutomationResultText(db, input.payload.value, payloadContext(input.id));
       const kysely = typedDatabase(db);
       executeSqliteQuerySync(
@@ -260,6 +278,7 @@ export function commitProtectedAutomationResult(
       ) {
         throw new Error("Protected automation run did not retain its prepared encrypted payload.");
       }
+
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts });
       const receipt: ProtectedAutomationResultCommitReceipt = {
         kind: "protected-automation-result-committed",

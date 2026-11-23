@@ -52,6 +52,8 @@ export const FIRST_USE_STATE_TABLES = [
   "protected_automation_owner_inbox",
   "protected_chat_shares",
   "protected_chat_share_grants",
+  "protected_automation_publications",
+  "protected_automation_subscriptions",
   "local_workspace_projections",
   "update_runs",
   "session_repository_workspaces",

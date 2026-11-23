@@ -30,7 +30,9 @@ function assertCurrent(
 
 export type StoredAutomationRecord = Omit<ProtectedAutomationRecord, "nextCheckAt">;
 
-function record(automation: ProtectedAutomationStorageRecord): StoredAutomationRecord {
+export function projectProtectedAutomationRecord(
+  automation: ProtectedAutomationStorageRecord,
+): StoredAutomationRecord {
   const thinking = automation.definition.thinking;
   if (!thinking) {
     throw new Error("Stored protected automation has no resolved thinking level.");
@@ -99,7 +101,7 @@ export async function listProtectedAutomationRecords(
   authority: ProtectedAutomationMutationAuthority,
 ): Promise<StoredAutomationRecord[]> {
   const records = await listOwnedProtectedAutomationStorageRecords(stateDir, authority);
-  return records.filter((automation) => automation.visibility === "private").map(record);
+  return records.map(projectProtectedAutomationRecord);
 }
 
 export async function readProtectedAutomationRecord(
@@ -108,8 +110,8 @@ export async function readProtectedAutomationRecord(
   authority: ProtectedAutomationMutationAuthority,
 ): Promise<StoredAutomationRecord | undefined> {
   const automation = await readAutomation(stateDir, input, authority);
-  return automation && automation.visibility === "private" && automation.relation === "owner"
-    ? record(automation)
+  return automation?.relation === "owner"
+    ? projectProtectedAutomationRecord(automation)
     : undefined;
 }
 
@@ -157,7 +159,7 @@ export async function createProtectedAutomationRecord(
   if (!created) {
     return undefined;
   }
-  return record(result.automation);
+  return projectProtectedAutomationRecord(result.automation);
 }
 
 export async function patchProtectedAutomationRecord(
@@ -198,7 +200,7 @@ export async function patchProtectedAutomationRecord(
       storage.settleAutomationPatch(currentStoredBytes, nextStoredBytes, false),
   });
   storage.assertResult();
-  return result.status === "updated" ? record(result.automation) : result;
+  return result.status === "updated" ? projectProtectedAutomationRecord(result.automation) : result;
 }
 
 export type SaveProtectedAutomationPatchResult =

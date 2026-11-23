@@ -3,15 +3,21 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { after, before, test } from "node:test";
+import { after, before, test, type TestContext } from "node:test";
 import { Value } from "typebox/value";
 import {
   ProtectedChatShareResponseSchema,
+  ProtectedPublicAutomationResponseSchema,
+  ProtectedPublicAutomationsResponseSchema,
   ProtectedShareClaimResponseSchema,
   ProtectedSharedChatResponseSchema,
   ProtectedSharedChatsResponseSchema,
 } from "../../packages/gateway-protocol/src/protected-sharing.js";
-import { ProtectedMeSchema } from "../../packages/gateway-protocol/src/protected.js";
+import {
+  ProtectedAutomationCatalogSchema,
+  ProtectedAutomationResponseSchema,
+  ProtectedMeSchema,
+} from "../../packages/gateway-protocol/src/protected.js";
 import { appendTranscriptMessage } from "../../src/config/sessions/session-accessor.js";
 import { closeSessionTranscriptReconcileWorkerPool } from "../../src/config/sessions/session-transcript-reconcile-pool.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
@@ -19,9 +25,18 @@ import { root } from "../../src/infra/fs-safe.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../src/state/openclaw-agent-db-lifecycle.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
+import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
-import { migrateProtectedSubjects } from "./admission-store.js";
+import {
+  listProtectedAdmissions,
+  migrateProtectedSubjects,
+  removeProtectedAdmission,
+} from "./admission-store.js";
 import { createProtectedAgentCatalog } from "./agents.js";
+import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
+import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
+import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
+import { readProtectedAutomationStorageUsage } from "./automations-store.js";
 import { measureProtectedStorage, storageEntryOverheadBytes } from "./capacity.js";
 import { chatArtifactsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
@@ -29,11 +44,18 @@ import { ProtectedError } from "./errors.js";
 import { readProtectedFeedbackStorageUsage } from "./feedback-store.js";
 import { createProtectedHttp } from "./http.js";
 import {
+  canMemberReadAutomation,
+  canMemberReadAutomationRun,
   canMemberReadChat,
   canMemberReadChatArtifact,
+  listAutomationRecipients,
   runProtectedSharing,
 } from "./sharing-store.js";
-import { prepareProtectedSharedState } from "./state-worker-context.js";
+import {
+  captureProtectedStateWorkerContext,
+  prepareProtectedSharedState,
+} from "./state-worker-context.js";
+import type { StoredDataRetirement } from "./storage-entry-quota.js";
 
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
 const originalStorageKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
@@ -62,20 +84,21 @@ after(async () => {
   }
 });
 
-void test("chat links grant live read-only access until revoked", async (t) => {
+const subjects = {
+  admin: "00000000-0000-4000-8000-000000000001",
+  owner: "00000000-0000-4000-8000-000000000002",
+  recipient: "00000000-0000-4000-8000-000000000003",
+  second: "00000000-0000-4000-8000-000000000004",
+  outsider: "00000000-0000-4000-8000-000000000005",
+  development: `service-token:${"d".repeat(32)}.access`,
+};
+type Member = keyof typeof subjects;
+
+async function createSharingFixture(t: TestContext) {
   const stateDir = path.resolve(".artifacts", `protected-sharing-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
   const issuer = "https://access.example";
-  const subjects = {
-    admin: "00000000-0000-4000-8000-000000000001",
-    owner: "00000000-0000-4000-8000-000000000002",
-    recipient: "00000000-0000-4000-8000-000000000003",
-    second: "00000000-0000-4000-8000-000000000004",
-    outsider: "00000000-0000-4000-8000-000000000005",
-    development: `service-token:${"d".repeat(32)}.access`,
-  };
-  type Member = keyof typeof subjects;
   const allowed = new Set<string>(Object.values(subjects));
   const expiresAt = Date.now() + 120_000;
   await prepareProtectedSharedState(stateDir, () => {});
@@ -204,6 +227,77 @@ void test("chat links grant live read-only access until revoked", async (t) => {
       body: { displayName: "Synthetic Owner" },
     }),
   );
+  const removeMember = async (member: Member) => {
+    const { people } = await ok(await call("admin", "/admin/people"));
+    const person = people.find((entry: { subject?: string }) => entry.subject === subjects[member]);
+    await ok(
+      await call("admin", `/admin/people/${person.id}/remove`, { method: "POST", body: {} }),
+    );
+  };
+  // Mirrors the service's measurement, so a limit squeezed from it admits nothing new.
+  const globalUsage = async () =>
+    (
+      await measureProtectedStorage(
+        {
+          chats,
+          usersRoot,
+          maxFileBytes: 4096,
+          encryption,
+          automationUsage: (profileId, assertCurrent) =>
+            readProtectedAutomationStorageUsage(stateDir, profileId, assertCurrent),
+          storedDataUsage: async (_profileId, assertCurrent) => [
+            ...(await readProtectedFeedbackStorageUsage(
+              stateDir,
+              storageEntryOverheadBytes,
+              assertCurrent,
+            )),
+            ...(await readProtectedAutomationResultStorageUsage(stateDir, assertCurrent)),
+            ...(await readProtectedAutomationLifecycleStorageUsage(stateDir, assertCurrent)),
+            ...(await runProtectedSharing(
+              stateDir,
+              "protectedSharing.storageUsage",
+              storageEntryOverheadBytes,
+              assertCurrent,
+            )),
+          ],
+        },
+        id("owner"),
+        () => {},
+        true,
+      )
+    ).globalBytes;
+  return {
+    app,
+    stateDir,
+    usersRoot,
+    encryption,
+    storageLimits,
+    globalUsage,
+    chats,
+    databasePath,
+    call,
+    ok,
+    errorCode,
+    id,
+    removeMember,
+  };
+}
+
+void test("chat links grant live read-only access until revoked", async (t) => {
+  const {
+    stateDir,
+    usersRoot,
+    encryption,
+    storageLimits,
+    globalUsage,
+    chats,
+    databasePath,
+    call,
+    ok,
+    errorCode,
+    id,
+    removeMember,
+  } = await createSharingFixture(t);
 
   const { chat } = await ok(await call("owner", "/chats", { method: "POST", body: {} }));
   const turn = async (text: string) => {
@@ -457,44 +551,9 @@ void test("chat links grant live read-only access until revoked", async (t) => {
       .share;
   };
   const firstPending = await pendingShare();
-  const globalUsage = async () =>
-    (
-      await measureProtectedStorage(
-        {
-          chats,
-          usersRoot,
-          maxFileBytes: 4096,
-          encryption,
-          storedDataUsage: async (_profileId, assertCurrent) => [
-            ...(await readProtectedFeedbackStorageUsage(
-              stateDir,
-              storageEntryOverheadBytes,
-              assertCurrent,
-            )),
-            ...(await runProtectedSharing(
-              stateDir,
-              "protectedSharing.storageUsage",
-              storageEntryOverheadBytes,
-              assertCurrent,
-            )),
-          ],
-        },
-        id("second"),
-        () => {},
-        true,
-      )
-    ).globalBytes;
   storageLimits.globalBytes = (await globalUsage()) + storageEntryOverheadBytes / 2;
   assert.equal((await claim("second", firstPending.id)).status, 413);
-  const { people } = await ok(await call("admin", "/admin/people"));
-  const personId = (name: Member) =>
-    people.find((person: { subject?: string }) => person.subject === subjects[name]).id;
-  await ok(
-    await call("admin", `/admin/people/${personId("recipient")}/remove`, {
-      method: "POST",
-      body: {},
-    }),
-  );
+  await removeMember("recipient");
   assert.deepEqual(countRows(), [2, 1]);
   assert.equal((await claim("second", nextShare.share.id)).status, 404);
   await ok(await call("second", `/shared/chats/${id("owner")}/${next.id}`));
@@ -505,9 +564,7 @@ void test("chat links grant live read-only access until revoked", async (t) => {
     },
   );
   storageLimits.globalBytes = 50_000_000;
-  await ok(
-    await call("admin", `/admin/people/${personId("owner")}/remove`, { method: "POST", body: {} }),
-  );
+  await removeMember("owner");
   assert.equal((await call("second", `/shared/chats/${id("owner")}/${next.id}`)).status, 404);
   assert.deepEqual(
     (await ok(await call("second", "/shared/chats"))).chats.map(
@@ -516,4 +573,458 @@ void test("chat links grant live read-only access until revoked", async (t) => {
     [id("outsider")],
   );
   assert.deepEqual(countRows(), [1, 1]);
+});
+
+void test("published automations are followed read-only until unpublished", async (t) => {
+  const {
+    stateDir,
+    storageLimits,
+    globalUsage,
+    databasePath,
+    call,
+    ok,
+    errorCode,
+    id,
+    removeMember,
+  } = await createSharingFixture(t);
+  const publicV1 = "sharing-v1, automations-public-v1";
+  const pub = (
+    member: Member,
+    pathname: string,
+    init: { method?: string; body?: object; headers?: Record<string, string> } = {},
+  ) => call(member, pathname, init, publicV1);
+  const legacyCatalog = await ok(await call("owner", "/automations/catalog"));
+  const { automation } = await ok(
+    await call("owner", "/automations", {
+      method: "POST",
+      body: {
+        name: "Synthetic public digest",
+        instructions: "Summarize synthetic updates.",
+        whenToNotify: "Only when useful.",
+        agentId: legacyCatalog.defaultAgentId,
+        model: { provider: "sparky", id: "synthetic" },
+        schedule: { kind: "every", everyMs: 60_000 },
+      },
+    }),
+    201,
+  );
+  const item = `/automations/${automation.id}`;
+
+  // Clients without automations-public-v1 keep the earlier contract.
+  for (const [pathname, method] of [
+    ["/automations/public", "GET"],
+    [`${item}/publication`, "PUT"],
+    [`${item}/follow`, "PUT"],
+    [`${item}/notifications`, "PUT"],
+  ] as const) {
+    const body = method === "PUT" ? { subscribed: true } : undefined;
+    assert.equal((await call("owner", pathname, { method, body })).status, 404, pathname);
+  }
+  const catalog = await ok(await pub("owner", "/automations/catalog"));
+  assert.ok(Value.Check(ProtectedAutomationCatalogSchema, catalog));
+  const { public: marker, ...automations } = catalog.capabilities.automations;
+  assert.deepEqual(marker, { publish: true, follow: true, notifications: true });
+  assert.deepEqual(
+    { ...catalog, capabilities: { ...catalog.capabilities, automations } },
+    {
+      ...legacyCatalog,
+    },
+  );
+  assert.deepEqual(
+    (await ok(await pub("development", "/automations/catalog"))).capabilities.automations.public,
+    { publish: false, follow: false, notifications: false },
+  );
+  const development = await pub("development", `${item}/publication`, { method: "PUT" });
+  assert.equal(development.status, 403);
+  assert.equal(await errorCode(development), "sharing_unavailable");
+  assert.equal((await ok(await pub("owner", item))).automation.publication, null);
+
+  // Only the owner publishes; following needs a publication.
+  assert.equal((await pub("recipient", `${item}/follow`, { method: "PUT" })).status, 404);
+  assert.equal((await pub("recipient", `${item}/publication`, { method: "PUT" })).status, 404);
+  const published = await ok(await pub("owner", `${item}/publication`, { method: "PUT" }));
+  assert.ok(Value.Check(ProtectedAutomationResponseSchema, published));
+  const publishedAt = published.automation.publication?.publishedAt;
+  assert.ok(publishedAt);
+  assert.deepEqual(published.automation.publication, { publishedAt, followers: 0 });
+  assert.deepEqual(
+    (await ok(await pub("owner", `${item}/publication`, { method: "PUT" }))).automation.publication,
+    { publishedAt, followers: 0 },
+  );
+  const { publication: _, ...legacyRecord } = published.automation;
+  assert.deepEqual((await ok(await call("owner", item))).automation, legacyRecord);
+  assert.deepEqual((await ok(await call("owner", "/automations"))).automations, [legacyRecord]);
+
+  const listed = await ok(await pub("recipient", "/automations/public"));
+  assert.ok(Value.Check(ProtectedPublicAutomationsResponseSchema, listed));
+  const expected = {
+    id: automation.id,
+    name: automation.name,
+    instructions: automation.instructions,
+    whenToNotify: automation.whenToNotify,
+    schedule: automation.schedule,
+    state: automation.state,
+    nextCheckAt: null,
+    owner: { personId: id("owner"), displayName: "Synthetic Owner" },
+    publishedAt,
+    followers: 0,
+    following: false,
+    subscribed: false,
+  };
+  assert.deepEqual(listed.automations, [expected]);
+  assert.deepEqual((await ok(await pub("owner", "/automations/public"))).automations, [expected]);
+
+  // Following starts unsubscribed; notifications are a follower opt-in.
+  const followed = await ok(await pub("recipient", `${item}/follow`, { method: "PUT" }));
+  assert.ok(Value.Check(ProtectedPublicAutomationResponseSchema, followed));
+  assert.deepEqual(followed.automation, { ...expected, followers: 1, following: true });
+  assert.equal((await pub("owner", `${item}/follow`, { method: "PUT" })).status, 404);
+  const invalidFollow = await pub("second", `${item}/follow`, {
+    method: "PUT",
+    body: { subscribed: "yes" },
+  });
+  assert.equal(invalidFollow.status, 400);
+  await ok(await pub("second", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
+  const subscribed = await ok(
+    await pub("recipient", `${item}/notifications`, { method: "PUT", body: { subscribed: true } }),
+  );
+  assert.deepEqual(subscribed.automation, {
+    ...expected,
+    followers: 2,
+    following: true,
+    subscribed: true,
+  });
+  assert.equal(
+    (
+      await pub("outsider", `${item}/notifications`, {
+        method: "PUT",
+        body: { subscribed: true },
+      })
+    ).status,
+    404,
+  );
+  assert.deepEqual((await ok(await pub("owner", item))).automation.publication, {
+    publishedAt,
+    followers: 2,
+  });
+  const recipients = () => listAutomationRecipients(stateDir, automation.id, () => {});
+  assert.deepEqual(await recipients(), {
+    ownerProfileId: id("owner"),
+    recipients: [id("owner"), id("second"), id("recipient")],
+  });
+  await ok(
+    await pub("recipient", `${item}/notifications`, { method: "PUT", body: { subscribed: false } }),
+  );
+  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("second")]);
+
+  // Followers read runs and results under the owner; owner routes stay owner-only.
+  const run = await commitProtectedAutomationFinishedResult(
+    stateDir,
+    {
+      automationId: automation.id,
+      definitionRevision: 1,
+      centralOwnerProfileId: id("owner"),
+      jobId: "synthetic-job",
+      runAtMs: 1_000,
+      runId: randomUUID(),
+      completedAtMs: 2_000,
+      automationName: automation.name,
+      privateFinalText: "Synthetic run result.",
+      transcript: { sessionKey: "synthetic-session-key", sessionId: randomUUID() },
+    },
+    {
+      profileId: id("owner"),
+      revalidate: async () => {},
+      assertCurrent: () => {},
+      enrollPublication: () => ({ finish: () => {} }),
+      reserveStorage: async () => ({ settle: () => {}, release: () => {} }),
+      retainUncertainCommit: () => {},
+    },
+  );
+  assert.equal(run.status, "created");
+  const runId = run.status === "created" ? run.id : "";
+  const member = (name: Member) => ({ profileId: id(name), assertCurrent() {} });
+  const access = (name: Member) => canMemberReadAutomation(stateDir, member(name), automation.id);
+  const runAccess = (name: Member, target = runId) =>
+    canMemberReadAutomationRun(stateDir, member(name), {
+      automationId: automation.id,
+      runId: target,
+    });
+  const asOwner = { ownerProfileId: id("owner"), relation: "owner" };
+  const asFollower = { ownerProfileId: id("owner"), relation: "follower" };
+  assert.deepEqual(await access("owner"), asOwner);
+  assert.deepEqual(await access("recipient"), asFollower);
+  assert.equal(await access("outsider"), undefined);
+  assert.deepEqual(await runAccess("recipient"), asFollower);
+  assert.equal(await runAccess("recipient", randomUUID()), undefined);
+  assert.equal(await runAccess("outsider"), undefined);
+  const results = "sharing-v1, automations-public-v1, automation-results-v1";
+  const runs = `${item}/runs`;
+  for (const pathname of [runs, `${runs}/${runId}`]) {
+    assert.deepEqual(
+      await ok(await call("recipient", pathname, {}, results)),
+      await ok(await call("owner", pathname, {}, "automation-results-v1")),
+    );
+  }
+  for (const [name, capabilities, pathname] of [
+    ["outsider", results, runs],
+    ["recipient", "sharing-v1, automation-results-v1", runs],
+    ["recipient", results, `${runs}/${randomUUID()}`],
+  ] as const) {
+    const denied = await call(name, pathname, {}, capabilities);
+    assert.equal(denied.status, 404, `${name} ${pathname}`);
+    assert.equal(await errorCode(denied), "not_found");
+  }
+  for (const [pathname, method, body] of [
+    [item, "GET", undefined],
+    [item, "PATCH", { name: "Taken" }],
+    [`${item}/publication`, "DELETE", undefined],
+  ] as const) {
+    const headers = { "if-match": legacyRecord.version };
+    assert.equal(
+      (await pub("recipient", pathname, { method, body, headers })).status,
+      404,
+      pathname,
+    );
+  }
+
+  // Owner edits keep the publication and its followers.
+  const renamed = await ok(
+    await pub("owner", item, {
+      method: "PATCH",
+      body: { name: "Renamed public digest" },
+      headers: { "if-match": legacyRecord.version },
+    }),
+  );
+  assert.deepEqual(renamed.automation.publication, { publishedAt, followers: 2 });
+  assert.equal(
+    (await ok(await pub("second", "/automations/public"))).automations[0].name,
+    "Renamed public digest",
+  );
+  const usage = await runProtectedSharing(
+    stateDir,
+    "protectedSharing.storageUsage",
+    4096,
+    () => {},
+  );
+  assert.deepEqual(
+    usage
+      .filter((entry) => entry.id.startsWith("automation-"))
+      .map((entry) => entry.profileId)
+      .toSorted(),
+    [id("owner"), id("recipient"), id("second")].toSorted(),
+  );
+
+  // Leaving stops access and notifications; unpublishing removes every follower.
+  await ok(await pub("second", `${item}/follow`, { method: "DELETE" }), 204);
+  assert.equal(await access("second"), undefined);
+  assert.deepEqual((await recipients())?.recipients, [id("owner")]);
+  assert.equal(
+    (await ok(await pub("second", "/automations/public"))).automations[0].following,
+    false,
+  );
+  const unpublished = await ok(await pub("owner", `${item}/publication`, { method: "DELETE" }));
+  assert.equal(unpublished.automation.publication, null);
+  assert.equal(await access("recipient"), undefined);
+  assert.equal(await runAccess("recipient"), undefined);
+  assert.equal((await call("recipient", runs, {}, results)).status, 404);
+  assert.deepEqual(await recipients(), { ownerProfileId: id("owner"), recipients: [id("owner")] });
+  assert.deepEqual((await ok(await pub("recipient", "/automations/public"))).automations, []);
+  const countRows = () => {
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      return [
+        "SELECT count(*) AS count FROM protected_automation_publications",
+        "SELECT count(*) AS count FROM protected_automation_subscriptions",
+        "SELECT count(*) AS count FROM protected_automation_members WHERE role = 'follower'",
+      ].map((query) => db.prepare(query).get()?.count);
+    } finally {
+      db.close();
+    }
+  };
+  assert.deepEqual(countRows(), [0, 0, 0]);
+
+  // Unpublishing and member removal retire exactly the ledger entries they delete.
+  // The ledger retires by entry identity; removal does not need the measured bytes.
+  const sorted = (entries: readonly { id: string; profileId: string }[]) =>
+    entries
+      .filter((entry) => entry.id.startsWith("automation-"))
+      .map((entry) => ({ id: entry.id, profileId: entry.profileId }))
+      .toSorted((a, b) => a.id.localeCompare(b.id));
+  const sharingEntries = async () =>
+    sorted(await runProtectedSharing(stateDir, "protectedSharing.storageUsage", 4096, () => {}));
+  await ok(await pub("owner", `${item}/publication`, { method: "PUT" }));
+  await ok(await pub("second", `${item}/follow`, { method: "PUT" }));
+  const charged = await sharingEntries();
+  assert.deepEqual(
+    charged.map((entry) => entry.profileId),
+    [id("second"), id("owner")],
+  );
+  const unpublishedEntries = await runProtectedSharing(
+    stateDir,
+    "protectedSharing.unpublishAutomation",
+    { profileId: id("owner"), automationId: automation.id, storageOverheadBytes: 4096 },
+    () => {},
+  );
+  assert.deepEqual(sorted(unpublishedEntries ?? []), charged);
+  assert.deepEqual(await sharingEntries(), []);
+
+  // Removing a follower or the owner from Alcove removes their access.
+  await ok(await pub("owner", `${item}/publication`, { method: "PUT" }));
+  await ok(await pub("second", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
+  await ok(await pub("outsider", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
+  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("second"), id("outsider")]);
+  storageLimits.globalBytes = (await globalUsage()) + storageEntryOverheadBytes / 2;
+  assert.equal((await pub("recipient", `${item}/follow`, { method: "PUT" })).status, 413);
+  await removeMember("second");
+  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("outsider")]);
+  await t.test("member removal immediately releases a removed follower's quota", async () => {
+    await ok(await pub("recipient", `${item}/follow`, { method: "PUT" }));
+  });
+  storageLimits.globalBytes = 50_000_000;
+  await ok(await pub("recipient", `${item}/follow`, { method: "DELETE" }), 204);
+  const exactEntries = async () =>
+    (
+      await runProtectedSharing(
+        stateDir,
+        "protectedSharing.storageUsage",
+        storageEntryOverheadBytes,
+        () => {},
+      )
+    )
+      .filter((entry) => entry.id.startsWith("automation-"))
+      .toSorted((a, b) => a.id.localeCompare(b.id));
+  const ownerEntries = await exactEntries();
+  assert.deepEqual(
+    ownerEntries.map((entry) => entry.profileId),
+    [id("outsider"), id("owner")],
+  );
+  const ownerAdmission = (await listProtectedAdmissions(stateDir)).find(
+    (entry) => entry.subject === subjects.owner,
+  );
+  assert.ok(ownerAdmission);
+  // The committed receipt carries the exact quota entries of the publication and its follows;
+  // the uncertain-commit recovery settles from the same receipt.
+  const retired: { id: string; profileId: string }[] = [];
+  const retiredChanges: StoredDataRetirement[] = [];
+  await removeProtectedAdmission(
+    stateDir,
+    { id: ownerAdmission.id, issuer: "https://access.example", ownerSubject: subjects.admin },
+    () => {},
+    (_subject, _profileId, _automations, changes) => retiredChanges.push(...changes),
+    () => {},
+    {
+      profileId: id("owner"),
+      admissionRevision: ownerAdmission.revision,
+      revalidate: async () => {},
+      assertWritersStopped: () => {},
+      enrollPublication: () => ({ finish: () => {} }),
+      retireStorage: (entries) => retired.push(...entries),
+      retainUncertainRemovalCommit: () => assert.fail("Removal should commit."),
+    },
+  );
+  assert.deepEqual(sorted(retired), []);
+  assert.deepEqual(
+    retiredChanges.toSorted((a, b) => a.removed.id.localeCompare(b.removed.id)),
+    ownerEntries.map((removed) => ({ removed })),
+  );
+  assert.equal(await access("outsider"), undefined);
+  assert.equal(await recipients(), undefined);
+  assert.deepEqual((await ok(await pub("outsider", "/automations/public"))).automations, []);
+  assert.deepEqual(countRows(), [0, 0, 0]);
+});
+
+void test("deleting a published automation unpublishes it and removes its followers", async (t) => {
+  const { app, stateDir, databasePath, call, ok, id } = await createSharingFixture(t);
+  const capabilities = "sharing-v1, automations-public-v1, automation-delete-v1";
+  const pub = (
+    member: Member,
+    pathname: string,
+    init: { method?: string; body?: object; headers?: Record<string, string> } = {},
+  ) => call(member, pathname, init, capabilities);
+  const catalog = await ok(await pub("owner", "/automations/catalog"));
+  const { automation } = await ok(
+    await pub("owner", "/automations", {
+      method: "POST",
+      body: {
+        name: "Synthetic doomed digest",
+        instructions: "Summarize synthetic updates.",
+        whenToNotify: "Only when useful.",
+        agentId: catalog.defaultAgentId,
+        model: { provider: "sparky", id: "synthetic" },
+        schedule: { kind: "every", everyMs: 3_600_000 },
+      },
+    }),
+    201,
+  );
+  const item = `/automations/${automation.id}`;
+  const { version } = (await ok(await pub("owner", `${item}/publication`, { method: "PUT" })))
+    .automation;
+  await ok(await pub("recipient", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
+  const member = (name: Member) => ({ profileId: id(name), assertCurrent() {} });
+  assert.deepEqual(await listAutomationRecipients(stateDir, automation.id, () => {}), {
+    ownerProfileId: id("owner"),
+    recipients: [id("owner"), id("recipient")],
+  });
+  await app.startAutomations(() => {});
+
+  // The deletion plan retires the publication and follow ledger entries with the definition.
+  const sorted = (entries: readonly { id: string; profileId: string }[]) =>
+    entries
+      .filter((entry) => entry.id.startsWith("automation-"))
+      .map((entry) => ({ id: entry.id, profileId: entry.profileId }))
+      .toSorted((a, b) => a.id.localeCompare(b.id));
+  const charged = sorted(
+    await runProtectedSharing(stateDir, "protectedSharing.storageUsage", 4096, () => {}),
+  );
+  assert.deepEqual(
+    charged.map((entry) => entry.profileId),
+    [id("recipient"), id("owner")],
+  );
+  const plan = await runOpenClawStateWorkerOperation(
+    captureProtectedStateWorkerContext(stateDir),
+    (scope) =>
+      scope.execute({
+        type: "protectedAutomationLifecycle.prepare",
+        input: {
+          command: {
+            kind: "remove",
+            profileId: id("owner"),
+            automationId: automation.id,
+            expectedRevision: Number(version),
+          },
+          entryOverheadBytes: 4096,
+        },
+      }),
+  );
+  assert.equal(plan.status, "prepared");
+  assert.deepEqual(sorted(plan.status === "prepared" ? plan.write.retired : []), charged);
+
+  const remove = (name: Member) =>
+    pub(name, item, { method: "DELETE", headers: { "if-match": version } });
+  assert.equal((await remove("recipient")).status, 404);
+  await ok(await remove("owner"), 204);
+  assert.equal(
+    await canMemberReadAutomation(stateDir, member("recipient"), automation.id),
+    undefined,
+  );
+  assert.equal(await listAutomationRecipients(stateDir, automation.id, () => {}), undefined);
+  assert.deepEqual((await ok(await pub("recipient", "/automations/public"))).automations, []);
+  assert.deepEqual(
+    await runProtectedSharing(stateDir, "protectedSharing.storageUsage", 4096, () => {}),
+    [],
+  );
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.deepEqual(
+      [
+        "SELECT count(*) AS count FROM protected_automation_publications",
+        "SELECT count(*) AS count FROM protected_automation_subscriptions",
+        "SELECT count(*) AS count FROM protected_automation_members",
+      ].map((query) => db.prepare(query).get()?.count),
+      [0, 0, 0],
+    );
+  } finally {
+    db.close();
+  }
 });

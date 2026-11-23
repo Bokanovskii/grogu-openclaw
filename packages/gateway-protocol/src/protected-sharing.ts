@@ -1,5 +1,10 @@
 import { Type, type Static } from "typebox";
-import { ProtectedChatSchema } from "./protected.js";
+import { Value } from "typebox/value";
+import {
+  ProtectedAutomationRecordSchema,
+  ProtectedChatSchema,
+  type ProtectedAutomationRecord,
+} from "./protected.js";
 
 // sharing-v1 shapes are sent only to requests that list that capability.
 const id = Type.String({ minLength: 1, maxLength: 256 });
@@ -35,6 +40,33 @@ export const ProtectedSharedChatResponseSchema = node({
   chat: ProtectedChatSchema,
   owner: ProtectedSharePersonSchema,
 });
+// automations-public-v1 shapes. Owners see a follower count, never follower identities.
+const automation = ProtectedAutomationRecordSchema.properties;
+export const ProtectedPublicAutomationSchema = node({
+  id: automation.id,
+  name: automation.name,
+  instructions: automation.instructions,
+  whenToNotify: automation.whenToNotify,
+  doneWhen: automation.doneWhen,
+  schedule: automation.schedule,
+  state: automation.state,
+  nextCheckAt: automation.nextCheckAt,
+  owner: ProtectedSharePersonSchema,
+  publishedAt: Type.Integer({ minimum: 0 }),
+  followers: Type.Integer({ minimum: 0 }),
+  following: Type.Boolean(),
+  subscribed: Type.Boolean(),
+});
+export const ProtectedPublicAutomationsResponseSchema = node({
+  automations: Type.Array(ProtectedPublicAutomationSchema),
+});
+export const ProtectedPublicAutomationResponseSchema = node({
+  automation: ProtectedPublicAutomationSchema,
+});
+export const ProtectedAutomationFollowRequestSchema = node({
+  subscribed: Type.Optional(Type.Boolean()),
+});
+export const ProtectedAutomationNotificationsRequestSchema = node({ subscribed: Type.Boolean() });
 export type ProtectedSharePerson = Static<typeof ProtectedSharePersonSchema>;
 export type ProtectedChatShare = Static<typeof ProtectedChatShareSchema>;
 export type ProtectedChatShareResponse = Static<typeof ProtectedChatShareResponseSchema>;
@@ -42,3 +74,25 @@ export type ProtectedSharedChatSummary = Static<typeof ProtectedSharedChatSummar
 export type ProtectedShareClaimResponse = Static<typeof ProtectedShareClaimResponseSchema>;
 export type ProtectedSharedChatsResponse = Static<typeof ProtectedSharedChatsResponseSchema>;
 export type ProtectedSharedChatResponse = Static<typeof ProtectedSharedChatResponseSchema>;
+export type ProtectedAutomationPublication = NonNullable<ProtectedAutomationRecord["publication"]>;
+export type ProtectedPublicAutomation = Static<typeof ProtectedPublicAutomationSchema>;
+export type ProtectedPublicAutomationsResponse = Static<
+  typeof ProtectedPublicAutomationsResponseSchema
+>;
+export type ProtectedPublicAutomationResponse = Static<
+  typeof ProtectedPublicAutomationResponseSchema
+>;
+export type ProtectedAutomationFollowRequest = Static<
+  typeof ProtectedAutomationFollowRequestSchema
+>;
+export type ProtectedAutomationNotificationsRequest = Static<
+  typeof ProtectedAutomationNotificationsRequestSchema
+>;
+export const isProtectedAutomationFollowRequest = (
+  value: unknown,
+): value is ProtectedAutomationFollowRequest =>
+  Value.Check(ProtectedAutomationFollowRequestSchema, value);
+export const isProtectedAutomationNotificationsRequest = (
+  value: unknown,
+): value is ProtectedAutomationNotificationsRequest =>
+  Value.Check(ProtectedAutomationNotificationsRequestSchema, value);

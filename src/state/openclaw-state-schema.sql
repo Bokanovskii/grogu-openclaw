@@ -3006,6 +3006,22 @@ CREATE TABLE IF NOT EXISTS protected_chat_share_grants (
 CREATE INDEX IF NOT EXISTS idx_protected_chat_share_grants_recipient
   ON protected_chat_share_grants(recipient_profile_id, granted_at DESC);
 
+-- Visibility 'shared' is the canonical published flag; this row records when, and is written
+-- with it. Follows are protected_automation_members rows; subscriptions are follower opt-ins.
+CREATE TABLE IF NOT EXISTS protected_automation_publications (
+  automation_id TEXT NOT NULL PRIMARY KEY
+    REFERENCES protected_automations(id) ON DELETE CASCADE,
+  published_at INTEGER NOT NULL CHECK (published_at >= 0)
+) STRICT;
+CREATE TABLE IF NOT EXISTS protected_automation_subscriptions (
+  automation_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  subscribed_at INTEGER NOT NULL CHECK (subscribed_at >= 0),
+  PRIMARY KEY (automation_id, profile_id),
+  FOREIGN KEY (automation_id, profile_id)
+    REFERENCES protected_automation_members(automation_id, profile_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,

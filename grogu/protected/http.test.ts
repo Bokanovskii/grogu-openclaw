@@ -2239,6 +2239,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "gpt-5.3-codex",
                   name: "Default",
                   object: "model",
+                  vendor: "OpenAI",
                   model_picker_enabled: true,
                   capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
                 },
@@ -2246,10 +2247,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "gpt-5.4",
                   name: "Second model",
                   object: "model",
+                  vendor: " OpenAI ",
                   model_picker_enabled: true,
                   capabilities: {
                     type: "chat",
-                    limits: { max_context_window_tokens: 64000 },
+                    limits: { max_context_window_tokens: 1_000_000 },
                     supports: { reasoning_effort: ["low", "high"] },
                   },
                 },
@@ -2257,6 +2259,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "no-reasoning",
                   name: "No reasoning",
                   object: "model",
+                  vendor: "   ",
                   model_picker_enabled: true,
                   capabilities: { type: "chat", supports: { reasoning_effort: [] } },
                 },
@@ -3923,10 +3926,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
 
   const { chat: interrupted } = await (await call("/chats", { method: "POST", body: "{}" })).json();
   const route = `/chats/${interrupted.id}`;
-  const copilotModels = () =>
+  const copilotModels = (capability?: string) =>
     call("/providers/github-copilot/models", {
       method: "POST",
-      headers: { "x-grogu-profile": user.id },
+      headers: {
+        "x-grogu-profile": user.id,
+        ...(capability ? { "x-alcove-capabilities": capability } : {}),
+      },
       body: JSON.stringify({ credential: { accessToken: githubToken } }),
     });
   const copilotTurn = (thinking: string) =>
@@ -3942,14 +3948,18 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       }),
     });
   await t.test("lists the account's visible Copilot models", async () => {
-    const listing = await copilotModels();
+    const listing = await copilotModels("model-vendor-v1");
     assert.equal(listing.status, 200);
+    assert.equal(listing.headers.get("vary"), "X-Alcove-Capabilities");
     const { models } = await listing.json();
     assert.deepEqual(
       models.map((model: { id: string }) => model.id),
       ["gpt-5.3-codex", "gpt-5.4", "no-reasoning"],
     );
-    assert.equal(models[1].contextWindow, 64000);
+    assert.equal(models[0].vendor, "OpenAI");
+    assert.equal(models[1].vendor, "OpenAI");
+    assert.equal(models[1].contextWindow, 1_000_000);
+    assert.equal(models[2].vendor, undefined);
     assert.ok(models[1].thinking.levels.includes("high"));
     assert.ok(!models[1].thinking.levels.includes("max"));
     assert.deepEqual(models[1].thinking.nativeChoices, [
@@ -3961,6 +3971,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.deepEqual(models[2].thinking.nativeChoices, []);
     assert.deepEqual(models[2].thinking.orchestrationLevels, ["ultra"]);
     assert.equal(models[2].thinking.default, "off");
+    const legacy = await copilotModels();
+    assert.equal(legacy.headers.get("vary"), "X-Alcove-Capabilities");
+    const legacyModels = (await legacy.json()).models;
+    assert.ok(legacyModels.every((model: { vendor?: string }) => model.vendor === undefined));
+    const unknownCapability = await copilotModels("model-vendor-v10");
+    const unknownModels = (await unknownCapability.json()).models;
+    assert.ok(unknownModels.every((model: { vendor?: string }) => model.vendor === undefined));
   });
   await t.test("unbound legacy credentials still follow the ambient tenant", async () => {
     const before = providerRequests.length;

@@ -296,7 +296,10 @@ or configuration from personal Grogu.
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
 levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
-available to that account. The token is used for that request only. Turns may
+available to that account. Clients can request the optional account-reported
+`vendor` on models with `X-Alcove-Capabilities: model-vendor-v1`; an absent
+vendor is unknown. A model's `contextWindow` is its reported maximum, not a
+separate context-tier selection. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.

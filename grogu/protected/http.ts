@@ -1731,11 +1731,15 @@ export function createProtectedHttp(options: {
         if (!isProtectedRenew(data)) {
           return invalid();
         }
-        const models = await fetchProtectedCopilotModels(data.credential, {
-          signal: request.signal,
-          revalidate,
-        });
-        return json({ models: models.map(({ model }) => model) });
+        const models = await fetchProtectedCopilotModels(
+          data.credential,
+          {
+            signal: request.signal,
+            revalidate,
+          },
+          { includeVendor: hasClientCapability(request.headers, "model-vendor-v1") },
+        );
+        return profileJson({ models: models.map(({ model }) => model) });
       }
       if (connection && (method === "POST" || method === "DELETE")) {
         requireProfile();

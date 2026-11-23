@@ -1,4 +1,9 @@
 import {
+  describeLostSuggestions,
+  readAuthenticatedSessionSuggestions,
+} from "../config/sessions/legacy-main-session-migration-claims.js";
+import { acquireLegacySessionDestinationCustody } from "../config/sessions/legacy-main-session-migration-durability.js";
+import {
   applySessionEntryLifecycleMutation,
   copySessionOwnedStateForCanonicalRepair,
   ensureTranscriptGenerationsForCanonicalRepair,
@@ -19,6 +24,7 @@ import { collectSessionStateIdsForEntry } from "../config/sessions/session-acces
 import { resolveSqliteTranscriptArchiveDirectory } from "../config/sessions/session-accessor.sqlite-scope.js";
 import { setCanonicalSqliteSessionMainKey } from "../config/sessions/session-canonical-key.js";
 import { preserveCreationStamp } from "../config/sessions/session-entry-provenance.js";
+import type { SessionStoreTarget } from "../config/sessions/targets-collision.js";
 import { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
 import { serializeJsonlLines } from "../config/sessions/transcript-jsonl.js";
 import type { SessionEntry } from "../config/sessions/types.js";
@@ -27,10 +33,12 @@ import {
   projectExistingAgentDatabaseTargets,
   resolveTargetSqliteOptions,
 } from "../infra/session-sqlite-migration-readers.js";
+import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import {
   openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import { hasSqliteStorageValueEncryption } from "../storage/sqlite-encryption.js";
 import {
   collectCanonicalSessionRepairGroups,
   resolveCanonicalSessionDestination,
@@ -362,6 +370,58 @@ async function repairCanonicalSessionGroupsInSingleDatabase(
   return result.archivedTranscriptDirectories;
 }
 
+/**
+ * Holds destination custody over a protected cross-store copy so the winner's source rows are
+ * removed only after the copy is durable and preserves every authenticated source suggestion.
+ */
+function acquireProtectedWinnerRetirement(params: {
+  destination: SessionStoreTarget;
+  env: NodeJS.ProcessEnv;
+  winner: CanonicalSessionCandidate;
+}): { release(): void; verifySource(source: OpenClawAgentDatabase): void } | undefined {
+  const writer = openOpenClawAgentDatabase(
+    resolveTargetSqliteOptions(params.destination, params.env),
+  );
+  const source = openOpenClawAgentDatabase(resolveTargetSqliteOptions(params.winner, params.env));
+  if (!hasSqliteStorageValueEncryption(writer.db) && !hasSqliteStorageValueEncryption(source.db)) {
+    return undefined;
+  }
+  const { canonicalKey, sessionKey } = params.winner;
+  const changed = () =>
+    new Error(`Canonical session changed before source removal: ${canonicalKey}`);
+  const custody = acquireLegacySessionDestinationCustody({
+    writer,
+    canonicalKey,
+    durable: true,
+    changed,
+  });
+  try {
+    // The held lock freezes the destination, so this read covers the source removal commit.
+    const destination = runSqliteDeferredTransactionSync(writer.db, () =>
+      readAuthenticatedSessionSuggestions(writer, canonicalKey),
+    );
+    return {
+      release: () => custody.release(),
+      verifySource: (database) => {
+        custody.assertHeld();
+        const lost = describeLostSuggestions({
+          canonicalKey,
+          destination,
+          sources: readAuthenticatedSessionSuggestions(database, sessionKey),
+        });
+        if (lost) {
+          throw new Error(
+            `Cannot remove ${sessionKey} after canonical repair: ${lost}; source data was not deleted.`,
+          );
+        }
+      },
+    };
+  } catch (error) {
+    custody.release();
+    throw error;
+  }
+}
+
 async function repairCanonicalSessionGroup(
   candidates: readonly CanonicalSessionCandidate[],
   params: { cfg: OpenClawConfig; env: NodeJS.ProcessEnv },
@@ -475,19 +535,30 @@ async function repairCanonicalSessionGroup(
       continue;
     }
     const storeCandidate = storeCandidates[0]!;
-    const result = await applySessionEntryLifecycleMutation({
-      agentId: storeCandidate.agentId,
-      allowCanonicalRepair: true,
-      removals: storeCandidates.map((candidate) =>
-        createCanonicalRepairRemoval(candidate, {
-          archiveRemovedTranscript: true,
-          deleteOwnedWindows: true,
-          deliveryCleanupKeys: [winner.canonicalKey],
-        }),
-      ),
-      skipMaintenance: true,
-      storePath: storeCandidate.storePath,
-    });
+    const retirement =
+      sqlitePath === winner.sqlitePath
+        ? acquireProtectedWinnerRetirement({ destination, env: params.env, winner })
+        : undefined;
+    let result: Awaited<ReturnType<typeof applySessionEntryLifecycleMutation>>;
+    try {
+      result = await applySessionEntryLifecycleMutation({
+        agentId: storeCandidate.agentId,
+        allowCanonicalRepair: true,
+        // Runs in the removal transaction, so the verified source rows are the rows removed.
+        ...(retirement ? { afterUpsertsInTransaction: retirement.verifySource } : {}),
+        removals: storeCandidates.map((candidate) =>
+          createCanonicalRepairRemoval(candidate, {
+            archiveRemovedTranscript: true,
+            deleteOwnedWindows: true,
+            deliveryCleanupKeys: [winner.canonicalKey],
+          }),
+        ),
+        skipMaintenance: true,
+        storePath: storeCandidate.storePath,
+      });
+    } finally {
+      retirement?.release();
+    }
     // Only the selected winner is copied. Stale loser data survives solely in its
     // verified archive, avoiding an ambiguous cross-store merge contract.
     for (const directory of result.archivedTranscriptDirectories) {

@@ -247,32 +247,39 @@ function authenticateSuggestion<Row extends Parameters<typeof openSessionSuggest
 }
 
 /**
- * Reads authenticated suggestion plaintext in the snapshot that matches the claim's fenced artifact
- * fingerprint. Each row opens under its own store key and session-key context.
+ * Reads one session's suggestions as authenticated plaintext, each opened under its own store key
+ * and session-key context. Callers own the snapshot or transaction that fences the read.
  */
+export function readAuthenticatedSessionSuggestions(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  key: string,
+): LegacySessionSuggestionRow[] {
+  const present = database.db
+    .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_suggestions'")
+    .get();
+  return present
+    ? executeSqliteQuerySync(
+        database.db,
+        getSessionKysely(database.db)
+          .selectFrom("session_suggestions")
+          .selectAll()
+          .where("session_key", "=", key)
+          .orderBy("id"),
+      ).rows.map((row) => authenticateSuggestion(database, row))
+    : [];
+}
+
+/** Reads authenticated suggestions in the snapshot that matches the claim's fenced fingerprint. */
 export function readClaimSuggestions(
   database: Pick<OpenClawAgentDatabase, "db">,
   key: string,
   expectedNodeArtifactFingerprint: string,
 ): LegacySessionSuggestionRow[] | undefined {
-  return runSqliteDeferredTransactionSync(database.db, () => {
-    if (readSessionNodeArtifactFingerprint(database, key) !== expectedNodeArtifactFingerprint) {
-      return undefined;
-    }
-    const present = database.db
-      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_suggestions'")
-      .get();
-    return present
-      ? executeSqliteQuerySync(
-          database.db,
-          getSessionKysely(database.db)
-            .selectFrom("session_suggestions")
-            .selectAll()
-            .where("session_key", "=", key)
-            .orderBy("id"),
-        ).rows.map((row) => authenticateSuggestion(database, row))
-      : [];
-  });
+  return runSqliteDeferredTransactionSync(database.db, () =>
+    readSessionNodeArtifactFingerprint(database, key) === expectedNodeArtifactFingerprint
+      ? readAuthenticatedSessionSuggestions(database, key)
+      : undefined,
+  );
 }
 
 /**
@@ -331,11 +338,24 @@ export function verifyCopiedSuggestions(
   if (!destination || sources.some((rows) => !rows)) {
     throw changed();
   }
-  const { differing, extra, missing } = compareCopiedSuggestions({
+  return describeLostSuggestions({
     canonicalKey: params.canonicalKey,
     destination,
     sameRow,
     sources: sources.flatMap((rows) => rows ?? []),
+  });
+}
+
+/** Names source suggestions the destination does not preserve, or undefined when none are lost. */
+export function describeLostSuggestions(params: {
+  canonicalKey: string;
+  destination: readonly LegacySessionSuggestionRow[];
+  sameRow?: LegacySessionSuggestionComparator;
+  sources: readonly LegacySessionSuggestionRow[];
+}): string | undefined {
+  const { differing, extra, missing } = compareCopiedSuggestions({
+    ...params,
+    sameRow: params.sameRow ?? authenticatedSuggestionsMatch,
   });
   const list = (ids: string[]) => ids.join(", ") || "none";
   return missing.length > 0 || differing.length > 0

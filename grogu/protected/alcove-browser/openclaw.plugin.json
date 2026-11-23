@@ -1,0 +1,13 @@
+{
+  "id": "alcove-browser",
+  "name": "Alcove Browser",
+  "description": "Read-only tools for a fresh private browser session bound to one interactive member chat.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "contracts": {
+    "tools": ["browser_open", "browser_snapshot", "browser_follow_link", "browser_back"]
+  }
+}

@@ -784,6 +784,37 @@ session generation still match. Run this cleanup before rolling back to an
 older service version, which does not recognize the transient-child
 classification.
 
+### Private browser
+
+The browser is off by default. Set `"browser": "fresh"` in `protected.json` to
+give interactive member turns four read-only tools: `browser_open`,
+`browser_snapshot`, `browser_follow_link`, and `browser_back`. Each turn gets a new,
+empty headless Chromium context that the turn closes when it ends. No cookies,
+storage, or history survive the turn or are shared between members or chats.
+
+Automation runs, protected automation runs, authoring turns, and routed or
+mentioned children never get the tools. The gate uses server-owned turn
+context, not client input, and missing context means no browser.
+
+Chromium reaches the web only through a loopback proxy that requires a
+per-session secret, allows ports 80 and 443 only, and pins each connection to
+an address checked by core SSRF policy, so loopback, private, link-local, and
+metadata addresses are refused. Only http and https URLs without embedded
+credentials open. Downloads, service workers, popups, permissions, dialogs,
+and raw Chrome DevTools access are unavailable. Snapshots are bounded, have
+every form field value removed, and reach the model as untrusted external
+content. At most four browser sessions run at once, and Chromium exits
+after a minute without sessions. Page text and frames are not logged. A listener restart
+closes every browser.
+
+The agent cannot type into pages, sign in, or ask the member to take control.
+Sites that need a password, one-time code, or passkey are unsupported. There
+is no persistent or owner profile in this version.
+
+Prerequisite: install Chromium as the service account with
+`npx playwright-core install chromium` (about 150 MB). If Chromium is missing,
+browser tools report that the page could not be loaded and the turn continues.
+
 ## Verification and release gates
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and

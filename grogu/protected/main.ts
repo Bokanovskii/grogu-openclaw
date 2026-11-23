@@ -6,6 +6,7 @@ import {
   verifyAuthorizedUserFiles,
 } from "../../src/infra/authorized-user-files.js";
 import { protectedResearchAgent } from "./agents.js";
+import { createProtectedBrowserBroker } from "./browser/broker.js";
 import { publicError } from "./errors.js";
 import { configureProtectedRuntimeWorkers, ProtectedWorkerBuildError } from "./runtime-workers.js";
 import {
@@ -203,6 +204,7 @@ async function main() {
     }),
   );
   const memberMemory = createProtectedMemberMemory();
+  const browser = settings.browser === "fresh" ? createProtectedBrowserBroker() : undefined;
   const app = createProtectedHttp({
     origin,
     stateDir,
@@ -236,6 +238,7 @@ async function main() {
       workspaceDir,
       agentDir,
       memberMemory,
+      ...(browser ? { browser } : {}),
       models,
       resolveSparkyKey: () => resolveSecretRefString(sparkySecret, { config }),
     }),
@@ -270,7 +273,11 @@ async function main() {
       server,
       {
         shutdown: async () => {
-          await Promise.all([app.shutdown(), retention.stop(), policySync.stop()]);
+          await Promise.all([
+            app.shutdown().finally(() => browser?.shutdown()),
+            retention.stop(),
+            policySync.stop(),
+          ]);
         },
       },
       stateDir,

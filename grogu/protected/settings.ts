@@ -59,7 +59,7 @@ export function parseRuntimeSettings(value: unknown) {
   if (!isRecord(value)) {
     throw new Error("Invalid protected runtime settings");
   }
-  const { stateDir, allowedSubjects, sparkySecret, ownerSubject } = value;
+  const { stateDir, allowedSubjects, sparkySecret, ownerSubject, browser } = value;
   const testClientId =
     value.testClientId === undefined ||
     (typeof value.testClientId === "string" && testClientIdPattern.test(value.testClientId))
@@ -78,6 +78,7 @@ export function parseRuntimeSettings(value: unknown) {
       (subject): subject is string => typeof subject === "string" && subjectPattern.test(subject),
     ) ||
     testClientId === null ||
+    (browser !== undefined && browser !== "fresh") ||
     !isRecord(sparkySecret) ||
     sparkySecret.source !== sparkyRef.source ||
     sparkySecret.provider !== sparkyRef.provider ||
@@ -96,6 +97,7 @@ export function parseRuntimeSettings(value: unknown) {
     allowedSubjects,
     ...(ownerSubject === undefined ? {} : { ownerSubject }),
     ...(testClientId === undefined ? {} : { testClientId }),
+    ...(browser === "fresh" ? { browser } : {}),
     sparkySecret: sparkyRef,
     storageLimits: {
       userBytes: limits.userBytes,
@@ -107,6 +109,7 @@ export function parseRuntimeSettings(value: unknown) {
 
 export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): OpenClawConfig {
   const automationsChatPluginPath = fileURLToPath(new URL("./automations-chat", import.meta.url));
+  const browserPluginPath = fileURLToPath(new URL("./alcove-browser", import.meta.url));
   return {
     // Keyless public search only; the plugin is shipped as source because it has no bundled dist.
     // The provider cache is process-wide, so a hit would reveal another member's identical query.
@@ -127,6 +130,7 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
     plugins: {
       allow: [
         "alcove-automations-chat",
+        "alcove-browser",
         "anthropic",
         "duckduckgo",
         "github-copilot",
@@ -137,11 +141,13 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
         paths: [
           path.join(serviceRoot, "extensions", "duckduckgo"),
           automationsChatPluginPath,
+          browserPluginPath,
           path.join(serviceRoot, "extensions", "memory-core"),
         ],
       },
       entries: {
         "alcove-automations-chat": { enabled: true },
+        "alcove-browser": { enabled: true },
         anthropic: { enabled: true },
         duckduckgo: { enabled: true },
         "github-copilot": { enabled: true },

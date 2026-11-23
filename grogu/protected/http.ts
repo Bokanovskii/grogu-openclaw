@@ -976,6 +976,9 @@ export function createProtectedHttp(options: {
         const currentEntry = await chats.readEntry(authority, id);
         assertRunChatWritable(currentEntry, context.automationId);
         const authoring = await admitAuthoringTurn(currentEntry);
+        // Only interactive member turns get a browser; any automation run or run chat fails closed.
+        const browserEligible =
+          context.automationId === undefined && currentEntry.protectedAutomationRunId === undefined;
         const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
         const selectedAgent = agentCatalog.get(selectedAgentId);
         if (!selectedAgent) {
@@ -1015,6 +1018,7 @@ export function createProtectedHttp(options: {
         return {
           run,
           authoring,
+          browserEligible,
           selectedAgent,
           mentionedAgents,
           storage,
@@ -1033,6 +1037,7 @@ export function createProtectedHttp(options: {
     const {
       run,
       authoring,
+      browserEligible,
       selectedAgent,
       mentionedAgents,
       storage,
@@ -1251,6 +1256,7 @@ export function createProtectedHttp(options: {
                     },
                     input,
                     ...(automationChat ? { automationChat } : {}),
+                    ...(browserEligible && !authoring ? { browserAccess: "fresh" as const } : {}),
                     mentionedAgents,
                     agent: selectedAgent,
                     ...(authoring ? {} : { routing: agentRouting }),

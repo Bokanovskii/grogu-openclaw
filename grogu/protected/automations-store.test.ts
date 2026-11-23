@@ -349,6 +349,49 @@ void test("protected automation records are private, bound to revisions, and sur
   );
   assert.equal(child.status, 0, child.stderr);
   assert.equal(JSON.parse(child.stdout).id, created.automation.id);
+
+  const isolated = await createProtectedAutomationWithAdmission(
+    context(),
+    {
+      profileId: ownerProfileId,
+      definition: { ...definition, contextAccess: "isolated" },
+      now: Date.now(),
+    },
+    authority(ownerProfileId),
+  );
+  assert.equal(isolated.status, "created");
+  if (isolated.status !== "created") {
+    return;
+  }
+  const edited = await patchProtectedAutomationWithAdmission(
+    context(),
+    {
+      profileId: ownerProfileId,
+      automationId: isolated.automation.id,
+      expectedRevision: 1,
+      definition: { ...definition, name: "Edited isolated automation" },
+      now: Date.now(),
+    },
+    authority(ownerProfileId),
+  );
+  assert.equal(edited.status, "updated");
+  if (edited.status === "updated") {
+    assert.equal(edited.automation.definition.contextAccess, "isolated");
+  }
+  await assert.rejects(
+    patchProtectedAutomationWithAdmission(
+      context(),
+      {
+        profileId: ownerProfileId,
+        automationId: isolated.automation.id,
+        expectedRevision: 2,
+        definition: { ...definition, contextAccess: "member" },
+        now: Date.now(),
+      },
+      authority(ownerProfileId),
+    ),
+    /context access cannot be changed/u,
+  );
 });
 
 void test("encrypted automation writes admit and settle actual stored bytes", async (t) => {

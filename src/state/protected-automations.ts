@@ -484,6 +484,12 @@ export function patchProtectedAutomation(
       if (current.definitionRevision !== input.expectedRevision) {
         return { status: "version_mismatch" as const };
       }
+      if (
+        input.definition.contextAccess !== undefined &&
+        input.definition.contextAccess !== (current.definition.contextAccess ?? "member")
+      ) {
+        throw new TypeError("An automation's context access cannot be changed.");
+      }
       const currentBinding = executeSqliteQuerySync(
         db,
         kysely
@@ -497,7 +503,10 @@ export function patchProtectedAutomation(
       const definitionValue = storedDefinition(
         db,
         input.automationId,
-        JSON.stringify(input.definition),
+        JSON.stringify({
+          ...input.definition,
+          contextAccess: current.definition.contextAccess,
+        }),
       );
       const storage = {
         automationId: input.automationId,

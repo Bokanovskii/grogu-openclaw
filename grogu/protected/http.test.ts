@@ -384,7 +384,7 @@ void test("Protected turns load skills on request and retain credentials during 
   const scheduleNow = Math.floor(Date.now() / 60_000) * 60_000;
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: scheduleNow });
   await app.startAutomations(() => {});
-  const capabilities = "automation-runs-v1, automation-results-v1";
+  const capabilities = "automation-runs-v1, automation-results-v1, automations-context-v1";
   const automationCall = (route: string, init?: RequestInit) =>
     call(route, {
       ...init,
@@ -417,6 +417,47 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(createdAutomation.status, 201, await createdAutomation.clone().text());
   const automation = (await createdAutomation.json()).automation;
   assert.equal(automation.nextCheckAt, null);
+  assert.equal(automation.contextAccess, "member");
+  const isolatedDraft: ProtectedAutomationDraft = {
+    name: "Synthetic isolated automation",
+    instructions: "Summarize synthetic isolated material.",
+    whenToNotify: "After each briefing.",
+    agentId: "grogu",
+    model: { provider: "sparky", id: "synthetic" },
+    thinking: "low",
+    contextAccess: "isolated",
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const isolatedResponse = await automationCall("/automations", {
+    method: "POST",
+    body: JSON.stringify(isolatedDraft),
+  });
+  assert.equal(isolatedResponse.status, 503, await isolatedResponse.clone().text());
+  assert.equal((await isolatedResponse.json()).error.code, "automation_isolation_unavailable");
+  const seededIsolated = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    { profileId: user.id, definition: isolatedDraft, now: Date.now() },
+    { profileId: user.id, assertCurrent() {} },
+  );
+  assert.equal(seededIsolated.status, "created");
+  if (seededIsolated.status !== "created") {
+    assert.fail("Could not seed the isolated automation.");
+  }
+  const isolatedId = seededIsolated.automation.id;
+  const isolatedView = await automationCall(`/automations/${isolatedId}`);
+  assert.equal(isolatedView.status, 200, await isolatedView.clone().text());
+  const isolatedAutomation = (await isolatedView.json()).automation;
+  assert.equal(isolatedAutomation.contextAccess, "isolated");
+  const legacyView = await call(`/automations/${isolatedId}`);
+  assert.equal(legacyView.status, 200);
+  assert.equal("contextAccess" in (await legacyView.json()).automation, false);
+  const beforeIsolatedRun = requests.length;
+  const isolatedRun = await automationCall(`/automations/${isolatedAutomation.id}/run`, {
+    method: "POST",
+  });
+  assert.equal(isolatedRun.status, 503);
+  assert.equal((await isolatedRun.json()).error.code, "automation_isolation_unavailable");
+  assert.equal(requests.length, beforeIsolatedRun);
   const waitForDelivery = async (trigger: "scheduled" | "manual", excluded: string[] = []) => {
     for await (const event of watch(stateDir, { recursive: true })) {
       void event;
@@ -528,6 +569,13 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(calendarPaused.status, 200, await calendarPaused.clone().text());
   const pausedRecord = (await calendarPaused.json()).automation;
   assert.equal(pausedRecord.nextCheckAt, null);
+  const isolatedEnabled = await automationCall(`/automations/${isolatedId}`, {
+    method: "PATCH",
+    headers: { "if-match": isolatedAutomation.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(isolatedEnabled.status, 200, await isolatedEnabled.clone().text());
+  const isolatedEnabledRecord = (await isolatedEnabled.json()).automation;
   let resumed = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": pausedRecord.version },
@@ -538,8 +586,40 @@ void test("Protected turns load skills on request and retain credentials during 
   const scheduledDelivery = waitForDelivery("scheduled");
   const automationRequestStart = requests.length;
   const browsersBeforeAutomation = browserSessions.opened;
+  const isolatedRefusal = Promise.withResolvers<void>();
+  const originalError = console.error;
+  const errorCapture = t.mock.method(console, "error", (...args: unknown[]) => {
+    if (
+      args.some(
+        (arg) =>
+          typeof arg === "string" &&
+          arg.includes(`protected-automation:${isolatedId} failed:`) &&
+          arg.includes("Isolated automation execution is unavailable"),
+      )
+    ) {
+      isolatedRefusal.resolve();
+    }
+    originalError(...args);
+  });
   t.mock.timers.tick(60_000);
-  const scheduledRun = await scheduledDelivery;
+  const [scheduledRun] = await Promise.all([scheduledDelivery, isolatedRefusal.promise]);
+  errorCapture.mock.restore();
+  const isolatedHistory = await automationCall(`/automations/${isolatedId}/run-history`);
+  assert.equal(isolatedHistory.status, 200, await isolatedHistory.clone().text());
+  assert.deepEqual((await isolatedHistory.json()).runs, []);
+  assert.ok(
+    requests
+      .slice(automationRequestStart)
+      .every((request) => !JSON.stringify(request.messages).includes(isolatedDraft.instructions)),
+  );
+  const isolatedDeletion = await automationCall(`/automations/${isolatedId}`, {
+    method: "DELETE",
+    headers: {
+      "x-alcove-capabilities": `${capabilities}, automation-delete-v1`,
+      "if-match": isolatedEnabledRecord.version,
+    },
+  });
+  assert.equal(isolatedDeletion.status, 204, await isolatedDeletion.clone().text());
   assert.equal(scheduledRun.status, "succeeded");
   assert.ok(scheduledRun.resultId);
   assert.ok(scheduledRun.runChatId);
@@ -6750,6 +6830,13 @@ void test("automation authoring chats hold a server binding and save only the se
   const { chat } = await created.json();
   assert.deepEqual(chat.authoring, { kind: "automation" });
   assert.equal(chat.selectedAgentId, "grogu");
+  assert.deepEqual(await listAutomations(), []);
+  const isolatedAuthoring = await turn("alice", chat.id, "Save", {
+    draft: { ...draft, contextAccess: "isolated" },
+    draftRevision: "1",
+  });
+  assert.equal(isolatedAuthoring.status, 503);
+  assert.equal(isolatedAuthoring.code, "automation_isolation_unavailable");
   assert.deepEqual(await listAutomations(), []);
   const agentSwitch = await call("alice", `/chats/${chat.id}/agent`, {
     method: "PATCH",

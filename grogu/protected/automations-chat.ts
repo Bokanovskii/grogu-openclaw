@@ -259,7 +259,28 @@ export function createProtectedAutomationAuthoringBindings(input: {
     },
     async update(params) {
       return runCurrent(async () => {
-        const validation = validate(params.draft, await readSaved());
+        if (
+          params.draft.contextAccess !== undefined &&
+          params.draft.contextAccess !== draft.contextAccess
+        ) {
+          return {
+            status: "invalid" as const,
+            writeApplied: false as const,
+            errors: [
+              {
+                field: "contextAccess",
+                code: "invalid_value",
+                message: "Only the member can change this draft's context access.",
+              },
+            ],
+          };
+        }
+        const validation = validate(
+          draft.contextAccess === undefined
+            ? params.draft
+            : { ...params.draft, contextAccess: draft.contextAccess },
+          await readSaved(),
+        );
         if (!validation.valid) {
           return {
             status: "invalid" as const,
@@ -341,7 +362,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
           await input.bind(automation.id);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
-          if (!savesDraft(automation, validation.draft)) {
+          if (!savesDraft(created, validation.draft)) {
             return refuse("version_mismatch", automation.version);
           }
         } else {

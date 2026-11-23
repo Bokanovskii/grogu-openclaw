@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { appendCurrentInboundContext } from "../../agents/embedded-agent-runner/run/runtime-context-prompt.js";
+import { getRequestScopedChildExecution } from "../../agents/request-scoped-child-execution.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
@@ -183,21 +184,23 @@ export async function executePreparedReplyAgentRun(
 
   const prePreflightCompactionCount = activeSessionEntry?.compactionCount ?? 0;
   try {
-    activeSessionEntry = await traceAgentPhase("reply.preflight_compaction", () =>
-      runSessionCompactionIfNeeded({
-        ...context,
-        replyOperation,
-        pendingUserEntryId: preflightAdmission?.entryId,
-        promptForEstimate: followupRun.prompt,
-        sessionEntry: activeSessionEntry,
-        sessionStore: activeSessionStore,
-        abortSignal: replyOperation.abortSignal,
-        beforeCompaction: checkpointMemory,
-        onCompactionStart: () => replyOperation.setPhase("preflight_compacting"),
-        onSessionIdChanged: (sessionId) => replyOperation.updateSessionId(sessionId),
-        onCompactionNotice: sendDirectCompactionNotice,
-      }),
-    );
+    if (getRequestScopedChildExecution(opts?.runId)?.contextIsolation !== "isolated") {
+      activeSessionEntry = await traceAgentPhase("reply.preflight_compaction", () =>
+        runSessionCompactionIfNeeded({
+          ...context,
+          replyOperation,
+          pendingUserEntryId: preflightAdmission?.entryId,
+          promptForEstimate: followupRun.prompt,
+          sessionEntry: activeSessionEntry,
+          sessionStore: activeSessionStore,
+          abortSignal: replyOperation.abortSignal,
+          beforeCompaction: checkpointMemory,
+          onCompactionStart: () => replyOperation.setPhase("preflight_compacting"),
+          onSessionIdChanged: (sessionId) => replyOperation.updateSessionId(sessionId),
+          onCompactionNotice: sendDirectCompactionNotice,
+        }),
+      );
+    }
   } catch (error) {
     const recorder = followupRun.userTurnTranscriptRecorder;
     if (recorder && buildPreflightCompactionFailureText(formatErrorMessage(error)) !== null) {

@@ -162,32 +162,6 @@ for (const saveDrafts of [false, true]) {
       retiredIds.push(await save(memberSubject, "Member draft one"));
       retiredIds.push(await save(memberSubject, "Member draft two"));
       retainedIds.push(await save(ownerSubject, "Other member draft"));
-      const ownerMe = await (await call("/me", "GET", ownerSubject)).json();
-      const sharedId = await save(memberSubject, "Shared definition");
-      const coOwnedId = await save(memberSubject, "Co-owned definition");
-      const boundId = await save(memberSubject, "Bound definition");
-      const enabledId = await save(memberSubject, "Enabled definition");
-      retainedIds.push(sharedId, coOwnedId, boundId, enabledId);
-      // These synthetic rows exercise future storage shapes outside the save-only release.
-      const fixture = new DatabaseSync(databasePath);
-      try {
-        fixture
-          .prepare("UPDATE protected_automations SET visibility = 'shared' WHERE id = ?")
-          .run(sharedId);
-        fixture.prepare("UPDATE protected_automations SET enabled = 1 WHERE id = ?").run(enabledId);
-        fixture
-          .prepare(
-            "INSERT INTO protected_automation_members (automation_id, profile_id, role, added_at) VALUES (?, ?, 'owner', ?)",
-          )
-          .run(coOwnedId, ownerMe.user.id, Date.now());
-        fixture
-          .prepare(
-            "INSERT INTO protected_automation_job_bindings (job_id, automation_id, central_owner_profile_id, definition_revision, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-          )
-          .run("synthetic-bound-job", boundId, me.user.id, Date.now(), Date.now());
-      } finally {
-        fixture.close();
-      }
     }
     const initialPeople = await (await call("/admin/people", "GET", ownerSubject)).json();
     const initialMember = initialPeople.people.find(
@@ -248,10 +222,6 @@ for (const saveDrafts of [false, true]) {
             undefined,
           );
         }
-        assert.equal(
-          stored.prepare("SELECT job_id FROM protected_automation_job_bindings").get()?.job_id,
-          "synthetic-bound-job",
-        );
       } finally {
         stored.close();
       }

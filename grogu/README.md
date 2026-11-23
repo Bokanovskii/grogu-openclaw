@@ -226,6 +226,21 @@ adds feedback and owner-only telemetry capabilities only for that opt-in.
 Existing clients retain their original `/me` shape. All `/admin/reports` and
 `/admin/telemetry` routes revalidate configured-owner authority server-side.
 
+Full-chat reports additionally require `report-chat-v1` in that capability
+header and explicit `includeChat:true` alongside `includeEvidence:true`.
+`GET /admin/reports/<id>/chat?cursor=<opaque>` returns up to 128 items per page;
+continue with `nextCursor` until it is `null`. The existing report-detail shape
+does not change. `capturedAt` identifies server capture time; an encrypted
+reference pins the exact transcript prefix and file metadata, excluding later
+additions. A rewritten or unavailable prefix returns `not_retained`, never a
+live-chat fallback. Reports without this consent return `not_included`.
+Tool inputs/results and compaction summaries are included, but secrets, private
+reasoning and replay fields are excluded. `redactions:null` means the exact
+redaction count is unavailable. Files are produced-file metadata only with
+`readable:false`; this does not add uploads or owner downloads. References count
+toward storage quotas and clear on chat/member deletion; consent remains until
+the report's existing 90-day expiry.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:

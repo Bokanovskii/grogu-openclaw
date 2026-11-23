@@ -40,6 +40,7 @@ import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { redactSensitiveText } from "../../src/logging/redact.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
+import { protectedFeedbackRetentionMs } from "../../src/state/protected-feedback.js";
 import {
   getCanonicalUserPreferences,
   getUserPreferenceValues,
@@ -146,6 +147,7 @@ import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { createProtectedMemoryReview } from "./memory-review.js";
 import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
+import { captureProtectedReportChatReference, projectProtectedReportChat } from "./report-chat.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import {
   parseStorageLimitBytes,
@@ -259,10 +261,15 @@ function feedbackReportSummary(report: ProtectedReportRecord) {
 type FeedbackReportInput = Pick<
   Parameters<typeof submitProtectedFeedbackReport>[1],
   "submissionId" | "category" | "description"
->;
-function parseFeedbackReportInput(input: Record<string, unknown>): FeedbackReportInput {
+> & { includeChat: boolean };
+function parseFeedbackReportInput(
+  input: Record<string, unknown>,
+  reportChatCapability: boolean,
+): FeedbackReportInput {
+  const includeChat = reportChatCapability && input.includeChat === true;
   if (
-    Object.keys(input).length !== 4 ||
+    Object.keys(input).length !== (includeChat ? 5 : 4) ||
+    (!includeChat && input.includeChat !== undefined) ||
     typeof input.submissionId !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
       input.submissionId,
@@ -279,6 +286,7 @@ function parseFeedbackReportInput(input: Record<string, unknown>): FeedbackRepor
     submissionId: input.submissionId,
     category: input.category,
     description: input.description,
+    includeChat,
   };
 }
 function replayFeedbackReport(responseId: string, prior: { id: string; createdAt: number }) {
@@ -673,6 +681,8 @@ export function createProtectedHttp(options: {
         options.ownerSubject !== undefined &&
         identity.subject === options.ownerSubject;
       const feedbackCapability = hasClientCapability(request.headers, "feedback-v1");
+      const reportChatCapability =
+        feedbackCapability && hasClientCapability(request.headers, "report-chat-v1");
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
@@ -900,6 +910,86 @@ export function createProtectedHttp(options: {
           reports: result.reports.map(feedbackReportSummary),
           openCount: result.openCount,
         });
+      }
+      const adminReportChat = /^\/admin\/reports\/([^/]+)\/chat$/u.exec(pathname);
+      if (adminReportChat && method === "GET") {
+        if (!reportChatCapability) {
+          return notFound();
+        }
+        if (!isOwner) {
+          return json({ error: "owner_required" }, 403);
+        }
+        const url = new URL(request.url);
+        if (
+          [...url.searchParams.keys()].some((key) => key !== "cursor") ||
+          url.searchParams.getAll("cursor").length > 1 ||
+          adminReportChat[1]!.length > 200
+        ) {
+          return invalid();
+        }
+        await revalidate();
+        const reportId = adminReportChat[1]!;
+        const report = await readProtectedFeedbackReport(options.stateDir, reportId);
+        await revalidate();
+        if (!report) {
+          return notFound();
+        }
+        if (report.createdAt + protectedFeedbackRetentionMs <= Date.now()) {
+          return json({ chat: { state: "expired" } });
+        }
+        if (report.evidence !== "available") {
+          return json({ chat: { state: report.evidence } });
+        }
+        if (report.chatIncluded !== true) {
+          return json({ chat: { state: "unavailable", reason: "not_included" } });
+        }
+        if (!report.chatReference) {
+          return json({ chat: { state: "unavailable", reason: "not_retained" } });
+        }
+        try {
+          const source = await chats.readReportChatSource(
+            { profileId: report.member.personId, assertCurrent },
+            report.chatId,
+            report.chatReference.eventCount,
+          );
+          await revalidate();
+          const chat = projectProtectedReportChat({
+            ...source,
+            reference: report.chatReference,
+            responseId: report.responseId,
+            reportedFileIds: report.files.map((file) => file.id),
+            ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+          });
+          const current = await readProtectedFeedbackReport(options.stateDir, reportId);
+          await revalidate();
+          if (!current) {
+            return notFound();
+          }
+          if (current.createdAt + protectedFeedbackRetentionMs <= Date.now()) {
+            return json({ chat: { state: "expired" } });
+          }
+          if (current.evidence !== "available") {
+            return json({ chat: { state: current.evidence } });
+          }
+          return json({ chat });
+        } catch (error) {
+          if (!(error instanceof ProtectedError && error.status === 404)) {
+            throw error;
+          }
+          const current = await readProtectedFeedbackReport(options.stateDir, reportId);
+          await revalidate();
+          if (!current) {
+            return notFound();
+          }
+          if (current.createdAt + protectedFeedbackRetentionMs <= Date.now()) {
+            return json({ chat: { state: "expired" } });
+          }
+          return json({
+            chat: {
+              state: current.evidence === "member_removed" ? "member_removed" : "deleted",
+            },
+          });
+        }
       }
       const adminReport = /^\/admin\/reports\/([^/]+)$/u.exec(pathname);
       if (adminReport && (method === "GET" || method === "PATCH")) {
@@ -1297,7 +1387,7 @@ export function createProtectedHttp(options: {
             ? accountUser(profile.displayName, await readAccountIcon())
             : { id: profile.id, displayName: profile.displayName ?? "User" },
           disclosure: feedbackCapability
-            ? `${disclosure} If you submit a feedback report, it includes the prompt and response, their sources and widgets, files created during that turn, and request metadata by reference. Report descriptions are encrypted at rest. Reports and detailed per-turn metadata are kept for 90 days. Deleting a chat or removing a member removes ratings and makes report evidence unavailable; the report description remains visible to the admin until expiry.`
+            ? `${disclosure} If you submit a feedback report, it includes the prompt and response, their sources and widgets, files created during that turn, and request metadata by reference.${reportChatCapability ? " If you explicitly include the full chat, the admin can also read retained messages, tool inputs and outputs, compaction summaries, model metadata and file references up to submission time, never later additions. Secrets and private model reasoning are excluded; file references do not provide downloads." : ""} Report descriptions${reportChatCapability ? " and full-chat references" : ""} are encrypted at rest. Reports and detailed per-turn metadata are kept for 90 days. Deleting a chat or removing a member removes ratings and makes report evidence unavailable; the report description remains visible to the admin until expiry.`
             : disclosure,
           models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
@@ -1305,6 +1395,7 @@ export function createProtectedHttp(options: {
             openaiConnect: options.providerRelay !== undefined,
             admin: isOwner,
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
+            ...(reportChatCapability ? { reportChat: true } : {}),
             ...(hasClientCapability(request.headers, "memory-v1")
               ? { memory: { review: options.memoryReview !== undefined } }
               : {}),
@@ -2202,7 +2293,7 @@ export function createProtectedHttp(options: {
         }
         let input: FeedbackReportInput;
         try {
-          input = parseFeedbackReportInput(await body(request));
+          input = parseFeedbackReportInput(await body(request), reportChatCapability);
         } catch (inputError) {
           if (
             inputError instanceof ProtectedError &&
@@ -2344,7 +2435,7 @@ export function createProtectedHttp(options: {
         if (responseId.length > 200) {
           return notFound();
         }
-        const input = parseFeedbackReportInput(await body(request));
+        const input = parseFeedbackReportInput(await body(request), reportChatCapability);
         await revalidate();
         const priorSubmission = await findProtectedFeedbackSubmission(
           options.stateDir,
@@ -2384,6 +2475,22 @@ export function createProtectedHttp(options: {
         if (priorReport) {
           return json({ error: "already_reported" }, 409);
         }
+        let chatReference: Parameters<typeof submitProtectedFeedbackReport>[1]["chatReference"];
+        if (input.includeChat) {
+          const artifacts = await files((owned) =>
+            listChatArtifactFiles(owned, id, options.maxFileBytes),
+          );
+          await revalidate();
+          const source = await chats.readReportChatSource(authority, id);
+          await revalidate();
+          const capturedAt = Date.now();
+          chatReference = captureProtectedReportChatReference(
+            source.events,
+            artifacts,
+            capturedAt,
+            source.chat.title,
+          );
+        }
         let storage: StorageAdmission | undefined;
         let reservation: ReturnType<StorageAdmission["reserveStoredData"]> | undefined;
         let reservationSettled = false;
@@ -2394,7 +2501,10 @@ export function createProtectedHttp(options: {
             "stored-data",
             await storageLimit(assertCurrent),
           );
-          reservation = storage?.reserveStoredData(16 * 1024);
+          const referenceBytes = chatReference
+            ? Math.ceil((Buffer.byteLength(JSON.stringify(chatReference)) * 4) / 3) + 1024
+            : 0;
+          reservation = storage?.reserveStoredData(16 * 1024 + referenceBytes);
           const result = await submitProtectedFeedbackReport(options.stateDir, {
             profileId: profile.id,
             memberLabel: redactFeedbackText(profile.displayName?.trim() || "User"),
@@ -2405,6 +2515,7 @@ export function createProtectedHttp(options: {
             description: input.description,
             now: Date.now(),
             storageOverheadBytes: storageEntryOverheadBytes,
+            ...(chatReference ? { chatReference } : {}),
           });
           if (result.kind === "already_reported") {
             reservation?.settle({ created: false, entries: [] });
@@ -2458,6 +2569,7 @@ export function createProtectedHttp(options: {
                       (entry) =>
                         entry.profileId === profile.id &&
                         (entry.id === `report:${committed.id}` ||
+                          entry.id === `report-chat:${committed.id}` ||
                           entry.id === `feedback:${id}:${responseId}`),
                     )
                   : [];

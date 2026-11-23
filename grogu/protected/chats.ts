@@ -292,7 +292,7 @@ export function createProtectedChats(options: {
       ];
     });
   };
-  const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {
+  const readTranscriptSource = async (authority: ProtectedChatAuthority, id: string) => {
     const entry = await readEntry(authority, id);
     const events = await loadTranscriptEvents({
       ...scope(authority, id),
@@ -300,6 +300,13 @@ export function createProtectedChats(options: {
       maxEventBytes: 2 * 1024 * 1024,
     });
     authority.assertCurrent();
+    return { entry, events };
+  };
+  const projectTranscriptSource = (
+    entry: SessionEntry,
+    events: Awaited<ReturnType<typeof loadTranscriptEvents>>,
+  ) => {
+    const id = entry.sessionId;
     const messages: ProtectedMessage[] = [];
     let projections = projectToolResult(undefined, undefined);
     let reply: ProtectedMessage | undefined;
@@ -532,6 +539,10 @@ export function createProtectedChats(options: {
     };
     return { chat, usage };
   };
+  const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {
+    const { entry, events } = await readTranscriptSource(authority, id);
+    return projectTranscriptSource(entry, events);
+  };
   return {
     env,
     agentId,
@@ -542,6 +553,16 @@ export function createProtectedChats(options: {
     read: async (authority: ProtectedChatAuthority, id: string) =>
       (await readWithUsage(authority, id)).chat,
     readWithUsage,
+    async readReportChatSource(authority: ProtectedChatAuthority, id: string, eventCount?: number) {
+      const { entry, events } = await readTranscriptSource(authority, id);
+      return {
+        ...projectTranscriptSource(
+          entry,
+          eventCount === undefined ? events : events.slice(0, eventCount),
+        ),
+        events,
+      };
+    },
     capacityEntries,
     async saveContextBudget(
       authority: ProtectedChatAuthority,

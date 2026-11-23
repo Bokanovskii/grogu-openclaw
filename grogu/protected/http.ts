@@ -204,7 +204,7 @@ import {
   parseStorageLimitVersion,
   storageLimitView,
 } from "./storage-limit-route.js";
-import { widgetIdPattern } from "./tool-events.js";
+import { widgetIdPattern, type Widget } from "./tool-events.js";
 import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
 import { listProtectedUsage, recordProtectedUsage } from "./usage-store.js";
@@ -1154,6 +1154,7 @@ export function createProtectedHttp(options: {
     const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
     const profileSessionPrefix = chats.scope(runAuthority, "").sessionKey;
     const ownedChildSessionKeys = new Set<string>();
+    const pendingChildResults = new Map<string, { agentId: string; widgets: Widget[] }>();
     const saveChildResult: ProtectedTurn["saveChildResult"] = async (result) => {
       await checkRun();
       const save = () =>
@@ -1162,6 +1163,7 @@ export function createProtectedHttp(options: {
           parentLifecycleRevision,
         });
       await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
+      pendingChildResults.delete(result.runId);
       await checkRun();
     };
     const sessionAccess = {
@@ -1318,6 +1320,17 @@ export function createProtectedHttp(options: {
                       });
                     },
                     childEvent: (event) => {
+                      if (event.type === "child-start") {
+                        pendingChildResults.set(event.runId, {
+                          agentId: event.agentId,
+                          widgets: [],
+                        });
+                      } else if (event.type === "child-widget") {
+                        pendingChildResults.get(event.runId)?.widgets.push({
+                          id: event.id,
+                          title: event.title,
+                        });
+                      }
                       if (hasClientCapability(request.headers, "specialist-stream-v1")) {
                         send(event);
                       }
@@ -1443,6 +1456,42 @@ export function createProtectedHttp(options: {
           } catch (error) {
             outcome = signal.aborted ? "interrupted" : "failed";
             let failure = error;
+            // Execution cancellation ends model work, not the owner's obligation to
+            // record an unfinished handoff. Membership and the parent generation still gate writes.
+            const assertSettlement = () => {
+              assertGrant();
+              profileAuthority.assertCurrent();
+              if (runs.get(id) !== run) {
+                unauthorized();
+              }
+            };
+            try {
+              for (const [childRunId, child] of pendingChildResults) {
+                await checkGrant(assertSettlement);
+                assertSettlement();
+                const save = () =>
+                  chats.saveChildResult(
+                    { profileId: profile.id, assertCurrent: assertSettlement },
+                    id,
+                    {
+                      runId: childRunId,
+                      agentId: child.agentId,
+                      text: "The agent did not finish. Please try again.",
+                      timestamp: Date.now(),
+                      parentLifecycleRevision,
+                      status: "failed",
+                      widgets: child.widgets,
+                    },
+                  );
+                await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
+                pendingChildResults.delete(childRunId);
+              }
+            } catch (saveError) {
+              failure = saveError;
+              process.stderr.write(
+                `Protected specialist failure could not be saved (${publicError(saveError).code}).\n`,
+              );
+            }
             try {
               storage?.assertResult();
             } catch (capacityError) {

@@ -265,6 +265,36 @@ Another member's chat returns 404. Clients without rename support remain
 unchanged; the existing create, agent-selection, and delete contracts do not
 change.
 
+### Chat sharing
+
+Clients opt in with `x-alcove-capabilities: sharing-v1`; `/me` then reports
+`capabilities.sharing`, which is false for the development identity. Without the
+capability every sharing route returns 404 and `/me` is unchanged. All routes
+require `x-grogu-profile`.
+
+The owner creates or reads a chat's single link with `POST` or `GET
+/api/protected/v1/chats/:id/share`. The link `path` is `/s/<id>`, where the id is
+32 random bytes in base64url and does not depend on the title. Another admitted
+member opens it and the client calls `POST /api/protected/v1/shares/:id/claim`,
+which records a durable read-only grant. Recipients list their grants with
+`GET /api/protected/v1/shared/chats` and read the owner's live chat, artifacts,
+files, and widgets under `/api/protected/v1/shared/chats/:ownerId/:chatId`.
+They cannot write to, run, or pay for the chat.
+
+`DELETE .../share/recipients/:personId` removes one recipient and rotates the
+link, so the removed member cannot claim the old URL again. `DELETE
+.../share` disables the link and revokes every grant. Renaming keeps the link.
+Deleting the chat or removing either member from Alcove removes the link or
+grants. Every shared read checks the grant, both members' admission, and that
+the chat still exists, so a deleted chat is denied even before its grant rows are
+gone. Grant rows for chats that no longer exist are removed on the next claim or
+shared-chat list.
+
+Links are charged to the owner and grants to the recipient as one 4 KiB storage
+entry each. The tables store only profile, chat, and link ids, and no chat text.
+`grogu/protected/sharing-store.ts` exports `canMemberReadChat` and
+`canMemberReadChatArtifact` for other routes that need the same read authority.
+
 ## Automation discovery and draft validation
 
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.

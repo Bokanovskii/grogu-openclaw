@@ -46,6 +46,18 @@ retire the charged bytes through the existing quota owner, so a cascade would
 free ciphertext without releasing quota. Only the owner can read these rows;
 nothing deletes them yet.
 
+### Protected chat share links
+
+The shared-state database lazily creates `protected_chat_shares` and
+`protected_chat_share_grants` for Alcove chat sharing. A share row maps one
+owner chat to its random link id; a grant row records one recipient's read
+access to that chat. Both store only profile, chat, and link ids. The chat lives
+in the per-agent database, so readers also check that the owner's chat still
+exists, and grant rows for missing chats are removed lazily. Member removal
+deletes the member's links and grants in its admission transaction. These
+additive first-use tables do not change the shared database's numeric schema
+version; older builds ignore them.
+
 The shared-state database retains `task_runs`, `task_delivery_state`, and `flow_runs`, including their existing columns and indexes. The Tasks and TaskFlow runtime, tools, and UI are removed; their non-Cron rows remain untouched and unused by the runtime. Cron owns only the `runtime = 'cron'` rows in `task_runs` through its history store. It does not move history to another table. Native execution and completion remain with the subagent registry and harness-binding owners; native Codex pending assignments use metadata in the existing parent binding, not a new table. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 
 In agent schema 23, `transcript_events` retains original event JSON as either

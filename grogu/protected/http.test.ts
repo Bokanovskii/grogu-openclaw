@@ -321,25 +321,67 @@ function responsesReply(
     output_tokens: 1,
     total_tokens: 4,
   },
+  summary?: string,
 ) {
   const content = { type: "output_text", text, annotations: [] };
   const message = { type: "message", id: "msg_family", role: "assistant", content: [content] };
+  const part = { type: "summary_text", text: summary ?? "" };
+  const reasoning = { type: "reasoning", id: "rs_family", summary: [part] };
+  const at = summary === undefined ? 0 : 1;
   return providerSse([
-    { type: "response.output_item.added", output_index: 0, item: { ...message, content: [] } },
+    ...(summary === undefined
+      ? []
+      : [
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { ...reasoning, summary: [] },
+          },
+          {
+            type: "response.reasoning_summary_part.added",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            part: { ...part, text: "" },
+          },
+          {
+            type: "response.reasoning_summary_text.delta",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            delta: summary,
+          },
+          {
+            type: "response.reasoning_summary_text.done",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            text: summary,
+          },
+          {
+            type: "response.reasoning_summary_part.done",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            part,
+          },
+          { type: "response.output_item.done", output_index: 0, item: reasoning },
+        ]),
+    { type: "response.output_item.added", output_index: at, item: { ...message, content: [] } },
     {
       type: "response.content_part.added",
-      output_index: 0,
+      output_index: at,
       content_index: 0,
       part: { ...content, text: "" },
     },
-    { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
-    { type: "response.output_item.done", output_index: 0, item: message },
+    { type: "response.output_text.delta", output_index: at, content_index: 0, delta: text },
+    { type: "response.output_item.done", output_index: at, item: message },
     {
       type: "response.completed",
       response: {
         id: "resp_family",
         status: "completed",
-        output: [message],
+        output: [...(summary === undefined ? [] : [reasoning]), message],
         ...(usage ? { usage } : {}),
       },
     },
@@ -2093,7 +2135,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     account: string | null;
     key: string | null;
   }> = [];
-  const copilotBodies: Array<{ model?: string; reasoning?: { effort?: string } }> = [];
+  const copilotBodies: Array<{
+    model?: string;
+    reasoning?: { effort?: string; summary?: string };
+  }> = [];
+  let copilotSummary: string | undefined;
   let copilotUsage: Parameters<typeof responsesReply>[1] = {
     input_tokens: 3,
     output_tokens: 1,
@@ -2166,7 +2212,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
             });
           case "https://api.business.githubcopilot.com/responses":
             copilotBodies.push(await new Request(input, init).json());
-            return responsesReply("Canonical Copilot reply.", copilotUsage);
+            return responsesReply("Canonical Copilot reply.", copilotUsage, copilotSummary);
           case "https://chatgpt.com/backend-api/codex/responses":
             return responsesReply("Canonical OpenAI reply.");
           case "https://api.anthropic.com/v1/messages":
@@ -3237,14 +3283,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.equal((await request()).status, 403);
   });
   await t.test("runs a chosen Copilot model with the selected reasoning", async () => {
-    const chosen = await copilotTurn("high");
-    assert.equal(chosen.status, 200);
-    const chosenEvents = (await chosen.text())
+    copilotSummary = "A public Copilot reasoning summary.";
+    let chosenTrace: string;
+    try {
+      const chosen = await copilotTurn("high");
+      assert.equal(chosen.status, 200);
+      // The provider fetch runs while the NDJSON body streams.
+      chosenTrace = await chosen.text();
+    } finally {
+      copilotSummary = undefined;
+    }
+    const chosenEvents = chosenTrace
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
     assert.equal(copilotBodies.at(-1)?.model, "gpt-5.4");
     assert.equal(copilotBodies.at(-1)?.reasoning?.effort, "high");
+    assert.equal(copilotBodies.at(-1)?.reasoning?.summary, "auto");
+    const reasoning = chosenEvents.findIndex((event) => event.type === "reasoning");
+    assert.ok(reasoning > 0, JSON.stringify(chosenEvents.map(({ type }) => type)));
+    assert.equal(chosenEvents[reasoning].text, "A public Copilot reasoning summary.");
+    assert.ok(reasoning < chosenEvents.findIndex((event) => event.type === "delta"));
     assert.equal(chosenEvents.at(-1)?.type, "done");
   });
   providerRequests.length = 0;

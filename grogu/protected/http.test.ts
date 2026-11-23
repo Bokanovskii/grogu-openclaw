@@ -3356,6 +3356,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const providerDisconnected = Promise.withResolvers<void>();
   const offlineProvider = Promise.withResolvers<void>();
   const offlineRelease = Promise.withResolvers<void>();
+  const routedChildRelease = Promise.withResolvers<void>();
   const offlineSettled = Promise.withResolvers<void>();
   const offlineDisconnected = Promise.withResolvers<void>();
   const offlinePrompt = "Finish this reply after the connection closes";
@@ -3365,10 +3366,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const failedOfflineSettled = Promise.withResolvers<void>();
   const failedOfflineDisconnected = Promise.withResolvers<void>();
   t.after(() => offlineRelease.resolve());
+  t.after(() => routedChildRelease.resolve());
   t.after(() => failedOfflineRelease.resolve());
   const sourceUrl = "https://example.com/family-source";
   const routePrompt = "Hand this trip to the right agent.";
   const routeBrief = "Plan a relaxed weekend in Lisbon for two adults.";
+  const failedRoutePrompt = "Hand this unsuccessful request to travel.";
+  const failedRouteBrief = "Simulate a specialist provider failure.";
   const selfRoutePrompt = "Hand this request back to yourself.";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
@@ -3606,6 +3610,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
           .end('{"error":{"message":"Invalid API key","code":"invalid_api_key"}}');
         return;
       }
+      if (JSON.stringify(body.messages).includes(failedRouteBrief)) {
+        response
+          .writeHead(401, { "content-type": "application/json" })
+          .end('{"error":{"message":"Synthetic provider failure","code":"invalid_api_key"}}');
+        return;
+      }
       seen.push({ auth: request.headers.authorization, body });
       response.writeHead(200, { "content-type": "text/event-stream" });
       if (JSON.stringify(body.messages).includes("Hold the provider response open")) {
@@ -3635,14 +3645,23 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         "## Current agent: Cleanup proof (cleanup)",
       );
       const groguTurn = JSON.stringify(body.messages).includes("## Current agent: Grogu (grogu)");
+      const routedTravelTurn =
+        JSON.stringify(body.messages).includes("## Current agent: Travel (travel)") &&
+        JSON.stringify(body.messages).includes(routeBrief);
       const routeArguments = JSON.stringify(body.messages).includes(routePrompt)
         ? { agentId: "travel", brief: routeBrief }
-        : JSON.stringify(body.messages).includes(selfRoutePrompt)
-          ? { agentId: "grogu", brief: "Answer it yourself." }
-          : undefined;
+        : JSON.stringify(body.messages).includes(failedRoutePrompt)
+          ? { agentId: "travel", brief: failedRouteBrief }
+          : JSON.stringify(body.messages).includes(selfRoutePrompt)
+            ? { agentId: "grogu", brief: "Answer it yourself." }
+            : undefined;
       const hasToolResponse = body.messages.some(
         (message: { role?: string }) => message.role === "tool",
       );
+      if (routedTravelTurn && hasToolResponse) {
+        response.flushHeaders();
+        await routedChildRelease.promise;
+      }
       const sessionListTurn = JSON.stringify(body.messages).includes(
         "Inspect my permitted sessions.",
       );
@@ -3763,7 +3782,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 ],
                 [{}, "tool_calls"],
               ]
-            : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
+            : (cleanupTurn || finalWidgetTurn || routedTravelTurn) && !hasToolResponse
               ? [
                   [
                     {
@@ -4799,6 +4818,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     ),
     "the native child result is streamed with its protected agent attribution",
   );
+  assert.ok(!mentionedEvents.some((event) => event.type === "child-start"));
   const mentionedRead = await (await reopened(`/chats/${chat.id}`)).json();
   const reportAfterLaterTurn = await (
     await reopened(reportChatRoute, { headers: reportChatHeaders })
@@ -5012,14 +5032,61 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const routedTurn = await reopened(`/chats/${routedChat.id}/turns`, {
     method: "POST",
     body: JSON.stringify({ provider: "sparky", text: routePrompt }),
-    headers: { "x-grogu-profile": user.id },
+    headers: {
+      "x-grogu-profile": user.id,
+      "X-Alcove-Capabilities": "specialist-stream-v1",
+    },
   });
   assert.equal(routedTurn.status, 200);
-  const routedEvents = (await routedTurn.text())
+  const routedReader = routedTurn.body!.getReader();
+  const routedDecoder = new TextDecoder();
+  let routedBody = "";
+  try {
+    while (!routedBody.includes('"type":"child-widget"')) {
+      const part = await routedReader.read();
+      assert.equal(part.done, false, "the child widget arrives before the provider finishes");
+      routedBody += routedDecoder.decode(part.value, { stream: true });
+    }
+    assert.doesNotMatch(routedBody, /"type":"child-result"/u);
+  } finally {
+    routedChildRelease.resolve();
+  }
+  for (;;) {
+    const part = await routedReader.read();
+    if (part.done) {
+      routedBody += routedDecoder.decode();
+      break;
+    }
+    routedBody += routedDecoder.decode(part.value, { stream: true });
+  }
+  const routedEvents = routedBody
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
   assert.equal(routedEvents.at(-1)?.type, "done", JSON.stringify(routedEvents));
+  const childStart = routedEvents.find((event) => event.type === "child-start");
+  assert.equal(childStart?.agentId, "travel");
+  const childWidget = routedEvents.find((event) => event.type === "child-widget");
+  assert.equal(childWidget?.runId, childStart.runId);
+  assert.ok(
+    routedEvents.findIndex((event) => event.type === "child-widget") <
+      routedEvents.findIndex((event) => event.type === "child-result"),
+    "the child widget is published before child completion",
+  );
+  assert.ok(
+    routedEvents.some(
+      (event) =>
+        event.type === "child-delta" &&
+        event.runId === childStart.runId &&
+        event.text.includes("Committed synthetic answer."),
+    ),
+    "the child's own model output is streamed with its identity",
+  );
+  assert.ok(
+    routedEvents.findIndex((event) => event.type === "child-delta") <
+      routedEvents.findIndex((event) => event.type === "child-result"),
+    "child text reaches the stream before completion",
+  );
   assert.deepEqual(
     routedEvents
       .filter((event) => event.type === "child-result")
@@ -5027,7 +5094,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     [["travel", "Committed synthetic answer."]],
   );
   const routedRequests = seen.slice(firstRoutedRequest);
-  assert.equal(routedRequests.length, 2, "Grogu routes once and Travel answers once");
+  assert.equal(routedRequests.length, 3, "Grogu routes once and Travel creates a widget");
   assert.match(systemText(routedRequests[0]), /\n## Current agent: Grogu \(grogu\)\n/);
   const routedChild = routedRequests[1];
   assert.match(systemText(routedChild), /\n## Current agent: Travel \(travel\)\n/);
@@ -5038,7 +5105,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "a routed agent cannot route again",
   );
   assert.match(JSON.stringify(routedChild?.body.messages), new RegExp(routeBrief));
-  const routedRead = await (await reopened(`/chats/${routedChat.id}`)).json();
+  const routedRead = await (
+    await reopened(`/chats/${routedChat.id}`, {
+      headers: { "X-Alcove-Capabilities": "specialist-stream-v1" },
+    })
+  ).json();
   assert.deepEqual(
     routedRead.chat.messages.map((message: { role: string; agentId?: string; text: string }) => [
       message.role,
@@ -5052,6 +5123,86 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     ],
   );
   assert.equal(routedRead.chat.messages[1]?.status, "complete", "a routing reply reloads complete");
+  assert.equal(routedRead.chat.messages[2]?.runId, childStart.runId);
+  assert.deepEqual(routedRead.chat.messages[2]?.widgets, [
+    { id: childWidget.id, title: "Synthetic widget" },
+  ]);
+  const routedWidget = await reopened(`/chats/${routedChat.id}/widgets/${childWidget.id}`);
+  assert.equal(routedWidget.status, 200);
+  assert.match((await routedWidget.json()).html, /Scoped widget body/);
+  const legacyRoutedRead = await (await reopened(`/chats/${routedChat.id}`)).json();
+  assert.equal("runId" in legacyRoutedRead.chat.messages[2], false);
+  const widgetMemberSubject = "synthetic-widget-member";
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: widgetMemberSubject,
+    }),
+    "added",
+  );
+  const widgetMemberApp = createProtectedHttp({
+    ...options,
+    directory: {
+      issuer: "https://synthetic.example",
+      allowedSubjects: ["synthetic-sparky", widgetMemberSubject],
+    },
+    verifyIdentity: identityFor(widgetMemberSubject, "synthetic-widget-member-session"),
+  });
+  t.after(() => widgetMemberApp.shutdown());
+  const widgetMemberHeaders = new Headers(reportChatHeaders);
+  widgetMemberHeaders.set("origin", origin);
+  const widgetMemberMe = await (
+    await widgetMemberApp.fetch(
+      new Request(`${origin}/api/protected/v1/me`, { headers: widgetMemberHeaders }),
+    )
+  ).json();
+  widgetMemberHeaders.set("x-grogu-profile", widgetMemberMe.user.id);
+  assert.equal(
+    (
+      await widgetMemberApp.fetch(
+        new Request(`${origin}/api/protected/v1/chats/${routedChat.id}/widgets/${childWidget.id}`, {
+          headers: widgetMemberHeaders,
+        }),
+      )
+    ).status,
+    404,
+  );
+  const { chat: failedRoutedChat } = await (
+    await reopened("/chats", { method: "POST", body: "{}" })
+  ).json();
+  const failedRoutedTurn = await reopened(`/chats/${failedRoutedChat.id}/turns`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "sparky", text: failedRoutePrompt }),
+    headers: {
+      "x-grogu-profile": user.id,
+      "X-Alcove-Capabilities": "specialist-stream-v1",
+    },
+  });
+  const failedRoutedEvents = (await failedRoutedTurn.text())
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line));
+  const failedChild = failedRoutedEvents.find((event) => event.type === "child-error");
+  assert.equal(failedChild?.agentId, "travel");
+  assert.equal(failedChild.code, "agent_failed");
+  assert.equal(failedRoutedEvents.at(-1)?.type, "error");
+  assert.ok(!failedRoutedEvents.some((event) => event.type === "child-result"));
+  const failedRoutedRead = await (
+    await reopened(`/chats/${failedRoutedChat.id}`, {
+      headers: { "X-Alcove-Capabilities": "specialist-stream-v1" },
+    })
+  ).json();
+  assert.equal(failedRoutedRead.chat.messages.at(-1)?.runId, failedChild.runId);
+  assert.equal(failedRoutedRead.chat.messages.at(-1)?.status, "failed");
+  assert.equal(
+    (
+      await reopened(`/chats/${failedRoutedChat.id}`, {
+        method: "DELETE",
+        headers: { "if-match": failedRoutedRead.chat.version },
+      })
+    ).status,
+    204,
+  );
   const { chat: selfRoutedChat } = await (
     await reopened("/chats", { method: "POST", body: "{}" })
   ).json();

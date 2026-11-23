@@ -101,9 +101,52 @@ export const ProtectedActivitySchema = node({
   label: Type.String({ maxLength: 200 }),
   status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed")]),
 });
+const ProtectedWidgetDraftEventSchema = node({
+  type: Type.Literal("widget-draft"),
+  id,
+  title: Type.Optional(Type.String({ maxLength: 200 })),
+  html: Type.Optional(Type.String({ maxLength: 262144 })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 262144 })),
+  receivedChars: Type.Integer({ minimum: 0 }),
+  unavailable: Type.Optional(
+    Type.Union([
+      Type.Literal("limit"),
+      Type.Literal("gap"),
+      Type.Literal("unsupported"),
+      Type.Literal("invalid"),
+    ]),
+  ),
+});
 export const ProtectedTurnEventSchema = Type.Union([
   node({ type: Type.Literal("start"), runId: id }),
   node({ type: Type.Literal("delta"), text: Type.String() }),
+  node({ type: Type.Literal("child-start"), runId: id, agentId: protectedAgentId }),
+  node({
+    type: Type.Literal("child-delta"),
+    runId: id,
+    agentId: protectedAgentId,
+    text: Type.String(),
+    replace: Type.Literal(true),
+  }),
+  node({
+    type: Type.Literal("child-widget-draft"),
+    runId: id,
+    agentId: protectedAgentId,
+    draft: ProtectedWidgetDraftEventSchema,
+  }),
+  node({
+    type: Type.Literal("child-widget"),
+    runId: id,
+    agentId: protectedAgentId,
+    ...ProtectedWidgetSchema.properties,
+  }),
+  node({
+    type: Type.Literal("child-error"),
+    runId: id,
+    agentId: protectedAgentId,
+    code: Type.String(),
+    message: Type.String(),
+  }),
   node({
     type: Type.Literal("child-result"),
     runId: id,
@@ -121,22 +164,7 @@ export const ProtectedTurnEventSchema = Type.Union([
     outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
     contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
-  node({
-    type: Type.Literal("widget-draft"),
-    id,
-    title: Type.Optional(Type.String({ maxLength: 200 })),
-    html: Type.Optional(Type.String({ maxLength: 262144 })),
-    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 262144 })),
-    receivedChars: Type.Integer({ minimum: 0 }),
-    unavailable: Type.Optional(
-      Type.Union([
-        Type.Literal("limit"),
-        Type.Literal("gap"),
-        Type.Literal("unsupported"),
-        Type.Literal("invalid"),
-      ]),
-    ),
-  }),
+  ProtectedWidgetDraftEventSchema,
   node({ type: Type.Literal("done"), chatVersion: Type.String() }),
   node({ type: Type.Literal("error"), code: Type.String(), message: Type.String() }),
 ]);
@@ -145,6 +173,7 @@ export const ProtectedMessageSchema = node({
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
   agentId: Type.Optional(protectedAgentId),
+  runId: Type.Optional(id),
   reasoning: Type.Optional(Type.String()),
   activity: Type.Optional(Type.Array(ProtectedActivitySchema)),
   durationMs: Type.Optional(Type.Integer({ minimum: 0 })),

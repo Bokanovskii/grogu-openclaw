@@ -45,7 +45,7 @@ import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encrypt
 import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
-import { projectActivity, projectToolResult } from "./tool-events.js";
+import { projectActivity, projectToolResult, widgetIdPattern, type Widget } from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
 
@@ -387,6 +387,10 @@ export function createProtectedChats(options: {
                 .join("\n")
             : "";
       const provider = typeof message.provider === "string" ? message.provider : undefined;
+      const childMessage =
+        provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
+        message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
+        message.model === "protected-child";
       if (message.role === "user") {
         runUsage = createSessionTranscriptUsageAccumulator();
       } else if (
@@ -410,11 +414,13 @@ export function createProtectedChats(options: {
           : content;
       const status =
         message.role === "assistant"
-          ? message.stopReason === "aborted"
-            ? "interrupted"
-            : message.stopReason === "error" || message.stopReason === "toolUse"
-              ? "failed"
-              : "complete"
+          ? childMessage && message.protectedChildStatus === "failed"
+            ? "failed"
+            : message.stopReason === "aborted"
+              ? "interrupted"
+              : message.stopReason === "error" || message.stopReason === "toolUse"
+                ? "failed"
+                : "complete"
           : undefined;
       if (message.role === "assistant" && status === "complete") {
         const snapshot = aggregateSessionTranscriptUsage([message]);
@@ -484,12 +490,31 @@ export function createProtectedChats(options: {
         /^[a-z][a-z0-9-]{0,47}$/u.test(message.protectedAgentId)
           ? { agentId: message.protectedAgentId }
           : {}),
+        ...(childMessage &&
+        typeof message.protectedChildRunId === "string" &&
+        validId(message.protectedChildRunId)
+          ? { runId: message.protectedChildRunId }
+          : {}),
         ...(status ? { status } : {}),
-        ...(message.role === "assistant" ? projections : {}),
-        ...(message.role === "assistant" && status !== "failed" && reasoning.length
+        ...(message.role === "assistant"
+          ? childMessage
+            ? {
+                widgets: Array.isArray(message.protectedChildWidgets)
+                  ? message.protectedChildWidgets.filter(
+                      (widget): widget is Widget =>
+                        isRecord(widget) &&
+                        typeof widget.id === "string" &&
+                        widgetIdPattern.test(widget.id) &&
+                        typeof widget.title === "string",
+                    )
+                  : [],
+              }
+            : projections
+          : {}),
+        ...(message.role === "assistant" && !childMessage && status !== "failed" && reasoning.length
           ? { reasoning: reasoning.join("\n") }
           : {}),
-        ...(message.role === "assistant" && status !== "failed" && activity.size
+        ...(message.role === "assistant" && !childMessage && status !== "failed" && activity.size
           ? { activity: [...activity.values()] }
           : {}),
         ...(message.role === "assistant" &&
@@ -522,7 +547,7 @@ export function createProtectedChats(options: {
           }
           toolReplies.length = 0;
         }
-        if (reply) {
+        if (reply && !childMessage && replyMessage?.model !== "protected-child") {
           delete reply.sources;
           delete reply.widgets;
         }
@@ -619,10 +644,15 @@ export function createProtectedChats(options: {
         text: string;
         timestamp: number;
         parentLifecycleRevision: string | null;
+        widgets?: Widget[];
+        status?: "complete" | "failed";
       },
     ) {
       await readEntry(authority, id);
-      if (!options.agentCatalog.get(result.agentId) || !result.text.trim()) {
+      if (
+        !options.agentCatalog.get(result.agentId) ||
+        (!result.text.trim() && !result.widgets?.length)
+      ) {
         throw new ProtectedError(500, "save_failed", "The agent result could not be saved.");
       }
       const message = {
@@ -635,7 +665,15 @@ export function createProtectedChats(options: {
         stopReason: "stop",
         timestamp: result.timestamp,
         protectedAgentId: result.agentId,
-      } satisfies SessionTranscriptAssistantMessage & { protectedAgentId: string };
+        protectedChildRunId: result.runId,
+        protectedChildStatus: result.status ?? "complete",
+        protectedChildWidgets: result.widgets ?? [],
+      } satisfies SessionTranscriptAssistantMessage & {
+        protectedAgentId: string;
+        protectedChildRunId: string;
+        protectedChildStatus: "complete" | "failed";
+        protectedChildWidgets: Widget[];
+      };
       const saved = await appendExactAssistantMessageToSessionTranscript({
         ...scope(authority, id),
         expectedSessionId: id,

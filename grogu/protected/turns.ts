@@ -31,6 +31,7 @@ import {
 import { makeZeroUsageSnapshot, type NormalizedUsage } from "../../src/agents/usage.js";
 import { runMemoryFlushIfNeeded } from "../../src/auto-reply/reply/agent-runner-memory.js";
 import type { FollowupRun } from "../../src/auto-reply/reply/queue.js";
+import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createDefaultDeps } from "../../src/cli/deps.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
 import { readSessionEntryReadOnlyInWorker } from "../../src/config/sessions/session-entry-read-runtime.js";
@@ -76,7 +77,7 @@ import {
   type AutomationsChatBindings,
 } from "./automations-chat/contract.js";
 import type { StorageFiles } from "./capacity.js";
-import { chatFilesDirectory } from "./chat-files.js";
+import { chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
 import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
@@ -131,11 +132,21 @@ export type ProtectedTurn = {
     agentId: string;
     text: string;
     timestamp: number;
+    widgets?: Widget[];
+    status?: "complete" | "failed";
   }) => Promise<void>;
   cleanupChildFiles: (sessionId: string) => Promise<void>;
   chargeChildCreation: () => void;
   registerChildSession: (sessionKey: string) => () => void;
   childResult: (result: { runId: string; agentId: string; text: string }) => void;
+  childEvent: (
+    event: Extract<
+      ProtectedTurnEvent,
+      {
+        type: "child-start" | "child-delta" | "child-widget-draft" | "child-widget" | "child-error";
+      }
+    >,
+  ) => void;
   usage: (tokens: number | null) => void;
   contextBudget: (tokens: number) => void;
   modelRequest: (record: TerminalModelRequestMetadata) => void;
@@ -164,6 +175,43 @@ type ProtectedMemberMemoryLease = Awaited<
   ReturnType<ReturnType<typeof createProtectedMemberMemory>["open"]>
 >;
 
+function widgetDraftEvent(data: Record<string, unknown>, draftBytes: Map<string, number>) {
+  if (
+    data.phase !== "input_delta" ||
+    data.name !== "show_widget" ||
+    typeof data.toolCallId !== "string" ||
+    !isRecord(data.widgetDraft)
+  ) {
+    return undefined;
+  }
+  const draft = readWidgetDraftMetadata(data.widgetDraft);
+  if (!draft) {
+    return undefined;
+  }
+  const { html, offset } = data.widgetDraft;
+  const id = data.toolCallId;
+  const previous = draftBytes.get(id) ?? 0;
+  if (previous > WIDGET_DRAFT_MAX_CHARS || (!draftBytes.has(id) && draftBytes.size >= 32)) {
+    return undefined;
+  }
+  const used = previous + (typeof html === "string" ? Buffer.byteLength(html) : 0);
+  draftBytes.set(id, used);
+  if (used > WIDGET_DRAFT_MAX_CHARS) {
+    draft.unavailable = "limit";
+  }
+  const chunk =
+    !draft.unavailable &&
+    typeof html === "string" &&
+    typeof offset === "number" &&
+    Number.isSafeInteger(offset) &&
+    offset >= 0 &&
+    offset + html.length <= WIDGET_DRAFT_MAX_CHARS &&
+    Buffer.byteLength(html) <= WIDGET_DRAFT_MAX_CHARS
+      ? { html, offset }
+      : {};
+  return { type: "widget-draft" as const, id, ...draft, ...chunk };
+}
+
 async function runMentionedAgent(
   config: OpenClawConfig,
   turn: ProtectedTurn,
@@ -182,16 +230,30 @@ async function runMentionedAgent(
       lifecycleRevision: string;
       releaseSessionAccess: () => void;
       releaseExecution: () => void;
+      stopEvents: () => void;
       memoryGrant?: MemoryAudienceGrant;
     }
   >();
   let savedResult = false;
+  let savedFailure = false;
+  let saveAttempted = false;
   let usageReported = false;
-  let settle!: (outcome: "deleted" | "changed") => void;
-  const settled = new Promise<"deleted" | "changed">((resolve) => {
+  let settle!: (outcome: "deleted" | "changed" | "failed") => void;
+  const settled = new Promise<"deleted" | "changed" | "failed">((resolve) => {
     settle = resolve;
   });
   let spawnedRunId: string | undefined;
+  const widgets: Widget[] = [];
+  const draftBytes = new Map<string, number>();
+  let updates = Promise.resolve();
+  let updateError: unknown;
+  const queueUpdate = (update: () => Promise<void>) => {
+    updates = updates
+      .then(() => (updateError ? undefined : update()))
+      .catch((error: unknown) => {
+        updateError ??= error;
+      });
+  };
   const scope = {
     provider: turn.input.provider,
     model: turn.input.model,
@@ -318,8 +380,71 @@ async function runMentionedAgent(
               releaseSessionAccess,
               releaseExecution,
               memoryGrant,
+              stopEvents: onAgentEventForRun(child.runId, ({ stream, data }) => {
+                if (stream === "assistant" && typeof data.text === "string") {
+                  const text = data.text;
+                  queueUpdate(async () => {
+                    turn.assertCurrent();
+                    turn.childEvent({
+                      type: "child-delta",
+                      runId: child.runId,
+                      agentId: agent.id,
+                      text,
+                      replace: true,
+                    });
+                  });
+                }
+                if (stream !== "tool") {
+                  return;
+                }
+                const draft = widgetDraftEvent(data, draftBytes);
+                if (draft) {
+                  queueUpdate(async () => {
+                    turn.assertCurrent();
+                    turn.childEvent({
+                      type: "child-widget-draft",
+                      runId: child.runId,
+                      agentId: agent.id,
+                      draft,
+                    });
+                  });
+                }
+                if (data.phase !== "result" || data.isError === true || !isRecord(data.result)) {
+                  return;
+                }
+                const projected = projectToolResult(data.name, data.result.details);
+                for (const widget of projected.widgets) {
+                  queueUpdate(async () => {
+                    if (widgets.some((item) => item.id === widget.id) || widgets.length >= 20) {
+                      return;
+                    }
+                    await turn.revalidate();
+                    await readCanvasDocumentHtmlSource(widget.id, {
+                      storage: {
+                        files: turn.files,
+                        directory: chatWidgetsDirectory(child.sessionId),
+                      },
+                    });
+                    await turn.revalidate();
+                    await turn.files.mkdir(chatWidgetsDirectory(turn.id));
+                    await turn.files.move(
+                      `${chatWidgetsDirectory(child.sessionId)}/${widget.id}`,
+                      `${chatWidgetsDirectory(turn.id)}/${widget.id}`,
+                    );
+                    turn.assertCurrent();
+                    widgets.push(widget);
+                    turn.childEvent({
+                      type: "child-widget",
+                      runId: child.runId,
+                      agentId: agent.id,
+                      ...widget,
+                    });
+                  });
+                }
+              }),
             });
             spawnedRunId = child.runId;
+            turn.childEvent({ type: "child-start", runId: child.runId, agentId: agent.id });
           },
           beforeChildDeleteCleanup: async (child) => {
             const owned = children.get(child.runId);
@@ -332,20 +457,27 @@ async function runMentionedAgent(
               throw new Error("Protected child generation changed before cleanup.");
             }
             try {
-              if (child.outcome?.status === "ok" && child.resultText?.trim()) {
+              owned.stopEvents();
+              await updates;
+              if (updateError) {
+                throw updateError;
+              }
+              if (child.outcome?.status === "ok" && (child.resultText?.trim() || widgets.length)) {
                 try {
                   turn.assertCurrent();
+                  saveAttempted = true;
                   await turn.saveChildResult({
                     runId: child.runId,
                     agentId: agent.id,
-                    text: child.resultText,
+                    text: child.resultText ?? "",
                     timestamp: Date.now(),
+                    widgets,
                   });
                   savedResult = true;
                   turn.childResult({
                     runId: child.runId,
                     agentId: agent.id,
-                    text: child.resultText,
+                    text: child.resultText ?? "",
                   });
                 } catch (error) {
                   try {
@@ -355,6 +487,26 @@ async function runMentionedAgent(
                   }
                   throw error;
                 }
+              } else {
+                const message = "The agent could not complete its work.";
+                await turn.revalidate();
+                saveAttempted = true;
+                await turn.saveChildResult({
+                  runId: child.runId,
+                  agentId: agent.id,
+                  text: message,
+                  timestamp: Date.now(),
+                  status: "failed",
+                  widgets,
+                });
+                savedFailure = true;
+                turn.childEvent({
+                  type: "child-error",
+                  runId: child.runId,
+                  agentId: agent.id,
+                  code: "agent_failed",
+                  message,
+                });
               }
             } finally {
               await turn.cleanupChildFiles(child.sessionId);
@@ -362,9 +514,6 @@ async function runMentionedAgent(
           },
           childDeleteCleanupSettled: (outcome) => {
             const child = spawnedRunId ? children.get(spawnedRunId) : undefined;
-            if (outcome === "failed") {
-              return;
-            }
             child?.releaseSessionAccess();
             child?.releaseExecution();
             child?.memoryGrant?.release();
@@ -391,16 +540,44 @@ async function runMentionedAgent(
         "The mentioned agent could not complete its work.",
       );
     }
-  }).finally(() => {
-    for (const child of children.values()) {
-      child.releaseSessionAccess();
-      child.releaseExecution();
-      child.memoryGrant?.release();
-    }
-    if (spawnedRunId && !usageReported) {
-      recordUsage(undefined);
-    }
-  });
+  })
+    .catch(async (error: unknown) => {
+      for (const child of children.values()) {
+        child.stopEvents();
+      }
+      await updates;
+      if (spawnedRunId && !savedResult && !savedFailure && !saveAttempted) {
+        const message = "The agent could not complete its work.";
+        await turn.revalidate();
+        await turn.saveChildResult({
+          runId: spawnedRunId,
+          agentId: agent.id,
+          text: message,
+          timestamp: Date.now(),
+          status: "failed",
+          widgets,
+        });
+        turn.childEvent({
+          type: "child-error",
+          runId: spawnedRunId,
+          agentId: agent.id,
+          code: "agent_failed",
+          message,
+        });
+      }
+      throw error;
+    })
+    .finally(() => {
+      for (const child of children.values()) {
+        child.stopEvents();
+        child.releaseSessionAccess();
+        child.releaseExecution();
+        child.memoryGrant?.release();
+      }
+      if (spawnedRunId && !usageReported) {
+        recordUsage(undefined);
+      }
+    });
 }
 
 function readRoute(
@@ -592,49 +769,15 @@ export function createCanonicalProtectedTurns(options: {
               });
           }
         }
-        if (
-          stream !== "tool" ||
-          data.phase !== "input_delta" ||
-          data.name !== "show_widget" ||
-          typeof data.toolCallId !== "string" ||
-          !isRecord(data.widgetDraft)
-        ) {
+        if (stream !== "tool") {
           return;
         }
-        const draft = readWidgetDraftMetadata(data.widgetDraft);
+        const draft = widgetDraftEvent(data, draftBytes);
         if (!draft) {
           return;
         }
-        const { html, offset } = data.widgetDraft;
-        const id = data.toolCallId;
-        const previous = draftBytes.get(id) ?? 0;
-        if (previous > WIDGET_DRAFT_MAX_CHARS || (!draftBytes.has(id) && draftBytes.size >= 32)) {
-          return;
-        }
-        const used = previous + (typeof html === "string" ? Buffer.byteLength(html) : 0);
-        draftBytes.set(id, used);
-        if (used > WIDGET_DRAFT_MAX_CHARS) {
-          draft.unavailable = "limit";
-        }
-        const chunk =
-          !draft.unavailable &&
-          typeof html === "string" &&
-          typeof offset === "number" &&
-          Number.isSafeInteger(offset) &&
-          offset >= 0 &&
-          offset + html.length <= WIDGET_DRAFT_MAX_CHARS &&
-          Buffer.byteLength(html) <= WIDGET_DRAFT_MAX_CHARS
-            ? { html, offset }
-            : {};
         updates = updates
-          .then(() =>
-            turn.widgetDraft({
-              type: "widget-draft",
-              id,
-              ...draft,
-              ...chunk,
-            }),
-          )
+          .then(() => turn.widgetDraft(draft))
           .catch((error: unknown) => {
             updateError ??= error;
           });

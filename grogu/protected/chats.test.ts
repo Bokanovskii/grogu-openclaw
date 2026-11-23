@@ -59,6 +59,7 @@ void test("a child result is saved once in its owner's chat and charged to the r
     text: "A synthetic research result.",
     timestamp: Date.now(),
     parentLifecycleRevision: entry.lifecycleRevision ?? null,
+    widgets: [{ id: `cv_${"a".repeat(32)}`, title: "Synthetic result" }],
   };
   let charged = 0;
   await withTranscriptWriteBudget(
@@ -72,8 +73,22 @@ void test("a child result is saved once in its owner's chat and charged to the r
   );
   const saved = await chats.read(authority, chat.id);
   assert.deepEqual(
-    saved.messages.map(({ role, text, agentId }) => ({ role, text, agentId })),
-    [{ role: "assistant", text: result.text, agentId: result.agentId }],
+    saved.messages.map(({ role, text, agentId, runId, widgets }) => ({
+      role,
+      text,
+      agentId,
+      runId,
+      widgets,
+    })),
+    [
+      {
+        role: "assistant",
+        text: result.text,
+        agentId: result.agentId,
+        runId: result.runId,
+        widgets: result.widgets,
+      },
+    ],
   );
   assert.ok(charged > 0);
   await assert.rejects(
@@ -98,6 +113,18 @@ void test("a child result is saved once in its owner's chat and charged to the r
     { code: "save_failed" },
   );
   assert.equal((await chats.read(authority, chat.id)).messages.length, 1);
+  const failed = {
+    ...result,
+    runId: randomUUID(),
+    text: "The agent could not complete its work.",
+    widgets: [],
+    status: "failed" as const,
+  };
+  await chats.saveChildResult(authority, chat.id, failed);
+  const messages = (await chats.read(authority, chat.id)).messages;
+  assert.deepEqual(messages[0]?.widgets, result.widgets);
+  assert.equal(messages[1]?.runId, failed.runId);
+  assert.equal(messages[1]?.status, "failed");
   current = false;
   await assert.rejects(chats.saveChildResult(authority, chat.id, result), /authority ended/);
 });

@@ -506,6 +506,15 @@ type SessionEntryCore = SessionRestartRecoveryState &
     protectedAutomationId?: string;
     /** Automation whose scheduled and manual runs share this protected chat. */
     protectedAutomationRunId?: string;
+    /** Protected side chat: the owner's main chat it was forked from; one level only. */
+    protectedSideParentId?: string;
+    /**
+     * A side chat's forked prefix: its last parent message, the visible messages it holds, and
+     * the transcript events copied from the parent. The chat's own entries follow them.
+     */
+    protectedSideForkedAt?: { messageId: string; messageCount: number; eventCount: number };
+    /** Client request that created this side chat, so a retried create returns the same chat. */
+    protectedSideRequestId?: string;
     /**
      * Tracks whether the persisted model selection came from an explicit user
      * action (`/model`, `sessions.patch`), a temporary runtime fallback, or an

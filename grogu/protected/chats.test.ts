@@ -6,6 +6,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
+import { loadTranscriptEvents } from "../../src/config/sessions/session-accessor.js";
 import { appendTranscriptMessages } from "../../src/config/sessions/session-accessor.transcript-turn.js";
 import type { SessionTranscriptAssistantMessage } from "../../src/config/sessions/transcript.js";
 import { root } from "../../src/infra/fs-safe.js";
@@ -265,4 +266,169 @@ void test("saved tool fragments need completion in their own turn, not a child r
       },
     ],
   );
+});
+
+async function seedSideParent(t: TestContext) {
+  const chats = await createChats(t);
+  const authority = { profileId: randomUUID(), assertCurrent() {} };
+  const parent = await chats.create(authority);
+  const assistant = (text: string) =>
+    ({
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api: "openai-completions",
+      provider: "sparky",
+      model: "synthetic",
+      usage: makeZeroUsageSnapshot(),
+      stopReason: "stop",
+      timestamp: Date.now(),
+    }) satisfies SessionTranscriptAssistantMessage;
+  const append = (chatId: string, messages: unknown[]) =>
+    appendTranscriptMessages(
+      { ...chats.scope(authority, chatId), sessionId: chatId },
+      { messages: messages.map((message) => ({ message })) },
+    );
+  const user = (text: string) => ({ role: "user", content: text, timestamp: Date.now() });
+  const rawEvents = (chatId: string) =>
+    loadTranscriptEvents({ ...chats.scope(authority, chatId), sessionId: chatId });
+  return { chats, authority, parent, append, user, assistant, rawEvents };
+}
+
+void test("a side chat forks the parent's completed prefix and projects only its own messages", async (t) => {
+  const { chats, authority, parent, append, user, assistant, rawEvents } = await seedSideParent(t);
+  await append(parent.id, [
+    user("First question"),
+    assistant("First answer"),
+    user("Second question"),
+    assistant("Second answer"),
+    user("An unfinished question"),
+  ]);
+  const requestId = randomUUID();
+  const { chat: side, created } = await chats.createSide(authority, parent.id, {
+    requestId,
+    title: "Detour",
+  });
+  assert.equal(created, true);
+  const parentMessages = (await chats.read(authority, parent.id)).messages;
+  assert.equal(side.title, "Detour");
+  assert.equal(side.side?.parentId, parent.id);
+  assert.deepEqual(side.side?.forkedAt, { messageId: parentMessages[3]?.id, messageCount: 4 });
+  assert.equal((await chats.read(authority, side.id)).messages.length, 0);
+
+  const parentEvents = await rawEvents(parent.id);
+  const sideEvents = await rawEvents(side.id);
+  const messageEvents = (events: unknown[]) =>
+    events.filter((event) => (event as { type?: string }).type === "message");
+  // The inherited prefix is copied unchanged, including its entry ids, and stops before the open turn.
+  assert.deepEqual(messageEvents(sideEvents), messageEvents(parentEvents).slice(0, 4));
+  assert.deepEqual(
+    (await chats.readReportChatSource(authority, side.id)).events,
+    [],
+    "report evidence for a side chat excludes the inherited parent prefix",
+  );
+
+  await append(side.id, [user("A side question"), assistant("A side answer")]);
+  assert.deepEqual(
+    (await chats.read(authority, side.id)).messages.map(({ role, text }) => ({ role, text })),
+    [
+      { role: "user", text: "A side question" },
+      { role: "assistant", text: "A side answer" },
+    ],
+  );
+  const report = await chats.readReportChatSource(authority, side.id);
+  assert.deepEqual(
+    messageEvents(report.events).map(
+      (event) => (event as { message: { role: string } }).message.role,
+    ),
+    ["user", "assistant"],
+  );
+  assert.deepEqual(
+    (await chats.readReportChatSource(authority, side.id, 1)).chat.messages.map(({ text }) => text),
+    ["A side question"],
+    "a retained report bound counts only the side chat's own events",
+  );
+  assert.equal((await chats.read(authority, parent.id)).messages.length, 5);
+  assert.equal(
+    messageEvents(await rawEvents(parent.id)).length,
+    5,
+    "the parent transcript does not receive side chat messages",
+  );
+  assert.deepEqual(
+    (await chats.list(authority))
+      .map(({ id, side: link }) => ({ id, parentId: link?.parentId }))
+      .toSorted((a, b) => a.id.localeCompare(b.id)),
+    [
+      { id: parent.id, parentId: undefined },
+      { id: side.id, parentId: parent.id },
+    ].toSorted((a, b) => a.id.localeCompare(b.id)),
+  );
+});
+
+void test("side chat creation is idempotent, one level deep and limited to eligible chats", async (t) => {
+  const { chats, authority, parent, append, user, assistant } = await seedSideParent(t);
+  await append(parent.id, [user("Question"), assistant("Answer")]);
+  const requestId = randomUUID();
+  const { chat: side } = await chats.createSide(authority, parent.id, { requestId });
+  assert.equal(side.title, "Side chat");
+  assert.deepEqual(await chats.createSide(authority, parent.id, { requestId }), {
+    chat: side,
+    created: false,
+  });
+  assert.equal((await chats.list(authority)).length, 2);
+
+  // A side chat's own side chat branches from the same parent, at the parent's current state.
+  const { chat: sibling } = await chats.createSide(authority, side.id, {
+    requestId: randomUUID(),
+  });
+  assert.equal(sibling.side?.parentId, parent.id);
+  await assert.rejects(chats.createSide(authority, parent.id, { requestId: randomUUID() }), {
+    status: 413,
+    code: "quota_exceeded",
+  });
+  assert.equal((await chats.createSide(authority, parent.id, { requestId })).created, false);
+
+  // A retry key never links to a different chat.
+  await chats.delete(authority, sibling.id, sibling.version, async () => {});
+  const other = await chats.create(authority);
+  await append(other.id, [user("Another question"), assistant("Another answer")]);
+  await assert.rejects(chats.createSide(authority, other.id, { requestId }), {
+    status: 409,
+    code: "request_conflict",
+  });
+  await chats.delete(authority, side.id, side.version, async () => {});
+  await assert.rejects(
+    chats.createSide(authority, other.id, {
+      requestId: randomUUID(),
+      selectedAgentId: "missing-agent",
+    }),
+    { status: 422, code: "agent_unavailable" },
+  );
+});
+
+void test("side chats are refused without history, for run and authoring chats, and across profiles", async (t) => {
+  const { chats, authority, parent } = await seedSideParent(t);
+  await assert.rejects(chats.createSide(authority, parent.id, { requestId: randomUUID() }), {
+    status: 422,
+    code: "side_unavailable",
+  });
+  const authoring = await chats.create(authority, "Authoring", undefined, { kind: "automation" });
+  await assert.rejects(chats.createSide(authority, authoring.id, { requestId: randomUUID() }), {
+    status: 422,
+    code: "side_unavailable",
+  });
+  const run = await chats.create(authority, "Run", undefined, undefined, {
+    chatId: randomUUID(),
+    automationId: randomUUID(),
+  });
+  await assert.rejects(chats.createSide(authority, run.id, { requestId: randomUUID() }), {
+    status: 422,
+    code: "side_unavailable",
+  });
+  const stranger = { profileId: randomUUID(), assertCurrent() {} };
+  await assert.rejects(chats.createSide(stranger, parent.id, { requestId: randomUUID() }), {
+    status: 404,
+  });
+  await assert.rejects(chats.createSide(authority, randomUUID(), { requestId: randomUUID() }), {
+    status: 404,
+  });
 });

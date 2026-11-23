@@ -1290,6 +1290,11 @@ export function createProtectedHttp(options: {
                         text: result.text,
                       });
                     },
+                    childEvent: (event) => {
+                      if (hasClientCapability(request.headers, "specialist-stream-v1")) {
+                        send(event);
+                      }
+                    },
                     usage: (value) => {
                       tokens = value;
                     },
@@ -3148,6 +3153,11 @@ export function createProtectedHttp(options: {
       ) => withProtectedFiles(profileId, use, assert, signal);
       const readChat = async (id: string, owner = authority) => {
         const { chat, usage } = await chats.readWithUsage(owner, id);
+        if (!hasClientCapability(request.headers, "specialist-stream-v1")) {
+          for (const message of chat.messages) {
+            delete message.runId;
+          }
+        }
         if (!supportsAutomationsAuthoring(request)) {
           delete chat.authoring;
         }

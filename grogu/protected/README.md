@@ -785,6 +785,13 @@ agent, a route to itself, or an empty or oversized brief fails the turn with
 child policy withholds `sessions_send` from it, so only the chat's own agent
 can add messages to another chat.
 
+Clients that send `X-Alcove-Capabilities: specialist-stream-v1` receive child
+start, text, widget draft, widget, and error events keyed by child run ID.
+Text events replace the child's current text snapshot. A `child-result` follows
+the saved result. Chat reads include the same run ID on saved child messages.
+Widget references resolve through the parent chat's widget endpoint. Legacy
+clients do not receive the new events or the saved run ID.
+
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted

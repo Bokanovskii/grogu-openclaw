@@ -425,10 +425,10 @@ the DST behavior, and its isolated schedule tests cover the advertised
 List, detail, create, and patch responses use the full record shape: the draft
 fields above plus `id`, opaque `version`, `enabled`, `state: "active" | "paused"`,
 and `nextCheckAt: string | null`; records include the resolved effective
-`thinking` level. Omitted patch fields are retained; `doneWhen: null` clears
-that rule and `thinking: null` resets to the catalog default. Start, run, and
-pause of active schedules remain unavailable until the protected-to-Gateway
-trust boundary reaches the native Cron owner.
+`thinking` level. `nextCheckAt` is the scheduler's armed wakeup in ISO format.
+It is null when paused, when the scheduler is stopped, or while no wakeup is armed.
+Omitted patch fields are retained; `doneWhen: null` clears
+that rule and `thinking: null` resets to the catalog default.
 
 Chat agents can search the public web with OpenClaw's `web_search` and fetch
 public URLs with `web_fetch`; the stream shows the resulting sources. Search

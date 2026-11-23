@@ -351,7 +351,8 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(summaryRequest.model, "synthetic");
   assert.match(recoveredTrace, /"type":"done"/u);
 
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const scheduleNow = Math.floor(Date.now() / 60_000) * 60_000;
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: scheduleNow });
   await app.startAutomations(() => {});
   const capabilities = "automation-runs-v1, automation-results-v1";
   const automationCall = (route: string, init?: RequestInit) =>
@@ -359,6 +360,15 @@ void test("Protected turns load skills on request and retain credentials during 
       ...init,
       headers: { "x-alcove-capabilities": capabilities, ...init?.headers },
     });
+  const nextMinute = new Date(scheduleNow + 60_000);
+  const cronParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(nextMinute);
+  const cronHour = Number(cronParts.find((part) => part.type === "hour")?.value);
+  const cronMinute = Number(cronParts.find((part) => part.type === "minute")?.value);
   const createdAutomation = await automationCall("/automations", {
     method: "POST",
     body: JSON.stringify({
@@ -367,17 +377,47 @@ void test("Protected turns load skills on request and retain credentials during 
       whenToNotify: "After each briefing.",
       agentId: "grogu",
       model: { provider: "sparky", id: "synthetic" },
-      schedule: { kind: "every", everyMs: 60_000 },
+      schedule: {
+        kind: "cron",
+        expr: `${cronMinute} ${cronHour} * * *`,
+        tz: "America/Los_Angeles",
+      },
     }),
   });
   assert.equal(createdAutomation.status, 201, await createdAutomation.clone().text());
   const automation = (await createdAutomation.json()).automation;
+  assert.equal(automation.nextCheckAt, null);
   const enabled = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": automation.version },
     body: JSON.stringify({ enabled: true }),
   });
   assert.equal(enabled.status, 200, await enabled.clone().text());
+  const expectedNextCheck = new Date(scheduleNow + 60_000).toISOString();
+  const enabledRecord = (await enabled.clone().json()).automation;
+  assert.equal(enabledRecord.nextCheckAt, expectedNextCheck);
+  const listed = (await (await automationCall("/automations")).json()).automations;
+  assert.equal(
+    listed.find((entry: { id: string }) => entry.id === automation.id)?.nextCheckAt,
+    expectedNextCheck,
+  );
+  const read = (await (await automationCall(`/automations/${automation.id}`)).json()).automation;
+  assert.equal(read.nextCheckAt, expectedNextCheck);
+  const paused = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": enabledRecord.version },
+    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 } }),
+  });
+  assert.equal(paused.status, 200, await paused.clone().text());
+  const pausedRecord = (await paused.json()).automation;
+  assert.equal(pausedRecord.nextCheckAt, null);
+  const resumed = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": pausedRecord.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
   const waitForDelivery = async (trigger: "scheduled" | "manual", excluded: string[] = []) => {
     for await (const event of watch(stateDir, { recursive: true })) {
       void event;
@@ -533,7 +573,7 @@ void test("Protected turns load skills on request and retain credentials during 
   await entered.promise;
   const busyDelete = await automationCall(`/automations/${automation.id}`, {
     method: "DELETE",
-    headers: { "if-match": (await enabled.clone().json()).automation.version },
+    headers: { "if-match": (await resumed.clone().json()).automation.version },
   });
   assert.equal(busyDelete.status, 409);
   assert.equal((await busyDelete.json()).error.code, "automation_busy");
@@ -569,6 +609,10 @@ void test("Protected turns load skills on request and retain credentials during 
   });
   server = createProtectedServer(origin, app.fetch);
   url = await listen(server);
+  const beforeStart = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(beforeStart.enabled, true);
+  assert.equal(beforeStart.nextCheckAt, null);
   const overdueDelivery = waitForDelivery("scheduled", [scheduledRun.id]);
   const quotaRefusal = (async () => {
     for await (const event of watch(stateDir, { recursive: true })) {
@@ -604,7 +648,7 @@ void test("Protected turns load skills on request and retain credentials during 
   );
   const beforeDeletion = await readProtectedAutomationLifecycleStorageUsage(stateDir, () => {});
   const beforeResults = await readProtectedAutomationResultStorageUsage(stateDir, () => {});
-  const ownerVersion = (await enabled.json()).automation.version;
+  const ownerVersion = (await resumed.json()).automation.version;
   const deletion = await automationCall(`/automations/${automation.id}`, {
     method: "DELETE",
     headers: { "if-match": ownerVersion },

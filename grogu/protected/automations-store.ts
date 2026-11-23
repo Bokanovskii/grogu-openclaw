@@ -28,7 +28,9 @@ function assertCurrent(
   authority.assertCurrent();
 }
 
-function record(automation: ProtectedAutomationStorageRecord): ProtectedAutomationRecord {
+export type StoredAutomationRecord = Omit<ProtectedAutomationRecord, "nextCheckAt">;
+
+function record(automation: ProtectedAutomationStorageRecord): StoredAutomationRecord {
   const thinking = automation.definition.thinking;
   if (!thinking) {
     throw new Error("Stored protected automation has no resolved thinking level.");
@@ -40,7 +42,6 @@ function record(automation: ProtectedAutomationStorageRecord): ProtectedAutomati
     version: String(automation.definitionRevision),
     enabled: automation.enabled,
     state: automation.enabled ? "active" : "paused",
-    nextCheckAt: null,
   };
 }
 
@@ -96,7 +97,7 @@ export async function listOwnedProtectedAutomationStorageRecords(
 export async function listProtectedAutomationRecords(
   stateDir: string,
   authority: ProtectedAutomationMutationAuthority,
-): Promise<ProtectedAutomationRecord[]> {
+): Promise<StoredAutomationRecord[]> {
   const records = await listOwnedProtectedAutomationStorageRecords(stateDir, authority);
   return records.filter((automation) => automation.visibility === "private").map(record);
 }
@@ -105,7 +106,7 @@ export async function readProtectedAutomationRecord(
   stateDir: string,
   input: { profileId: string; automationId: string },
   authority: ProtectedAutomationMutationAuthority,
-): Promise<ProtectedAutomationRecord | undefined> {
+): Promise<StoredAutomationRecord | undefined> {
   const automation = await readAutomation(stateDir, input, authority);
   return automation && automation.visibility === "private" && automation.relation === "owner"
     ? record(automation)
@@ -141,7 +142,7 @@ export async function createProtectedAutomationRecord(
     StorageAdmission,
     "chargeAutomationCreate" | "settleAutomationCreate" | "assertResult"
   >,
-): Promise<ProtectedAutomationRecord | undefined> {
+): Promise<StoredAutomationRecord | undefined> {
   const workerContext = context(stateDir);
   const result = await createProtectedAutomationWithAdmission(workerContext, input, {
     ...authority,
@@ -201,7 +202,7 @@ export async function patchProtectedAutomationRecord(
 }
 
 export type SaveProtectedAutomationPatchResult =
-  | { status: "updated"; automation: ProtectedAutomationRecord }
+  | { status: "updated"; automation: StoredAutomationRecord }
   | { status: "not_found" }
   | { status: "version_mismatch"; currentVersion?: string }
   | { status: "scheduler_required" }

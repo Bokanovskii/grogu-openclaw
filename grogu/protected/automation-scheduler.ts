@@ -17,6 +17,7 @@ export type ProtectedScheduledAutomation = {
 type ScheduledEntry = {
   automation: ProtectedScheduledAutomation;
   timer?: GatewayScheduledJob;
+  atMs?: number;
 };
 
 /** Owns wakeups only; the run owner rechecks authority and version before starting. */
@@ -41,6 +42,7 @@ export function createProtectedAutomationScheduler(
       id: `protected-automation:${automation.id}`,
       atMs,
       run: async () => {
+        entry.atMs = undefined;
         try {
           await run(automation, atMs);
         } finally {
@@ -50,6 +52,7 @@ export function createProtectedAutomationScheduler(
         }
       },
     });
+    entry.atMs = atMs;
   };
 
   return {
@@ -63,6 +66,12 @@ export function createProtectedAutomationScheduler(
     remove(id: string) {
       jobs.get(id)?.timer?.cancel();
       jobs.delete(id);
+    },
+    nextCheckAtMs(id: string, version: string) {
+      const entry = jobs.get(id);
+      return !scheduler.signal.aborted && entry?.automation.version === version
+        ? (entry.atMs ?? null)
+        : null;
     },
     beginClose: () => scheduler.beginClose(),
     stop: () => scheduler.stop(),

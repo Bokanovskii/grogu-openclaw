@@ -215,7 +215,7 @@ export function validateProtectedAutomationDraft(
 }
 
 export function applyProtectedAutomationPatch(
-  current: ProtectedAutomationRecord,
+  current: Omit<ProtectedAutomationRecord, "nextCheckAt">,
   patch: ProtectedAutomationPatchRequest,
 ): Record<string, unknown> {
   const definition: Record<string, unknown> = { ...current };

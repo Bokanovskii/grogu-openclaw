@@ -65,6 +65,34 @@ void test("validates only the advertised local calendar schedules", () => {
   }
 });
 
+void test("returns calendar schedules in canonical form without leading zeros", () => {
+  const catalog = createProtectedAutomationCatalog({
+    agents,
+    models: [model],
+    calendarDraftValidationAvailable: true,
+  });
+  assert.ok(catalog);
+
+  for (const [expr, canonical] of [
+    ["00 06 * * *", "0 6 * * *"],
+    ["05 07 * * 1-5", "5 7 * * 1-5"],
+    ["30 18 * * 6", "30 18 * * 6"],
+  ] as const) {
+    const result = validateProtectedAutomationDraft(
+      { ...baseDraft, schedule: { kind: "cron", expr, tz: "America/Los_Angeles" } },
+      catalog,
+    );
+    assert.equal(result.valid, true, expr);
+    if (result.valid) {
+      assert.deepEqual(result.draft.schedule, {
+        kind: "cron",
+        expr: canonical,
+        tz: "America/Los_Angeles",
+      });
+    }
+  }
+});
+
 void test("rejects ambiguous, unsupported, or invalid calendar schedules", () => {
   const catalog = createProtectedAutomationCatalog({
     agents,

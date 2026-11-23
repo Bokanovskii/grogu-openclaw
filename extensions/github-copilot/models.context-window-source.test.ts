@@ -1,15 +1,24 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it, vi } from "vitest";
-import { fetchCopilotModelCatalog } from "./models.js";
+import { fetchCopilotModelCatalog, getCopilotCatalogContextSizes } from "./models.js";
 
-const fixture = vi.hoisted(() => ({ limits: {} as Record<string, unknown> }));
+const fixture = vi.hoisted(() => ({
+  limits: {} as Record<string, unknown>,
+  billing: undefined as unknown,
+}));
 // Mapping owns these tests; transport cleanup and SSRF have coverage in models.test.ts.
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/ssrf-runtime")>()),
   ssrfPolicyFromHttpBaseUrlAllowedOrigin: () => ({}),
   fetchWithSsrFGuard: async () => ({
     response: Response.json({
-      data: [{ id: "account-model", capabilities: { type: "chat", limits: fixture.limits } }],
+      data: [
+        {
+          id: "account-model",
+          billing: fixture.billing,
+          capabilities: { type: "chat", limits: fixture.limits },
+        },
+      ],
     }),
     release: async () => {},
   }),
@@ -22,6 +31,7 @@ describe("native context window provenance", () => {
       copilotApiToken: "fixture-token",
       baseUrl: "https://fixture.test",
     });
+
     return expectDefined(model, "mapped account model");
   }
 
@@ -57,4 +67,45 @@ describe("native context window provenance", () => {
     expect(model).not.toHaveProperty("contextWindowSource");
     expect(model.contextTokens).toBe(777_000);
   });
+});
+
+describe("Copilot context pricing", () => {
+  it.each([
+    [
+      "equal prices",
+      { input_price: 1, output_price: 1, cache_read_price: 1, cache_write_price: 1 },
+      1_000_000,
+      false,
+    ],
+    ["missing cache prices", { input_price: 1, output_price: 1 }, 200_000, true],
+    ["missing output price", { input_price: 1 }, undefined, undefined],
+  ])(
+    "handles %s without claiming unknown prices are free",
+    async (_name, prices, defaultSize, surcharge) => {
+      fixture.limits = { max_context_window_tokens: 1_000_000 };
+      fixture.billing = {
+        token_prices: {
+          default: { ...prices, context_max: 200_000 },
+          long_context: { ...prices, context_max: 1_000_000 },
+        },
+      };
+      try {
+        const [model] = await fetchCopilotModelCatalog({
+          copilotApiToken: "fixture-token",
+          baseUrl: "https://fixture.test",
+        });
+        expect(getCopilotCatalogContextSizes(expectDefined(model, "mapped account model"))).toEqual(
+          defaultSize === undefined
+            ? undefined
+            : {
+                options: [200_000, 1_000_000],
+                default: defaultSize,
+                longContextSurcharge: surcharge,
+              },
+        );
+      } finally {
+        fixture.billing = undefined;
+      }
+    },
+  );
 });

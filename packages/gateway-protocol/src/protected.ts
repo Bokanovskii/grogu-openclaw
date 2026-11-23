@@ -86,6 +86,7 @@ export const ProtectedTurnRequestSchema = node({
   provider: ProtectedProviderSchema,
   credential: Type.Optional(ProtectedCredentialSchema),
   thinking: Type.Optional(ProtectedThinkLevelSchema),
+  contextSize: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 });
 export const ProtectedSourceSchema = node({ title: Type.String(), url: Type.String() });
 export const ProtectedWidgetSchema = node({ id, title: Type.String() });
@@ -118,6 +119,7 @@ export const ProtectedTurnEventSchema = Type.Union([
     contextTokens: Type.Integer({ minimum: 0 }),
     inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
     outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+    contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
   node({
     type: Type.Literal("widget-draft"),
@@ -177,6 +179,17 @@ export const ProtectedModelSchema = node({
   label: Type.String(),
   vendor: Type.Optional(Type.String()),
   contextWindow: Type.Optional(Type.Integer({ minimum: 1 })),
+  contextSizes: Type.Optional(
+    node({
+      options: Type.Array(Type.Integer({ minimum: 1 }), {
+        minItems: 2,
+        maxItems: 2,
+        uniqueItems: true,
+      }),
+      default: Type.Integer({ minimum: 1 }),
+      longContextSurcharge: Type.Boolean(),
+    }),
+  ),
   thinking: Type.Optional(
     node({
       levels: Type.Array(ProtectedThinkLevelSchema),
@@ -554,6 +567,7 @@ export const ProtectedChatResponseSchema = node({
       contextTokens: Type.Integer({ minimum: 0 }),
       inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
       outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+      contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
       provider: ProtectedProviderSchema,
       model: id,
     }),

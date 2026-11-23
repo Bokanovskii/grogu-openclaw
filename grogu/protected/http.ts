@@ -1920,7 +1920,10 @@ export function createProtectedHttp(options: {
             signal: request.signal,
             revalidate,
           },
-          { includeVendor: hasClientCapability(request.headers, "model-vendor-v1") },
+          {
+            includeVendor: hasClientCapability(request.headers, "model-vendor-v1"),
+            includeContextSizes: hasClientCapability(request.headers, "model-context-v1"),
+          },
         );
         return profileJson({ models: models.map(({ model }) => model) });
       }
@@ -2179,8 +2182,11 @@ export function createProtectedHttp(options: {
       if (!rest && method === "GET") {
         const { chat, usage } = await readChat(id);
         await revalidate();
+        if (usage && !hasClientCapability(request.headers, "model-context-v1")) {
+          delete usage.contextSize;
+        }
         const active = runs.get(id);
-        return json({
+        return profileJson({
           chat,
           ...(usage ? { usage } : {}),
           ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
@@ -2572,10 +2578,11 @@ export function createProtectedHttp(options: {
               "Connect this provider first.",
             );
           }
-          const models = await fetchProtectedCopilotModels(credential, {
-            signal: request.signal,
-            revalidate,
-          });
+          const models = await fetchProtectedCopilotModels(
+            credential,
+            { signal: request.signal, revalidate },
+            { includeContextSizes: data.contextSize !== undefined },
+          );
           const requested = data.model ?? fixedModel?.id;
           copilotModel = models.find(({ model }) => model.id === requested);
         }
@@ -2592,12 +2599,23 @@ export function createProtectedHttp(options: {
             "This reasoning level is not available.",
           );
         }
+        if (
+          data.contextSize !== undefined &&
+          !copilotModel?.model.contextSizes?.options.includes(data.contextSize)
+        ) {
+          throw new ProtectedError(
+            422,
+            "context_size_unavailable",
+            "This context size is not available.",
+          );
+        }
         const input: TurnInput = {
           provider: model.provider,
           model: model.id,
           text: text(data.text, 16_000),
           ...(data.mentions ? { mentions: data.mentions } : {}),
           thinking: data.thinking ?? model.thinking?.default,
+          ...(data.contextSize === undefined ? {} : { contextSize: data.contextSize }),
           ...(copilotModel ? { copilotModel } : {}),
           ...(isRecord(credential)
             ? {
@@ -2945,6 +2963,7 @@ export function createProtectedHttp(options: {
             const complete = async () => {
               let outcome: "complete" | "failed" | "interrupted" = "failed";
               let tokens: number | null = null;
+              let contextBudget: number | undefined;
               let messageCount: number | null = null;
               let failed = true;
               let errorCode: string | null = null;
@@ -3009,6 +3028,9 @@ export function createProtectedHttp(options: {
                         usage: (value) => {
                           tokens = value;
                         },
+                        contextBudget: (value) => {
+                          contextBudget = value;
+                        },
                         modelRequest: (record) => {
                           modelRequests.push(record);
                         },
@@ -3055,7 +3077,7 @@ export function createProtectedHttp(options: {
                   signal,
                 );
                 storage?.assertResult();
-                const { chat, usage } = await chats.readWithUsage(runAuthority, id);
+                let { chat, usage } = await chats.readWithUsage(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 messageCount = newMessages.length;
@@ -3080,6 +3102,34 @@ export function createProtectedHttp(options: {
                     "The reply could not be confirmed as saved.",
                   );
                 }
+                if (
+                  contextBudget !== undefined &&
+                  responseId !== null &&
+                  usage?.provider === input.provider &&
+                  usage.model === input.model
+                ) {
+                  const size = contextBudget;
+                  const completedResponseId = responseId;
+                  const saveBudget = () =>
+                    chats.saveContextBudget(runAuthority, id, {
+                      runId: run.id,
+                      responseId: completedResponseId,
+                      contextSize: size,
+                      lifecycleRevision: parentLifecycleRevision,
+                    });
+                  await (storage
+                    ? withTranscriptWriteBudget(storage.charge, saveBudget)
+                    : saveBudget());
+                  ({ chat, usage } = await chats.readWithUsage(runAuthority, id));
+                  await checkRun();
+                  if (usage?.contextSize !== size) {
+                    throw new ProtectedError(
+                      500,
+                      "save_failed",
+                      "The context budget could not be confirmed as saved.",
+                    );
+                  }
+                }
                 failed = false;
                 if (usage && usage.provider === input.provider && usage.model === input.model) {
                   send({
@@ -3088,6 +3138,10 @@ export function createProtectedHttp(options: {
                     ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
                     ...(usage.outputTokens !== undefined
                       ? { outputTokens: usage.outputTokens }
+                      : {}),
+                    ...(usage.contextSize !== undefined &&
+                    hasClientCapability(request.headers, "model-context-v1")
+                      ? { contextSize: usage.contextSize }
                       : {}),
                   });
                 }

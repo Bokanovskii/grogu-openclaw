@@ -332,8 +332,14 @@ levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
 available to that account. Clients can request the optional account-reported
 `vendor` on models with `X-Alcove-Capabilities: model-vendor-v1`; an absent
-vendor is unknown. A model's `contextWindow` is its reported maximum, not a
-separate context-tier selection. The token is used for that request only. Turns may
+vendor is unknown. Clients can request `model-context-v1` to receive
+`contextSizes` for Copilot models with distinct provider-reported input limits.
+The options include a default and a warning when the longer context can cost more
+or cache pricing is unknown. The shorter budget is the default in either case.
+Turns can send a listed `contextSize`. OpenClaw uses it as a local context budget,
+with room reserved for output. It is not a provider mode or a billing guarantee.
+An unavailable size returns `context_size_unavailable`. Omission retains the
+existing budget. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
@@ -341,6 +347,8 @@ An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
+With `model-context-v1`, usage also includes the effective `contextSize` for a
+completed turn that selected one. Older replies can omit it.
 Both include optional `inputTokens` and `outputTokens` for the latest parent
 turn, summed from its saved provider calls. The existing `contextTokens` remains
 the latest call's context size. Unknown counters and adapter-default zeros are

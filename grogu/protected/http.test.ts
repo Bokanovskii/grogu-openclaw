@@ -2242,8 +2242,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   }> = [];
   const copilotBodies: Array<{
     model?: string;
+    input?: unknown;
     reasoning?: { effort?: string; summary?: string };
   }> = [];
+  let copilotOverflow = false;
   let copilotSummary: string | undefined;
   let foreignAutomationId = "";
   let ownedAutomationId = "";
@@ -2300,6 +2302,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   object: "model",
                   vendor: " OpenAI ",
                   model_picker_enabled: true,
+                  billing: {
+                    token_prices: {
+                      default: { input_price: 1, output_price: 1, max_prompt_tokens: 200_000 },
+                      long_context: {
+                        input_price: 2,
+                        output_price: 2,
+                        max_prompt_tokens: 1_000_000,
+                      },
+                    },
+                  },
                   capabilities: {
                     type: "chat",
                     limits: { max_context_window_tokens: 1_000_000 },
@@ -2322,9 +2334,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 },
               ],
             });
-          case "https://api.business.githubcopilot.com/responses":
-            copilotBodies.push(await new Request(input, init).json());
+          case "https://api.business.githubcopilot.com/responses": {
+            const body = await new Request(input, init).json();
+            copilotBodies.push(body);
+            if (
+              !copilotOverflow &&
+              JSON.stringify(body.input).includes("Trigger Copilot overflow")
+            ) {
+              copilotOverflow = true;
+              return Response.json(
+                {
+                  error: {
+                    message:
+                      "This model's maximum context length is 200000 tokens. However, your messages resulted in 201000 tokens.",
+                    code: "context_length_exceeded",
+                  },
+                },
+                { status: 400 },
+              );
+            }
             return responsesReply("Canonical Copilot reply.", copilotUsage, copilotSummary);
+          }
           case "https://chatgpt.com/backend-api/codex/responses":
             return responsesReply("Canonical OpenAI reply.");
           case "https://api.anthropic.com/v1/messages":
@@ -2872,6 +2902,156 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.equal(me.status, 200, await me.clone().text());
   const meBody = await me.json();
   const { user, models: fixedModels } = meBody;
+  await t.test("offers provider-backed context sizes only to capable clients", async () => {
+    const listing = (capability?: string) =>
+      call("/providers/github-copilot/models", {
+        method: "POST",
+        headers: {
+          "x-grogu-profile": user.id,
+          ...(capability ? { "x-alcove-capabilities": capability } : {}),
+        },
+        body: JSON.stringify({ credential: { accessToken: githubToken } }),
+      });
+    const { models } = await (await listing("model-context-v1")).json();
+    assert.deepEqual(models[1].contextSizes, {
+      options: [200_000, 1_000_000],
+      default: 200_000,
+      longContextSurcharge: true,
+    });
+    assert.equal(models[0].contextSizes, undefined);
+    assert.equal((await (await listing()).json()).models[1].contextSizes, undefined);
+  });
+  await t.test("uses and restores the selected Copilot context budget", async () => {
+    const created = await call("/chats", { method: "POST", body: "{}" });
+    const { chat } = await created.json();
+    const route = `/chats/${chat.id}`;
+    const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "model-context-v1" };
+    const turn = (contextSize: number, text = "Test selected context") =>
+      call(`${route}/turns`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          provider: "github-copilot",
+          model: "gpt-5.4",
+          text,
+          thinking: "high",
+          contextSize,
+          credential: { accessToken: githubToken },
+        }),
+      });
+    const invalid = await turn(300_000);
+    assert.equal(invalid.status, 422);
+    assert.equal((await invalid.json()).error.code, "context_size_unavailable");
+    for (const contextSize of [200_000, 1_000_000]) {
+      const response = await turn(contextSize);
+      assert.equal(response.status, 200);
+      const events = (await response.text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(events.at(-1)?.type, "done");
+      assert.equal(events.find((event) => event.type === "usage")?.contextSize, contextSize);
+      const saved = await (await call(route, { headers })).json();
+      assert.equal(saved.usage?.contextSize, contextSize);
+      const legacy = await (await call(route)).json();
+      assert.equal(legacy.usage?.contextSize, undefined);
+    }
+    const priorCompaction = protectedConfig.agents?.defaults?.compaction;
+    assert.ok(protectedConfig.agents?.defaults);
+    protectedConfig.agents.defaults.compaction = {
+      mode: "default",
+      keepRecentTokens: 1,
+      postIndexSync: "off",
+    };
+    const bodyStart = copilotBodies.length;
+    const requestStart = providerRequests.length;
+    try {
+      const recovered = await turn(200_000, "Trigger Copilot overflow");
+      const events = (await recovered.text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(copilotOverflow, true);
+      assert.ok(
+        copilotBodies
+          .slice(bodyStart)
+          .some((body) => JSON.stringify(body.input).includes("context summarization assistant")),
+      );
+      assert.ok(
+        providerRequests
+          .slice(requestStart)
+          .filter(({ endpoint }) => endpoint.endsWith("/responses"))
+          .every(({ authorization }) => authorization === `Bearer ${rawGithubToken}`),
+      );
+      assert.equal(events.at(-1)?.type, "done");
+      assert.equal(events.find((event) => event.type === "usage")?.contextSize, 200_000);
+    } finally {
+      protectedConfig.agents.defaults.compaction = priorCompaction;
+    }
+    const current = await (await call(route)).json();
+    assert.equal(
+      (await call(route, { method: "DELETE", headers: { "if-match": current.chat.version } }))
+        .status,
+      204,
+    );
+  });
+  await t.test(
+    "compacts the same retained context only at the smaller selected budget",
+    async () => {
+      assert.ok(protectedConfig.agents?.defaults);
+      const priorCompaction = protectedConfig.agents.defaults.compaction;
+      const priorUsage = copilotUsage;
+      protectedConfig.agents.defaults.compaction = {
+        mode: "default",
+        keepRecentTokens: 1,
+        postIndexSync: "off",
+      };
+      const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "model-context-v1" };
+      try {
+        for (const contextSize of [1_000_000, 200_000]) {
+          const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+          const route = `/chats/${chat.id}`;
+          const send = async (size: number, text: string) => {
+            const response = await call(`${route}/turns`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                provider: "github-copilot",
+                model: "gpt-5.4",
+                text,
+                thinking: "high",
+                contextSize: size,
+                credential: { accessToken: githubToken },
+              }),
+            });
+            assert.equal(response.status, 200);
+            const trace = await response.text();
+            assert.match(trace, /"type":"done"/u);
+          };
+          copilotUsage = { input_tokens: 210_000, output_tokens: 1, total_tokens: 210_001 };
+          await send(1_000_000, "Retain the same synthetic context");
+          copilotUsage = priorUsage;
+          const bodyStart = copilotBodies.length;
+          await send(contextSize, "Continue this conversation");
+          const summarized = copilotBodies
+            .slice(bodyStart)
+            .some((body) => JSON.stringify(body.input).includes("context summarization assistant"));
+          assert.equal(summarized, contextSize === 200_000);
+          const current = await (await call(route)).json();
+          assert.equal(
+            (await call(route, { method: "DELETE", headers: { "if-match": current.chat.version } }))
+              .status,
+            204,
+          );
+        }
+      } finally {
+        protectedConfig.agents.defaults.compaction = priorCompaction;
+        copilotUsage = priorUsage;
+      }
+    },
+  );
+  const contextProofUsage = await listProtectedUsage(stateDir, user.id, Date.now());
+  const contextProofTokens = contextProofUsage.reduce((total, day) => total + day.tokens, 0);
   assert.equal("feedback" in meBody.capabilities, false);
   assert.equal("telemetry" in meBody.capabilities, false);
   const sparkyModel = fixedModels.find(
@@ -3182,7 +3362,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   );
   assert.equal(telemetry.totals.reports, 1);
   assert.equal(telemetry.totals.ratingsDown, 1);
-  assert.equal(telemetry.totals.runs, 1);
+  assert.equal(telemetry.totals.runs, 8);
   const attributedRun = telemetry.runs.find(
     (run: { chatId: string | null; provider: string | null; model: string | null }) =>
       run.chatId === chat.id && run.provider === "sparky" && run.model === "synthetic",
@@ -3400,8 +3580,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const usage = await listProtectedUsage(stateDir, user.id, Date.now());
   assert.equal(
     usage.reduce((total, day) => total + day.tokens, 0),
-    25,
-    "usage includes both parent turns and both native child provider requests",
+    25 + contextProofTokens,
+    "usage includes the context proof, both parent turns, and both native child provider requests",
   );
   assert.equal(
     usage.reduce((total, day) => total + day.missingUsage, 0),

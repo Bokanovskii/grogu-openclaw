@@ -79,6 +79,7 @@ export type TurnInput = {
   model: string;
   credential?: { accessToken: string; expiresAt?: number };
   thinking?: ProtectedTurnRequest["thinking"];
+  contextSize?: number;
   copilotModel?: Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number];
 };
 export type ProtectedTurn = {
@@ -119,6 +120,7 @@ export type ProtectedTurn = {
   registerChildSession: (sessionKey: string) => () => void;
   childResult: (result: { runId: string; agentId: string; text: string }) => void;
   usage: (tokens: number | null) => void;
+  contextBudget: (tokens: number) => void;
   modelRequest: (record: TerminalModelRequestMetadata) => void;
   reasoningLength: (length: number) => void;
   delta: (text: string) => Promise<void>;
@@ -493,7 +495,14 @@ export function createCanonicalProtectedTurns(options: {
                 ...options.config.models?.providers,
                 "github-copilot": {
                   baseUrl: turn.input.copilotModel.baseUrl,
-                  models: [turn.input.copilotModel.definition],
+                  models: [
+                    turn.input.contextSize === undefined
+                      ? turn.input.copilotModel.definition
+                      : {
+                          ...turn.input.copilotModel.definition,
+                          contextTokens: turn.input.contextSize,
+                        },
+                  ],
                 },
               },
             },
@@ -671,6 +680,9 @@ export function createCanonicalProtectedTurns(options: {
                   trigger: "user",
                   provider,
                   model,
+                  ...(turn.input.contextSize === undefined
+                    ? {}
+                    : { contextTokenBudget: turn.input.contextSize, modelSelectionLocked: true }),
                   thinkLevel: turn.input.thinking,
                   reasoningLevel: "stream",
                   agentHarnessRuntimeOverride: "openclaw",
@@ -757,6 +769,17 @@ export function createCanonicalProtectedTurns(options: {
         }
         if (result.payloads?.some((payload) => payload.isError) || result.meta.aborted) {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
+        }
+        const effectiveBudget = result.meta.agentMeta?.contextTokens;
+        if (
+          turn.input.contextSize !== undefined &&
+          result.meta.agentMeta?.provider === provider &&
+          result.meta.agentMeta?.model === model &&
+          typeof effectiveBudget === "number" &&
+          Number.isSafeInteger(effectiveBudget) &&
+          effectiveBudget > 0
+        ) {
+          turn.contextBudget(effectiveBudget);
         }
         if (result.meta.intentionalTerminalCompletion === "tool-batch") {
           // Only the native owner can confirm that a settled tool batch ended the reply.

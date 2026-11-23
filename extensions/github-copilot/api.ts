@@ -3,6 +3,7 @@ export { normalizeGithubCopilotOAuthScope } from "./domain.js";
 export { runGitHubCopilotDeviceFlow } from "./login.js";
 export {
   fetchCopilotModelCatalog,
+  getCopilotCatalogContextSizes,
   getCopilotCatalogVendor,
   isCopilotCatalogModelVisible,
 } from "./models.js";

@@ -109,6 +109,34 @@ async function listDirectory(files: AuthorizedUserFiles, directory: string) {
   }
 }
 
+export async function listProtectedChatFileCandidates(files: AuthorizedUserFiles, chatId: string) {
+  const fileDirectory = chatArtifactsDirectory(chatId);
+  const generatedDirectory = chatGeneratedArtifactsDirectory(chatId);
+  return [
+    ...(await listDirectory(files, fileDirectory)).filter(validFilename).map((name) => ({
+      kind: "file" as const,
+      id: `${chatId}~${name}`,
+      name,
+      displayName: name,
+      directory: fileDirectory,
+    })),
+    ...(await listDirectory(files, generatedDirectory)).flatMap((name) => {
+      const slug = generatedSlug(name);
+      return slug
+        ? [
+            {
+              kind: "file" as const,
+              id: `generated~${chatId}~${name}`,
+              name,
+              displayName: `${slug.replaceAll("-", " ")}.html`,
+              directory: generatedDirectory,
+            },
+          ]
+        : [];
+    }),
+  ];
+}
+
 export async function listProtectedArtifacts(options: {
   files: AuthorizedUserFiles;
   chats: ProtectedChatSummary[];
@@ -121,30 +149,9 @@ export async function listProtectedArtifacts(options: {
     (left, right) => right.updatedAt - left.updatedAt || compareStrings(left.id, right.id),
   );
   for (const chat of chats) {
-    const fileDirectory = chatArtifactsDirectory(chat.id);
-    const generatedDirectory = chatGeneratedArtifactsDirectory(chat.id);
     const widgetDirectory = chatWidgetsDirectory(chat.id);
     const candidates = [
-      ...(await listDirectory(options.files, fileDirectory)).filter(validFilename).map((name) => ({
-        kind: "file" as const,
-        id: `${chat.id}~${name}`,
-        name,
-        directory: fileDirectory,
-      })),
-      ...(await listDirectory(options.files, generatedDirectory)).flatMap((name) => {
-        const slug = generatedSlug(name);
-        return slug
-          ? [
-              {
-                kind: "file" as const,
-                id: `generated~${chat.id}~${name}`,
-                name,
-                displayName: `${slug.replaceAll("-", " ")}.html`,
-                directory: generatedDirectory,
-              },
-            ]
-          : [];
-      }),
+      ...(await listProtectedChatFileCandidates(options.files, chat.id)),
       ...(await listDirectory(options.files, widgetDirectory))
         .filter((id) => widgetIdPattern.test(id))
         .map((id) => ({ kind: "widget" as const, id })),
@@ -170,10 +177,7 @@ export async function listProtectedArtifacts(options: {
           artifacts.push({
             ...key,
             kind: "file",
-            name:
-              "displayName" in candidate && typeof candidate.displayName === "string"
-                ? candidate.displayName
-                : candidate.name,
+            name: candidate.displayName,
             size: info.size,
             chatTitle: chat.title,
           });

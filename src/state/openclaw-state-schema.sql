@@ -2914,8 +2914,69 @@ CREATE TABLE IF NOT EXISTS protected_automation_runs (
   charged_bytes INTEGER NOT NULL CHECK (charged_bytes >= 0),
   UNIQUE (job_id, run_at_ms, native_run_id)
 ) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_runs_history
+  ON protected_automation_runs(automation_id, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_protected_automation_runs_owner
   ON protected_automation_runs(central_owner_profile_id, automation_id, completed_at_ms DESC, sequence DESC);
+
+-- Charged references have explicit retirement receipts, never unaccounted FK cascades.
+CREATE TABLE IF NOT EXISTS protected_automation_run_chats (
+  automation_id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  chat_id TEXT CHECK (chat_id IS NULL OR length(CAST(chat_id AS BLOB)) BETWEEN 1 AND 128),
+  last_scheduled_at_ms INTEGER CHECK (last_scheduled_at_ms IS NULL OR last_scheduled_at_ms >= 0),
+  reserved_run_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_run_bytes >= 0),
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes > 0)
+) STRICT;
+CREATE TABLE IF NOT EXISTS protected_automation_run_lifecycle (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 128),
+  automation_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+  scheduled_at_ms INTEGER NOT NULL CHECK (scheduled_at_ms >= 0),
+  queued_at_ms INTEGER NOT NULL CHECK (queued_at_ms >= 0),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'skipped')),
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  error_code TEXT CHECK (error_code IS NULL OR error_code IN (
+    'interrupted', 'member_inactive', 'automation_disabled', 'definition_changed',
+    'quota_exceeded', 'provider_timeout', 'provider_busy', 'provider_rejected',
+    'provider_failed', 'plan_limit', 'model_unavailable', 'chat_too_long',
+    'turn_failed', 'result_failed'
+  )),
+  result_id TEXT,
+  delivered_at_ms INTEGER,
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes >= 0),
+  CHECK (started_at_ms IS NULL OR started_at_ms >= queued_at_ms),
+  CHECK (finished_at_ms IS NULL OR finished_at_ms >= COALESCE(started_at_ms, queued_at_ms)),
+  CHECK (
+    (status = 'queued' AND started_at_ms IS NULL AND finished_at_ms IS NULL AND error_code IS NULL AND result_id IS NULL) OR
+    (status = 'running' AND started_at_ms IS NOT NULL AND finished_at_ms IS NULL AND error_code IS NULL AND result_id IS NULL) OR
+    (status = 'succeeded' AND started_at_ms IS NOT NULL AND finished_at_ms IS NOT NULL AND error_code IS NULL AND result_id IS NOT NULL) OR
+    (status IN ('failed', 'skipped') AND finished_at_ms IS NOT NULL AND error_code IS NOT NULL AND result_id IS NULL)
+  ),
+  CHECK (delivered_at_ms IS NULL OR status = 'succeeded')
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_lifecycle_history
+  ON protected_automation_run_lifecycle(automation_id, sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_protected_automation_lifecycle_scheduled
+  ON protected_automation_run_lifecycle(automation_id, trigger, queued_at_ms DESC, sequence DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_protected_automation_lifecycle_active
+  ON protected_automation_run_lifecycle(automation_id) WHERE status IN ('queued', 'running');
+CREATE TABLE IF NOT EXISTS protected_automation_owner_inbox (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  automation_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  result_id TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes > 0),
+  UNIQUE (profile_id, run_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_owner_inbox_recipient
+  ON protected_automation_owner_inbox(profile_id, sequence DESC);
 
 -- Live read-only chat links. Chats live in agent databases, so readers also verify the chat.
 CREATE TABLE IF NOT EXISTS protected_chat_shares (

@@ -443,6 +443,7 @@ export function patchProtectedAutomation(
     automationId: string;
     expectedRevision: number;
     definition: ProtectedAutomationDraft;
+    enabled?: boolean;
     now: number;
   },
 ): PatchProtectedAutomationResult {
@@ -456,6 +457,7 @@ export function patchProtectedAutomation(
     profileId: input.profileId,
     automationId: input.automationId,
     expectedRevision: input.expectedRevision,
+    enabled: input.enabled,
   };
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
@@ -485,9 +487,6 @@ export function patchProtectedAutomation(
       }
       if (current.definitionRevision !== input.expectedRevision) {
         return { status: "version_mismatch" as const };
-      }
-      if (current.enabled) {
-        return { status: "scheduler_required" as const };
       }
       const currentBinding = executeSqliteQuerySync(
         db,
@@ -520,13 +519,12 @@ export function patchProtectedAutomation(
           .set({
             definition_json: definitionValue,
             definition_revision: input.expectedRevision + 1,
-            enabled: 0,
+            enabled: (input.enabled ?? current.enabled) ? 1 : 0,
             updated_at: input.now,
           })
           .where("id", "=", input.automationId)
           .where("central_owner_profile_id", "=", input.profileId)
-          .where("definition_revision", "=", input.expectedRevision)
-          .where("enabled", "=", 0),
+          .where("definition_revision", "=", input.expectedRevision),
       );
       const automation = selectVisibleAutomations(db, input.profileId, input.automationId)[0];
       if (!automation || automation.definitionRevision !== input.expectedRevision + 1) {

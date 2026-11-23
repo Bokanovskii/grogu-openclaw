@@ -178,6 +178,7 @@ export function patchProtectedAutomationWithAdmission(
     profileId: captured.profileId,
     automationId: captured.automationId,
     expectedRevision: captured.expectedRevision,
+    enabled: captured.enabled,
   };
   return runOpenClawStateWorkerOperation(
     context,

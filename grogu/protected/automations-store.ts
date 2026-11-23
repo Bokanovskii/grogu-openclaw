@@ -57,10 +57,26 @@ async function readAutomation(
   );
 }
 
-export async function listProtectedAutomationRecords(
+export async function readOwnedProtectedAutomationStorageRecord(
+  stateDir: string,
+  automationId: string,
+  authority: ProtectedAutomationMutationAuthority,
+): Promise<ProtectedAutomationStorageRecord | undefined> {
+  const automation = await readAutomation(
+    stateDir,
+    { profileId: authority.profileId, automationId },
+    authority,
+  );
+  return automation?.relation === "owner" &&
+    automation.centralOwnerProfileId === authority.profileId
+    ? automation
+    : undefined;
+}
+
+export async function listOwnedProtectedAutomationStorageRecords(
   stateDir: string,
   authority: ProtectedAutomationMutationAuthority,
-): Promise<ProtectedAutomationRecord[]> {
+): Promise<ProtectedAutomationStorageRecord[]> {
   const workerContext = context(stateDir);
   const records = await runOpenClawStateWorkerOperation(
     workerContext,
@@ -71,9 +87,18 @@ export async function listProtectedAutomationRecords(
       }),
     { assertCurrent: () => assertCurrent(workerContext, authority) },
   );
-  return records
-    .filter((automation) => automation.visibility === "private" && automation.relation === "owner")
-    .map(record);
+  return records.filter(
+    (automation) =>
+      automation.relation === "owner" && automation.centralOwnerProfileId === authority.profileId,
+  );
+}
+
+export async function listProtectedAutomationRecords(
+  stateDir: string,
+  authority: ProtectedAutomationMutationAuthority,
+): Promise<ProtectedAutomationRecord[]> {
+  const records = await listOwnedProtectedAutomationStorageRecords(stateDir, authority);
+  return records.filter((automation) => automation.visibility === "private").map(record);
 }
 
 export async function readProtectedAutomationRecord(
@@ -141,6 +166,7 @@ export async function patchProtectedAutomationRecord(
     automationId: string;
     expectedRevision: number;
     definition: ProtectedAutomationDraft;
+    enabled?: boolean;
     now: number;
   },
   authority: ProtectedAutomationMutationAuthority,
@@ -183,7 +209,7 @@ export type SaveProtectedAutomationPatchResult =
   | { status: "member_inactive" }
   | { status: "storage_unavailable" };
 
-/** The one versioned save path for paused-draft edits from fields and from authoring chats. */
+/** The versioned save path for field and authoring-chat edits. */
 export async function saveProtectedAutomationPatch(
   stateDir: string,
   input: {
@@ -196,6 +222,8 @@ export async function saveProtectedAutomationPatch(
   authority: ProtectedAutomationMutationAuthority,
   deps: {
     revalidate: () => Promise<void>;
+    schedulerAvailable?: boolean;
+    provision?: () => Promise<void>;
     admitStorage?: () => Promise<
       Pick<
         StorageAdmission,
@@ -222,7 +250,7 @@ export async function saveProtectedAutomationPatch(
   if (current.version !== input.expectedVersion) {
     return { status: "version_mismatch", currentVersion: current.version };
   }
-  if (input.patch.enabled === true || current.enabled) {
+  if (input.patch.enabled === true && !deps.schedulerAvailable) {
     return { status: "scheduler_required" };
   }
   const validation = validateProtectedAutomationDraft(
@@ -234,6 +262,12 @@ export async function saveProtectedAutomationPatch(
     return { status: "invalid", validation };
   }
   await deps.revalidate();
+  if (input.patch.enabled === true) {
+    if (!deps.provision) {
+      return { status: "scheduler_required" };
+    }
+    await deps.provision();
+  }
   if (!deps.admitStorage) {
     return { status: "storage_unavailable" };
   }
@@ -246,6 +280,7 @@ export async function saveProtectedAutomationPatch(
         automationId: input.automationId,
         expectedRevision: Number(input.expectedVersion),
         definition: validation.draft,
+        enabled: input.patch.enabled ?? current.enabled,
         now: Date.now(),
       },
       authority,

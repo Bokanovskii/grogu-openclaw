@@ -1,7 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
 import { observeSqliteWorkerCommittedFacts } from "../../src/infra/sqlite-worker-operation-admission.js";
-import { createKeyedFifoLeaseRegistry } from "../../src/shared/keyed-fifo-lease.js";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
 import { prepareProtectedAutomationResultWriteAdmission } from "../../src/state/protected-automation-results-admission.js";
 import { captureProtectedAutomationFinishedResult } from "../../src/state/protected-automation-results-input.js";
@@ -13,11 +12,11 @@ import type {
   ProtectedAutomationResultStorageReservation,
 } from "../../src/state/protected-automation-results.types.js";
 import { protectedAutomationResultStorageEntries } from "./automation-results-storage.js";
+import {
+  protectedAutomationStorageLeases,
+  protectedAutomationStorageLeaseKeys,
+} from "./automation-storage-leases.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
-
-const resultLeases = createKeyedFifoLeaseRegistry(
-  Symbol.for("openclaw.protectedAutomationResultLeases"),
-);
 
 export async function commitProtectedAutomationFinishedResult(
   stateDir: string,
@@ -29,7 +28,12 @@ export async function commitProtectedAutomationFinishedResult(
     throw new Error("Protected automation result authority does not match the owner.");
   }
   const context = captureProtectedStateWorkerContext(stateDir);
-  const lease = resultLeases.reserve([
+  const lease = protectedAutomationStorageLeases.reserve([
+    ...protectedAutomationStorageLeaseKeys(
+      context.admission.databasePath,
+      input.automationId,
+      input.centralOwnerProfileId,
+    ),
     JSON.stringify([context.admission.databasePath, input.jobId, input.runAtMs, input.runId]),
   ]);
   if (!lease) {
@@ -44,6 +48,20 @@ export async function commitProtectedAutomationFinishedResult(
   let writerSettled = false;
   let write: ReturnType<typeof prepareProtectedAutomationResultWriteAdmission> | undefined;
   let expectedReceipt: ProtectedAutomationResultCommitReceipt | undefined;
+  const settleStorage = () => {
+    if (!reservation || !expectedReceipt) {
+      throw new Error("Protected automation result has no retained storage reservation.");
+    }
+    if (!settled) {
+      reservation.settle({ created: true, entries: expectedReceipt.entries });
+      settled = true;
+    }
+  };
+  const releaseStorage = () => {
+    if (!settled) {
+      reservation?.release();
+    }
+  };
   try {
     enrollment = authority.enrollPublication();
     await lease.wait();
@@ -104,8 +122,7 @@ export async function commitProtectedAutomationFinishedResult(
             if (!isDeepStrictEqual(facts, receipt)) {
               throw new Error("Protected automation result commit receipt does not match.");
             }
-            heldReservation.settle({ created: true, entries });
-            settled = true;
+            settleStorage();
           });
           return created;
         },
@@ -164,6 +181,8 @@ export async function commitProtectedAutomationFinishedResult(
       lease,
       admission,
       retained,
+      settleStorage,
+      releaseStorage,
     });
     const error = new SqliteWorkerError(
       "Protected automation result commit requires native reconciliation",
@@ -186,6 +205,8 @@ export async function commitProtectedAutomationFinishedResult(
           lease,
           admission,
           retained,
+          settleStorage,
+          releaseStorage,
         });
       }
     }

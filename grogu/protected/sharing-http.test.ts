@@ -31,6 +31,7 @@ import {
   canMemberReadChatArtifact,
   runProtectedSharing,
 } from "./sharing-store.js";
+import { prepareProtectedSharedState } from "./state-worker-context.js";
 
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
 const originalStorageKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
@@ -75,6 +76,7 @@ void test("chat links grant live read-only access until revoked", async (t) => {
   type Member = keyof typeof subjects;
   const allowed = new Set<string>(Object.values(subjects));
   const expiresAt = Date.now() + 120_000;
+  await prepareProtectedSharedState(stateDir, () => {});
   await migrateProtectedSubjects(stateDir, { issuer, subjects: [...allowed] });
   const encryption = createStorageValueEncryption(randomBytes(32));
   const usersRoot = await root(usersDir);

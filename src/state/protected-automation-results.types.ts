@@ -63,6 +63,8 @@ export type ProtectedAutomationResultUncertainCommit = {
   lease: KeyedFifoLease;
   admission: SqliteWorkerOperationAdmission;
   retained: RetainedWorkerTransactionAdmission;
+  settleStorage(): void;
+  releaseStorage(): void;
 };
 
 export type ProtectedAutomationResultPublicationOutcome = "settled" | "recovery-required";

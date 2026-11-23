@@ -62,6 +62,11 @@
       "import": "./dist/protected-authoring.mjs",
       "default": "./dist/protected-authoring.mjs"
     },
+    "./protected-automation-results": {
+      "types": "./dist/protected-automation-results.d.mts",
+      "import": "./dist/protected-automation-results.mjs",
+      "default": "./dist/protected-automation-results.mjs"
+    },
     "./protected-sharing": {
       "types": "./dist/protected-sharing.d.mts",
       "import": "./dist/protected-sharing.mjs",

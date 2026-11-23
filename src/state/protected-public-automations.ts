@@ -25,19 +25,17 @@ export function listProtectedPublicAutomations(
     : listProtectedAutomations(database, input.profileId);
   return automations
     .flatMap((automation) => {
-      const publication =
-        automation &&
-        readProtectedAutomationPublication(database.db, {
-          profileId: input.profileId,
-          automationId: automation.id,
-        });
-      if (!automation || !publication) {
+      if (!automation || automation.relation !== "owner") {
         return [];
       }
-      const following = automation.relation === "follower";
-      return [
-        { ...publication, automation, following, subscribed: following && publication.subscribed },
-      ];
+      const publication = readProtectedAutomationPublication(database.db, {
+        profileId: input.profileId,
+        automationId: automation.id,
+      });
+      if (!publication) {
+        return [];
+      }
+      return [{ ...publication, automation, following: false, subscribed: false }];
     })
     .toSorted((left, right) => right.publishedAt - left.publishedAt);
 }

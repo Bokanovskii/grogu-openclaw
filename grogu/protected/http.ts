@@ -3752,15 +3752,19 @@ export function createProtectedHttp(options: {
           "sharing_unavailable",
           "Sharing is not available for this account.",
         );
+      const publicAutomationsUnavailable = () =>
+        new ProtectedError(
+          503,
+          "public_automations_unavailable",
+          "Public automations are temporarily unavailable.",
+        );
       // automations-public-v1 additions; requests without it keep the earlier automation contract.
-      const requirePublicAutomations = (write: boolean) => {
+      const requirePublicAutomations = () => {
         if (!automationsPublicCapability || !automationCatalog?.capabilities.automations.list) {
           notFound();
         }
         requireProfile();
-        if (write && identity.kind === "development") {
-          throw sharingUnavailable();
-        }
+        throw publicAutomationsUnavailable();
       };
       const withPublication = async (
         automations: StoredAutomationRecord[],
@@ -3831,7 +3835,7 @@ export function createProtectedHttp(options: {
             : deletionCatalog;
         const listing = catalog.capabilities.automations.list;
         const chatAvailable = supportsAutomationsChat(request) && listing;
-        const publicAvailable = listing && identity.kind !== "development";
+        const publicAvailable = false;
         return profileJson(
           chatAvailable || automationsPublicCapability
             ? {
@@ -3918,44 +3922,12 @@ export function createProtectedHttp(options: {
         }
       }
       if (hasClientCapability(request.headers, automationResultsCapability)) {
-        // Current followers read the owner's results under the owner's profile; everyone else
-        // stays on the owner path, whose 404 is indistinguishable.
-        const followed =
-          automationsPublicCapability && method === "GET"
-            ? /^\/automations\/([^/]+)\/runs(?:\/([^/]+))?$/u.exec(pathname)
-            : null;
-        const recheck = followed
-          ? () =>
-              followed[2] === undefined
-                ? sharing("protectedSharing.automationAccess", {
-                    profileId: profile.id,
-                    automationId: followed[1]!,
-                  })
-                : sharing("protectedSharing.automationRunAccess", {
-                    profileId: profile.id,
-                    automationId: followed[1]!,
-                    runId: followed[2],
-                  })
-          : undefined;
-        const access = await recheck?.();
-        const follower = access?.relation === "follower" ? access : undefined;
         const result = await handleProtectedAutomationResultsRoute(
           options.stateDir,
           { method, pathname },
-          follower
-            ? { profileId: follower.ownerProfileId, assertCurrent, revalidate }
-            : { ...authority, revalidate },
+          { ...authority, revalidate },
         );
         if (result) {
-          if (follower) {
-            const current = await recheck!();
-            if (
-              current?.relation !== "follower" ||
-              current.ownerProfileId !== follower.ownerProfileId
-            ) {
-              notFound();
-            }
-          }
           return json(result.body, result.status);
         }
       }
@@ -4158,7 +4130,7 @@ export function createProtectedHttp(options: {
         return json({ runId: queued.runId, status: "queued" }, 202);
       }
       if (pathname === "/automations/public" && method === "GET" && automationsPublicCapability) {
-        requirePublicAutomations(false);
+        requirePublicAutomations();
         const automations = await sharing("protectedSharing.publicAutomations", {
           profileId: profile.id,
         });
@@ -4174,7 +4146,7 @@ export function createProtectedHttp(options: {
       if (publicAutomation && (method === "PUT" || method === "DELETE")) {
         const automationId = publicAutomation[1]!;
         const target = publicAutomation[2];
-        requirePublicAutomations(true);
+        requirePublicAutomations();
         const ref = { profileId: profile.id, automationId };
         const storageOverheadBytes = storageEntryOverheadBytes;
         if (target === "publication") {

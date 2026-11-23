@@ -27,7 +27,7 @@ type Database = ProtectedAutomationDatabase & {
 
 export type ProtectedAutomationReadAccess = {
   ownerProfileId: string;
-  relation: "owner" | "follower";
+  relation: "owner";
 };
 
 type FollowRef = { profileId: string; automationId: string };
@@ -364,21 +364,12 @@ export function unfollowProtectedAutomation(
   });
 }
 
-/** False unless the caller currently follows a published automation. */
+/** Public automation subscriptions are disabled; retained rows are not changed. */
 export function setProtectedAutomationSubscription(
-  database: OpenClawStateDatabase,
-  input: FollowRef & { subscribed: boolean; now: number },
+  _database: OpenClawStateDatabase,
+  _input: FollowRef & { subscribed: boolean; now: number },
 ): boolean {
-  if (!tableExists(database.db, "protected_automation_publications")) {
-    return false;
-  }
-  return write(database, "protected.automationSharing.subscription", (db) => {
-    if (readAccess(db, input)?.relation !== "follower") {
-      return false;
-    }
-    setSubscription(db, input, input.subscribed ? input.now : undefined);
-    return true;
-  });
+  return false;
 }
 
 /** Facts for one published automation with an active owner; `subscribed` is the caller's opt-in. */
@@ -440,13 +431,10 @@ function readAccess(
   if (ownerProfileId === input.profileId) {
     return { ownerProfileId, relation: "owner" };
   }
-  return publishedAt(db, input.automationId) !== undefined &&
-    followRole(db, input.automationId, input.profileId)?.role === "follower"
-    ? { ownerProfileId, relation: "follower" }
-    : undefined;
+  return undefined;
 }
 
-/** The owner, or a current follower of a published automation; both approved and not denied. */
+/** Only the active owner can read an automation or its retained runs. */
 export function readProtectedAutomationAccess(
   database: OpenClawStateDatabase,
   input: { profileId: string; automationId: string },
@@ -476,7 +464,7 @@ export function readProtectedAutomationRunAccess(
   return run ? access : undefined;
 }
 
-/** The active owner first, then active followers who opted in, in subscription order. */
+/** Automation results remain private; followers are not delivery recipients. */
 export function listProtectedAutomationRecipients(
   database: OpenClawStateDatabase,
   input: { automationId: string },
@@ -486,11 +474,7 @@ export function listProtectedAutomationRecipients(
   if (!ownerProfileId) {
     return undefined;
   }
-  const followers =
-    publishedAt(db, input.automationId) === undefined
-      ? []
-      : activeFollowers(db, input.automationId, true);
-  return { ownerProfileId, recipients: [ownerProfileId, ...followers] };
+  return { ownerProfileId, recipients: [ownerProfileId] };
 }
 
 /**

@@ -319,37 +319,19 @@ entry each. The tables store only profile, chat, and link ids, and no chat text.
 
 ### Public automations
 
-Clients opt in with `x-alcove-capabilities: automations-public-v1`. Only those
-requests receive `capabilities.automations.public` (`publish`, `follow`, and
-`notifications`, false for the development identity) in the automation catalog
-and a `publication` field (`{ publishedAt, followers }` or `null`) on owner
-automation records. The routes below return 404 without the capability, and
-other responses stay unchanged. All routes require `x-grogu-profile`.
+Public automation is disabled until the automation origin and model-request
+isolation boundary is verified. Clients that send
+`x-alcove-capabilities: automations-public-v1` see all three capability flags
+(`publish`, `follow`, and `notifications`) set to `false`; public listing,
+publication, follow, and notification routes return 503. Existing publication,
+follow, and notification rows are retained unchanged, but treated as private.
+Only the owner can read automation definitions, runs, lifecycle history, and
+inbox entries. Missing or legacy origin information never grants follower
+access or delivery.
 
-The owner publishes with `PUT /api/protected/v1/automations/:id/publication`
-and unpublishes with `DELETE` on the same path; both return the owner record.
-Owners see a follower count, never follower identities. Any admitted member
-browses `GET /api/protected/v1/automations/public`, which includes the caller's
-own published automations with `following: false`, and follows with `PUT
-.../automations/:id/follow`. Following starts without notifications unless the
-body is `{ "subscribed": true }`; `PUT .../notifications` with `{ "subscribed":
-boolean }` changes the opt-in, and `DELETE .../follow` leaves. These return the
-public DTO (no model, agent, or version, and a `nextCheckAt` that is always
-`null` because the owner's scheduler state stays private) or 404 for an
-unpublished, missing, or own automation.
-
-Followers get read-only access to the automation's runs and results under its
-owner, and never write, run, or pay for it; run history, the inbox, and run
-chats stay owner-only. Unpublishing removes every
-follower and notification opt-in, so publishing again starts empty. Leaving or
-removal from Alcove removes a follower's access, and removing the owner
-unpublishes their automations before the private-definition cleanup below.
-Publications are charged to the owner and follows to the follower as one 4 KiB
-storage entry each; member removal and unpublishing retire those exact entries
-through the removal receipt or the unpublish result. `grogu/protected/sharing-store.ts` exports
-`canMemberReadAutomation`, `canMemberReadAutomationRun`, and
-`listAutomationRecipients` (the owner, then subscribed followers) for run reads
-and delivery; callers check them immediately before each read or delivery.
+This restriction does not affect owner access to private automations or
+explicit chat-sharing grants. Chat shares remain a separate, owner-granted
+read-only permission and do not publish an automation.
 
 ## Automation discovery and draft validation
 
@@ -457,9 +439,8 @@ only owners can edit definitions. Other members see published definitions only
 through the public automation routes above.
 Clients that send `X-Alcove-Capabilities: automation-results-v1` can read
 existing finished results at `GET /automations/:id/runs` and
-`GET /automations/:id/runs/:runId`. Owners can read their own; current followers
-that also send `automations-public-v1` read the owner's results read-only.
-Foreign and unknown records return 404.
+`GET /automations/:id/runs/:runId`. Only owners can read them; foreign and
+unknown records return 404.
 These routes do not start runs or enable scheduling.
 Clients that also negotiate `automation-runs-v1` can enable and pause eligible
 automations, start a run with `POST /automations/:id/run`, inspect lifecycle

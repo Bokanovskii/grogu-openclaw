@@ -167,6 +167,10 @@ export type ProtectedTurnTelemetryInput = {
 };
 
 export type ProtectedStoredDataEntry = { id: string; profileId: string; bytes: number };
+export type ProtectedStoredDataRetirement = {
+  removed: ProtectedStoredDataEntry;
+  retained?: ProtectedStoredDataEntry;
+};
 
 export type ProtectedFeedbackValue = {
   responseId: string;

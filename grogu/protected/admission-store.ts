@@ -13,9 +13,14 @@ import {
 import type { ProtectedAdmissionAutomationRetirementFacts } from "../../src/state/protected-admission.js";
 import type { ProtectedAutomationMemberRetirementAuthority } from "../../src/state/protected-automation-lifecycle.types.js";
 import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
-import { readProtectedAutomationRetirementReceipt } from "./automation-retirement-receipt.js";
+import {
+  readProtectedAutomationRetirementReceipt,
+  readProtectedStoredDataRetirements,
+} from "./automation-retirement-receipt.js";
 import { protectedAutomationStorageLeases } from "./automation-storage-leases.js";
+import { storageEntryOverheadBytes } from "./capacity.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
+import type { StoredDataRetirement } from "./storage-entry-quota.js";
 
 export type { ProtectedAccessRequest } from "../../src/state/protected-admission.js";
 export type { ProtectedAutomationMemberRetirementAuthority } from "../../src/state/protected-automation-lifecycle.types.js";
@@ -69,6 +74,7 @@ function ownerMutationAdmission(
     subject: string | undefined,
     profileId: string | undefined,
     retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+    retiredStoredDataChanges: readonly StoredDataRetirement[],
   ) => void,
   onPolicyChanged: () => void,
   onNativeRemovalCommitted?: () => void,
@@ -112,11 +118,22 @@ function ownerMutationAdmission(
     ) {
       throw new Error("Access removal committed with invalid publication facts.");
     }
+    const retiredStoredDataChanges = readProtectedStoredDataRetirements(
+      facts.retiredStoredDataChanges,
+    );
+    if (!retiredStoredDataChanges) {
+      throw new Error("Access removal committed with invalid storage retirement facts.");
+    }
     if (onNativeRemovalCommitted) {
       onNativeRemovalCommitted();
       return;
     }
-    onRemovalCommitted(facts.subject, facts.profileId, facts.retiredAutomations);
+    onRemovalCommitted(
+      facts.subject,
+      facts.profileId,
+      facts.retiredAutomations,
+      retiredStoredDataChanges,
+    );
     onPolicyChanged();
   });
   return { nativeLocations: [context.admission.databasePath], admission };
@@ -163,12 +180,18 @@ export function removeProtectedAdmission(
     subject: string | undefined,
     profileId: string | undefined,
     retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+    retiredStoredDataChanges: readonly StoredDataRetirement[],
   ) => void,
   onPolicyChanged: () => void,
   retirement?: ProtectedAutomationMemberRetirementAuthority,
 ) {
   const context = captureProtectedStateWorkerContext(stateDir);
-  const captured = { id: input.id, issuer: input.issuer, ownerSubject: input.ownerSubject };
+  const captured = {
+    id: input.id,
+    issuer: input.issuer,
+    ownerSubject: input.ownerSubject,
+    storageOverheadBytes: storageEntryOverheadBytes,
+  };
   const assertOwnerCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
@@ -206,12 +229,13 @@ export function removeProtectedAdmission(
 
 async function removeWithAutomationStorage(
   context: ReturnType<typeof captureProtectedStateWorkerContext>,
-  input: { id: string; issuer: string; ownerSubject: string },
+  input: { id: string; issuer: string; ownerSubject: string; storageOverheadBytes: number },
   assertOwnerCurrent: () => void,
   onRemovalCommitted: (
     subject: string | undefined,
     profileId: string | undefined,
     retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+    retiredStoredDataChanges: readonly StoredDataRetirement[],
   ) => void,
   onPolicyChanged: () => void,
   retirement: ProtectedAutomationMemberRetirementAuthority,
@@ -267,7 +291,12 @@ async function removeWithAutomationStorage(
       chargedRetired = true;
     }
     if (!published) {
-      onRemovalCommitted(receipt.subject, receipt.profileId, receipt.retiredAutomations);
+      onRemovalCommitted(
+        receipt.subject,
+        receipt.profileId,
+        receipt.retiredAutomations,
+        receipt.retiredStoredDataChanges,
+      );
       published = true;
     }
     if (!policyNotified) {

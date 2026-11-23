@@ -1,6 +1,56 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
-import type { StoredDataEntry } from "./storage-entry-quota.js";
+import type { StoredDataEntry, StoredDataRetirement } from "./storage-entry-quota.js";
+
+function readStoredEntry(value: unknown): StoredDataEntry | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    !value.id ||
+    typeof value.profileId !== "string" ||
+    !value.profileId ||
+    typeof value.bytes !== "number" ||
+    !Number.isSafeInteger(value.bytes) ||
+    value.bytes < 0
+  ) {
+    return undefined;
+  }
+  return { id: value.id, profileId: value.profileId, bytes: value.bytes };
+}
+
+export function readProtectedStoredDataRetirements(
+  value: unknown,
+): StoredDataRetirement[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const changes: StoredDataRetirement[] = [];
+  const seen = new Set<string>();
+  for (const change of value) {
+    if (!isRecord(change)) {
+      return undefined;
+    }
+    const removed = readStoredEntry(change.removed);
+    const retained = change.retained === undefined ? undefined : readStoredEntry(change.retained);
+    if (
+      !removed ||
+      (change.retained !== undefined && !retained) ||
+      (retained &&
+        (retained.id !== removed.id ||
+          retained.profileId !== removed.profileId ||
+          retained.bytes > removed.bytes))
+    ) {
+      return undefined;
+    }
+    const key = JSON.stringify([removed.profileId, removed.id]);
+    if (seen.has(key)) {
+      return undefined;
+    }
+    seen.add(key);
+    changes.push({ removed, ...(retained ? { retained } : {}) });
+  }
+  return changes;
+}
 
 export function readProtectedAutomationRetirementReceipt(
   facts: unknown,
@@ -27,6 +77,12 @@ export function readProtectedAutomationRetirementReceipt(
     !Array.isArray(facts.retiredAutomations) ||
     !Array.isArray(facts.retiredStoredData)
   ) {
+    return undefined;
+  }
+  const retiredStoredDataChanges = readProtectedStoredDataRetirements(
+    facts.retiredStoredDataChanges,
+  );
+  if (!retiredStoredDataChanges) {
     return undefined;
   }
   const retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
@@ -76,5 +132,6 @@ export function readProtectedAutomationRetirementReceipt(
     profileId: facts.profileId,
     retiredAutomations,
     retiredStoredData,
+    retiredStoredDataChanges,
   };
 }

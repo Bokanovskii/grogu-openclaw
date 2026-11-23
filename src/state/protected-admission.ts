@@ -21,6 +21,7 @@ import {
 } from "./protected-automation-lifecycle-cleanup.js";
 import type { ProtectedAutomationStorageUsage } from "./protected-automations.js";
 import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
+import type { ProtectedStoredDataRetirement } from "./protected-feedback.js";
 import { removeProtectedMemberSharingRows } from "./protected-sharing.js";
 
 export type ProtectedAccessRequest = {
@@ -53,6 +54,7 @@ export type ProtectedAdmissionRemovalInput = {
   issuer: string;
   ownerSubject: string;
   now: number;
+  storageOverheadBytes: number;
   retireAutomationStorage?: true;
   expectedProfileId?: string | null;
   expectedRevision?: number;
@@ -501,6 +503,9 @@ export function removeProtectedAdmission(
   database: OpenClawStateDatabase,
   input: ProtectedAdmissionRemovalInput,
 ): ProtectedAdmission | "owner_protected" | undefined {
+  if (!Number.isSafeInteger(input.storageOverheadBytes) || input.storageOverheadBytes < 0) {
+    throw new Error("Protected member removal storage overhead is invalid.");
+  }
   let retirementFacts: ProtectedAdmissionAutomationRetirementFacts | undefined;
   if (input.retireAutomationStorage === true) {
     const expectedProfileId = input.expectedProfileId;
@@ -576,10 +581,14 @@ export function removeProtectedAdmission(
           .deleteFrom("protected_storage_limits")
           .where("admission_id", "=", admission.id),
       );
-      if (profileId) {
-        removeProtectedMemberFeedbackRows(db, profileId);
-        removeProtectedMemberSharingRows(db, profileId);
-      }
+      const retiredStoredDataChanges: ProtectedStoredDataRetirement[] = profileId
+        ? [
+            ...removeProtectedMemberFeedbackRows(db, profileId, input.storageOverheadBytes),
+            ...removeProtectedMemberSharingRows(db, profileId, input.storageOverheadBytes).map(
+              (removed) => ({ removed }),
+            ),
+          ]
+        : [];
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
         retiredAutomations = retireProtectedAutomationMemberDefinitions(
@@ -621,6 +630,7 @@ export function removeProtectedAdmission(
         ...result,
         retiredAutomations,
         retiredStoredData,
+        retiredStoredDataChanges,
         ...(retirementFacts
           ? {
               kind: "protected-member-automation-retired",

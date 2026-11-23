@@ -1,7 +1,9 @@
+import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
+import { readProtectedReportChatStoredData } from "./protected-feedback-chat.js";
 import {
   ensureProtectedFeedbackSchema,
   protectedFeedbackDayMs,
@@ -13,6 +15,30 @@ import {
   type ProtectedStoredDataEntry,
   type ProtectedTelemetryRun,
 } from "./protected-feedback.js";
+
+export function readProtectedResponseFeedbackStoredData(
+  db: DatabaseSync,
+  overheadBytes: number,
+  profileId?: string,
+): ProtectedStoredDataEntry[] {
+  let query = getNodeSqliteKysely<FeedbackDatabase>(db)
+    .selectFrom("protected_response_feedback")
+    .select([
+      "profile_id",
+      sql<string>`'feedback:' || chat_id || ':' || response_id`.as("id"),
+      sql<number>`length(CAST(profile_id AS BLOB)) + length(CAST(chat_id AS BLOB)) + length(CAST(response_id AS BLOB)) + 64`.as(
+        "bytes",
+      ),
+    ]);
+  if (profileId !== undefined) {
+    query = query.where("profile_id", "=", profileId);
+  }
+  return executeSqliteQuerySync(db, query).rows.map((row) => ({
+    id: row.id,
+    profileId: row.profile_id,
+    bytes: overheadBytes + row.bytes,
+  }));
+}
 
 export function readProtectedFeedbackStoredData(
   database: OpenClawStateDatabase,
@@ -98,37 +124,8 @@ export function readProtectedFeedbackStoredData(
       profileId: row.profile_id,
       bytes: overheadBytes + row.bytes,
     })),
-    ...executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<FeedbackDatabase>(db)
-        .selectFrom("protected_report_chat_evidence as c")
-        .innerJoin("protected_feedback_reports as r", "r.id", "c.report_id")
-        .select([
-          "c.report_id",
-          "r.profile_id",
-          sql<number>`coalesce(length(CAST(c.reference AS BLOB)), 0) + 64`.as("bytes"),
-        ]),
-    ).rows.map((row) => ({
-      id: `report-chat:${row.report_id}`,
-      profileId: row.profile_id,
-      bytes: overheadBytes + row.bytes,
-    })),
-    ...executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<FeedbackDatabase>(db)
-        .selectFrom("protected_response_feedback")
-        .select([
-          "profile_id",
-          sql<string>`'feedback:' || chat_id || ':' || response_id`.as("id"),
-          sql<number>`length(CAST(profile_id AS BLOB)) + length(CAST(chat_id AS BLOB)) + length(CAST(response_id AS BLOB)) + 64`.as(
-            "bytes",
-          ),
-        ]),
-    ).rows.map((row) => ({
-      id: row.id,
-      profileId: row.profile_id,
-      bytes: overheadBytes + row.bytes,
-    })),
+    ...readProtectedReportChatStoredData(db, overheadBytes),
+    ...readProtectedResponseFeedbackStoredData(db, overheadBytes),
   ];
   return records;
 }

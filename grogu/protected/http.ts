@@ -2944,7 +2944,8 @@ export function createProtectedHttp(options: {
             options.stateDir,
             { id: admission.id, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
             assertCurrent,
-            (subject, removedProfileId, retiredAutomations) => {
+            (subject, removedProfileId, retiredAutomations, retiredStoredDataChanges) => {
+              admitStorage?.retiredStoredData(retiredStoredDataChanges);
               if (subject) {
                 options.onRemoveSubject?.(subject);
               }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import {
   hasSqliteStorageValueEncryption,
   openSqliteStorageText,
@@ -16,8 +17,10 @@ import {
 import {
   clearReportChatReferences,
   openReportChatReference,
+  readProtectedReportChatStoredData,
   reportChatReferenceContext,
 } from "./protected-feedback-chat.js";
+import { readProtectedResponseFeedbackStoredData } from "./protected-feedback-telemetry.js";
 import {
   ensureProtectedFeedbackSchema,
   protectedFeedbackRetentionMs,
@@ -31,6 +34,7 @@ import {
   type ProtectedReportRecord,
   type ProtectedReportChatReference,
   type ProtectedStoredDataEntry,
+  type ProtectedStoredDataRetirement,
 } from "./protected-feedback.js";
 
 type StoredReport = FeedbackDatabase["protected_feedback_reports"];
@@ -616,11 +620,21 @@ export function removeProtectedChatFeedbackEvidence(
   );
 }
 
-export function removeProtectedMemberFeedbackRows(db: DatabaseSync, profileId: string): void {
-  if (!tableExists(db, "protected_feedback_runs")) {
-    return;
+export function removeProtectedMemberFeedbackRows(
+  db: DatabaseSync,
+  profileId: string,
+  overheadBytes: number,
+): ProtectedStoredDataRetirement[] {
+  const schema = getAdmittedSqliteSchemaFacts(db);
+  if (!schema) {
+    throw new Error("Protected member feedback removal requires an admitted database.");
+  }
+  if (!schema.tables.has("protected_feedback_runs")) {
+    return [];
   }
   const queries = getNodeSqliteKysely<FeedbackDatabase>(db);
+  const removed = readProtectedReportChatStoredData(db, overheadBytes, profileId);
+  const removedRatings = readProtectedResponseFeedbackStoredData(db, overheadBytes, profileId);
   clearReportChatReferences(db, { profileId });
   executeSqliteQuerySync(
     db,
@@ -645,6 +659,22 @@ export function removeProtectedMemberFeedbackRows(db: DatabaseSync, profileId: s
       })
       .where("profile_id", "=", profileId),
   );
+  const retained = new Map(
+    readProtectedReportChatStoredData(db, overheadBytes, profileId).map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  );
+  return [
+    ...removedRatings.map((entry) => ({ removed: entry })),
+    ...removed.map((entry) => {
+      const remaining = retained.get(entry.id);
+      if (!remaining) {
+        throw new Error("Protected member removal lost a retained report evidence row.");
+      }
+      return { removed: entry, retained: remaining };
+    }),
+  ];
 }
 
 export function pruneProtectedFeedback(database: OpenClawStateDatabase, now: number): void {

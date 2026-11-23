@@ -1,5 +1,10 @@
-export type StoredDataEntry = { id: string; profileId: string; bytes: number };
-export type StoredDataRetirement = { removed: StoredDataEntry; retained?: StoredDataEntry };
+import type {
+  ProtectedStoredDataEntry,
+  ProtectedStoredDataRetirement,
+} from "../../src/state/protected-feedback.js";
+
+export type StoredDataEntry = ProtectedStoredDataEntry;
+export type StoredDataRetirement = ProtectedStoredDataRetirement;
 export type StoredDataTransfer = { previous: StoredDataEntry; current: StoredDataEntry };
 export type StoredDataReplacement = { previous: StoredDataEntry; current: StoredDataEntry };
 export type StoredDataReplacementReservation = {

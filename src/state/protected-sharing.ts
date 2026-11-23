@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import {
   runOpenClawStateWriteTransaction,
@@ -456,26 +457,57 @@ export function readProtectedSharingStorageUsage(
  * Runs inside member removal. Links the member claimed rotate so a re-admitted account cannot
  * reuse an old URL; links the member owns are disabled with all their grants.
  */
-export function removeProtectedMemberSharingRows(db: DatabaseSync, profileId: string): void {
-  if (!tableExists(db, "protected_chat_shares")) {
-    return;
+export function removeProtectedMemberSharingRows(
+  db: DatabaseSync,
+  profileId: string,
+  overheadBytes: number,
+): ProtectedStoredDataEntry[] {
+  const schema = getAdmittedSqliteSchemaFacts(db);
+  if (!schema) {
+    throw new Error("Protected member sharing removal requires an admitted database.");
+  }
+  if (!schema.tables.has("protected_chat_shares")) {
+    return [];
   }
   const claimed = executeSqliteQuerySync(
     db,
     queries(db)
       .deleteFrom("protected_chat_share_grants")
       .where("recipient_profile_id", "=", profileId)
-      .returning(["owner_profile_id", "chat_id"]),
+      .returning(["owner_profile_id", "chat_id", "recipient_profile_id", "granted_at"]),
   ).rows;
   for (const row of claimed) {
     rotateShare(db, { ownerProfileId: row.owner_profile_id, chatId: row.chat_id });
   }
-  executeSqliteQuerySync(
+  const ownedGrants = executeSqliteQuerySync(
     db,
-    queries(db).deleteFrom("protected_chat_share_grants").where("owner_profile_id", "=", profileId),
-  );
-  executeSqliteQuerySync(
+    queries(db)
+      .deleteFrom("protected_chat_share_grants")
+      .where("owner_profile_id", "=", profileId)
+      .returning(["owner_profile_id", "chat_id", "recipient_profile_id", "granted_at"]),
+  ).rows;
+  const ownedShares = executeSqliteQuerySync(
     db,
-    queries(db).deleteFrom("protected_chat_shares").where("owner_profile_id", "=", profileId),
-  );
+    queries(db)
+      .deleteFrom("protected_chat_shares")
+      .where("owner_profile_id", "=", profileId)
+      .returning(["owner_profile_id", "chat_id", "created_at"]),
+  ).rows;
+  return [
+    ...[...claimed, ...ownedGrants].map((row) =>
+      grantEntry(
+        { ownerProfileId: row.owner_profile_id, chatId: row.chat_id },
+        row.recipient_profile_id,
+        row.granted_at,
+        overheadBytes,
+      ),
+    ),
+    ...ownedShares.map((row) =>
+      shareEntry(
+        { ownerProfileId: row.owner_profile_id, chatId: row.chat_id },
+        row.created_at,
+        overheadBytes,
+      ),
+    ),
+  ];
 }

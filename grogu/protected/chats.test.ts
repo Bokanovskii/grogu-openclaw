@@ -364,6 +364,58 @@ void test("a side chat forks the parent's completed prefix and projects only its
   );
 });
 
+void test("a widget replaces the newest earlier widget of the same title in its own chat", async (t) => {
+  const { chats, authority, parent, append, user, assistant } = await seedSideParent(t);
+  const widgetId = (letter: string) => `cv_${letter.repeat(32)}`;
+  const widgetTurn = (question: string, id: string, title: string) => [
+    user(question),
+    {
+      ...assistant(""),
+      stopReason: "toolUse",
+      content: [
+        { type: "toolCall", id, name: "show_widget", arguments: { title, html: "<p>x</p>" } },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "show_widget",
+      content: [{ type: "text", text: "Saved" }],
+      details: { kind: "canvas", view: { id: widgetId(id) }, presentation: { title } },
+      isError: false,
+      timestamp: Date.now(),
+    },
+    assistant(`Shown ${title}`),
+  ];
+  const widgetsOf = async (chatId: string) =>
+    (await chats.read(authority, chatId)).messages.flatMap(({ widgets }) => widgets ?? []);
+  await append(parent.id, [
+    ...widgetTurn("One", "a", "Plan"),
+    ...widgetTurn("Two", "b", "Other"),
+    ...widgetTurn("Three", "c", "Plan"),
+  ]);
+  assert.deepEqual(await widgetsOf(parent.id), [
+    { id: widgetId("a"), title: "Plan" },
+    { id: widgetId("b"), title: "Other" },
+    { id: widgetId("c"), title: "Plan", replaces: widgetId("a") },
+  ]);
+
+  const { chat: side } = await chats.createSide(authority, parent.id, { requestId: randomUUID() });
+  await append(side.id, [
+    ...widgetTurn("Side one", "d", "Plan"),
+    ...widgetTurn("Side two", "e", "Plan"),
+  ]);
+  assert.deepEqual(
+    await widgetsOf(side.id),
+    [
+      { id: widgetId("d"), title: "Plan" },
+      { id: widgetId("e"), title: "Plan", replaces: widgetId("d") },
+    ],
+    "a side chat never replaces the parent's widget",
+  );
+  assert.equal((await widgetsOf(parent.id)).length, 3);
+});
+
 void test("side chat creation is idempotent, one level deep and limited to eligible chats", async (t) => {
   const { chats, authority, parent, append, user, assistant } = await seedSideParent(t);
   await append(parent.id, [user("Question"), assistant("Answer")]);

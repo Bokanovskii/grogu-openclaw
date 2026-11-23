@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ProtectedChatSummary } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { AuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
@@ -17,7 +18,9 @@ type ArtifactKey = {
   id: string;
 };
 
-type Artifact = ArtifactKey & { chatTitle: string } & (
+// `version` changes exactly when the artifact's content does. Saved widget documents are immutable,
+// so a widget's version is its id, as in the widget response.
+type Artifact = ArtifactKey & { chatTitle: string; version: string } & (
     | { kind: "file"; name: string; size: number }
     | { kind: "widget"; title: string }
   );
@@ -179,6 +182,9 @@ export async function listProtectedArtifacts(options: {
             kind: "file",
             name: candidate.displayName,
             size: info.size,
+            version: createHash("sha256")
+              .update(await options.files.read(`${candidate.directory}/${candidate.name}`))
+              .digest("hex"),
             chatTitle: chat.title,
           });
         } else {
@@ -200,6 +206,7 @@ export async function listProtectedArtifacts(options: {
             ...key,
             kind: "widget",
             title: typeof manifest.title === "string" ? manifest.title.slice(0, 256) : "Widget",
+            version: candidate.id,
             chatTitle: chat.title,
           });
         }

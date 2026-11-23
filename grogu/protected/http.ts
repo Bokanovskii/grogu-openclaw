@@ -204,7 +204,7 @@ import {
   parseStorageLimitVersion,
   storageLimitView,
 } from "./storage-limit-route.js";
-import { widgetIdPattern, type Widget } from "./tool-events.js";
+import { createWidgetChain, widgetIdPattern, type Widget } from "./tool-events.js";
 import { createProtectedTurnTiming } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
 import { listProtectedUsage, recordProtectedUsage } from "./usage-store.js";
@@ -1264,6 +1264,9 @@ export function createProtectedHttp(options: {
             assertRun();
             send({ type: "start", runId: run.id });
             const before = await chats.read(runAuthority, id);
+            const widgetChain = createWidgetChain(
+              before.messages.flatMap((message) => message.widgets ?? []),
+            );
             await files(
               async (owned) => {
                 const beforeArtifacts = await listChatArtifactFiles(
@@ -1366,7 +1369,7 @@ export function createProtectedHttp(options: {
                     },
                     widget: async (widget) => {
                       await owned.stat(`${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`);
-                      send({ type: "widget", ...widget });
+                      send({ type: "widget", ...widgetChain(widget) });
                     },
                     widgetDraft: async (draft) => {
                       send(draft);
@@ -4760,19 +4763,20 @@ export function createProtectedHttp(options: {
         await revalidate();
         return json({ chats: result });
       }
-      if (pathname === "/artifacts" && method === "GET") {
-        requireProfile();
-        const ownedChats = await visibleChats();
-        return await files(async (owned) => {
+      const artifactPage = (artifactChats: ProtectedChatSummary[]) =>
+        files(async (owned) => {
           const result = await listProtectedArtifacts({
             files: owned,
-            chats: ownedChats,
+            chats: artifactChats,
             cursor: new URL(request.url).searchParams.get("cursor"),
             maxFileBytes: options.maxFileBytes,
           });
           await revalidate();
           return json(result);
         });
+      if (pathname === "/artifacts" && method === "GET") {
+        requireProfile();
+        return await artifactPage(await visibleChats());
       }
       if (pathname === "/files" && method === "GET") {
         try {
@@ -5500,6 +5504,15 @@ export function createProtectedHttp(options: {
           requireProfile();
         }
         return widgetResponse(id, widgetId);
+      }
+      if (rest === "artifacts" && method === "GET") {
+        requireProfile();
+        // The same visibility as the chat list, so a side chat stays hidden without negotiation.
+        const chat = (await visibleChats()).find((item) => item.id === id);
+        if (!chat) {
+          return notFound();
+        }
+        return await artifactPage([chat]);
       }
       if (rest === "side" && method === "POST") {
         // Only the owner's own chats reach this route; recipients have no side route.

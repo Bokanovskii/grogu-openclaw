@@ -2156,6 +2156,16 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
     [parent.id],
   );
   assert.equal(legacyList[0]?.side, undefined);
+  const artifactsOf = (chatId: string, capabilities = negotiated) =>
+    call(
+      "alice",
+      `/chats/${chatId}/artifacts`,
+      { headers: { "x-grogu-profile": aliceId } },
+      capabilities,
+    );
+  assert.equal((await artifactsOf(sideChat.id)).status, 200);
+  assert.equal((await artifactsOf(sideChat.id, "")).status, 404);
+  assert.equal((await artifactsOf(parent.id, "")).status, 200);
 
   // A side chat's own side chat branches from the same parent; the third chat fills the budget.
   const second = await startSide("alice", aliceId, sideChat.id, { requestId: randomUUID() });
@@ -2213,6 +2223,133 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
   );
   assert.equal(legacyDelete.status, 204);
   assert.equal((await readChat("alice", legacySide.id)).status, 404);
+});
+
+void test("the widget stream event names the earlier widget of the same title in its chat", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-widget-chain-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const usersRoot = await root(stateDir);
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 60_000,
+    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    turns: {
+      models: [{ provider: "anthropic", id: "synthetic", label: "Synthetic only" }],
+      // Each turn saves two widgets titled with its own text, as two show_widget calls would.
+      async run(turn) {
+        for (let copy = 0; copy < 2; copy++) {
+          const title = turn.input.text;
+          const document = await createCanvasDocument(
+            { title, html: "<p>x</p>" },
+            { storage: { files: turn.files, directory: `chats/${turn.id}/widgets` } },
+          );
+          await turn.widget({ id: document.id, title });
+        }
+        await turn.delta("Done.");
+      },
+      async steer() {
+        assert.fail("Steering is not used by this fixture.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", "alice");
+    headers.set("content-type", "application/json");
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  const aliceId = (await (await call("/me")).json()).user.id;
+  const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+  const seeder = createProtectedChats({
+    stateDir,
+    maxChatsPerUser: 3,
+    agentCatalog: createProtectedAgentCatalog([protectedResearchAgent]),
+    usersRoot,
+    maxFileBytes: 60_000,
+  });
+  const earlier = `cv_${"a".repeat(32)}`;
+  const timestamp = Date.now();
+  await appendTranscriptMessages(
+    { ...seeder.scope({ profileId: aliceId, assertCurrent() {} }, chat.id), sessionId: chat.id },
+    {
+      messages: [
+        { role: "user", content: "Earlier", timestamp },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call", name: "show_widget", arguments: {} }],
+          api: "openai-completions",
+          provider: "sparky",
+          model: "synthetic",
+          usage: makeZeroUsageSnapshot(),
+          stopReason: "toolUse",
+          timestamp,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call",
+          toolName: "show_widget",
+          content: [{ type: "text", text: "Saved" }],
+          details: { kind: "canvas", view: { id: earlier }, presentation: { title: "Plan" } },
+          isError: false,
+          timestamp,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Shown" }],
+          api: "openai-completions",
+          provider: "sparky",
+          model: "synthetic",
+          usage: makeZeroUsageSnapshot(),
+          stopReason: "stop",
+          timestamp,
+        },
+      ].map((message) => ({ message })),
+    },
+  );
+  const streamedWidgets = async (text: string) => {
+    const response = await call(`/chats/${chat.id}/turns`, {
+      method: "POST",
+      headers: { "x-grogu-profile": aliceId },
+      body: JSON.stringify({
+        provider: "anthropic",
+        text,
+        credential: { accessToken: "synthetic-only" },
+      }),
+    });
+    return (await response.text())
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "widget")
+      .map(({ id, title, replaces }) => ({ id, title, replaces }));
+  };
+  const plan = await streamedWidgets("Plan");
+  assert.equal(plan.length, 2);
+  assert.equal(plan[0]?.replaces, earlier, "a later turn replaces the chat's saved widget");
+  assert.equal(plan[1]?.replaces, plan[0]?.id, "a widget replaces the one before it in the turn");
+  const fresh = await streamedWidgets("Fresh");
+  assert.equal(fresh[0]?.replaces, undefined);
+  assert.equal(fresh[1]?.replaces, fresh[0]?.id);
 });
 
 void test("artifact pages expose only owned saved content through guarded reads", async (t) => {
@@ -2332,6 +2469,34 @@ void test("artifact pages expose only owned saved content through guarded reads"
     ).artifacts,
     [],
   );
+  const versioned = (items: Array<{ id: string; version?: string }>, id: string) =>
+    items.find((item) => item.id === id)?.version;
+  assert.equal(versioned(all, widget.id), widget.id);
+  assert.match(versioned(all, generatedId) ?? "", /^[a-f0-9]{64}$/);
+  const otherChat = (
+    await (
+      await call("alice", "/chats", { method: "POST", body: '{"title":"Per-chat artifacts"}' })
+    ).json()
+  ).chat;
+  const otherName = `artifact-${randomUUID()}-notes.html`;
+  await files.write(`chats/${otherChat.id}/artifacts/${otherName}`, "<p>first</p>");
+  const otherRoute = `/chats/${otherChat.id}/artifacts`;
+  assert.equal((await call("alice", otherRoute)).status, 403);
+  assert.equal(
+    (await call("bob", otherRoute, { headers: { "x-grogu-profile": bob.id } })).status,
+    404,
+  );
+  assert.equal((await call("alice", "/chats/missing/artifacts", { headers: profile })).status, 404);
+  const firstVersion = await (await call("alice", otherRoute, { headers: profile })).json();
+  assert.deepEqual(
+    firstVersion.artifacts.map((item: { chatId: string }) => item.chatId),
+    [otherChat.id],
+  );
+  const repeatVersion = await (await call("alice", otherRoute, { headers: profile })).json();
+  assert.equal(repeatVersion.artifacts[0].version, firstVersion.artifacts[0].version);
+  await files.write(`chats/${otherChat.id}/artifacts/${otherName}`, "<p>second</p>");
+  const changedVersion = await (await call("alice", otherRoute, { headers: profile })).json();
+  assert.notEqual(changedVersion.artifacts[0].version, firstVersion.artifacts[0].version);
   assert.equal((await call("bob", `/files/${generatedId}`)).status, 404);
   assert.equal((await call("bob", `/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
   assert.equal(

@@ -12,6 +12,7 @@ import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-d
 import { migrateProtectedSubjects } from "./admission-store.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
+import { prepareProtectedSharedState } from "./state-worker-context.js";
 
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
 const originalStorageKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
@@ -45,6 +46,7 @@ for (const saveDrafts of [false, true]) {
     const stateDir = path.resolve(".artifacts", `protected-revocation-test-${randomUUID()}`);
     const usersDir = path.join(stateDir, "users");
     await mkdir(usersDir, { recursive: true, mode: 0o700 });
+    await prepareProtectedSharedState(stateDir, () => {});
     const issuer = "https://access.example";
     const ownerSubject = "00000000-0000-4000-8000-000000000001";
     const memberSubject = "00000000-0000-4000-8000-000000000002";

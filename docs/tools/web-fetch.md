@@ -46,6 +46,10 @@ Truncate output to this many characters. Clamped to `tools.web.fetch.maxCharsCap
 - Optional `spill: { path, chars, truncated? }` when truncated content was written
   to a private temporary file; `truncated` is present only when that file contains
   partial source content
+- Runs scoped to member-owned files (Alcove chats) return only the bounded text,
+  end it with a notice that the rest was not saved, and omit `spill`. Text beyond
+  `maxChars` is not retained, because those agents have no tool that can read a
+  spill file
 
 `length` is the wrapped `text` length. `rawLength` is the extracted content length
 before external-content wrapping.

@@ -2760,6 +2760,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
   };
+  const generatedFileName = `artifact-${randomUUID()}-overview.html`;
+  const generatedFileHtml = "<p>Private generated artifact content.</p>";
+  const runWithGeneratedArtifact = options.turns.run.bind(options.turns);
+  options.turns.run = async (turn) => {
+    await runWithGeneratedArtifact(turn);
+    if (turn.input.text === "Reply briefly") {
+      await turn.files.write(`chats/${turn.id}/artifacts/${generatedFileName}`, generatedFileHtml);
+    }
+  };
   const sendNotification = mock.fn(async () => ({ statusCode: 201 }));
   const webPushMock = mock.module("web-push", {
     defaultExport: {
@@ -2830,6 +2839,23 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const created = await call("/chats", { method: "POST", body: "{}" });
   assert.equal(created.status, 200, await created.clone().text());
   const { chat } = await created.json();
+  const priorGeneratedFileName = `artifact-${randomUUID()}-overview.html`;
+  const seedFiles = await createAuthorizedUserFiles({
+    usersRoot: await root(usersDir),
+    profileId: user.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  try {
+    await seedFiles.write(
+      `chats/${chat.id}/artifacts/${priorGeneratedFileName}`,
+      "<p>Prior reply artifact.</p>",
+    );
+    await seedFiles.write(`chats/${chat.id}/web-fetch/overview.html`, "<p>Prior download.</p>");
+  } finally {
+    seedFiles.dispose();
+  }
   const response = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Reply briefly"}',
@@ -3067,7 +3093,18 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.deepEqual(reportDetail.report.evidence.widgets, [
     { id: widget.id, title: "Synthetic widget" },
   ]);
-  assert.deepEqual(reportDetail.report.evidence.files, []);
+  assert.deepEqual(reportDetail.report.evidence.files, [
+    {
+      id: `generated~${chat.id}~${generatedFileName}`,
+      name: "overview.html",
+      size: Buffer.byteLength(generatedFileHtml),
+      origin: "produced",
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(reportDetail),
+    /Private generated artifact content|Scoped widget body/u,
+  );
   const reviewResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
     method: "PATCH",
     headers: feedbackHeaders,

@@ -25,6 +25,10 @@ import {
   generationsMatch,
   readClaim,
 } from "./legacy-main-session-migration-claims.js";
+import {
+  checkpointProtectedLegacySessionCopy,
+  isProtectedLegacySessionMove,
+} from "./legacy-main-session-migration-durability.js";
 import type {
   LegacyMainSessionMigrationMode,
   LegacyMainSessionMigrationOutcome,
@@ -439,6 +443,12 @@ async function deleteCopiedClaims(params: {
         throw changed();
       }
     };
+    if (isProtectedLegacySessionMove({ writer, sources, env: params.env, changed })) {
+      params.beforePersistentApply?.();
+      assertCurrent();
+      checkpointProtectedLegacySessionCopy(writer, params.canonicalKey);
+      assertCurrent();
+    }
     let verifiedVersion: number | undefined;
     const assertCopied = () => {
       params.beforePersistentApply?.();
@@ -604,8 +614,8 @@ export async function processIdenticalClaims(params: {
     };
   }
 
-  // The destination commit is durable before source cleanup. Every retry therefore sees either
-  // the original claim, an identical canonical claim, or both; no read-through fallback is needed.
+  // The destination commit precedes source cleanup, and protected copies are checkpointed first,
+  // including on a retry. Every retry sees the original claim, an identical canonical claim, or both.
   const changedSource = await deleteCopiedClaims({ ...params, receipt: canonical });
   if (changedSource) {
     return {

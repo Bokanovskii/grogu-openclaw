@@ -232,6 +232,9 @@ export async function noteSessionTranscriptHealth(options?: {
       cfg: params.cfg ?? {},
       env: params.env,
       mode: params.shouldRepair ? "doctor-fix" : "detect",
+      ...(maintenanceAuthority
+        ? { beforePersistentApply: () => maintenanceAuthority.assertCurrent() }
+        : {}),
     });
     const repairParams = {
       apply: params.shouldRepair,

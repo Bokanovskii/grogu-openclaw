@@ -5,7 +5,7 @@ import { registerListener } from "../shared/listeners.js";
 import { hasErrnoCode } from "./errno.js";
 import { formatErrorMessage } from "./errors.js";
 import { supportsNodeSqliteWalCheckpointNoop } from "./node-sqlite.js";
-import { normalizeSqliteNumber, readFiniteSqliteNumber } from "./sqlite-number.js";
+import { normalizeSqliteNumber } from "./sqlite-number.js";
 import {
   readSqliteReaderDiagnosticsForPath,
   sqliteReaderDatabasePathKey,
@@ -147,17 +147,14 @@ function checkpoint(database: DatabaseSync, mode: SqliteWalCheckpointMode) {
 /** Offline maintenance must stop before compaction or recovery if truncation remains busy. */
 export class SqliteWalCheckpointBusyError extends Error {}
 
-export function truncateSqliteWal(database: DatabaseSync, sqlitePath: string): void {
-  const row = checkpoint(database, "TRUNCATE");
-  const busy = readFiniteSqliteNumber(row?.busy ?? (row ? Object.values(row)[0] : undefined));
-  if (busy === undefined) {
-    throw new Error(`SQLite checkpoint returned an invalid result for ${sqlitePath}.`);
-  }
-  if (busy !== 0) {
+export function truncateSqliteWal(database: DatabaseSync, sqlitePath: string) {
+  const result = readCheckpointResult(checkpoint(database, "TRUNCATE"));
+  if (result.busy !== 0) {
     throw new SqliteWalCheckpointBusyError(
       `SQLite checkpoint remained busy for ${sqlitePath}. Stop OpenClaw and retry.`,
     );
   }
+  return result;
 }
 
 /** The maintenance lifecycle owns this checkpoint result and its last observation. */

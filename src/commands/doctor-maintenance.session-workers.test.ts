@@ -1,5 +1,5 @@
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readSessionArchiveContentSync } from "../config/sessions/archive-compression.js";
 import {
   deleteSessionEntryLifecycle,
@@ -34,7 +34,9 @@ import {
 } from "../state/openclaw-agent-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { beginDoctorMaintenance } from "./doctor-maintenance.js";
+import * as sessionSqlite from "./doctor-session-sqlite.js";
 import { noteSessionTranscriptHealth } from "./doctor-session-transcripts.js";
+import * as maintenanceLock from "./doctor-sqlite-maintenance-lock.js";
 
 function begin() {
   return beginDoctorMaintenance({
@@ -45,6 +47,83 @@ function begin() {
 }
 
 describe("Doctor maintenance with session workers", () => {
+  it.each(["before-copy", "before-retirement"] as const)(
+    "preserves legacy claims when Doctor loses maintenance authority %s",
+    async (phase) => {
+      await withOpenClawTestState(
+        { scenario: "external-service", label: "doctor-migration-authority" },
+        async (state) => {
+          const cfg: OpenClawConfig = {
+            agents: { entries: { ops: {} } },
+            plugins: { enabled: false },
+          };
+          await state.writeConfig(cfg);
+          const source = {
+            agentId: "main",
+            env: state.env,
+            sessionId: "doctor-authority",
+            sessionKey: "agent:main:doctor",
+            storePath: path.join(state.sessionsDir("main"), "sessions.json"),
+          };
+          const destination = {
+            ...source,
+            agentId: "ops",
+            sessionKey: "agent:ops:doctor",
+            storePath: path.join(state.sessionsDir("ops"), "sessions.json"),
+          };
+          const maintenance = await begin();
+          const runSessionSqlite = sessionSqlite.runDoctorSessionSqlite;
+          const withLock = maintenanceLock.withDoctorSqliteMaintenanceLock;
+          const expired = new Error("Doctor maintenance authority expired during session repair");
+          let imported = false;
+          vi.spyOn(sessionSqlite, "runDoctorSessionSqlite").mockImplementation(async (...args) => {
+            const result = await runSessionSqlite(...args);
+            imported = true;
+            return result;
+          });
+          vi.spyOn(maintenanceLock, "withDoctorSqliteMaintenanceLock").mockImplementation(
+            (params) =>
+              withLock({
+                ...params,
+                run: (authority) =>
+                  params.run({
+                    assertCurrent() {
+                      authority.assertCurrent();
+                      if (
+                        imported &&
+                        (phase === "before-copy" || loadExactSessionEntryReadOnly(destination))
+                      ) {
+                        throw expired;
+                      }
+                    },
+                  }),
+              }),
+          );
+          try {
+            await maintenance!.run(async () => {
+              await replaceSessionEntry(source, { sessionId: source.sessionId, updatedAt: 1 });
+              await expect(
+                noteSessionTranscriptHealth({
+                  cfg,
+                  env: state.env,
+                  shouldRepair: true,
+                  postSessionPluginMigrationPlanBound: true,
+                }),
+              ).rejects.toBe(expired);
+              expect(loadExactSessionEntryReadOnly(source)?.entry.sessionId).toBe(source.sessionId);
+              expect(loadExactSessionEntryReadOnly(destination)?.entry.sessionId).toBe(
+                phase === "before-copy" ? undefined : source.sessionId,
+              );
+            });
+          } finally {
+            vi.restoreAllMocks();
+            await maintenance?.release();
+          }
+        },
+      );
+    },
+  );
+
   it("certifies pending canonical rows under Doctor without changing them or retaining worker leases", async () => {
     await withOpenClawTestState(
       { scenario: "external-service", label: "doctor-canonical-worker" },

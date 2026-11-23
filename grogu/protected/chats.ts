@@ -289,6 +289,25 @@ export function createProtectedChats(options: {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
       }
+      const budgetReceipt = event.message.protectedContextBudget;
+      if (
+        event.message.role === "assistant" &&
+        event.message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
+        event.message.provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
+        event.message.model === OPENCLAW_DELIVERY_MIRROR_MODEL &&
+        isRecord(budgetReceipt)
+      ) {
+        if (
+          usage &&
+          reply?.id === budgetReceipt.responseId &&
+          typeof budgetReceipt.contextSize === "number" &&
+          Number.isSafeInteger(budgetReceipt.contextSize) &&
+          budgetReceipt.contextSize > 0
+        ) {
+          usage.contextSize = budgetReceipt.contextSize;
+        }
+        continue;
+      }
       const terminalReceipt =
         event.message.role === "assistant" &&
         event.message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
@@ -499,6 +518,42 @@ export function createProtectedChats(options: {
       (await readWithUsage(authority, id)).chat,
     readWithUsage,
     capacityEntries,
+    async saveContextBudget(
+      authority: ProtectedChatAuthority,
+      id: string,
+      result: {
+        runId: string;
+        responseId: string;
+        contextSize: number;
+        lifecycleRevision: string | null;
+      },
+    ) {
+      const message = {
+        role: "assistant",
+        content: [],
+        api: OPENCLAW_TRANSCRIPT_ARTIFACT_API,
+        provider: OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
+        model: OPENCLAW_DELIVERY_MIRROR_MODEL,
+        usage: makeZeroUsageSnapshot(),
+        stopReason: "stop",
+        timestamp: Date.now(),
+        protectedContextBudget: { responseId: result.responseId, contextSize: result.contextSize },
+      } satisfies SessionTranscriptAssistantMessage & {
+        protectedContextBudget: { responseId: string; contextSize: number };
+      };
+      const saved = await appendExactAssistantMessageToSessionTranscript({
+        ...scope(authority, id),
+        expectedSessionId: id,
+        expectedLifecycleRevision: result.lifecycleRevision,
+        idempotencyKey: `protected-context-budget:${result.runId}`,
+        message,
+        assertCurrent: authority.assertCurrent,
+      });
+      authority.assertCurrent();
+      if (!saved.ok) {
+        throw new ProtectedError(500, "save_failed", "The context budget could not be saved.");
+      }
+    },
     removeTransientFiles(authority: ProtectedChatAuthority, sessionId: string) {
       authority.assertCurrent();
       if (!validId(sessionId)) {

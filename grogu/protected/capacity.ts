@@ -30,6 +30,8 @@ const MiB = 1024 * 1024;
 const chatBytes = 32 * 1024;
 export const storageEntryOverheadBytes = 4096;
 export type StorageLimits = { globalBytes: number; userBytes: number; freeFloorBytes: number };
+export const defaultUserLimitBytes = 512 * MiB;
+export const minimumUserLimitBytes = 16 * MiB;
 
 export type StorageAdmission = {
   release(): void;
@@ -60,13 +62,13 @@ function freeBytes(directory: string) {
 export function measureStorageLimits(stateDir: string): StorageLimits {
   const available = freeBytes(stateDir);
   const freeFloorBytes = 512 * MiB;
-  const globalBytes = Math.min(256 * MiB, Number(available - BigInt(freeFloorBytes)) / 16);
-  if (globalBytes < 16 * MiB) {
+  const globalBytes = Math.floor(Number(available - BigInt(freeFloorBytes)) / 16);
+  if (globalBytes < minimumUserLimitBytes) {
     throw new Error("Insufficient free space for Alcove.");
   }
   return {
-    globalBytes: Math.floor(globalBytes),
-    userBytes: Math.floor(globalBytes / 4),
+    globalBytes,
+    userBytes: Math.min(defaultUserLimitBytes, globalBytes),
     freeFloorBytes,
   };
 }
@@ -267,6 +269,8 @@ export function createStorageAdmission(
     profileId: string,
     assertCurrent: () => void,
     operation: "create" | "turn" | "automation" | "stored-data",
+    // null exempts the caller (the owner) from member and shared budgets, not the disk floor.
+    userLimitBytes: number | null = options.limits.userBytes,
   ): Promise<StorageAdmission> => {
     const previous = pending;
     let unlock!: () => void;
@@ -390,7 +394,8 @@ export function createStorageAdmission(
         if (
           pendingFileWrites === 0 &&
           (ledger.globalBytes + initial > options.limits.globalBytes ||
-            (ledger.users.get(profileId) ?? 0) + initial > options.limits.userBytes)
+            (userLimitBytes !== null &&
+              (ledger.users.get(profileId) ?? 0) + initial > userLimitBytes))
         ) {
           const existing = ledger;
           const entries = await options.chats.capacityEntries();
@@ -429,13 +434,19 @@ export function createStorageAdmission(
           const userBytes = account.users.get(profileId) ?? 0;
           if (
             remaining < bytes ||
-            options.limits.userBytes - userBytes < bytes ||
-            options.limits.globalBytes - account.globalBytes < bytes
+            (userLimitBytes !== null && userLimitBytes - userBytes < bytes)
           ) {
             throw new ProtectedError(
               413,
               "quota_exceeded",
               "Storage limit reached. Delete stored data to free space, or contact the server operator.",
+            );
+          }
+          if (userLimitBytes !== null && options.limits.globalBytes - account.globalBytes < bytes) {
+            throw new ProtectedError(
+              413,
+              "quota_exceeded",
+              "The server's shared storage for members is full. Contact the server operator.",
             );
           }
           remaining -= bytes;
@@ -685,8 +696,13 @@ export function createStorageAdmission(
     }
   };
   return Object.assign(admit, {
-    async reserveStoredData(profileId: string, assertCurrent: () => void, bytes: number) {
-      const admission = await admit(profileId, assertCurrent, "stored-data");
+    async reserveStoredData(
+      profileId: string,
+      assertCurrent: () => void,
+      bytes: number,
+      userLimitBytes: number | null = options.limits.userBytes,
+    ) {
+      const admission = await admit(profileId, assertCurrent, "stored-data", userLimitBytes);
       try {
         const reservation = admission.reserveStoredData(bytes);
         return {

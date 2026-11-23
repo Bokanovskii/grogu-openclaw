@@ -26,6 +26,60 @@ afterEach(() => {
 });
 
 describe("metadata-only request telemetry", () => {
+  it("observes terminal metadata once in the suppressed request scope without content", async () => {
+    const terminal = vi.fn();
+    await withoutModelRequestTelemetry(
+      async () => {
+        const tracker = createRequestTracker({ provider: "synthetic", model: "test" });
+        tracker.update({ prompt: "private prompt", token: "private credential" });
+        tracker.observe({ type: "thinking_delta", delta: "private reasoning" });
+        expect(terminal).not.toHaveBeenCalled();
+        createRequestTracker({ kind: "http_attempt" }).finish();
+        await Promise.resolve();
+        tracker.finish({ usage: { inputTokens: 7, outputTokens: 0 } });
+        tracker.finish();
+      },
+      undefined,
+      terminal,
+    );
+    expect(terminal).toHaveBeenCalledTimes(1);
+    const observed = terminal.mock.calls[0]?.[0];
+    expect(observed).toMatchObject({
+      provider: "synthetic",
+      model: "test",
+      inputTokens: 7,
+      outputTokens: 0,
+      queueWaitMs: null,
+      cacheReadTokens: null,
+      reasoningTokens: null,
+    });
+    expect(Object.keys(observed ?? {}).toSorted()).toEqual(
+      [
+        "requestId",
+        "provider",
+        "model",
+        "workClass",
+        "outcome",
+        "usageSource",
+        "wallDurationMs",
+        "queueWaitMs",
+        "timeToHeadersMs",
+        "timeToFirstByteMs",
+        "timeToFirstOutputMs",
+        "timeToFirstTextMs",
+        "timeToFirstReasoningMs",
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+        "reasoningTokens",
+      ].toSorted(),
+    );
+    expect(JSON.stringify(terminal.mock.calls)).not.toMatch(/private|credential|prompt/);
+    createRequestTracker({}).finish();
+    expect(terminal).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     { type: "thinking_delta", delta: "private reasoning" },
     { type: "toolcall_start", partial: { content: [{ type: "toolCall", name: "show_widget" }] } },

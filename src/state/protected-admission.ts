@@ -19,6 +19,7 @@ import type {
   ProtectedAutomationDatabase,
   ProtectedAutomationStorageUsage,
 } from "./protected-automations.js";
+import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -484,6 +485,9 @@ export function removeProtectedAdmission(
       );
       // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
       const profileId = admission.profile_id;
+      if (profileId) {
+        removeProtectedMemberFeedbackRows(db, profileId);
+      }
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
         retiredAutomations = executeSqliteQuerySync(

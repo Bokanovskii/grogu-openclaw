@@ -19,17 +19,20 @@ import {
   type ProtectedAutomationListResponse,
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
+  type ProtectedMessage,
   type ProtectedTurnEvent,
 } from "@openclaw/gateway-protocol/protected";
 import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { ALCOVE_CONTENT_STYLES } from "../../packages/widget-host/src/styles.js";
+import type { TerminalModelRequestMetadata } from "../../src/agents/model-request-telemetry.js";
 import { buildSandboxHostDocument } from "../../src/agents/sandbox-host.js";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { matchesHttpIfNoneMatch } from "../../src/gateway/http-conditional.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
+import { redactSensitiveText } from "../../src/logging/redact.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
 import {
   getCanonicalUserPreferences,
@@ -75,7 +78,13 @@ import {
   createProtectedAutomationCatalog,
   validateProtectedAutomationDraft,
 } from "./automations.js";
-import { createStorageAdmission, measureProtectedStorage, type StorageLimits } from "./capacity.js";
+import {
+  createStorageAdmission,
+  measureProtectedStorage,
+  storageEntryOverheadBytes,
+  type StorageAdmission,
+  type StorageLimits,
+} from "./capacity.js";
 import {
   chatArtifactsDirectory,
   chatGeneratedArtifactsDirectory,
@@ -85,6 +94,22 @@ import {
 import { createProtectedChats } from "./chats.js";
 import { clientCapabilitiesVary, hasClientCapability } from "./client-capabilities.js";
 import { ProtectedError, publicError } from "./errors.js";
+import {
+  findProtectedFeedbackSubmission,
+  findProtectedFeedbackForResponse,
+  listProtectedFeedback,
+  listProtectedFeedbackReports,
+  listProtectedTelemetry,
+  readProtectedFeedbackReport,
+  readProtectedFeedbackStorageUsage,
+  removeProtectedChatFeedback,
+  setProtectedFeedback,
+  setProtectedFeedbackReportStatus,
+  submitProtectedFeedbackReport,
+  type ProtectedProducedFile,
+  type ProtectedReportRecord,
+  type ProtectedTurnTelemetryInput,
+} from "./feedback-store.js";
 import {
   iconImageMime,
   iconPreference,
@@ -139,6 +164,105 @@ function invalid(): never {
 }
 function noContent() {
   return new Response(null, { status: 204, headers: commonHeaders });
+}
+async function listChatArtifactFiles(
+  files: Awaited<ReturnType<typeof createAuthorizedUserFiles>>,
+  chatId: string,
+  maxFileBytes: number,
+): Promise<ProtectedProducedFile[]> {
+  let names: string[];
+  try {
+    names = await files.list(chatArtifactsDirectory(chatId));
+  } catch (error) {
+    if (error instanceof FsSafeError && error.code === "not-found") {
+      return [];
+    }
+    throw error;
+  }
+  const result: ProtectedProducedFile[] = [];
+  for (const name of names) {
+    if (!validFilename(name)) {
+      continue;
+    }
+    const info = await files.stat(`${chatArtifactsDirectory(chatId)}/${name}`);
+    const id = `${chatId}~${name}`;
+    if (
+      info.isFile &&
+      info.size <= maxFileBytes &&
+      id.length <= 200 &&
+      redactFeedbackText(id) === id &&
+      redactFeedbackText(name) === name
+    ) {
+      result.push({ id, name, size: info.size, origin: "produced" });
+    }
+  }
+  return result;
+}
+
+function assistantResponse(messages: readonly ProtectedMessage[], id: string) {
+  return messages.find(
+    (message) => message.id === id && message.role === "assistant" && message.status === "complete",
+  );
+}
+const feedbackCategories = new Set(["wrong", "ignored", "broken", "slow", "unsafe", "other"]);
+function isFeedbackRating(value: unknown): value is "up" | "down" | null {
+  return value === null || value === "up" || value === "down";
+}
+function isFeedbackCategory(
+  value: unknown,
+): value is "wrong" | "ignored" | "broken" | "slow" | "unsafe" | "other" {
+  return typeof value === "string" && feedbackCategories.has(value);
+}
+function redactFeedbackText(value: string) {
+  return redactSensitiveText(value, { mode: "tools" });
+}
+function feedbackReportSummary(report: ProtectedReportRecord) {
+  return {
+    id: report.id,
+    status: report.status,
+    category: report.category,
+    excerpt: redactFeedbackText(report.description).slice(0, 160),
+    createdAt: report.createdAt,
+    member: {
+      personId: report.member.personId,
+      displayName: redactFeedbackText(report.member.displayName),
+    },
+    provider: report.provider,
+    model: report.model,
+    agentId: report.agentId,
+    evidence: report.evidence,
+  };
+}
+type FeedbackReportInput = Pick<
+  Parameters<typeof submitProtectedFeedbackReport>[1],
+  "submissionId" | "category" | "description"
+>;
+function parseFeedbackReportInput(input: Record<string, unknown>): FeedbackReportInput {
+  if (
+    Object.keys(input).length !== 4 ||
+    typeof input.submissionId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      input.submissionId,
+    ) ||
+    !isFeedbackCategory(input.category) ||
+    typeof input.description !== "string" ||
+    input.description.length > 2000 ||
+    (input.category === "other" && !input.description.trim()) ||
+    input.includeEvidence !== true
+  ) {
+    invalid();
+  }
+  return {
+    submissionId: input.submissionId,
+    category: input.category,
+    description: input.description,
+  };
+}
+function replayFeedbackReport(responseId: string, prior: { id: string; createdAt: number }) {
+  return json({
+    report: { id: prior.id, status: "open", createdAt: prior.createdAt },
+    feedback: { responseId, rating: "down", reportId: prior.id },
+  });
 }
 async function body(request: Request) {
   if (
@@ -231,6 +355,8 @@ export function createProtectedHttp(options: {
     chats,
     automationUsage: (profileId: string, assertCurrent: () => void) =>
       readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
+    storedDataUsage: (_profileId: string, assertCurrent: () => void) =>
+      readProtectedFeedbackStorageUsage(options.stateDir, storageEntryOverheadBytes, assertCurrent),
   };
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
@@ -321,8 +447,8 @@ export function createProtectedHttp(options: {
   };
   const handle = async (request: Request): Promise<Response> => {
     const startedAt = performance.now();
+    const path = new URL(request.url).pathname;
     try {
-      const path = new URL(request.url).pathname;
       if (path === "/healthz" && request.method === "GET") {
         return json({ ready: !shutdown.signal.aborted }, shutdown.signal.aborted ? 503 : 200);
       }
@@ -485,6 +611,7 @@ export function createProtectedHttp(options: {
         identity.issuer === options.accessIssuer &&
         options.ownerSubject !== undefined &&
         identity.subject === options.ownerSubject;
+      const feedbackCapability = hasClientCapability(request.headers, "feedback-v1");
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
@@ -627,6 +754,229 @@ export function createProtectedHttp(options: {
           lastActiveAt: person.lastActiveAt ?? null,
           lastChatActivityAt: storage?.lastChatActivityAt ?? null,
         });
+      }
+      if (pathname === "/admin/reports" && method === "GET") {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const url = new URL(request.url);
+        const statusValues = url.searchParams.getAll("status");
+        if (
+          [...url.searchParams.keys()].some((key) => key !== "status") ||
+          statusValues.length > 1 ||
+          (statusValues[0] !== undefined && statusValues[0] !== "open" && statusValues[0] !== "all")
+        ) {
+          return invalid();
+        }
+        await revalidate();
+        const result = await listProtectedFeedbackReports(
+          options.stateDir,
+          statusValues[0] === "all" ? "all" : "open",
+        );
+        await revalidate();
+        return json({
+          reports: result.reports.map(feedbackReportSummary),
+          openCount: result.openCount,
+        });
+      }
+      const adminReport = /^\/admin\/reports\/([^/]+)$/u.exec(pathname);
+      if (adminReport && (method === "GET" || method === "PATCH")) {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const reportId = adminReport[1]!;
+        if (reportId.length > 200) {
+          return notFound();
+        }
+        if (method === "PATCH") {
+          const input = await body(request);
+          if (
+            Object.keys(input).length !== 1 ||
+            (input.status !== "open" && input.status !== "reviewed")
+          ) {
+            return invalid();
+          }
+          await revalidate();
+          const updated = await setProtectedFeedbackReportStatus(
+            options.stateDir,
+            reportId,
+            input.status,
+            Date.now(),
+          );
+          await revalidate();
+          if (!updated) {
+            return json({ error: "not_found" }, 404);
+          }
+          return json({ report: feedbackReportSummary(updated) });
+        }
+        await revalidate();
+        const report = await readProtectedFeedbackReport(options.stateDir, reportId);
+        await revalidate();
+        if (!report) {
+          return json({ error: "not_found" }, 404);
+        }
+        let evidence:
+          | {
+              state: "available";
+              prompt: string;
+              response: string;
+              sources: Array<{ title: string; url: string }>;
+              widgets: Array<{ id: string; title: string }>;
+              files: Array<{
+                id: string;
+                name: string;
+                size: number;
+                origin: "sent" | "produced";
+              }>;
+            }
+          | { state: "deleted" | "member_removed" } = { state: report.evidence };
+        let evidenceState = report.evidence;
+        if (report.evidence === "available") {
+          try {
+            const { chat } = await chats.readWithUsage(
+              { profileId: report.member.personId, assertCurrent },
+              report.chatId,
+            );
+            await revalidate();
+            const responseIndex = chat.messages.findIndex(
+              (message) =>
+                message.id === report.responseId &&
+                message.role === "assistant" &&
+                message.status === "complete",
+            );
+            const response = chat.messages[responseIndex];
+            const prompt = chat.messages
+              .slice(0, responseIndex)
+              .toReversed()
+              .find((message) => message.role === "user");
+            if (!response || !prompt) {
+              evidenceState = "deleted";
+              evidence = { state: "deleted" };
+            } else {
+              evidence = {
+                state: "available",
+                prompt: redactFeedbackText(prompt.text),
+                response: redactFeedbackText(response.text),
+                sources: (response.sources ?? []).map((source) => ({
+                  title: redactFeedbackText(source.title),
+                  url: redactFeedbackText(source.url),
+                })),
+                widgets: (response.widgets ?? []).map((widget) => ({
+                  id: widget.id,
+                  title: redactFeedbackText(widget.title),
+                })),
+                files: report.files.map((file) => ({
+                  id: redactFeedbackText(file.id),
+                  name: redactFeedbackText(file.name),
+                  size: file.size,
+                  origin: file.origin,
+                })),
+              };
+            }
+          } catch (error) {
+            if (!(error instanceof ProtectedError && error.status === 404)) {
+              throw error;
+            }
+            await revalidate();
+            evidenceState = "deleted";
+            evidence = { state: "deleted" };
+          }
+        }
+        const summary = feedbackReportSummary({ ...report, evidence: evidenceState });
+        return json({
+          report: {
+            ...summary,
+            description: redactFeedbackText(report.description).slice(0, 2000),
+            chatId: report.chatId,
+            responseId: report.responseId,
+            metrics: report.metrics,
+            evidence,
+          },
+        });
+      }
+      if (pathname === "/admin/telemetry" && method === "GET") {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        if (!isOwner) {
+          throw new ProtectedError(403, "owner_required", "Owner access is required.");
+        }
+        const url = new URL(request.url);
+        const allowed = new Set(["days", "member", "feature", "provider", "model", "cursor"]);
+        const keys = [...url.searchParams.keys()];
+        if (
+          keys.some((key) => !allowed.has(key)) ||
+          keys.some((key) => url.searchParams.getAll(key).length !== 1)
+        ) {
+          return invalid();
+        }
+        const rawDays = url.searchParams.get("days") ?? "7";
+        const days =
+          rawDays === "1"
+            ? 1
+            : rawDays === "7"
+              ? 7
+              : rawDays === "30"
+                ? 30
+                : rawDays === "90"
+                  ? 90
+                  : null;
+        const member = url.searchParams.get("member") ?? undefined;
+        const feature = url.searchParams.get("feature") ?? undefined;
+        const provider = url.searchParams.get("provider") ?? undefined;
+        const model = url.searchParams.get("model") ?? undefined;
+        const cursor = url.searchParams.get("cursor") ?? undefined;
+        const validCursor = (value: string) => {
+          if (!/^[A-Za-z0-9_-]{1,128}$/u.test(value)) {
+            return false;
+          }
+          const decoded = Buffer.from(value, "base64url").toString("utf8");
+          const split = decoded.indexOf(":");
+          const at = Number(decoded.slice(0, split));
+          const id = decoded.slice(split + 1);
+          return (
+            split > 0 &&
+            Number.isSafeInteger(at) &&
+            at >= 0 &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(id) &&
+            Buffer.from(decoded, "utf8").toString("base64url") === value
+          );
+        };
+        if (
+          days === null ||
+          (member !== undefined &&
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+              member,
+            )) ||
+          (feature !== undefined && feature !== "chat") ||
+          (provider !== undefined &&
+            provider !== "unattributed" &&
+            !/^[a-z][a-z0-9._-]{0,63}$/iu.test(provider)) ||
+          (model !== undefined &&
+            model !== "unattributed" &&
+            !/^[a-z][a-z0-9._-]{0,63}\/.{1,128}$/iu.test(model)) ||
+          (cursor !== undefined && !validCursor(cursor))
+        ) {
+          return invalid();
+        }
+        await revalidate();
+        const result = await listProtectedTelemetry(options.stateDir, {
+          now: Date.now(),
+          days,
+          ...(member !== undefined ? { member } : {}),
+          ...(feature !== undefined ? { feature } : {}),
+          ...(provider !== undefined ? { provider } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        await revalidate();
+        return json(result);
       }
       const adminRequest = /^\/admin\/requests\/([a-f0-9-]{36})\/(approve|deny)$/u.exec(pathname);
       if (adminRequest && method === "POST") {
@@ -820,17 +1170,21 @@ export function createProtectedHttp(options: {
         return { id: profile.id, displayName: name.slice(0, 40), setupRequired: !name, icon };
       };
       if (pathname === "/me" && method === "GET") {
+        const disclosure =
+          "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.";
         return profileJson({
           user: profileCapability
             ? accountUser(profile.displayName, await readAccountIcon())
             : { id: profile.id, displayName: profile.displayName ?? "User" },
-          disclosure:
-            "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
+          disclosure: feedbackCapability
+            ? `${disclosure} If you submit a feedback report, it includes the prompt and response, their sources and widgets, files created during that turn, and request metadata by reference. Report descriptions are encrypted at rest. Reports and detailed per-turn metadata are kept for 90 days. Deleting a chat or removing a member removes ratings and makes report evidence unavailable; the report description remains visible to the admin until expiry.`
+            : disclosure,
           models: options.turns.models.map((model) => withThinking(model)),
           capabilities: {
             copilotConnect: options.providerRelay !== undefined,
             openaiConnect: options.providerRelay !== undefined,
             admin: isOwner,
+            ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
           },
         });
       }
@@ -1560,7 +1914,44 @@ export function createProtectedHttp(options: {
         return notFound();
       }
       const [, id, rest] = match;
-      await chats.readEntry(authority, id);
+      const feedbackReport = /^responses\/([^/]+)\/reports$/u.exec(rest ?? "");
+      try {
+        await chats.readEntry(authority, id);
+      } catch (error) {
+        const responseId = feedbackReport?.[1];
+        if (
+          !(error instanceof ProtectedError && error.status === 404) ||
+          method !== "POST" ||
+          !feedbackCapability ||
+          !responseId ||
+          responseId.length > 200
+        ) {
+          throw error;
+        }
+        let input: FeedbackReportInput;
+        try {
+          input = parseFeedbackReportInput(await body(request));
+        } catch (inputError) {
+          if (
+            inputError instanceof ProtectedError &&
+            (inputError.status === 400 || inputError.status === 413)
+          ) {
+            throw error;
+          }
+          throw inputError;
+        }
+        await revalidate();
+        const prior = await findProtectedFeedbackSubmission(
+          options.stateDir,
+          profile.id,
+          input.submissionId,
+        );
+        await revalidate();
+        if (prior?.chatId === id && prior.responseId === responseId) {
+          return replayFeedbackReport(responseId, prior);
+        }
+        throw error;
+      }
       await revalidate();
       if (!rest && method === "GET") {
         const { chat, usage } = await readChat(id);
@@ -1573,6 +1964,235 @@ export function createProtectedHttp(options: {
             ? { activeRun: { id: active.id } }
             : {}),
         });
+      }
+      if (rest === "feedback" && method === "GET") {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        const { chat } = await readChat(id);
+        await revalidate();
+        const responseIds = new Set(
+          chat.messages
+            .filter((message) => message.role === "assistant" && message.status === "complete")
+            .map((message) => message.id),
+        );
+        const feedback = await listProtectedFeedback(options.stateDir, profile.id, id);
+        await revalidate();
+        return json({
+          feedback: feedback
+            .filter((entry) => responseIds.has(entry.responseId))
+            .map(({ responseId, rating, reportId }) => ({ responseId, rating, reportId })),
+        });
+      }
+      const feedbackResponse = /^responses\/([^/]+)\/feedback$/u.exec(rest ?? "");
+      if (feedbackResponse && method === "PUT") {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        const responseId = feedbackResponse[1]!;
+        if (responseId.length > 200) {
+          return notFound();
+        }
+        const input = await body(request);
+        if (Object.keys(input).length !== 1 || !isFeedbackRating(input.rating)) {
+          return invalid();
+        }
+        const { chat } = await readChat(id);
+        if (!assistantResponse(chat.messages, responseId)) {
+          return notFound();
+        }
+        await revalidate();
+        let storage: StorageAdmission | undefined;
+        let reservation: ReturnType<StorageAdmission["reserveStoredData"]> | undefined;
+        let reservationSettled = false;
+        try {
+          const current = await listProtectedFeedback(options.stateDir, profile.id, id);
+          await revalidate();
+          if (input.rating !== null && !current.some((entry) => entry.responseId === responseId)) {
+            storage = await admitStorage?.(profile.id, assertCurrent, "stored-data");
+            reservation = storage?.reserveStoredData(storageEntryOverheadBytes + 1024);
+          }
+          const result = await setProtectedFeedback(options.stateDir, {
+            profileId: profile.id,
+            chatId: id,
+            responseId,
+            rating: input.rating,
+            now: Date.now(),
+            storageOverheadBytes: storageEntryOverheadBytes,
+          });
+          reservation?.settle({
+            created: result.created,
+            entries: result.entry ? [result.entry] : [],
+          });
+          reservationSettled = reservation !== undefined;
+          await revalidate();
+          return json({ feedback: result.feedback });
+        } catch (error) {
+          if (reservation && !reservationSettled) {
+            try {
+              const stored = await readProtectedFeedbackStorageUsage(
+                options.stateDir,
+                storageEntryOverheadBytes,
+                assertCurrent,
+              );
+              const entry = stored.find(
+                (candidate) =>
+                  candidate.profileId === profile.id &&
+                  candidate.id === `feedback:${id}:${responseId}`,
+              );
+              if (entry) {
+                reservation.settle({ created: true, entries: [entry] });
+              } else {
+                reservation.release();
+              }
+            } catch {
+              process.stderr.write(
+                "Protected feedback write outcome is unknown; its storage reservation remains held.\n",
+              );
+            }
+          }
+          throw error;
+        } finally {
+          storage?.release();
+        }
+      }
+      if (feedbackReport && method === "POST") {
+        if (!feedbackCapability) {
+          return notFound();
+        }
+        const responseId = feedbackReport[1]!;
+        if (responseId.length > 200) {
+          return notFound();
+        }
+        const input = parseFeedbackReportInput(await body(request));
+        await revalidate();
+        const priorSubmission = await findProtectedFeedbackSubmission(
+          options.stateDir,
+          profile.id,
+          input.submissionId,
+        );
+        await revalidate();
+        if (priorSubmission) {
+          if (priorSubmission.chatId !== id || priorSubmission.responseId !== responseId) {
+            return json({ error: "submission_conflict" }, 409);
+          }
+          return replayFeedbackReport(responseId, priorSubmission);
+        }
+        const { chat } = await readChat(id);
+        const responseIndex = chat.messages.findIndex(
+          (message) =>
+            message.id === responseId &&
+            message.role === "assistant" &&
+            message.status === "complete",
+        );
+        const response = chat.messages[responseIndex];
+        const prompt = chat.messages
+          .slice(0, responseIndex)
+          .toReversed()
+          .find((message) => message.role === "user");
+        if (!response || !prompt) {
+          return notFound();
+        }
+        await revalidate();
+        const priorReport = await findProtectedFeedbackForResponse(
+          options.stateDir,
+          profile.id,
+          id,
+          responseId,
+        );
+        await revalidate();
+        if (priorReport) {
+          return json({ error: "already_reported" }, 409);
+        }
+        let storage: StorageAdmission | undefined;
+        let reservation: ReturnType<StorageAdmission["reserveStoredData"]> | undefined;
+        let reservationSettled = false;
+        try {
+          storage = await admitStorage?.(profile.id, assertCurrent, "stored-data");
+          reservation = storage?.reserveStoredData(16 * 1024);
+          const result = await submitProtectedFeedbackReport(options.stateDir, {
+            profileId: profile.id,
+            memberLabel: redactFeedbackText(profile.displayName?.trim() || "User"),
+            chatId: id,
+            responseId,
+            submissionId: input.submissionId,
+            category: input.category,
+            description: input.description,
+            now: Date.now(),
+            storageOverheadBytes: storageEntryOverheadBytes,
+          });
+          if (result.kind === "already_reported") {
+            reservation?.settle({ created: false, entries: [] });
+            reservationSettled = reservation !== undefined;
+            return json({ error: "already_reported" }, 409);
+          }
+          if (result.kind === "submission_conflict") {
+            reservation?.settle({ created: false, entries: [] });
+            reservationSettled = reservation !== undefined;
+            return json({ error: "submission_conflict" }, 409);
+          }
+          reservation?.settle({
+            created: result.kind === "created",
+            entries: result.entries,
+          });
+          reservationSettled = reservation !== undefined;
+          await revalidate();
+          if (result.kind === "created") {
+            void track(
+              loadProtectedPush()
+                .then(({ notifyProtectedIssueReport }) =>
+                  notifyProtectedIssueReport({
+                    stateDir: options.stateDir,
+                    issuer: options.accessIssuer,
+                    ownerSubject: options.ownerSubject,
+                  }),
+                )
+                .catch(() => {
+                  process.stderr.write("Alcove could not deliver a report notification.\n");
+                }),
+            );
+          }
+          return json({ report: result.report, feedback: result.feedback }, 201);
+        } catch (error) {
+          if (reservation && !reservationSettled) {
+            try {
+              const committed = await findProtectedFeedbackSubmission(
+                options.stateDir,
+                profile.id,
+                input.submissionId,
+              );
+              await revalidate();
+              const stored = await readProtectedFeedbackStorageUsage(
+                options.stateDir,
+                storageEntryOverheadBytes,
+                assertCurrent,
+              );
+              const entries =
+                committed?.chatId === id && committed.responseId === responseId
+                  ? stored.filter(
+                      (entry) =>
+                        entry.profileId === profile.id &&
+                        (entry.id === `report:${committed.id}` ||
+                          entry.id === `feedback:${id}:${responseId}`),
+                    )
+                  : [];
+              if (entries.length > 0) {
+                reservation.settle({ created: true, entries });
+                reservationSettled = true;
+              } else {
+                reservation.release();
+                reservationSettled = true;
+              }
+            } catch {
+              process.stderr.write(
+                "Protected report write outcome is unknown; its storage reservation remains held.\n",
+              );
+            }
+          }
+          throw error;
+        } finally {
+          storage?.release();
+        }
       }
       if (!rest && method === "DELETE") {
         const version = request.headers.get("if-match");
@@ -1588,6 +2208,8 @@ export function createProtectedHttp(options: {
             await files((owned) => removeChatFilesDirectory(owned, id));
             await revalidate();
           });
+          await removeProtectedChatFeedback(options.stateDir, profile.id, id);
+          await revalidate();
           admitStorage?.deletedChat(profile.id, id);
           await revalidate();
           return noContent();
@@ -1966,12 +2588,22 @@ export function createProtectedHttp(options: {
               let tokens: number | null = null;
               let messageCount: number | null = null;
               let failed = true;
+              let errorCode: string | null = null;
+              let responseId: string | null = null;
+              let producedFiles: ProtectedProducedFile[] = [];
+              let reasoningSummaryChars = input.thinking === "off" ? 0 : null;
+              const modelRequests: TerminalModelRequestMetadata[] = [];
               try {
                 assertRun();
                 send({ type: "start", runId: run.id });
                 const before = await chats.read(runAuthority, id);
                 await files(
                   async (owned) => {
+                    const beforeArtifacts = await listChatArtifactFiles(
+                      owned,
+                      id,
+                      options.maxFileBytes,
+                    );
                     const execute = () =>
                       options.turns.run({
                         id,
@@ -2017,6 +2649,17 @@ export function createProtectedHttp(options: {
                         usage: (value) => {
                           tokens = value;
                         },
+                        modelRequest: (record) => {
+                          modelRequests.push(record);
+                        },
+                        reasoningLength: (length) => {
+                          if (reasoningSummaryChars !== null) {
+                            const next = reasoningSummaryChars + length;
+                            reasoningSummaryChars = Number.isSafeInteger(next) ? next : null;
+                          } else if (length > 0) {
+                            reasoningSummaryChars = length;
+                          }
+                        },
                         delta: async (value) => {
                           send({ type: "delta", text: value });
                         },
@@ -2039,7 +2682,14 @@ export function createProtectedHttp(options: {
                           send(draft);
                         },
                       });
-                    return storage ? withTranscriptWriteBudget(storage.charge, execute) : execute();
+                    const result = await (storage
+                      ? withTranscriptWriteBudget(storage.charge, execute)
+                      : execute());
+                    const beforeNames = new Set(beforeArtifacts.map((file) => file.name));
+                    producedFiles = (
+                      await listChatArtifactFiles(owned, id, options.maxFileBytes)
+                    ).filter((file) => !beforeNames.has(file.name));
+                    return result;
                   },
                   assertRun,
                   signal,
@@ -2049,6 +2699,14 @@ export function createProtectedHttp(options: {
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 messageCount = newMessages.length;
+                const latestMessage = newMessages.at(-1);
+                responseId =
+                  latestMessage?.role === "assistant" && latestMessage.status === "complete"
+                    ? latestMessage.id
+                    : null;
+                if (responseId === null) {
+                  producedFiles = [];
+                }
                 if (
                   !newMessages.some(
                     (message) => message.role === "user" && message.text === input.text,
@@ -2086,19 +2744,115 @@ export function createProtectedHttp(options: {
                 const issue = signal.aborted
                   ? new ProtectedError(409, "interrupted", "The turn was interrupted.")
                   : publicError(failure);
+                errorCode = issue.code;
                 send({ type: "error", code: issue.code, message: issue.message });
               } finally {
+                const timingMetrics = timing.finish(outcome);
+                const telemetryRequests = modelRequests.map((record) => ({
+                  requestId: record.requestId,
+                  provider: record.provider,
+                  model: record.model,
+                  outcome: record.outcome,
+                  usageSource: record.usageSource,
+                  wallDurationMs:
+                    record.wallDurationMs === null ? null : Math.round(record.wallDurationMs),
+                  inputTokens: record.inputTokens,
+                  outputTokens: record.outputTokens,
+                  cacheReadTokens: record.cacheReadTokens,
+                  cacheWriteTokens: record.cacheWriteTokens,
+                  reasoningTokens: record.reasoningTokens,
+                }));
+                const telemetry: ProtectedTurnTelemetryInput = {
+                  id: run.id,
+                  profileId: profile.id,
+                  memberLabel: redactFeedbackText(profile.displayName?.trim() || "User"),
+                  createdAt: Date.now(),
+                  agentId: selectedAgent.id,
+                  status:
+                    outcome === "complete"
+                      ? "complete"
+                      : outcome === "interrupted"
+                        ? "stopped"
+                        : "failed",
+                  chatId: id,
+                  responseId,
+                  errorCode,
+                  reasoningSummaryChars,
+                  admissionMs: timingMetrics.admissionMs,
+                  providerStartMs: timingMetrics.providerRequestStartMs,
+                  firstOutputMs: timingMetrics.firstProviderOutputMs,
+                  firstVisibleMs: timingMetrics.firstClientVisibleOutputMs,
+                  completionMs: timingMetrics.completionMs,
+                  files: producedFiles,
+                  requests: telemetryRequests,
+                  storageOverheadBytes: storageEntryOverheadBytes,
+                };
+                const telemetryBytes =
+                  storageEntryOverheadBytes +
+                  Buffer.byteLength(JSON.stringify(telemetry.files), "utf8") +
+                  Buffer.byteLength(telemetry.memberLabel, "utf8") +
+                  telemetry.id.length +
+                  telemetry.requests.reduce(
+                    (total, record) =>
+                      total +
+                      storageEntryOverheadBytes +
+                      Buffer.byteLength(JSON.stringify(record), "utf8") +
+                      record.requestId.length,
+                    0,
+                  );
+                let recordTelemetry = true;
+                let telemetryReservation:
+                  | ReturnType<NonNullable<typeof storage>["reserveStoredData"]>
+                  | undefined;
+                if (storage) {
+                  try {
+                    telemetryReservation = storage.reserveStoredData(telemetryBytes);
+                  } catch {
+                    recordTelemetry = false;
+                    process.stderr.write(
+                      "Protected telemetry was not recorded because storage capacity was unavailable.\n",
+                    );
+                  }
+                }
                 try {
-                  await recordProtectedUsage(options.stateDir, {
+                  const storedEntries = await recordProtectedUsage(options.stateDir, {
                     runId: run.id,
                     profileId: profile.id,
                     model: `${input.provider}/${input.model}`,
                     messages: messageCount,
                     tokens,
                     failed,
-                    now: Date.now(),
+                    now: telemetry.createdAt,
+                    ...(recordTelemetry ? { telemetry } : {}),
+                  });
+                  telemetryReservation?.settle({
+                    created: storedEntries.length > 0,
+                    entries: storedEntries,
                   });
                 } catch {
+                  if (telemetryReservation) {
+                    try {
+                      const expected = new Set([
+                        `run:${run.id}`,
+                        ...telemetryRequests.map((record) => `request:${record.requestId}`),
+                      ]);
+                      const storedEntries = (
+                        await readProtectedFeedbackStorageUsage(
+                          options.stateDir,
+                          storageEntryOverheadBytes,
+                          assertGrant,
+                        )
+                      ).filter((entry) => entry.profileId === profile.id && expected.has(entry.id));
+                      telemetryReservation.settle({
+                        created: storedEntries.some((entry) => entry.id === `run:${run.id}`),
+                        entries: storedEntries,
+                      });
+                    } catch {
+                      process.stderr.write(
+                        "Protected telemetry write outcome is unknown; its storage reservation remains held.\n",
+                      );
+                    }
+                  }
                   process.stderr.write(
                     "Protected usage could not be recorded for a completed run.\n",
                   );
@@ -2110,7 +2864,6 @@ export function createProtectedHttp(options: {
                 for (const queued of run.steering.values()) {
                   queued.abort();
                 }
-                timing.finish(outcome);
                 if (attached) {
                   attached = false;
                   controller.close();
@@ -2200,6 +2953,14 @@ export function createProtectedHttp(options: {
       return notFound();
     } catch (error) {
       const issue = publicError(error);
+      if (
+        /^\/api\/protected\/v1\/(?:chats\/[^/]+\/(?:feedback|responses\/[^/]+\/(?:feedback|reports))|admin\/(?:reports(?:\/[^/]+)?|telemetry))$/u.test(
+          path,
+        ) &&
+        ["already_reported", "not_found", "owner_required"].includes(issue.code)
+      ) {
+        return json({ error: issue.code }, issue.status);
+      }
       return json({ error: { code: issue.code, message: issue.message } }, issue.status);
     }
   };

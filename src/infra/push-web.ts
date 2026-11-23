@@ -164,7 +164,7 @@ export async function clearBoundWebPushSubscription(params: {
 }
 
 type WebPushPayload = {
-  title: string;
+  title?: string;
   body?: string;
   renotify?: boolean;
   tag?: string;

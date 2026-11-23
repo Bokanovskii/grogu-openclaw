@@ -21,6 +21,7 @@ import {
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
 import { Value } from "typebox/value";
+import type { ProtectedAuthoringTurnEvent } from "../../packages/gateway-protocol/src/protected-authoring.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
 import { createCanvasDocument } from "../../src/canvas/documents.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
@@ -4838,4 +4839,287 @@ void test("the owner sets member storage limits and is exempt from them", async 
   const blockedError = (await blocked.json()).error;
   assert.equal(blockedError.code, "quota_exceeded");
   assert.match(blockedError.message, /shared storage/u);
+});
+
+void test("automation authoring chats hold a server binding and save only the sent draft", async (t) => {
+  const stateDir = path.resolve(".artifacts", `automation-authoring-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://authoring.example";
+  const expiresAt = Date.now() + 120_000;
+  const routed: boolean[] = [];
+  const app = createProtectedHttp({
+    origin,
+    stateDir,
+    accessIssuer: "https://identity.example",
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer: "https://identity.example",
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 10,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run(turn) {
+        routed.push(turn.routing !== undefined);
+        const tools = turn.automationChat;
+        if (tools && "authoring" in tools) {
+          const current = await tools.read();
+          // One model message may carry parallel tool calls; the bindings must order them.
+          await Promise.all([
+            turn.input.text.includes("update")
+              ? tools.update({ draft: { ...current.draft, name: "Revised by chat" } })
+              : undefined,
+            turn.input.text.includes("save")
+              ? tools.save({ draftRevision: turn.input.text.split(" ").at(-1)! })
+              : undefined,
+          ]);
+        }
+        await turn.delta("Done.");
+      },
+      async steer() {
+        assert.fail("Authoring proof does not steer an agent.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const negotiated = "automations-chat-v1, automations-authoring-v1";
+  const call = (subject: string, route: string, init?: RequestInit, capabilities = negotiated) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          "x-alcove-capabilities": capabilities,
+          ...init?.headers,
+        },
+      }),
+    );
+  const profiles: Record<string, string> = {};
+  for (const subject of ["alice", "bob"]) {
+    profiles[subject] = (await (await call(subject, "/me")).json()).user.id;
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://identity.example", subject }),
+      "added",
+    );
+  }
+  const draft = {
+    name: "Synthetic authoring draft",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky" as const, id: "synthetic-sparky" },
+    thinking: "low" as const,
+    schedule: { kind: "every" as const, everyMs: 60_000 },
+  };
+  const turn = async (
+    subject: string,
+    chatId: string,
+    text: string,
+    authoring?: Record<string, unknown>,
+    capabilities = negotiated,
+  ) => {
+    const response = await call(
+      subject,
+      `/chats/${chatId}/turns`,
+      {
+        method: "POST",
+        headers: { "x-grogu-profile": profiles[subject]! },
+        body: JSON.stringify({ provider: "sparky", text, ...(authoring ? { authoring } : {}) }),
+      },
+      capabilities,
+    );
+    const raw = await response.text();
+    if (response.status !== 200) {
+      const events: ProtectedAuthoringTurnEvent[] = [];
+      return { status: response.status, code: JSON.parse(raw).error.code as string, events };
+    }
+    const events = raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ProtectedAuthoringTurnEvent);
+    return { status: 200, code: undefined, events };
+  };
+  const ofType = <T extends ProtectedAuthoringTurnEvent["type"]>(
+    events: ProtectedAuthoringTurnEvent[],
+    type: T,
+  ) =>
+    events.filter(
+      (event): event is Extract<ProtectedAuthoringTurnEvent, { type: T }> => event.type === type,
+    );
+  const listAutomations = async () =>
+    (await (await call("alice", "/automations")).json()).automations as { id: string }[];
+
+  const plainCatalog = await (
+    await call("alice", "/automations/catalog", {}, "automations-chat-v1")
+  ).json();
+  assert.equal(plainCatalog.capabilities.automations.chat.authoring, undefined);
+  const catalog = await (await call("alice", "/automations/catalog")).json();
+  assert.equal(catalog.capabilities.automations.chat.authoring, true);
+  assert.equal(
+    (await call("alice", "/automations/authoring", { method: "POST" }, "automations-chat-v1"))
+      .status,
+    404,
+  );
+
+  // The first message creates an unsaved Grogu chat; nothing is saved or scheduled.
+  const created = await call("alice", "/automations/authoring", { method: "POST" });
+  assert.equal(created.status, 201);
+  const { chat } = await created.json();
+  assert.deepEqual(chat.authoring, { kind: "automation" });
+  assert.equal(chat.selectedAgentId, "grogu");
+  assert.deepEqual(await listAutomations(), []);
+  const agentSwitch = await call("alice", `/chats/${chat.id}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": chat.version },
+    body: JSON.stringify({ selectedAgentId: "travel" }),
+  });
+  assert.equal(agentSwitch.status, 409);
+  assert.equal((await agentSwitch.json()).error.code, "authoring_chat");
+
+  // The server-held binding, not the body, decides whether a turn may author.
+  assert.equal((await turn("alice", chat.id, "Hello")).code, "authoring_required");
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "1" }, "automations-chat-v1"))
+      .code,
+    "authoring_required",
+  );
+  assert.equal((await turn("bob", chat.id, "Hello", { draft, draftRevision: "1" })).status, 404);
+  const { chat: ordinary } = await (
+    await call("alice", "/chats", { method: "POST", body: "{}" })
+  ).json();
+  assert.equal(
+    (await turn("alice", ordinary.id, "Hello", { draft, draftRevision: "1" })).status,
+    400,
+  );
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "1", automationVersion: "1" }))
+      .status,
+    400,
+  );
+
+  const updated = await turn("alice", chat.id, "Please update", { draft, draftRevision: "4" });
+  assert.deepEqual(ofType(updated.events, "automation-draft-update"), [
+    {
+      type: "automation-draft-update",
+      baseDraftRevision: "4",
+      draftRevision: "5",
+      draft: { ...draft, name: "Revised by chat" },
+    },
+  ]);
+  assert.deepEqual(await listAutomations(), []);
+  const changedThenSaved = await turn("alice", chat.id, "Please update and save 5", {
+    draft,
+    draftRevision: "5",
+  });
+  assert.deepEqual(ofType(changedThenSaved.events, "automation-save-refused"), [
+    { type: "automation-save-refused", draftRevision: "5", reason: "draft_changed" },
+  ]);
+  assert.deepEqual(await listAutomations(), []);
+
+  // A first save that stopped before binding left its record under the chat id; a retry reuses it.
+  const orphan = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    {
+      profileId: profiles.alice!,
+      definition: { ...draft, name: "Saved before binding" },
+      now: Date.now(),
+      automationId: chat.id,
+    },
+    { profileId: profiles.alice!, assertCurrent() {} },
+  );
+  assert.ok(orphan.status === "created");
+  const interrupted = await turn("alice", chat.id, "Please save 6", { draft, draftRevision: "6" });
+  assert.deepEqual(ofType(interrupted.events, "automation-save-refused"), [
+    {
+      type: "automation-save-refused",
+      draftRevision: "6",
+      reason: "version_mismatch",
+      currentVersion: String(orphan.automation.definitionRevision),
+    },
+  ]);
+  assert.deepEqual(ofType(interrupted.events, "automation-saved"), []);
+  assert.deepEqual(
+    (await listAutomations()).map(({ id }) => id),
+    [chat.id],
+  );
+  const bound = (await (await call("alice", "/chats")).json()).chats.find(
+    ({ id }: { id: string }) => id === chat.id,
+  );
+  assert.deepEqual(bound.authoring, { kind: "automation", automationId: chat.id });
+  const savedEvent = {
+    automation: { version: String(orphan.automation.definitionRevision) },
+  };
+
+  // A bound chat requires the record version it was opened against.
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "7" })).code,
+    "version_required",
+  );
+  const resaved = await turn("alice", chat.id, "Please save 7", {
+    draft,
+    draftRevision: "7",
+    automationVersion: savedEvent.automation.version,
+  });
+  const [resavedEvent] = ofType(resaved.events, "automation-saved");
+  assert.ok(resavedEvent);
+  assert.equal(resavedEvent.automation.name, draft.name);
+  assert.equal(resavedEvent.automation.enabled, false);
+  assert.notEqual(resavedEvent.automation.version, savedEvent.automation.version);
+  assert.equal(
+    (
+      await turn("alice", chat.id, "Hello", {
+        draft,
+        draftRevision: "8",
+        automationVersion: savedEvent.automation.version,
+      })
+    ).status,
+    412,
+  );
+  assert.deepEqual(routed, [false, false, false, false]);
+
+  // Saved items reopen their one bound chat; other members cannot see or bind them.
+  const reopened = await call("alice", `/automations/${chat.id}/authoring`, { method: "POST" });
+  assert.equal(reopened.status, 200);
+  assert.equal((await reopened.json()).chat.id, chat.id);
+  assert.equal(
+    (await call("bob", `/automations/${chat.id}/authoring`, { method: "POST" })).status,
+    404,
+  );
+  const formSaved = (
+    await (
+      await call("alice", "/automations", { method: "POST", body: JSON.stringify(draft) })
+    ).json()
+  ).automation;
+  const first = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json();
+  assert.deepEqual(firstBody.chat.authoring, { kind: "automation", automationId: formSaved.id });
+  assert.equal(firstBody.automation.version, formSaved.version);
+  const again = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
+  assert.equal((await again.json()).chat.id, firstBody.chat.id);
 });

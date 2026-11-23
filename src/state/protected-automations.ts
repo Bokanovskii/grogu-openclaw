@@ -297,15 +297,21 @@ function selectVisibleAutomations(
 
 export function createProtectedAutomation(
   database: OpenClawStateDatabase,
-  input: { profileId: string; definition: ProtectedAutomationDraft; now: number },
+  input: {
+    profileId: string;
+    definition: ProtectedAutomationDraft;
+    now: number;
+    /** Caller-reserved id makes a retried create return the owned record instead of a duplicate. */
+    automationId?: string;
+  },
 ):
-  | { status: "created"; automation: ProtectedAutomationStorageRecord }
+  | { status: "created" | "exists"; automation: ProtectedAutomationStorageRecord }
   | { status: "member_inactive" } {
   ensureSchema(database);
   if (!Value.Check(ProtectedAutomationDraftSchema, input.definition)) {
     throw new TypeError("Protected automation definition does not match its schema.");
   }
-  const automationId = randomUUID();
+  const automationId = input.automationId ?? randomUUID();
   const definitionJson = JSON.stringify(input.definition);
   const admissionFacts = {
     kind: "protected-automation",
@@ -327,6 +333,23 @@ export function createProtectedAutomation(
       ).rows[0];
       if (!activeAdmission) {
         return { status: "member_inactive" as const };
+      }
+      if (input.automationId) {
+        const reserved = executeSqliteQuerySync(
+          db,
+          kysely
+            .selectFrom("protected_automations")
+            .select("id")
+            .where("id", "=", automationId)
+            .limit(1),
+        ).rows[0];
+        if (reserved) {
+          const owned = selectVisibleAutomations(db, input.profileId, automationId)[0];
+          if (!owned || owned.relation !== "owner") {
+            throw new Error("Reserved protected automation id belongs to another record.");
+          }
+          return { status: "exists" as const, automation: owned };
+        }
       }
       const definitionValue = storedDefinition(db, automationId, definitionJson);
       const storage = {

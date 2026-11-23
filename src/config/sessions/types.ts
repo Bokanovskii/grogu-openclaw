@@ -500,6 +500,10 @@ type SessionEntryCore = SessionRestartRecoveryState &
     agentRuntimeOverride?: string;
     /** Protected Family app agent selection; does not change the OpenClaw agent identity. */
     protectedAgentId?: string;
+    /** Protected Family authoring chat kind; fixed when the chat is created. */
+    protectedAuthoringKind?: "automation";
+    /** Saved protected automation bound to an authoring chat; set at most once, never changed. */
+    protectedAutomationId?: string;
     /**
      * Tracks whether the persisted model selection came from an explicit user
      * action (`/model`, `sessions.patch`), a temporary runtime fallback, or an

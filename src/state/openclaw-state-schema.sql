@@ -2881,6 +2881,31 @@ CREATE TABLE IF NOT EXISTS protected_automation_job_bindings (
 CREATE INDEX IF NOT EXISTS idx_protected_automation_job_bindings_owner
   ON protected_automation_job_bindings(central_owner_profile_id, automation_id);
 
+-- No foreign key to protected_automations: a cascade would drop charged ciphertext without
+-- releasing its quota, and a restrict would block member removal. Rows are owner-private.
+CREATE TABLE IF NOT EXISTS protected_automation_runs (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE CHECK (
+    length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+    AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+    AND id NOT GLOB '*[^0-9a-f-]*' AND substr(id, 15, 1) = '4'
+    AND substr(id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  automation_id TEXT NOT NULL,
+  central_owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  job_id TEXT NOT NULL,
+  run_at_ms INTEGER NOT NULL CHECK (run_at_ms >= 0),
+  native_run_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  completed_at_ms INTEGER NOT NULL CHECK (completed_at_ms >= 0),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes >= 0),
+  UNIQUE (job_id, run_at_ms, native_run_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_runs_owner
+  ON protected_automation_runs(central_owner_profile_id, automation_id, completed_at_ms DESC, sequence DESC);
+
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,
   kind TEXT NOT NULL,

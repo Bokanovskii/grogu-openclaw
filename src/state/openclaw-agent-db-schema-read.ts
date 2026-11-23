@@ -13,6 +13,7 @@ import {
 } from "../storage/sqlite-encryption.js";
 import {
   AGENT_MEDIA_SCHEMA_VERSION,
+  isProtectedAgentSchemaVersion,
   OPENCLAW_AGENT_SCHEMA_VERSION,
   PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
 } from "./openclaw-agent-db-contract.js";
@@ -47,12 +48,13 @@ function assertProtectedEncryptionAdmission(
         .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
         .get(PROTECTED_ENCRYPTION_TABLE),
     );
-  if (userVersion === PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION && !hasMarker) {
+  const protectedVersion = isProtectedAgentSchemaVersion(userVersion);
+  if (protectedVersion && !hasMarker) {
     throw new SqliteSchemaMismatchError(
       `Protected agent database ${pathname} has an encrypted schema version but no encryption marker; keep it stopped and repair it with a supporting build.`,
     );
   }
-  if (hasMarker && userVersion !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION) {
+  if (hasMarker && !protectedVersion) {
     throw new SqliteSchemaMismatchError(
       `Protected agent database ${pathname} has an encryption marker without its schema version; keep it stopped and repair it with a supporting build.`,
     );
@@ -109,9 +111,7 @@ export function assertRequiredProtectedAgentStorage(db: DatabaseSync, pathname: 
       `Protected agent database ${pathname} requires its storage key; restore the key before starting the service.`,
     );
   }
-  if (
-    assertSupportedAgentSchemaVersion(db, pathname) !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
-  ) {
+  if (!isProtectedAgentSchemaVersion(assertSupportedAgentSchemaVersion(db, pathname))) {
     throw new SqliteSchemaMismatchError(
       `Protected agent database ${pathname} is unmarked or unencrypted; stop the service and run provision-storage-key before starting it.`,
     );

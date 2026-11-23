@@ -27,10 +27,7 @@ import {
 } from "../storage/sqlite-encryption.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { trajectoryRuntimeEventStorageContext } from "../trajectory/storage-context.js";
-import {
-  OPENCLAW_AGENT_SCHEMA_VERSION,
-  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
-} from "./openclaw-agent-db-contract.js";
+import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
 import { AGENT_DATABASE_MAINTENANCE_LEASE } from "./openclaw-agent-db-lease.js";
 import { withAgentDatabaseMaintenanceLease } from "./openclaw-agent-db-maintenance-lease.js";
 import { persistAgentSchemaMetadata } from "./openclaw-agent-db-metadata-write.js";
@@ -110,6 +107,8 @@ it("atomically migrates protected transcript data and refuses unsupported or wro
           VALUES('protected-session', 'agent:main:protected', 1, 2, 'protected-window-sentinel');
         INSERT INTO session_entry_snapshots(session_key, field, value_json)
           VALUES('agent:main:protected', 'skillsSnapshot', '${snapshot.replaceAll("'", "''")}');
+        INSERT INTO session_suggestions(id, session_key, author_id, author_label, text, created_at, state)
+          VALUES('idea', 'agent:main:protected', 'suggestion-author', NULL, 'suggestion-text', 1, 'pending');
         UPDATE session_nodes
           SET label = 'protected-label-sentinel', display_name = 'protected-display-sentinel'
           WHERE session_key = 'agent:main:protected';
@@ -206,9 +205,19 @@ it("atomically migrates protected transcript data and refuses unsupported or wro
           env: state.env,
         });
       });
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
-        PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
-      );
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(28);
+      const suggestion = database
+        .prepare("SELECT author_id, author_label, text FROM session_suggestions WHERE id = 'idea'")
+        .get();
+      expect(suggestion?.author_id).not.toBe("suggestion-author");
+      expect(suggestion?.author_label).toBeNull();
+      expect(suggestion?.text).not.toBe("suggestion-text");
+      expect(
+        database
+          .prepare("PRAGMA table_info(session_transcript_archives)")
+          .all()
+          .some((column) => column.name === "protected_attribution"),
+      ).toBe(true);
       const event = database
         .prepare(
           "SELECT event_json, event_zstd, event_utf8_bytes FROM transcript_events WHERE seq = 7",

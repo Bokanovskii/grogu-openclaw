@@ -7,7 +7,19 @@ import type {
 import type { OpenClawStateDatabaseOptions } from "./openclaw-state-db-contract.js";
 
 export const OPENCLAW_AGENT_SCHEMA_VERSION = 25;
-export const PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 1;
+// Protected-only versions above the personal schema; they collide with future upstream numbers.
+// 26 seals transcript storage, 27 adds archive attribution, 28 seals suggestions.
+export const FIRST_PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 1;
+export const PROTECTED_ARCHIVE_ATTRIBUTION_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 2;
+export const PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION = OPENCLAW_AGENT_SCHEMA_VERSION + 3;
+
+/** Marked protected stores this build admits, including predecessors it migrates. */
+export function isProtectedAgentSchemaVersion(version: number): boolean {
+  return (
+    version >= FIRST_PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION &&
+    version <= PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION
+  );
+}
 export const CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION = 25;
 export const AGENT_STORAGE_SCHEMA_VERSION = 23;
 export const TRANSCRIPT_FTS_ROW_SCHEMA_VERSION = 22;

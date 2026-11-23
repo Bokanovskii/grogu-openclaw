@@ -3,9 +3,11 @@ import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
+  iterateSqliteQuerySync,
 } from "../../infra/kysely-sync.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import { readSessionEntryInstanceId } from "./session-accessor.sqlite-entry-identity.js";
 import type {
   SessionSuggestionClaimParams,
@@ -17,6 +19,10 @@ import type {
   StoredSessionSuggestionResolution,
   StoredSessionSuggestionState,
 } from "./session-sharing-store.types.js";
+import {
+  openSessionSuggestionFields,
+  sealSessionSuggestionFields,
+} from "./session-suggestion-encryption.js";
 import { SessionWorkStartInvalidatedError } from "./work-start-error.js";
 
 type SuggestionDatabase = Pick<OpenClawAgentKyselyDatabase, "session_suggestions">;
@@ -100,21 +106,39 @@ export function addSessionSuggestionInDatabase(
   pruneResolvedSessionSuggestions(database, sessionKey);
   // Compare decoded IDs in JS; binding the author here changes malformed-ID
   // matching and can move binding errors ahead of the session-cap error.
-  const pendingCounts = executeSqliteQuerySync(
-    database.db,
-    db
-      .selectFrom("session_suggestions")
-      .select((eb) => ["author_id", eb.fn.countAll<number>().as("count")])
-      .where("session_key", "=", sessionKey)
-      .where("state", "=", "pending")
-      .groupBy("author_id"),
-  ).rows.reduce(
-    (counts, row) => ({
-      session: counts.session + row.count,
-      author: counts.author + (row.author_id === suggestion.authorId ? row.count : 0),
-    }),
-    { session: 0, author: 0 },
-  );
+  const pendingCounts = { session: 0, author: 0 };
+  if (hasSqliteStorageValueEncryption(database.db)) {
+    const rows = iterateSqliteQuerySync(
+      database.db,
+      db
+        .selectFrom("session_suggestions")
+        .select(["id", "session_key", "author_id", "author_label", "text"])
+        .where("session_key", "=", sessionKey)
+        .where("state", "=", "pending"),
+    );
+    for (const row of rows) {
+      const opened = openSessionSuggestionFields(database.db, row);
+      pendingCounts.session++;
+      if (opened.author_id === suggestion.authorId) {
+        pendingCounts.author++;
+      }
+    }
+  } else {
+    for (const row of executeSqliteQuerySync(
+      database.db,
+      db
+        .selectFrom("session_suggestions")
+        .select((eb) => ["author_id", eb.fn.countAll<number>().as("count")])
+        .where("session_key", "=", sessionKey)
+        .where("state", "=", "pending")
+        .groupBy("author_id"),
+    ).rows) {
+      pendingCounts.session += row.count;
+      if (row.author_id === suggestion.authorId) {
+        pendingCounts.author += row.count;
+      }
+    }
+  }
   if (pendingCounts.session >= MAX_PENDING_SESSION_SUGGESTIONS_PER_SESSION) {
     throw new Error("session pending suggestion limit reached");
   }
@@ -123,18 +147,20 @@ export function addSessionSuggestionInDatabase(
   }
   executeSqliteQuerySync(
     database.db,
-    db.insertInto("session_suggestions").values({
-      id: suggestion.id,
-      session_key: sessionKey,
-      author_id: suggestion.authorId,
-      author_label: suggestion.authorLabel ?? null,
-      text: suggestion.text,
-      created_at: suggestion.createdAt,
-      state: suggestion.state,
-      dispatch_token: null,
-      dispatch_started_at: null,
-      dispatch_resolution: null,
-    }),
+    db.insertInto("session_suggestions").values(
+      sealSessionSuggestionFields(database.db, {
+        id: suggestion.id,
+        session_key: sessionKey,
+        author_id: suggestion.authorId,
+        author_label: suggestion.authorLabel ?? null,
+        text: suggestion.text,
+        created_at: suggestion.createdAt,
+        state: suggestion.state,
+        dispatch_token: null,
+        dispatch_started_at: null,
+        dispatch_resolution: null,
+      }),
+    ),
   );
   return suggestion;
 }
@@ -146,18 +172,30 @@ export function listSessionSuggestionsInDatabase(
 ): StoredSessionSuggestion[] {
   let query = suggestionDb(database)
     .selectFrom("session_suggestions")
-    .select(["id", "author_id", "author_label", "text", "created_at", "state"])
+    .select(["id", "session_key", "author_id", "author_label", "text", "created_at", "state"])
     .where("session_key", "=", sessionKey);
-  if (params.authorId?.trim()) {
+  const protectedStorage = hasSqliteStorageValueEncryption(database.db);
+  if (!protectedStorage && params.authorId?.trim()) {
     query = query.where("author_id", "=", params.authorId.trim());
   }
   if (params.pendingOnly) {
     query = query.where("state", "=", "pending");
   }
-  return executeSqliteQuerySync(
+  const suggestions: StoredSessionSuggestion[] = [];
+  for (const row of iterateSqliteQuerySync(
     database.db,
     query.orderBy("created_at", "asc").orderBy("id", "asc"),
-  ).rows.map(toSuggestion);
+  )) {
+    const opened = openSessionSuggestionFields(database.db, row);
+    if (
+      !protectedStorage ||
+      !params.authorId?.trim() ||
+      opened.author_id === params.authorId.trim()
+    ) {
+      suggestions.push(toSuggestion(opened));
+    }
+  }
+  return suggestions;
 }
 
 export function claimSessionSuggestionDispatchInDatabase(
@@ -173,6 +211,7 @@ export function claimSessionSuggestionDispatchInDatabase(
       .selectFrom("session_suggestions")
       .select([
         "id",
+        "session_key",
         "author_id",
         "author_label",
         "text",
@@ -204,6 +243,7 @@ export function claimSessionSuggestionDispatchInDatabase(
       resolution: row.dispatch_resolution as StoredSessionSuggestionResolution,
     };
   }
+  const suggestion = toSuggestion(openSessionSuggestionFields(database.db, row));
   const token = randomUUID();
   executeSqliteQuerySync(
     database.db,
@@ -218,7 +258,7 @@ export function claimSessionSuggestionDispatchInDatabase(
       .where("id", "=", params.id)
       .where("state", "=", "pending"),
   );
-  return { kind: "claimed", suggestion: toSuggestion(row), token };
+  return { kind: "claimed", suggestion, token };
 }
 
 export function releaseSessionSuggestionDispatchInDatabase(
@@ -251,7 +291,7 @@ export function finalizeSessionSuggestionClaimInDatabase(
     database.db,
     db
       .selectFrom("session_suggestions")
-      .select(["id", "author_id", "author_label", "text", "created_at", "state"])
+      .select(["id", "session_key", "author_id", "author_label", "text", "created_at", "state"])
       .where("session_key", "=", sessionKey)
       .where("id", "=", params.id)
       .where("state", "=", "pending")
@@ -260,6 +300,7 @@ export function finalizeSessionSuggestionClaimInDatabase(
   if (!row) {
     return null;
   }
+  const suggestion = toSuggestion(openSessionSuggestionFields(database.db, row));
   const updated = executeSqliteQuerySync(
     database.db,
     db
@@ -279,5 +320,5 @@ export function finalizeSessionSuggestionClaimInDatabase(
     return null;
   }
   pruneResolvedSessionSuggestions(database, sessionKey);
-  return { ...toSuggestion(row), state: params.state };
+  return { ...suggestion, state: params.state };
 }

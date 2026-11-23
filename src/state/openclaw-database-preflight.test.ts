@@ -74,7 +74,7 @@ describe("OpenClaw database schema preflight", () => {
       async () => {
         const env = { ...process.env };
         const agent = openOpenClawAgentDatabase({ agentId: "main", env });
-        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(28);
         closeDatabases();
         const config = { agents: { ownership: "explicit" as const, entries: { main: {} } } };
         const startup = () =>
@@ -129,7 +129,7 @@ describe("OpenClaw database schema preflight", () => {
           ).toMatchObject({ ownProtectedFormat: true, preparationPending: true });
         }
         withDatabase(agent.path, (database) => {
-          database.exec("PRAGMA user_version = 27");
+          database.exec("PRAGMA user_version = 29");
         });
         await expect(startup()).rejects.toThrow(/newer than this build/);
       },

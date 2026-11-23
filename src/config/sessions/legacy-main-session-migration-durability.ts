@@ -8,9 +8,19 @@ import {
 } from "../../state/openclaw-agent-db-identity.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import { isSameOpenClawAgentDatabasePath } from "../../state/openclaw-agent-db.paths.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../../state/openclaw-state-db-contract.js";
 import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
-import type { SessionClaim } from "./legacy-main-session-migration.contract.js";
+import type {
+  LegacyMainSessionMigrationOutcome,
+  PhysicalStore,
+  SessionComparisonClaim,
+  SessionClaim,
+} from "./legacy-main-session-migration.contract.js";
+import {
+  hasSessionSuggestions,
+  ProtectedCrossStoreSuggestionError,
+} from "./session-accessor.sqlite-node-artifacts.js";
 
 export function isProtectedLegacySessionMove(params: {
   writer: OpenClawAgentDatabase;
@@ -34,6 +44,85 @@ export function isProtectedLegacySessionMove(params: {
     }
   }
   return false;
+}
+
+/**
+ * Protected suggestion ciphertext is bound to its session key, and cross-store moves are not yet
+ * authenticated end to end. Refuses before any copy, restore, or quarantine mutates a claim, and
+ * reports the copy transaction's own refusal when suggestions appear after this check.
+ */
+export async function guardProtectedCrossStoreSuggestions<Claim extends SessionComparisonClaim>(
+  params: {
+    aliases: readonly Claim[];
+    allCanonical: readonly Claim[];
+    destination: PhysicalStore;
+    canonicalKey: string;
+    env: NodeJS.ProcessEnv;
+    outcomes: LegacyMainSessionMigrationOutcome[];
+    warnings: string[];
+  },
+  migrate: (canonicalClaims: Claim[]) => Promise<void>,
+): Promise<void> {
+  const canonicalClaims = params.allCanonical.filter((claim) => claim.key === params.canonicalKey);
+  const claims = [...params.aliases, ...canonicalClaims];
+  try {
+    if (
+      !hasProtectedCrossStoreSuggestions(
+        claims,
+        params.destination,
+        params.canonicalKey,
+        params.env,
+      )
+    ) {
+      await migrate(canonicalClaims);
+      return;
+    }
+  } catch (error) {
+    if (!(error instanceof ProtectedCrossStoreSuggestionError)) {
+      throw error;
+    }
+  }
+  const detail = new ProtectedCrossStoreSuggestionError(params.canonicalKey).message;
+  params.outcomes.push({
+    kind: "protected-suggestions-unsupported",
+    canonicalKey: params.canonicalKey,
+    detail,
+    paths: [...new Set(claims.map((claim) => claim.store.path))],
+    sourceKeys: params.aliases.map((claim) => claim.key),
+  });
+  params.warnings.push(`session: ${detail}`);
+}
+
+function hasProtectedCrossStoreSuggestions(
+  claims: readonly SessionComparisonClaim[],
+  destination: PhysicalStore,
+  canonicalKey: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (
+    claims.every((claim) => isSameOpenClawAgentDatabasePath(claim.store.path, destination.path))
+  ) {
+    return false;
+  }
+  const probes = [
+    ...claims.map((claim) => ({ store: claim.store, key: claim.key })),
+    { store: destination, key: canonicalKey },
+  ];
+  let protectedStore = false;
+  let suggestions = false;
+  for (const probe of probes) {
+    const result = withOpenClawAgentDatabaseReadOnly(
+      (database) => {
+        protectedStore ||= hasSqliteStorageValueEncryption(database.db);
+        suggestions ||= hasSessionSuggestions(database, [probe.key]);
+      },
+      { agentId: probe.store.databaseAgentId, path: probe.store.path, env },
+    );
+    if (!result.found && probe.store !== destination) {
+      throw new Error(`Legacy session store disappeared before migration: ${probe.store.path}`);
+    }
+  }
+  return protectedStore && suggestions;
 }
 
 /**

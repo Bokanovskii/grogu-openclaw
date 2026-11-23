@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   OPENCLAW_AGENT_SCHEMA_VERSION,
-  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+  isProtectedAgentSchemaVersion,
 } from "../state/openclaw-agent-db-contract.js";
 import { inspectAgentDatabaseSchema } from "../state/openclaw-agent-schema-inspection.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
@@ -117,7 +117,7 @@ export async function inspectUpdateProtectedAgent(
   stagingRoot?: string,
   onProgress?: (progress: UpdateStateInspectionProgress) => void,
 ) {
-  if (version !== PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION) {
+  if (!isProtectedAgentSchemaVersion(version)) {
     return { userVersion: version };
   }
   const progress = createUpdateStateSnapshotReporter(

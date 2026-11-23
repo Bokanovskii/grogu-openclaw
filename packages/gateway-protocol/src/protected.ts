@@ -98,7 +98,12 @@ export const ProtectedTurnRequestSchema = node({
   contextSize: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 });
 export const ProtectedSourceSchema = node({ title: Type.String(), url: Type.String() });
-export const ProtectedWidgetSchema = node({ id, title: Type.String() });
+export const ProtectedWidgetSchema = node({
+  id,
+  title: Type.String(),
+  // The earlier widget of the same artifact in this chat (same title), when there is one.
+  replaces: Type.Optional(id),
+});
 export const ProtectedActivitySchema = node({
   id,
   kind: Type.Union([
@@ -662,7 +667,8 @@ export const ProtectedSteerSchema = node({
 export const ProtectedSteerResultSchema = node({ queued: Type.Literal(true) });
 export const ProtectedStopResultSchema = node({ stopped: Type.Literal(true) });
 export const ProtectedWidgetResponseSchema = node({
-  ...ProtectedWidgetSchema.properties,
+  id,
+  title: Type.String(),
   html: Type.String(),
   version: id,
 });

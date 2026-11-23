@@ -171,10 +171,26 @@ chat update time, newest first, then chat ID, kind, and artifact ID. The
 Concurrent chat changes can change the order between pages.
 
 File entries use `id`, `name`, and `size`. Widget entries use `id` and `title`.
-Both include `kind`, `chatId`, `chatTitle`, and `updatedAt`. Read files through
+Both include `kind`, `chatId`, `chatTitle`, `updatedAt`, and `version`. `version`
+is an opaque string that changes when the artifact's content changes: the
+SHA-256 digest of a file's bytes, and the id of a widget (saved widget documents
+are immutable, so a changed widget is a new id). Read files through
 `GET /api/protected/v1/files/:id` and widgets through
 `GET /api/protected/v1/chats/:chatId/widgets/:id`. These routes check chat
 ownership again. File responses are downloads, not HTML pages.
+
+`GET /api/protected/v1/chats/:chatId/artifacts` returns the same page shape for
+one chat. It needs `X-Grogu-Profile`, returns the same 404 as the chat for a
+foreign or missing chat, and also returns 404 for a side chat when the client
+did not negotiate `side-chats-v1`. `GET /shared/chats/:owner/:chat/artifacts`
+returns entries with `version` too, under the existing shared-chat checks.
+
+A widget in a message and in the `widget` stream event may carry `replaces`, the
+id of the newest earlier widget with the same title in that chat. The runtime
+derives it; the model-facing `show_widget` tool is unchanged. A side chat's
+chain starts after the forked prefix, so it never points at the parent's
+widgets. The `child-widget` stream event has no `replaces`; clients use the same
+title rule for those.
 
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,

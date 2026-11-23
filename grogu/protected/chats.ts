@@ -50,7 +50,13 @@ import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encrypt
 import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
-import { projectActivity, projectToolResult, widgetIdPattern, type Widget } from "./tool-events.js";
+import {
+  createWidgetChain,
+  projectActivity,
+  projectToolResult,
+  widgetIdPattern,
+  type Widget,
+} from "./tool-events.js";
 
 export type ProtectedChatAuthority = { profileId: string; assertCurrent: () => void };
 
@@ -339,10 +345,14 @@ export function createProtectedChats(options: {
     let turnStartedAt: number | undefined;
     let usage: ProtectedChatResponse["usage"];
     let runUsage = createSessionTranscriptUsageAccumulator();
-    for (const event of events) {
+    const widgetChain = createWidgetChain();
+    // A side chat's chain starts after the parent prefix; it never points at the parent's widgets.
+    const inheritedEvents = entry.protectedSideForkedAt?.eventCount ?? 0;
+    for (const [eventIndex, event] of events.entries()) {
       if (!isRecord(event) || !isRecord(event.message)) {
         continue;
       }
+      const chainWidget = eventIndex < inheritedEvents ? (widget: Widget) => widget : widgetChain;
       const budgetReceipt = event.message.protectedContextBudget;
       if (
         event.message.role === "assistant" &&
@@ -385,7 +395,10 @@ export function createProtectedChats(options: {
         if (!message.isError) {
           const projected = projectToolResult(message.toolName, message.details);
           projections.sources = [...projections.sources, ...projected.sources].slice(0, 20);
-          projections.widgets = [...projections.widgets, ...projected.widgets].slice(0, 20);
+          projections.widgets = [
+            ...projections.widgets,
+            ...projected.widgets.map(chainWidget),
+          ].slice(0, 20);
           if (reply) {
             reply.sources = projections.sources;
             reply.widgets = projections.widgets;
@@ -519,13 +532,15 @@ export function createProtectedChats(options: {
           ? childMessage
             ? {
                 widgets: Array.isArray(message.protectedChildWidgets)
-                  ? message.protectedChildWidgets.filter(
-                      (widget): widget is Widget =>
-                        isRecord(widget) &&
-                        typeof widget.id === "string" &&
-                        widgetIdPattern.test(widget.id) &&
-                        typeof widget.title === "string",
-                    )
+                  ? message.protectedChildWidgets
+                      .filter(
+                        (widget): widget is Widget =>
+                          isRecord(widget) &&
+                          typeof widget.id === "string" &&
+                          widgetIdPattern.test(widget.id) &&
+                          typeof widget.title === "string",
+                      )
+                      .map((widget) => chainWidget({ id: widget.id, title: widget.title }))
                   : [],
               }
             : projections

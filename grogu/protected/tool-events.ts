@@ -2,8 +2,24 @@ import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 
 export type Source = { url: string; title: string };
-export type Widget = { id: string; title: string };
+export type Widget = { id: string; title: string; replaces?: string };
 export const widgetIdPattern = /^cv_[a-f0-9]{32}$/u;
+
+/**
+ * Owns which widget supersedes which. The model does not name an artifact, so a widget replaces the
+ * newest earlier widget in the same chat with the same title.
+ */
+export function createWidgetChain(earlier: Iterable<Pick<Widget, "id" | "title">> = []) {
+  const latest = new Map<string, string>();
+  for (const widget of earlier) {
+    latest.set(widget.title, widget.id);
+  }
+  return (widget: Widget): Widget => {
+    const replaces = latest.get(widget.title);
+    latest.set(widget.title, widget.id);
+    return replaces && replaces !== widget.id ? { ...widget, replaces } : widget;
+  };
+}
 
 const toolLabels: Partial<Record<string, string>> = {
   sessions_list: "Looking through your chats",

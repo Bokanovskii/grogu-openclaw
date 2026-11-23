@@ -387,37 +387,6 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal(createdAutomation.status, 201, await createdAutomation.clone().text());
   const automation = (await createdAutomation.json()).automation;
   assert.equal(automation.nextCheckAt, null);
-  const enabled = await automationCall(`/automations/${automation.id}`, {
-    method: "PATCH",
-    headers: { "if-match": automation.version },
-    body: JSON.stringify({ enabled: true }),
-  });
-  assert.equal(enabled.status, 200, await enabled.clone().text());
-  const expectedNextCheck = new Date(scheduleNow + 60_000).toISOString();
-  const enabledRecord = (await enabled.clone().json()).automation;
-  assert.equal(enabledRecord.nextCheckAt, expectedNextCheck);
-  const listed = (await (await automationCall("/automations")).json()).automations;
-  assert.equal(
-    listed.find((entry: { id: string }) => entry.id === automation.id)?.nextCheckAt,
-    expectedNextCheck,
-  );
-  const read = (await (await automationCall(`/automations/${automation.id}`)).json()).automation;
-  assert.equal(read.nextCheckAt, expectedNextCheck);
-  const paused = await automationCall(`/automations/${automation.id}`, {
-    method: "PATCH",
-    headers: { "if-match": enabledRecord.version },
-    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 } }),
-  });
-  assert.equal(paused.status, 200, await paused.clone().text());
-  const pausedRecord = (await paused.json()).automation;
-  assert.equal(pausedRecord.nextCheckAt, null);
-  const resumed = await automationCall(`/automations/${automation.id}`, {
-    method: "PATCH",
-    headers: { "if-match": pausedRecord.version },
-    body: JSON.stringify({ enabled: true }),
-  });
-  assert.equal(resumed.status, 200, await resumed.clone().text());
-  assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
   const waitForDelivery = async (trigger: "scheduled" | "manual", excluded: string[] = []) => {
     for await (const event of watch(stateDir, { recursive: true })) {
       void event;
@@ -453,6 +422,49 @@ void test("Protected turns load skills on request and retain credentials during 
     }
     throw new Error("Automation storage watcher stopped before delivery.");
   };
+  const pausedDelivery = waitForDelivery("manual");
+  const pausedRunNow = await automationCall(`/automations/${automation.id}/run`, {
+    method: "POST",
+  });
+  assert.equal(pausedRunNow.status, 202, await pausedRunNow.clone().text());
+  const firstManualRun = await pausedDelivery;
+  assert.equal(firstManualRun.status, "succeeded");
+  const stillPaused = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(stillPaused.enabled, false);
+  assert.equal(stillPaused.version, automation.version);
+  assert.equal(stillPaused.nextCheckAt, null);
+  const enabled = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": automation.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(enabled.status, 200, await enabled.clone().text());
+  const expectedNextCheck = new Date(scheduleNow + 60_000).toISOString();
+  const enabledRecord = (await enabled.clone().json()).automation;
+  assert.equal(enabledRecord.nextCheckAt, expectedNextCheck);
+  const listed = (await (await automationCall("/automations")).json()).automations;
+  assert.equal(
+    listed.find((entry: { id: string }) => entry.id === automation.id)?.nextCheckAt,
+    expectedNextCheck,
+  );
+  const read = (await (await automationCall(`/automations/${automation.id}`)).json()).automation;
+  assert.equal(read.nextCheckAt, expectedNextCheck);
+  const calendarPaused = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": enabledRecord.version },
+    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 } }),
+  });
+  assert.equal(calendarPaused.status, 200, await calendarPaused.clone().text());
+  const pausedRecord = (await calendarPaused.json()).automation;
+  assert.equal(pausedRecord.nextCheckAt, null);
+  let resumed = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": pausedRecord.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
   const scheduledDelivery = waitForDelivery("scheduled");
   const automationRequestStart = requests.length;
   t.mock.timers.tick(60_000);
@@ -464,6 +476,12 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.match(JSON.stringify(automationRequest?.messages), /Summarize synthetic public news/u);
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_search"));
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_fetch"));
+  const paused = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": (await resumed.clone().json()).automation.version },
+    body: JSON.stringify({ enabled: false }),
+  });
+  assert.equal(paused.status, 200, await paused.clone().text());
   const originalPost = Worker.prototype.postMessage;
   const originalEmit = Worker.prototype.emit;
   const heldQueue = Promise.withResolvers<{ worker: Worker; runId: string }>();
@@ -517,7 +535,7 @@ void test("Protected turns load skills on request and retain credentials during 
   const uncertainResponse = await uncertainRequest;
   assert.notEqual(uncertainResponse.status, 202);
   t.mock.restoreAll();
-  const manualDelivery = waitForDelivery("manual", [lostQueue.runId]);
+  const manualDelivery = waitForDelivery("manual", [firstManualRun.id, lostQueue.runId]);
   const runNow = await automationCall(`/automations/${automation.id}/run`, { method: "POST" });
   assert.equal(runNow.status, 202, await runNow.clone().text());
   const recoveredHistory = (await (
@@ -530,6 +548,10 @@ void test("Protected turns load skills on request and retain credentials during 
   const manualRun = await manualDelivery;
   assert.equal(manualRun.status, "succeeded");
   assert.equal(manualRun.runChatId, scheduledRun.runChatId);
+  const afterManual = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(afterManual.enabled, false);
+  assert.equal(afterManual.nextCheckAt, null);
   const results = await automationCall(`/automations/${automation.id}/runs`);
   assert.equal(results.status, 200);
   const resultRows = (await results.json()).runs as Array<{ runId: string; text: string }>;
@@ -567,19 +589,29 @@ void test("Protected turns load skills on request and retain credentials during 
   const release = Promise.withResolvers<void>();
   t.after(() => release.resolve());
   blockedAutomation = { entered: entered.resolve, wait: release.promise };
-  const nextDelivery = waitForDelivery("manual", [lostQueue.runId, manualRun.id]);
+  const nextDelivery = waitForDelivery("manual", [
+    firstManualRun.id,
+    lostQueue.runId,
+    manualRun.id,
+  ]);
   const activeRun = await automationCall(`/automations/${automation.id}/run`, { method: "POST" });
   assert.equal(activeRun.status, 202);
   await entered.promise;
   const busyDelete = await automationCall(`/automations/${automation.id}`, {
     method: "DELETE",
-    headers: { "if-match": (await resumed.clone().json()).automation.version },
+    headers: { "if-match": (await paused.clone().json()).automation.version },
   });
   assert.equal(busyDelete.status, 409);
   assert.equal((await busyDelete.json()).error.code, "automation_busy");
   blockedAutomation = undefined;
   release.resolve();
   await nextDelivery;
+  resumed = await automationCall(`/automations/${automation.id}`, {
+    method: "PATCH",
+    headers: { "if-match": (await paused.json()).automation.version },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
   const memberCreated = await automationCall("/automations", {
     method: "POST",
     headers: foreignHeaders,

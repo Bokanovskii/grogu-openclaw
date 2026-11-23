@@ -606,7 +606,7 @@ export function createProtectedHttp(options: {
       subject: string;
       revision: number;
     },
-    run?: { automationId: string; version: number },
+    run?: { automationId: string; version: number; trigger: "scheduled" | "manual" },
   ) => {
     const assertGrant = () => {
       shutdown.signal.throwIfAborted();
@@ -629,7 +629,7 @@ export function createProtectedHttp(options: {
           { profileId: member.profileId, assertCurrent: assert },
         );
         assert();
-        if (!automation?.enabled) {
+        if (!automation || (run.trigger === "scheduled" && !automation.enabled)) {
           throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
         }
         if (automation.definitionRevision !== run.version) {
@@ -1529,11 +1529,13 @@ export function createProtectedHttp(options: {
     member: Parameters<typeof automationAuthority>[0],
     automation: NonNullable<Awaited<ReturnType<typeof readOwnedProtectedAutomationStorageRecord>>>,
     chatId: string,
+    trigger: "scheduled" | "manual",
   ) => {
     const definition = automation.definition;
     const authority = automationAuthority(member, {
       automationId: automation.id,
       version: automation.definitionRevision,
+      trigger,
     });
     const prompt = [
       `Automation: ${definition.name}`,
@@ -1854,7 +1856,7 @@ export function createProtectedHttp(options: {
       scheduled.id,
       memberAuthority.authority,
     );
-    if (!automation?.enabled) {
+    if (!automation || (trigger === "scheduled" && !automation.enabled)) {
       throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
     }
     if (String(automation.definitionRevision) !== scheduled.version) {
@@ -1867,6 +1869,16 @@ export function createProtectedHttp(options: {
     const queuedAtMs = Date.now();
     let queued;
     try {
+      if (trigger === "manual") {
+        const provisioned = await writeProtectedAutomationLifecycle(
+          options.stateDir,
+          { kind: "provision", profileId: member.profileId, automationId: automation.id },
+          lifecycle,
+        );
+        if (provisioned.status !== "committed" && provisioned.status !== "unchanged") {
+          throw new ProtectedError(503, "storage_unavailable", "Automation storage is not ready.");
+        }
+      }
       queued = await writeProtectedAutomationLifecycle(
         options.stateDir,
         {
@@ -1917,6 +1929,7 @@ export function createProtectedHttp(options: {
           const runAuthority = automationAuthority(member, {
             automationId: automation.id,
             version: automation.definitionRevision,
+            trigger,
           });
           const binding = await readProtectedAutomationRunChat(options.stateDir, automation.id, {
             ...memberAuthority.authority,
@@ -2005,7 +2018,7 @@ export function createProtectedHttp(options: {
               automation.definition.agentId,
             );
           }
-          const turn = await executeProtectedAutomationTurn(member, automation, chatId);
+          const turn = await executeProtectedAutomationTurn(member, automation, chatId, trigger);
           if (turn.outcome !== "complete" || !turn.responseId) {
             throw new ProtectedError(500, turn.errorCode ?? "turn_failed", "The run failed.");
           }

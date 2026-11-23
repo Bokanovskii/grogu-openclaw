@@ -148,6 +148,14 @@ function openAgentDatabaseBackend(
     }
   };
   admitOpen();
+  if (
+    input.protectedStorage &&
+    (!input.expectedIdentity || input.creatingIdentity || input.creationClaim)
+  ) {
+    throw new SqliteWorkerOpenRefusedError(
+      new Error("Protected agent execution requires an existing prepared physical store"),
+    );
+  }
   const options = { agentId: input.agentId, path: input.databasePath, env: input.environment };
   let admittedFileIdentity =
     input.creatingIdentity?.key ??
@@ -281,16 +289,30 @@ function openAgentDatabaseBackend(
       let registration: OpenClawAgentDatabaseRegistrationCommit | undefined;
       let openingResult: Result<OpenClawAgentDatabase, unknown>;
       try {
-        const opened = openOpenClawAgentDatabase(options, lease, {
-          starting: () =>
-            requestSqliteWorkerOperationAdmission({
-              stage: "prepare",
-              facts: { kind: "agent-registration-start", lease: lease.receipt },
-            }),
-          committed(receipt) {
-            registration = receipt;
+        const opened = openOpenClawAgentDatabase(
+          options,
+          lease,
+          {
+            starting: () =>
+              requestSqliteWorkerOperationAdmission({
+                stage: "prepare",
+                facts: { kind: "agent-registration-start", lease: lease.receipt },
+              }),
+            committed(receipt) {
+              registration = receipt;
+            },
           },
-        });
+          input.protectedStorage
+            ? {
+                expectedIdentity: {
+                  key: `file:${input.expectedIdentity.physicalIdentity}`,
+                  birthtime: input.expectedIdentity.birthtime,
+                },
+                assertCurrent: admitOpen,
+                requireProtectedStorage: true,
+              }
+            : undefined,
+        );
         database = opened;
         releaseBorrow = retainAgentDatabase(opened.db);
         openingResult = { ok: true, value: opened };

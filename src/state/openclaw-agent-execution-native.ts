@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { MessagePort } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -47,14 +46,16 @@ import {
   readAgentDatabaseClosedReceipt,
   publishAgentDatabaseCloseCheckpoint,
 } from "./openclaw-agent-execution-cleanup.js";
-import type {
-  AgentDatabaseFileExecutionIdentity,
-  AgentDatabaseExecutionFileIdentity,
-  AgentDatabaseFileExecutionOpen,
-  AgentDatabaseExecutionScope,
-  AgentDatabaseNativeGeneration,
-  AgentDatabaseNativeStore as Store,
-  AgentDatabaseOperations,
+import {
+  assertProtectedAgentStoreRun,
+  createAgentDatabaseFileExecutionOpen,
+  type AgentDatabaseFileExecutionIdentity,
+  type AgentDatabaseExecutionFileIdentity,
+  type AgentDatabaseFileExecutionOpen,
+  type AgentDatabaseExecutionScope,
+  type AgentDatabaseNativeGeneration,
+  type AgentDatabaseNativeStore as Store,
+  type AgentDatabaseOperations,
 } from "./openclaw-agent-execution-contract.js";
 import { createAgentNativeStopObservation } from "./openclaw-agent-native-stop-observation.js";
 import { runOpenClawAgentWorkerWrite } from "./openclaw-agent-write-admission.js";
@@ -77,17 +78,14 @@ export function createAgentDatabaseNativeGeneration(
   retainVerification: () => () => Promise<void>,
   creatingIdentity?: DatabasePathIdentity,
   creationClaim?: AgentDatabaseFileExecutionOpen["creationClaim"],
+  protectedStorage?: true,
 ): AgentDatabaseNativeGeneration {
-  const input: AgentDatabaseFileExecutionOpen = {
-    leaseId: randomUUID(),
-    agentId,
-    databasePath: pathname,
-    stateDatabasePath: context.admission.databasePath,
-    environment: context.environment,
-    ...(expectedIdentity ? { expectedIdentity } : {}),
-    ...(creatingIdentity ? { creatingIdentity } : {}),
-    ...(creationClaim ? { creationClaim } : {}),
-  };
+  const input = createAgentDatabaseFileExecutionOpen(agentId, pathname, context, {
+    expectedIdentity,
+    creatingIdentity,
+    creationClaim,
+    protectedStorage,
+  });
   let retiring = false,
     preparationPublished = false;
   let opening: Promise<Store | undefined> | undefined;
@@ -524,6 +522,7 @@ export function createAgentDatabaseNativeGeneration(
       assertCallerCurrent?.();
       signal?.throwIfAborted();
     };
+    assertProtectedAgentStoreRun(protectedStorage, createIfMissing);
     const wasPrepared = preparationPublished;
     // Opening publishes registration before another caller can reuse this generation.
     const store = preparationPublished
@@ -531,6 +530,7 @@ export function createAgentDatabaseNativeGeneration(
       : await open(source, assertCallerCurrent, createIfMissing, signal);
     assertOperationCurrent();
     if (!store) {
+      assertProtectedAgentStoreRun(protectedStorage, createIfMissing, true);
       return undefined;
     }
     const schema = createIfMissing

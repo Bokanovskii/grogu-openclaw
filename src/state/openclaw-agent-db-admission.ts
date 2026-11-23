@@ -141,8 +141,9 @@ export function createOpenClawAgentDatabaseAdmissionOwner(
     options: OpenClawAgentDatabaseOptions,
     preparedLease?: ReturnType<typeof prepareOpenClawAgentDatabaseWorkerLease>,
     registrationObserver?: OpenClawAgentDatabaseRegistrationObserver,
+    repairAdmission?: OpenClawAgentDatabaseRepairAdmission,
   ): OpenClawAgentDatabase {
-    return openAgentDatabase(options, preparedLease, registrationObserver);
+    return openAgentDatabase(options, preparedLease, registrationObserver, repairAdmission);
   }
 
   function openAgentDatabase(

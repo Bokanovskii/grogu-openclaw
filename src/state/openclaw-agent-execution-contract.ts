@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   SqliteWalPeriodicRequest,
   SqliteWalPeriodicResult,
@@ -17,6 +18,7 @@ import type {
 } from "./openclaw-agent-execution-admission-contract.js";
 import type { AgentDatabaseDomainOperations } from "./openclaw-agent-execution-domain.js";
 import type { RegisteredAgentWorkerOperations } from "./openclaw-agent-execution-operations.js";
+import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 
 /** Recorded by the native owner; a descriptor never grants access to that owner. */
 export type AgentDatabaseFileExecutionIdentity = {
@@ -94,18 +96,79 @@ export type AgentDatabaseNativeGeneration = {
   close(): Promise<void>;
 };
 
-export type AgentDatabaseFileExecutionOpen = {
+type AgentDatabaseFileExecutionOpenBase = {
   kind?: "file";
   leaseId: string;
   agentId: string;
   databasePath: string;
   stateDatabasePath: string;
   environment: SqliteWorkerStateContext["environment"];
-  expectedIdentity?: AgentDatabaseExecutionFileIdentity;
-  /** Captured before a creating request yields; absence is an identity too. */
-  creatingIdentity?: DatabasePathIdentity;
-  creationClaim?: AgentCreationClaimWitness;
 };
+
+export type AgentDatabaseFileExecutionOpen =
+  | (AgentDatabaseFileExecutionOpenBase & {
+      expectedIdentity?: AgentDatabaseExecutionFileIdentity;
+      /** Captured before a creating request yields; absence is an identity too. */
+      creatingIdentity?: DatabasePathIdentity;
+      creationClaim?: AgentCreationClaimWitness;
+      protectedStorage?: never;
+    })
+  | (AgentDatabaseFileExecutionOpenBase & {
+      /** The prepared physical store; the worker never creates or replaces it. */
+      expectedIdentity: AgentDatabaseExecutionFileIdentity;
+      /** Explicit host grant: refuse an unencrypted or unmarked store before schema work. */
+      protectedStorage: true;
+      creatingIdentity?: never;
+      creationClaim?: never;
+    });
+
+/** Builds the worker open input; the protected grant only admits an existing prepared store. */
+export function createAgentDatabaseFileExecutionOpen(
+  agentId: string,
+  databasePath: string,
+  context: Pick<OpenClawStateWorkerContext, "admission" | "environment">,
+  identities: {
+    expectedIdentity?: AgentDatabaseExecutionFileIdentity;
+    creatingIdentity?: DatabasePathIdentity;
+    creationClaim?: AgentCreationClaimWitness;
+    protectedStorage?: true;
+  },
+): AgentDatabaseFileExecutionOpen {
+  const { expectedIdentity, creatingIdentity, creationClaim, protectedStorage } = identities;
+  const base = {
+    leaseId: randomUUID(),
+    agentId,
+    databasePath,
+    stateDatabasePath: context.admission.databasePath,
+    environment: context.environment,
+  };
+  if (protectedStorage) {
+    if (!expectedIdentity || creatingIdentity || creationClaim) {
+      throw new Error("Protected agent execution requires an existing prepared physical store");
+    }
+    return { ...base, expectedIdentity, protectedStorage };
+  }
+  return {
+    ...base,
+    ...(expectedIdentity ? { expectedIdentity } : {}),
+    ...(creatingIdentity ? { creatingIdentity } : {}),
+    ...(creationClaim ? { creationClaim } : {}),
+  };
+}
+
+/** Protected execution never initializes a store; a missing one stays unadmitted until setup. */
+export function assertProtectedAgentStoreRun(
+  protectedStorage: true | undefined,
+  createIfMissing: boolean,
+  missing = false,
+): void {
+  if (protectedStorage && createIfMissing) {
+    throw new Error("Protected agent execution never initializes its physical store");
+  }
+  if (protectedStorage && missing) {
+    throw new Error("Protected agent store is missing; it needs setup before admission");
+  }
+}
 
 /** Process-private locators; neither a handle nor its incarnation grants authority. */
 export type AgentDatabaseIncognitoIdentity = Readonly<SqliteWorkerEphemeralTarget>;

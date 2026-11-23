@@ -752,6 +752,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/state/openclaw-agent-db.integrity-lease.test.ts",
   "src/state/openclaw-agent-db.registration-settlement.test.ts",
   "src/state/openclaw-agent-execution.integrity.test.ts",
+  "src/state/openclaw-agent-execution.protected.test.ts",
   "src/state/openclaw-agent-execution-incognito.test.ts",
   "src/state/openclaw-agent-execution-incognito.sessions.test.ts",
   "src/state/openclaw-agent-execution-incognito.completion-lineage.test.ts",

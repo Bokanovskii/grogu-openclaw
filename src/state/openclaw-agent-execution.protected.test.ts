@@ -1,0 +1,194 @@
+import fs from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, expect, it } from "vitest";
+import { createSqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
+import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { readOpenClawAgentDatabaseIdentity } from "./openclaw-agent-db-identity.js";
+import {
+  closeOpenClawAgentDatabaseByPath,
+  closeOpenClawAgentDatabasesAsync,
+  closeOpenClawAgentDatabasesForTest,
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+} from "./openclaw-agent-db.js";
+import type { AgentDatabaseRequestExecutionSource } from "./openclaw-agent-execution-admission-contract.js";
+import type { AgentDatabaseExecutionFileIdentity } from "./openclaw-agent-execution-contract.js";
+import { createAgentDatabaseNativeGeneration } from "./openclaw-agent-execution-native.js";
+import {
+  closeOpenClawStateDatabaseAsync,
+  closeOpenClawStateDatabaseForTest,
+} from "./openclaw-state-db.js";
+import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
+
+afterEach(async () => {
+  await closeOpenClawAgentDatabasesAsync();
+  await closeOpenClawStateDatabaseAsync();
+  closeOpenClawAgentDatabasesForTest();
+  closeOpenClawStateDatabaseForTest();
+});
+
+type TestState = Parameters<Parameters<typeof withOpenClawTestState>[1]>[0];
+
+async function useStorageKey(state: TestState, fill = 7) {
+  const keyPath = state.path("storage-key");
+  await fs.writeFile(keyPath, Buffer.alloc(32, fill), { mode: 0o600 });
+  state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+  state.applyEnv();
+}
+
+function prepareStore(state: TestState, insert = false) {
+  const options = { agentId: "protected", env: state.env };
+  const database = openOpenClawAgentDatabase(options);
+  if (insert) {
+    runOpenClawAgentWriteTransaction(({ db }) => {
+      db.prepare(
+        "INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at) VALUES (?, ?, ?, ?)",
+      ).run("agent:protected:family:profile:test", "session", '{"sessionId":"session"}', 1);
+    }, options);
+  }
+  const native = readOpenClawAgentDatabaseIdentity(database);
+  const identity: AgentDatabaseExecutionFileIdentity = {
+    kind: "file",
+    physicalIdentity: String(native.identity),
+    birthtime: native.birthtime,
+    nativeLocation: native.filename,
+  };
+  closeOpenClawAgentDatabaseByPath(database.path);
+  return { pathname: database.path, identity };
+}
+
+async function runProtected(
+  state: TestState,
+  pathname: string,
+  identity: AgentDatabaseExecutionFileIdentity,
+  {
+    protectedStorage = true,
+    createIfMissing = false,
+  }: {
+    protectedStorage?: true;
+    createIfMissing?: boolean;
+  } = {},
+) {
+  const context = captureOpenClawStateWorkerContext({ env: state.env });
+  let hostAdmissions = 0;
+  const assertCurrent = () => {
+    hostAdmissions += 1;
+    context.admission.assertCurrent();
+  };
+  const source: AgentDatabaseRequestExecutionSource = {
+    assertCurrent,
+    createAdmission: (binding) => () => ({
+      nativeLocations: binding.nativeLocations,
+      admission: createSqliteWorkerOperationAdmission((request, grant) => {
+        binding.authorize(request);
+        assertCurrent();
+        if (!grant()) {
+          throw new Error("Protected native fixture lost admission");
+        }
+      }, binding.attachment),
+    }),
+  };
+  const generation = createAgentDatabaseNativeGeneration(
+    "protected",
+    pathname,
+    context,
+    assertCurrent,
+    assertCurrent,
+    identity,
+    () => {},
+    () => async () => {},
+    undefined,
+    undefined,
+    protectedStorage,
+  );
+  try {
+    return await generation.run(source, async () => hostAdmissions, undefined, createIfMissing);
+  } finally {
+    await generation.close();
+  }
+}
+
+function readUserVersion(pathname: string) {
+  const db = new DatabaseSync(pathname, { readOnly: true });
+  try {
+    return db.prepare("PRAGMA user_version").get()?.user_version;
+  } finally {
+    db.close();
+  }
+}
+
+it("opens a prepared protected store in the native worker only through host admission", async () => {
+  await withOpenClawTestState(
+    { label: "protected-native-open", env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined } },
+    async (state) => {
+      await useStorageKey(state);
+      const { pathname, identity } = prepareStore(state);
+      await expect(runProtected(state, pathname, identity)).resolves.toBeGreaterThan(0);
+
+      state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = undefined;
+      state.applyEnv();
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(/storage key/iu);
+      await useStorageKey(state, 8);
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(
+        /configured storage key/iu,
+      );
+    },
+  );
+});
+
+it("refuses an unmarked store before native schema convergence", async () => {
+  await withOpenClawTestState(
+    { label: "protected-native-unmarked", env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined } },
+    async (state) => {
+      const { pathname, identity } = prepareStore(state, true);
+      const before = readUserVersion(pathname);
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(
+        /requires its storage key/iu,
+      );
+      expect(readUserVersion(pathname)).toBe(before);
+      await useStorageKey(state);
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(
+        /protected.*(unmarked|unencrypted)/iu,
+      );
+      expect(readUserVersion(pathname)).toBe(before);
+    },
+  );
+});
+
+it("refuses a missing or replaced store without creating one", async () => {
+  await withOpenClawTestState(
+    { label: "protected-native-replaced", env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined } },
+    async (state) => {
+      await useStorageKey(state);
+      const { pathname, identity } = prepareStore(state);
+      await fs.rm(pathname);
+      await fs.rm(`${pathname}-wal`, { force: true });
+      await fs.rm(`${pathname}-shm`, { force: true });
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(/needs setup/u);
+      await expect(
+        runProtected(state, pathname, identity, { createIfMissing: true }),
+      ).rejects.toThrow(/never initializes/u);
+      await expect(fs.stat(pathname)).rejects.toThrow(/ENOENT/u);
+
+      const replacement = prepareStore(state, true);
+      expect(replacement.identity.physicalIdentity).not.toBe(identity.physicalIdentity);
+      await expect(runProtected(state, pathname, identity)).rejects.toThrow(/changed|differs/u);
+      await expect(runProtected(state, pathname, replacement.identity)).resolves.toBeGreaterThan(0);
+      expect(() =>
+        createAgentDatabaseNativeGeneration(
+          "protected",
+          pathname,
+          captureOpenClawStateWorkerContext({ env: state.env }),
+          () => {},
+          () => {},
+          undefined,
+          () => {},
+          () => async () => {},
+          undefined,
+          undefined,
+          true,
+        ),
+      ).toThrow(/existing prepared physical store/u);
+    },
+  );
+});

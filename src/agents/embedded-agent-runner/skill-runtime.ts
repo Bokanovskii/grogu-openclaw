@@ -34,11 +34,20 @@ export async function prepareEmbeddedSkills(params: {
   includeCodeModeSkills: boolean;
 }) {
   const executionAllow = params.attempt.toolExecutionAllow;
-  // Retained schemas are not execution permission. An unreadable skill catalog
-  // creates impossible prerequisites and exposes an ungated Code Mode reader.
+  const snapshot = params.attempt.skillsSnapshot;
+  const inlineSnapshot =
+    !params.sandbox?.enabled &&
+    snapshot?.discoverySkills !== undefined &&
+    !snapshot.librarySelections?.length &&
+    snapshot.discoverySkills.every((skill) => typeof skill.readContent === "string") &&
+    (snapshot.resolvedSkills ?? []).every((skill) => typeof skill.readContent === "string");
+  // An inline snapshot can be read by skills_read without exposing workspace read.
+  // Retained schemas alone do not grant permission to discover or read skills.
   if (
     params.attempt.operation === "settled-tool-finalization" ||
-    (executionAllow && !isToolExecutionAllowed(executionAllow, "read"))
+    (executionAllow &&
+      !isToolExecutionAllowed(executionAllow, "read") &&
+      !(inlineSnapshot && isToolExecutionAllowed(executionAllow, "skills_read")))
   ) {
     return {
       restoreSkillEnv: () => {},

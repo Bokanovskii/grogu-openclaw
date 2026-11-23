@@ -5,7 +5,7 @@ import {
   COMMAND_PALETTE_SHORTCUT,
   createKeyboardShortcutMatcher,
 } from "../shared/keyboard-shortcuts.js";
-import { WIDGET_THEME_MESSAGE_TYPE } from "../shared/widget-theme.js";
+import { WIDGET_THEME_MESSAGE_TYPE, WIDGET_THEME_TOKENS } from "../shared/widget-theme.js";
 import { buildSandboxWidgetScrollBridgeHtml } from "./sandbox-widget-scroll-bridge.js";
 
 export type SandboxHostCsp = {
@@ -252,8 +252,13 @@ export function buildSandboxHostPath(csp?: SandboxHostCsp, sameOriginSandbox = f
 }
 
 /** Version the public shell and its security headers together, never widget content. */
-export function buildSandboxHostDocument(csp?: SandboxHostCsp, sameOriginSandbox = false) {
-  const html = buildSandboxHostProxyHtml(csp, sameOriginSandbox);
+export function buildSandboxHostDocument(
+  csp?: SandboxHostCsp,
+  sameOriginSandbox = false,
+  // This is host-owned CSS, never content supplied by a widget.
+  options?: { protectedWidgetStyles?: string },
+) {
+  const html = buildSandboxHostProxyHtml(csp, sameOriginSandbox, options);
   const headers = {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Security-Policy": [
@@ -316,14 +321,21 @@ export function decodeSandboxHostCsp(value: string | null): SandboxHostCsp | und
 }
 
 /** Trusted outer document. Untrusted content is written only into its inner iframe. */
-function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = false): string {
+function buildSandboxHostProxyHtml(
+  csp?: SandboxHostCsp,
+  sameOriginSandbox = false,
+  options?: { protectedWidgetStyles?: string },
+): string {
   const protectedProfile = csp?.profile === "protected";
   const blockDescendantFrames = csp?.blockDescendantFrames === true;
   // Runtime insertion reaches existing saved widgets without changing their
   // approved bytes. Capture listeners consume private host state before stored
   // scripts, including older wrappers whose scroll bridge must stay nonce-less.
   const serializedDocumentGuard = JSON.stringify(
-    (protectedProfile ? buildProtectedWidgetBridgeHtml() : "") +
+    (protectedProfile && options?.protectedWidgetStyles
+      ? `<style>${options.protectedWidgetStyles}</style>`
+      : "") +
+      (protectedProfile ? buildProtectedWidgetBridgeHtml() : "") +
       buildSandboxDocumentGuardHtml(blockDescendantFrames) +
       (protectedProfile
         ? ""
@@ -347,13 +359,18 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
   try { void window.top.document; throw new Error("MCP App sandbox isolation failed"); } catch (error) {
     if (error instanceof Error && error.message === "MCP App sandbox isolation failed") throw error;
   }
+  let hostTheme;
   const createInner = (allowScripts = true) => {
     const frame = document.createElement("iframe");
     // Block native popups here without reserving widget globals such as open.
     frame.setAttribute("sandbox", allowScripts ? ${JSON.stringify(protectedProfile ? "allow-scripts" : "allow-scripts allow-forms")} : "");
+    if (hostTheme) frame.style.colorScheme = hostTheme;
     return frame;
   };
+  const themeKeys = ${JSON.stringify(WIDGET_THEME_TOKENS)};
+  let widgetTheme;
   let inner = createInner();
+  let pendingDraft;
   document.body.appendChild(inner);
   let hostPort;
   const opaqueHost = ${sameOriginSandbox};
@@ -378,33 +395,75 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
   };
   const documentGuard = ${serializedDocumentGuard};
   const resolveLeadingDoctypeEnd = ${RESOLVE_LEADING_DOCTYPE_END_SOURCE};
-  const guardDocument = html => {
+  let draftResource;
+  const guardDocument = (html, allowScripts) => {
     if (blockDescendantFrames && hasBlockedDescendant(new DOMParser().parseFromString(html, "text/html"))) {
       throw new Error("sandbox descendant browsing contexts are disabled");
     }
     const doctypeEnd = resolveLeadingDoctypeEnd(html);
-    return html.slice(0, doctypeEnd) + documentGuard + html.slice(doctypeEnd);
+    let themeStyle = "";
+    if (${protectedProfile} && hostTheme) {
+      const style = document.createElement("span").style;
+      style.colorScheme = hostTheme;
+      // Saved widgets use their live bridge so omitted tokens cannot reveal
+      // stale admission values underneath a later inline snapshot.
+      if (!allowScripts) {
+        for (const key of themeKeys) {
+          const value = widgetTheme?.tokens?.[key];
+          if (value) style.setProperty("--" + key, value);
+        }
+      }
+      // Script-free drafts need CSS at admission; escape markup delimiters
+      // after native CSS serialization so values cannot end the style element.
+      themeStyle = "<style>:root:root{" + style.cssText.replaceAll("<", "\\\\3c ") + "}</style>";
+    }
+    return html.slice(0, doctypeEnd) + documentGuard + themeStyle + html.slice(doctypeEnd);
   };
   const receiveHost = (data) => {
       if (data?.method === "ui/notifications/sandbox-resource-ready") {
         const params = data.params ?? {};
         if (typeof params.html === "string") {
-          const guardedHtml = guardDocument(params.html);
+          draftResource = ${protectedProfile} && params.allowScripts === false ? data : undefined;
+          const guardedHtml = guardDocument(params.html, params.allowScripts !== false);
           // Replace the browsing context so a superseded document cannot race
           // the new wrapper's first private bridge-port offer.
           const nextInner = createInner(params.allowScripts !== false);
+          const bufferDraft = ${protectedProfile} && params.allowScripts === false;
+          pendingDraft?.remove();
+          pendingDraft = undefined;
           nextInner.addEventListener("load", () => {
+            if (bufferDraft) {
+              if (pendingDraft !== nextInner) return;
+              pendingDraft = undefined;
+              nextInner.style.position = "";
+              nextInner.style.inset = "";
+              nextInner.style.visibility = "";
+              widgetPortsOffered.clear();
+              inner.replaceWith(nextInner);
+              inner = nextInner;
+            }
             if (inner !== nextInner || typeof params.renderId !== "string") return;
+            if (widgetTheme) nextInner.contentWindow?.postMessage(widgetTheme, "*");
             postHost({
               jsonrpc: "2.0",
               method: "ui/notifications/sandbox-resource-loaded",
               params: { renderId: params.renderId },
             });
           }, { once: true });
-          widgetPortsOffered.clear();
           nextInner.srcdoc = guardedHtml;
-          inner.replaceWith(nextInner);
-          inner = nextInner;
+          if (bufferDraft) {
+            // Keep the last painted draft through theme changes. Superseded
+            // buffers are retired before their load can publish readiness.
+            pendingDraft = nextInner;
+            nextInner.style.position = "absolute";
+            nextInner.style.inset = "0";
+            nextInner.style.visibility = "hidden";
+            document.body.appendChild(nextInner);
+          } else {
+            widgetPortsOffered.clear();
+            inner.replaceWith(nextInner);
+            inner = nextInner;
+          }
         }
         return;
       }
@@ -416,8 +475,23 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp, sameOriginSandbox = fal
       const theme = data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)} ? data.mode
         : data?.method === "ui/notifications/host-context-changed" ? data.params?.theme
         : data?.result?.hostContext?.theme;
-      if (theme === "light" || theme === "dark") document.documentElement.style.colorScheme = theme;
-      inner.contentWindow?.postMessage(data, "*");
+      if (theme === "light" || theme === "dark") {
+        const themeChanged = hostTheme !== theme;
+        hostTheme = theme;
+        document.documentElement.style.colorScheme = theme;
+        if (!draftResource) inner.style.colorScheme = theme;
+        if (data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)}) {
+          const tokens = {};
+          for (const key of themeKeys) {
+            const raw = data.tokens?.[key];
+            const value = typeof raw === "string" ? raw.trim() : "";
+            if (value && value.length <= 256) tokens[key] = value;
+          }
+          widgetTheme = { type: data.type, mode: theme, tokens };
+        }
+        if (draftResource && (themeChanged || data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)})) receiveHost(draftResource);
+      }
+      inner.contentWindow?.postMessage(data?.type === ${JSON.stringify(WIDGET_THEME_MESSAGE_TYPE)} ? widgetTheme : data, "*");
   };
   window.addEventListener("message", (event) => {
     if (event.source === window.parent) {

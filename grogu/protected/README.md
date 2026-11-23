@@ -142,8 +142,27 @@ An answer can finish with a widget and no closing text. When the native agent
 confirms successful terminal tool execution, Alcove saves a completion receipt
 in the canonical transcript. The receipt completes the existing reply after
 reload and does not become another chat bubble or provider message. An ordinary
-tool call or saved widget alone does not prove completion. Existing transcripts
+tool call or saved widget alone does not prove completion. Tool-only turns
 without that receipt retain their recorded status.
+
+A model's explicit completion or a qualified terminal receipt also completes
+earlier visible tool-call fragments in the same user turn. A child result or
+a later user turn does not complete unfinished parent output. Saved errors
+and interrupted replies keep their failure or interruption status.
+
+`GET /api/protected/v1/artifacts` lists saved widgets, fetched files, and
+generated files for the signed-in member. Send the current profile ID in
+`X-Grogu-Profile`. Each page contains at most 100 entries and an optional
+`nextCursor`. Pass that value as `cursor` to read the next page. Entries sort by
+chat update time, newest first, then chat ID, kind, and artifact ID. The
+`updatedAt` value is the chat update time, not the artifact creation time.
+Concurrent chat changes can change the order between pages.
+
+File entries use `id`, `name`, and `size`. Widget entries use `id` and `title`.
+Both include `kind`, `chatId`, `chatTitle`, and `updatedAt`. Read files through
+`GET /api/protected/v1/files/:id` and widgets through
+`GET /api/protected/v1/chats/:chatId/widgets/:id`. These routes check chat
+ownership again. File responses are downloads, not HTML pages.
 
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
@@ -439,10 +458,9 @@ listener again only after maintenance succeeds.
 
 ## Protected chat agents
 
-`grogu/protected/agents.ts` owns the agent catalog. Every agent gets the same
-native tools, the same member-scoped access, and the same prompt header. Agents
-differ only in their intent instructions, packaged skills, example prompts, and
-presentation hints for the client.
+`grogu/protected/agents.ts` owns the agent catalog. Agents share member-scoped
+access and a prompt header. Their available skill reader, intent instructions,
+packaged skills, example prompts, and presentation hints can differ.
 
 - **Grogu** (`grogu`) is the default for new chats. It is the generic Alcove
   agent with no specialty. Its prompt lists the other selectable agents, and it
@@ -500,7 +518,9 @@ cleanup.
 
 Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
 `name` and `description`. A `{{template}}` marker is replaced with that
-directory's `template.html`. The runtime archive must include
+directory's `template.html`. The prompt includes only the agent's skill names
+and descriptions; `skills_read` loads the selected skill's complete guidance
+on request without granting general filesystem reads. The runtime archive must include
 `grogu/protected/agent-skills/`; the catalog fails to load without it. The
 service owner can add agents through the `agentExtensions` option to
 `createProtectedHttp`. Extension IDs must be unique.

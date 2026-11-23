@@ -358,6 +358,28 @@ describe("runEmbeddedAttempt skill policy projections", () => {
     }
   });
 
+  it("does not grant filesystem skill reads from a non-inline snapshot", async () => {
+    const skill = createFixtureSkillEntry("demo").skill;
+    hoisted.createOpenClawCodingToolsMock.mockImplementation((options) =>
+      createInstalledSkillTools(options?.installedSkills ?? []),
+    );
+    await run({
+      sessionKey: "agent:main:no-file-read",
+      attemptOverrides: {
+        disableTools: false,
+        toolExecutionAllow: ["skills_read"],
+        skillsSnapshot: {
+          prompt: skillsPrompt,
+          skills: [{ name: skill.name, skillKey: skill.name }],
+          resolvedSkills: [skill],
+          discoverySkills: [skill],
+        },
+      },
+    });
+    expect(sessionTools().some((entry) => entry.name === "skills_read")).toBe(false);
+    expect(hoisted.embeddedSystemPromptInputs.at(-1)).toMatchObject({ skillsPrompt: "" });
+  });
+
   it("gates catalog-hidden tools during review while skill_workshop stays callable", async () => {
     const sessionManager = SessionManager.inMemory();
     const executed: string[] = [];

@@ -190,6 +190,7 @@ async function runMentionedAgent(
         toolsAllow: [...agent.tools],
         toolExecutionAllow: agent.tools,
         extraSystemPrompt: agent.systemPrompt,
+        skillsSnapshot: agent.skillsSnapshot,
         clientCaps: ["inline-widgets"],
       };
     },
@@ -632,6 +633,7 @@ export function createCanonicalProtectedTurns(options: {
                   prompt: turn.input.text,
                   transcriptPrompt: turn.input.text,
                   extraSystemPrompt: turn.agent.systemPrompt,
+                  skillsSnapshot: turn.agent.skillsSnapshot,
                   trigger: "user",
                   provider,
                   model,

@@ -1351,6 +1351,7 @@ async function exerciseMemberMemoryBoundary(
   await Promise.all(
     [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
   );
+  await prepareProtectedSharedState(stateDir, () => {});
   await writeFile(path.join(workspaceDir, "MEMORY.md"), "Synthetic forbidden workspace memory.");
   const requests: Array<{
     messages: Array<{ role: string; content?: unknown }>;
@@ -1927,6 +1928,7 @@ void test("deleting another member's chat frees quota for a running turn", async
   const stateDir = path.resolve(".artifacts", `protected-quota-http-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
   const started = Promise.withResolvers<void>();
   const proceed = Promise.withResolvers<void>();
   const written = Promise.withResolvers<void>();
@@ -2398,6 +2400,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     mkdir(usersDir, { recursive: true, mode: 0o700 }),
     mkdir(path.join(bundleDir, "assets"), { recursive: true, mode: 0o700 }),
   ]);
+  await prepareProtectedSharedState(stateDir, () => {});
   await Promise.all([
     writeFile(path.join(bundleDir, "index.html"), "<h1>Family notebook</h1>"),
     writeFile(path.join(bundleDir, "assets/index-Family.js"), "export {};"),

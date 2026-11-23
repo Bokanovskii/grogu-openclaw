@@ -293,15 +293,30 @@ type WebFetchWrappedContent = Pick<
   "text" | "truncated" | "rawLength" | "length" | "spill"
 >;
 
+// Member-file runs expose no tool that can read a spill, so they return only the
+// bounded inline text and persist no unreachable chat file.
+type WebFetchOutputScope =
+  | ReturnType<typeof createWebFetchArtifactScope>
+  | { cacheKey: string; inlineOnly: true };
+
 async function spillWebFetchContent(
   value: string,
   wrapped: WebFetchWrappedContent,
   maxChars: number,
   sourceTruncated: boolean,
-  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>,
+  artifactScope?: WebFetchOutputScope,
 ): Promise<WebFetchWrappedContent> {
   if (!wrapped.truncated) {
     return sourceTruncated ? { ...wrapped, truncated: true } : wrapped;
+  }
+  if (artifactScope && "inlineOnly" in artifactScope) {
+    const notice = "\n\n[Showing truncated web_fetch content. The rest was not saved.]";
+    if (notice.length > maxChars) {
+      return { ...wrapped, truncated: true };
+    }
+    const visible = wrapWebFetchContent(value, maxChars - notice.length);
+    const text = `${visible.text}${notice}`;
+    return { ...visible, truncated: true, text, length: text.length };
   }
   // maxChars/maxCharsCap bound the model-visible return text. Recoverable spill
   // uses this fixed file cap so vanished pages can still be read after truncation.
@@ -353,7 +368,7 @@ function normalizeContentType(value: string | null | undefined): string | undefi
 }
 
 type WebFetchRuntimeParams = {
-  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>;
+  artifactScope?: WebFetchOutputScope;
   url: string;
   extractMode: ExtractMode;
   maxChars: number;
@@ -406,7 +421,7 @@ function sanitizeWebFetchUrl(raw: string): string {
 }
 
 async function buildWebFetchPayload(params: {
-  artifactScope?: ReturnType<typeof createWebFetchArtifactScope>;
+  artifactScope?: WebFetchOutputScope;
   providerId?: string;
   payload: unknown;
   requestedUrl: string;
@@ -543,7 +558,8 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
     cached &&
     (!params.artifactScope ||
       !cached.value.spill ||
-      (await params.artifactScope.canReuse(cached.value.spill)))
+      ("canReuse" in params.artifactScope &&
+        (await params.artifactScope.canReuse(cached.value.spill))))
   ) {
     return { ...cached.value, cached: true };
   }
@@ -871,10 +887,13 @@ export function createWebFetchTool(
       );
       try {
         const result = await runWebFetch({
-          artifactScope:
-            options?.userFileScope || loadGroguPrivateProfile()
+          artifactScope: options?.userFileScope
+            ? {
+                cacheKey: `user-files-inline-v1:${options.userFileScope.cacheKey}`,
+                inlineOnly: true,
+              }
+            : loadGroguPrivateProfile()
               ? createWebFetchArtifactScope({
-                  userFileScope: options?.userFileScope,
                   workspaceDir:
                     options?.sandboxRoot ?? options?.fsPolicy?.root ?? options?.workspaceDir,
                   agentId: options?.artifactAgentId,
@@ -916,6 +935,8 @@ export function createWebFetchTool(
           signal,
           resolveProviderFallback,
         });
+        // Cached member results must not outlive the member's file authority.
+        options?.userFileScope?.files.assertCurrent();
         return jsonResult(result);
       } finally {
         clearProgressTimer();

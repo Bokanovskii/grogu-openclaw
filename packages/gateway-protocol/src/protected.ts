@@ -218,6 +218,14 @@ export const ProtectedAutomationCapabilitiesSchema = node({
   run: Type.Boolean(),
   sharing: Type.Boolean(),
   notifications: Type.Boolean(),
+  chat: Type.Optional(
+    node({
+      list: Type.Boolean(),
+      read: Type.Boolean(),
+      proposeCreate: Type.Boolean(),
+      proposePatch: Type.Boolean(),
+    }),
+  ),
 });
 export const ProtectedAutomationScheduleSchema = Type.Union([
   node({

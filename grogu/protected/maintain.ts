@@ -272,6 +272,14 @@ async function main() {
     process.stdout.write("Alcove owner subject updated. Restart the listener.\n");
     return;
   }
+  if (action === "refresh-storage-limits" && arg === undefined && rest.length === 0) {
+    const storageLimits = measureStorageLimits(stateDir);
+    await updateSettings((settings) => ({ ...settings, storageLimits }));
+    process.stdout.write(
+      `Alcove storage limits updated: ${storageLimits.userBytes} bytes per member, ${storageLimits.globalBytes} bytes shared. Restart the listener.\n`,
+    );
+    return;
+  }
   if (action === "retire-bootstrap" && arg === undefined && rest.length === 0) {
     const { acquireProtectedStateOwner } = await import("./state-owner.js");
     const owner = await acquireProtectedStateOwner(stateDir);
@@ -319,7 +327,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

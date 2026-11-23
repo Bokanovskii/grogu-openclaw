@@ -15,6 +15,8 @@ import {
   ProtectedAutomationDraftValidationSchema,
   ProtectedAutomationListResponseSchema,
   ProtectedAutomationResponseSchema,
+  ProtectedMeSchema,
+  type ProtectedAutomationDraft,
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
@@ -26,6 +28,8 @@ import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files
 import { root } from "../../src/infra/fs-safe.js";
 import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
+import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
+import { createProtectedAutomationWithAdmission } from "../../src/state/protected-automation-operations.js";
 import {
   getCanonicalUserPreferences,
   setCanonicalUserPreferences,
@@ -36,7 +40,7 @@ import {
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
-import { addProtectedSubject } from "./admission-store.js";
+import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
 import {
   protectedAgentTools,
   protectedResearchAgent,
@@ -916,13 +920,30 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   );
   const measurement = await first.call("alice", "/widget-measurement");
   assert.equal(measurement.status, 200);
+  for (const response of [widgetHost, measurement]) {
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
   assert.match(measurement.headers.get("content-security-policy") ?? "", /script-src 'none'/);
   assert.equal(measurement.headers.get("set-cookie"), null);
   assert.match(await measurement.text(), /<style data-widget-base>/);
   const me = await first.call("alice", "/me");
   assert.equal(me.status, 200);
-  const { user, capabilities } = await me.json();
-  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true, admin: false });
+  const meResponse = await me.json();
+  assert.equal(Value.Check(ProtectedMeSchema, meResponse), false);
+  const { user, capabilities } = meResponse;
+  assert.deepEqual(capabilities, {
+    copilotConnect: true,
+    openaiConnect: true,
+    admin: false,
+  });
+  const negotiatedMe = await first.call("alice", "/me", {
+    headers: { "X-Alcove-Capabilities": "profile-v1, agents-v1" },
+  });
+  assert.equal(negotiatedMe.status, 200);
+  const negotiatedMeResponse = await negotiatedMe.json();
+  assert.equal(Value.Check(ProtectedMeSchema, negotiatedMeResponse), true);
+  assert.deepEqual(negotiatedMeResponse.capabilities, capabilities);
   const automationCatalogResponse = await first.call("alice", "/automations/catalog");
   assert.equal(automationCatalogResponse.status, 200);
   const automationCatalog = await automationCatalogResponse.json();
@@ -951,6 +972,30 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(Value.Check(ProtectedAutomationCatalogV1Schema, automationCatalogV1), true);
   assert.equal(Value.Check(ProtectedAutomationCatalogSchema, automationCatalogV1), false);
   assert.deepEqual({ ...automationCatalogV1, agents: automationCatalog.agents }, automationCatalog);
+  assert.equal(automationCatalog.capabilities.automations.chat, undefined);
+  const negotiatedAutomationCatalogResponse = await first.call("alice", "/automations/catalog", {
+    headers: { "X-Alcove-Capabilities": "profile-v1, automations-chat-v1" },
+  });
+  assert.equal(negotiatedAutomationCatalogResponse.status, 200);
+  const negotiatedAutomationCatalog = await negotiatedAutomationCatalogResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogSchema, negotiatedAutomationCatalog), true);
+  assert.deepEqual(negotiatedAutomationCatalog.capabilities.automations.chat, {
+    list: true,
+    read: true,
+    proposeCreate: true,
+    proposePatch: true,
+  });
+  const combinedAutomationCatalog = await (
+    await first.call("alice", "/automations/catalog", {
+      headers: { "X-Alcove-Capabilities": "agents-v1, automations-chat-v1" },
+    })
+  ).json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogV1Schema, combinedAutomationCatalog), true);
+  assert.deepEqual(combinedAutomationCatalog.agents, automationCatalogV1.agents);
+  assert.deepEqual(
+    combinedAutomationCatalog.capabilities.automations.chat,
+    negotiatedAutomationCatalog.capabilities.automations.chat,
+  );
   assert.deepEqual(automationCatalog.schedule.everyMs, {
     minimum: 1,
     maximum: 8_640_000_000_000_000,
@@ -971,7 +1016,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(automationCatalog.models[0].provider, "sparky");
   assert.deepEqual(automationCatalog.models[0].thinking.levels, ["low", "medium", "ultra"]);
   assert.equal(automationCatalog.models[0].thinking.default, "ultra");
-  const automationDraft = {
+  const automationDraft: ProtectedAutomationDraft = {
     name: "Synthetic morning summary",
     instructions: "Summarize public project updates.",
     whenToNotify: "Only when there is a meaningful update.",
@@ -2075,7 +2120,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       model?: string;
       reasoning_effort?: string;
       messages?: unknown[];
-      tools?: Array<{ function: { name: string } }>;
+      tools?: Array<{
+        function: {
+          name: string;
+          parameters?: {
+            properties?: Record<string, { properties?: Record<string, unknown> }>;
+          };
+        };
+      }>;
     };
   }> = [];
   const activeProvider = Promise.withResolvers<void>();
@@ -2142,6 +2194,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     reasoning?: { effort?: string; summary?: string };
   }> = [];
   let copilotSummary: string | undefined;
+  let foreignAutomationId = "";
+  let ownedAutomationId = "";
+  let ownedAutomationVersion = "";
+  let proposedAutomationDraft: Record<string, unknown> = {};
   let copilotUsage: Parameters<typeof responsesReply>[1] = {
     input_tokens: 3,
     output_tokens: 1,
@@ -2338,6 +2394,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       const sessionListTurn = JSON.stringify(body.messages).includes(
         "Inspect my permitted sessions.",
       );
+      const automationChatTurn = JSON.stringify(body.messages).includes(
+        "Use private automation chat tools.",
+      );
       const frames =
         groguTurn && routeArguments && !hasToolResponse
           ? [
@@ -2360,7 +2419,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
               ],
               [{}, "tool_calls"],
             ]
-          : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
+          : automationChatTurn && !hasToolResponse
             ? [
                 [
                   {
@@ -2368,9 +2427,83 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_widget_cleanup",
+                        id: "call_automations_list",
                         type: "function",
-                        function: { name: "show_widget", arguments: widgetArguments },
+                        function: {
+                          name: "automations_list",
+                          arguments: JSON.stringify({ limit: 10 }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: "call_automations_read_foreign",
+                        type: "function",
+                        function: {
+                          name: "automations_read",
+                          arguments: JSON.stringify({ automationId: foreignAutomationId }),
+                        },
+                      },
+                      {
+                        index: 2,
+                        id: "call_automations_propose_create",
+                        type: "function",
+                        function: {
+                          name: "automations_propose_create",
+                          arguments: JSON.stringify({ draft: proposedAutomationDraft }),
+                        },
+                      },
+                      {
+                        index: 3,
+                        id: "call_automations_propose_patch",
+                        type: "function",
+                        function: {
+                          name: "automations_propose_patch",
+                          arguments: JSON.stringify({
+                            automationId: ownedAutomationId,
+                            expectedVersion: ownedAutomationVersion,
+                            patch: { name: "Alice proposed automation update" },
+                          }),
+                        },
+                      },
+                      {
+                        index: 4,
+                        id: "call_sessions_list",
+                        type: "function",
+                        function: {
+                          name: "sessions_list",
+                          arguments: JSON.stringify({ limit: 25 }),
+                        },
+                      },
+                      {
+                        index: 5,
+                        id: "call_sessions_history_owned",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.permitted,
+                          }),
+                        },
+                      },
+                      {
+                        index: 6,
+                        id: "call_sessions_history_foreign",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.foreign,
+                          }),
+                        },
+                      },
+                      {
+                        index: 7,
+                        id: "callsessionssearch",
+                        type: "function",
+                        function: {
+                          name: "sessions_search",
+                          arguments: JSON.stringify({ query: "transcript marker" }),
+                        },
                       },
                     ],
                   },
@@ -2378,7 +2511,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 ],
                 [{}, "tool_calls"],
               ]
-            : sessionListTurn && !hasToolResponse && sessionHistoryTargets
+            : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
               ? [
                   [
                     {
@@ -2386,43 +2519,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                       tool_calls: [
                         {
                           index: 0,
-                          id: "call_sessions_list",
+                          id: "call_widget_cleanup",
                           type: "function",
-                          function: {
-                            name: "sessions_list",
-                            arguments: JSON.stringify({ limit: 25 }),
-                          },
-                        },
-                        {
-                          index: 1,
-                          id: "call_sessions_history_owned",
-                          type: "function",
-                          function: {
-                            name: "sessions_history",
-                            arguments: JSON.stringify({
-                              sessionKey: sessionHistoryTargets.permitted,
-                            }),
-                          },
-                        },
-                        {
-                          index: 2,
-                          id: "call_sessions_history_foreign",
-                          type: "function",
-                          function: {
-                            name: "sessions_history",
-                            arguments: JSON.stringify({
-                              sessionKey: sessionHistoryTargets.foreign,
-                            }),
-                          },
-                        },
-                        {
-                          index: 3,
-                          id: "callsessionssearch",
-                          type: "function",
-                          function: {
-                            name: "sessions_search",
-                            arguments: JSON.stringify({ query: "transcript marker" }),
-                          },
+                          function: { name: "show_widget", arguments: widgetArguments },
                         },
                       ],
                     },
@@ -2430,7 +2529,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   ],
                   [{}, "tool_calls"],
                 ]
-              : researchTurn && !hasToolResponse
+              : sessionListTurn && !hasToolResponse && sessionHistoryTargets
                 ? [
                     [
                       {
@@ -2438,11 +2537,42 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                         tool_calls: [
                           {
                             index: 0,
-                            id: "call_fetch_research",
+                            id: "call_sessions_list",
                             type: "function",
                             function: {
-                              name: "web_fetch",
-                              arguments: JSON.stringify({ url: sourceUrl }),
+                              name: "sessions_list",
+                              arguments: JSON.stringify({ limit: 25 }),
+                            },
+                          },
+                          {
+                            index: 1,
+                            id: "call_sessions_history_owned",
+                            type: "function",
+                            function: {
+                              name: "sessions_history",
+                              arguments: JSON.stringify({
+                                sessionKey: sessionHistoryTargets.permitted,
+                              }),
+                            },
+                          },
+                          {
+                            index: 2,
+                            id: "call_sessions_history_foreign",
+                            type: "function",
+                            function: {
+                              name: "sessions_history",
+                              arguments: JSON.stringify({
+                                sessionKey: sessionHistoryTargets.foreign,
+                              }),
+                            },
+                          },
+                          {
+                            index: 3,
+                            id: "callsessionssearch",
+                            type: "function",
+                            function: {
+                              name: "sessions_search",
+                              arguments: JSON.stringify({ query: "transcript marker" }),
                             },
                           },
                         ],
@@ -2451,23 +2581,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     ],
                     [{}, "tool_calls"],
                   ]
-                : !researchTurn && seen.length === 1
+                : researchTurn && !hasToolResponse
                   ? [
-                      [{ role: "assistant", reasoning_content: "Check the source. " }, null],
-                      [{ reasoning_content: "Prepare the widget." }, null],
                       [
                         {
                           role: "assistant",
                           tool_calls: [
                             {
                               index: 0,
-                              id: "call_widget_1",
-                              type: "function",
-                              function: { name: "show_widget", arguments: widgetArguments },
-                            },
-                            {
-                              index: 1,
-                              id: "call_fetch_1",
+                              id: "call_fetch_research",
                               type: "function",
                               function: {
                                 name: "web_fetch",
@@ -2480,10 +2602,48 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                       ],
                       [{}, "tool_calls"],
                     ]
-                  : [
-                      [{ role: "assistant", content: "Committed synthetic answer." }, null],
-                      [{}, "stop"],
-                    ];
+                  : !researchTurn && seen.length === 1
+                    ? [
+                        [{ role: "assistant", reasoning_content: "Check the source. " }, null],
+                        [{ reasoning_content: "Prepare the widget." }, null],
+                        [
+                          {
+                            role: "assistant",
+                            tool_calls: [
+                              {
+                                index: 0,
+                                id: "call_widget_1",
+                                type: "function",
+                                function: { name: "show_widget", arguments: widgetArguments },
+                              },
+                              {
+                                index: 1,
+                                id: "call_fetch_1",
+                                type: "function",
+                                function: {
+                                  name: "web_fetch",
+                                  arguments: JSON.stringify({ url: sourceUrl }),
+                                },
+                              },
+                            ],
+                          },
+                          null,
+                        ],
+                        [{}, "tool_calls"],
+                      ]
+                    : [
+                        [
+                          {
+                            role: "assistant",
+                            content:
+                              automationChatTurn && hasToolResponse
+                                ? "Proposed only; nothing was saved."
+                                : "Committed synthetic answer.",
+                          },
+                          null,
+                        ],
+                        [{}, "stop"],
+                      ];
       for (const [delta, finish_reason] of frames) {
         response.write(
           `data: ${JSON.stringify({
@@ -3494,6 +3654,48 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "members share the same header prefix",
   );
   assert.deepEqual(foreignRequest?.body.tools, seen[0]?.body.tools);
+  const automationDraft: ProtectedAutomationDraft = {
+    name: "Synthetic private automation",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const foreignAutomationSubject = "synthetic-automation-other-member";
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: foreignAutomationSubject,
+    }),
+    "added",
+  );
+  const foreignAutomationProfile = await ensureCanonicalUserProfileForVerifiedIdentity(
+    { issuer: "https://synthetic.example", subject: foreignAutomationSubject },
+    { env: { OPENCLAW_STATE_DIR: stateDir } },
+  );
+  assert.equal(
+    await bindProtectedProfile(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: foreignAutomationSubject,
+      profileId: foreignAutomationProfile.id,
+    }),
+    true,
+  );
+  const foreignAutomation = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    {
+      profileId: foreignAutomationProfile.id,
+      definition: { ...automationDraft, name: "Foreign member automation" },
+      now: Date.now(),
+    },
+    { profileId: foreignAutomationProfile.id, assertCurrent() {} },
+  );
+  assert.equal(foreignAutomation.status, "created");
+  if (foreignAutomation.status !== "created") {
+    assert.fail("Could not seed the other member's automation.");
+  }
+  foreignAutomationId = foreignAutomation.automation.id;
   const { chat: permitted } = await (
     await reopened("/chats", { method: "POST", body: "{}" })
   ).json();
@@ -3511,17 +3713,63 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     permitted: `agent:protected:family:${user.id}:${permitted.id}`,
     foreign: `agent:protected:family:${foreignMe.user.id}:${foreignChat.id}`,
   };
-  const sessionHistoryPrompt = "Inspect my permitted sessions.";
-  const sessionHistoryTurn = await reopened(`/chats/${coordinator.id}/turns`, {
+  const ownedAutomationResponse = await reopened("/automations", {
     method: "POST",
-    body: JSON.stringify({ provider: "sparky", text: sessionHistoryPrompt }),
+    headers: { "x-grogu-profile": user.id },
+    body: JSON.stringify({ ...automationDraft, name: "Alice private automation" }),
+  });
+  assert.equal(ownedAutomationResponse.status, 201, await ownedAutomationResponse.clone().text());
+  const ownedAutomation = await ownedAutomationResponse.json();
+  ownedAutomationId = ownedAutomation.automation.id;
+  ownedAutomationVersion = ownedAutomation.automation.version;
+  proposedAutomationDraft = {
+    ...automationDraft,
+    name: "Alice suggested automation",
+  };
+  const automationsBefore = await (
+    await reopened("/automations", { headers: { "x-grogu-profile": user.id } })
+  ).json();
+  const legacyAutomationCatalogResponse = await reopened("/automations/catalog", {
     headers: { "x-grogu-profile": user.id },
   });
+  const legacyAutomationCatalogBody = await legacyAutomationCatalogResponse.text();
+  assert.equal(legacyAutomationCatalogResponse.status, 200);
+  assert.equal(JSON.parse(legacyAutomationCatalogBody).capabilities.automations.chat, undefined);
+  const negotiatedAutomationCatalogHeaders = {
+    "x-grogu-profile": user.id,
+    "X-Alcove-Capabilities": "automations-chat-v1",
+  };
+  const negotiatedAutomationCatalogResponse = await reopened("/automations/catalog", {
+    headers: negotiatedAutomationCatalogHeaders,
+  });
+  const negotiatedAutomationCatalogBody = await negotiatedAutomationCatalogResponse.text();
+  assert.equal(negotiatedAutomationCatalogResponse.status, 200);
+  assert.deepEqual(JSON.parse(negotiatedAutomationCatalogBody).capabilities.automations.chat, {
+    list: true,
+    read: true,
+    proposeCreate: true,
+    proposePatch: true,
+  });
+  const sessionHistoryPrompt = "Inspect my permitted sessions.";
+  const automationChatPrompt = "Use private automation chat tools.";
+  const automationChatRequestBody = {
+    provider: "sparky",
+    text: `${sessionHistoryPrompt} ${automationChatPrompt}`,
+  };
+  const toolTurnRequestStart = seen.length;
+  const automationChatRoute = `/chats/${coordinator.id}/turns`;
+  const sessionHistoryTurn = await reopened(automationChatRoute, {
+    method: "POST",
+    body: JSON.stringify(automationChatRequestBody),
+    headers: negotiatedAutomationCatalogHeaders,
+  });
   assert.equal(sessionHistoryTurn.status, 200);
-  assert.match(await sessionHistoryTurn.text(), /"type":"done"/);
-  const sessionHistoryRequests = seen.filter(({ body }) =>
-    JSON.stringify(body.messages).includes(sessionHistoryPrompt),
-  );
+  const automationChatStream = await sessionHistoryTurn.text();
+  assert.match(automationChatStream, /"type":"done"/);
+  assert.match(automationChatStream, /Proposed only; nothing was saved\./);
+  const sessionHistoryRequests = seen
+    .slice(toolTurnRequestStart)
+    .filter(({ body }) => JSON.stringify(body.messages).includes(sessionHistoryPrompt));
   assert.ok(
     sessionHistoryRequests.length >= 2,
     "native session-history results return to the model",
@@ -3542,6 +3790,115 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     sessionHistoryOutput.includes(permitted.id),
     "session list includes the permitted chat",
   );
+  const automationChatRequests = seen
+    .slice(toolTurnRequestStart)
+    .filter(({ body }) => JSON.stringify(body.messages).includes(automationChatPrompt));
+  assert.equal(automationChatRequests.length, 2);
+  const automationTools = automationChatRequests[0]!.body.tools ?? [];
+  assert.deepEqual(
+    automationTools
+      .map((tool) => tool.function.name)
+      .filter((name) => name.startsWith("automations_"))
+      .toSorted(),
+    [
+      "automations_list",
+      "automations_propose_create",
+      "automations_propose_patch",
+      "automations_read",
+    ],
+  );
+  const patchTool = automationTools.find(
+    (tool) => tool.function.name === "automations_propose_patch",
+  );
+  assert.ok(patchTool);
+  const patchSchema = patchTool.function.parameters?.properties?.patch;
+  assert.ok(patchSchema?.properties);
+  assert.equal(patchSchema.properties.enabled, undefined);
+  assert.doesNotMatch(JSON.stringify(automationTools), /profileId/u);
+  const automationToolMessages =
+    automationChatRequests[1]!.body.messages?.filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "role" in message &&
+        message.role === "tool",
+    ) ?? [];
+  const automationToolOutput = JSON.stringify(
+    automationToolMessages.map((message) => {
+      const content =
+        typeof message === "object" && message !== null && "content" in message
+          ? message.content
+          : undefined;
+      if (typeof content !== "string") {
+        throw new Error("Expected automation tool result content to be JSON text");
+      }
+      return JSON.parse(content);
+    }),
+  );
+  assert.match(automationToolOutput, /Alice private automation/u);
+  assert.doesNotMatch(automationToolOutput, /Foreign member automation/u);
+  assert.match(automationToolOutput, /"status":"not_found"/u);
+  assert.match(automationToolOutput, /Alice suggested automation/u);
+  assert.match(automationToolOutput, /Alice proposed automation update/u);
+  assert.match(automationToolOutput, /"writeApplied":false/u);
+  assert.deepEqual(
+    await (await reopened("/automations", { headers: { "x-grogu-profile": user.id } })).json(),
+    automationsBefore,
+  );
+  const capturePath = process.env.OPENCLAW_AUTOMATIONS_CHAT_CAPTURE_PATH;
+  if (capturePath) {
+    await writeFile(
+      capturePath,
+      [
+        {
+          name: "legacy-automation-catalog",
+          request: {
+            method: "GET",
+            path: "/api/protected/v1/automations/catalog",
+            headers: { "x-grogu-profile": user.id },
+          },
+          response: {
+            status: legacyAutomationCatalogResponse.status,
+            contentType: legacyAutomationCatalogResponse.headers.get("content-type"),
+            body: legacyAutomationCatalogBody,
+          },
+        },
+        {
+          name: "negotiated-automation-catalog",
+          request: {
+            method: "GET",
+            path: "/api/protected/v1/automations/catalog",
+            headers: negotiatedAutomationCatalogHeaders,
+          },
+          response: {
+            status: negotiatedAutomationCatalogResponse.status,
+            contentType: negotiatedAutomationCatalogResponse.headers.get("content-type"),
+            body: negotiatedAutomationCatalogBody,
+          },
+        },
+        {
+          name: "automation-chat-turn",
+          request: {
+            method: "POST",
+            path: `/api/protected/v1${automationChatRoute}`,
+            headers: {
+              ...negotiatedAutomationCatalogHeaders,
+              "content-type": "application/json",
+            },
+            body: automationChatRequestBody,
+          },
+          response: {
+            status: sessionHistoryTurn.status,
+            contentType: sessionHistoryTurn.headers.get("content-type"),
+            body: automationChatStream,
+          },
+        },
+      ]
+        .map((capture) => JSON.stringify(capture))
+        .join("\n") + "\n",
+      { mode: 0o600 },
+    );
+  }
   assert.ok(!sessionHistoryOutput.includes(foreignChat.id), "session list omits the foreign chat");
   const searchMessage = sessionToolMessages?.find(
     (message) => "tool_call_id" in message && message.tool_call_id === "callsessionssearch",
@@ -4252,4 +4609,183 @@ void test("automation definitions consume member and global storage quota", asyn
     }),
   );
   assert.equal(disabledCreate.status, 404);
+});
+
+void test("the owner sets member storage limits and is exempt from them", async (t) => {
+  const stateDir = path.resolve(".artifacts", `storage-limit-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://limits.example";
+  const issuer = "https://identity.example";
+  const expiresAt = Date.now() + 120_000;
+  const MiB = 1024 * 1024;
+  const options = {
+    origin,
+    stateDir,
+    accessIssuer: issuer,
+    ownerSubject: "alice",
+    directory: { issuer, allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer,
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run() {
+        assert.fail("Storage limit proof does not run an agent.");
+      },
+      async steer() {
+        assert.fail("Storage limit proof does not steer an agent.");
+      },
+    },
+  };
+  const app = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 64 * MiB, userBytes: 32 * MiB, freeFloorBytes: 1 },
+  });
+  t.after(() => app.shutdown());
+  const fetchFrom = (target: typeof app) => (subject: string, route: string, init?: RequestInit) =>
+    target.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  const call = fetchFrom(app);
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(await addProtectedSubject(stateDir, { issuer, subject }), "added");
+    await call(subject, "/me");
+  }
+  const people = (await (await call("alice", "/admin/people")).json()).people as {
+    id: string;
+    subject?: string;
+  }[];
+  const bobId = people.find((person) => person.subject === "bob")!.id;
+  const aliceId = people.find((person) => person.subject === "alice")!.id;
+  const route = (id: string) => `/admin/people/${id}/storage-limit`;
+  const errorCode = async (response: Response) => (await response.json()).error.code;
+
+  assert.equal((await call("bob", route(bobId))).status, 403);
+  const initial = await (await call("alice", route(bobId))).json();
+  assert.deepEqual(
+    { ...initial, usedBytes: typeof initial.usedBytes },
+    {
+      usedBytes: "number",
+      limitBytes: 32 * MiB,
+      defaultLimitBytes: 32 * MiB,
+      customLimitBytes: null,
+      exempt: false,
+      minLimitBytes: 16 * MiB,
+      maxLimitBytes: 64 * MiB,
+      version: "default",
+    },
+  );
+  const put = (id: string, value: unknown, version?: string) =>
+    call("alice", route(id), {
+      method: "PUT",
+      headers: version ? { "if-match": version } : {},
+      body: JSON.stringify(value),
+    });
+  const missingVersion = await put(bobId, { limitBytes: 20 * MiB });
+  assert.equal(missingVersion.status, 428);
+  assert.equal(await errorCode(missingVersion), "version_required");
+  for (const value of [
+    { limitBytes: 1 },
+    { limitBytes: 65 * MiB },
+    { limitBytes: 20 * MiB, x: 1 },
+  ]) {
+    const rejected = await put(bobId, value, "default");
+    assert.equal(rejected.status, 400);
+    assert.equal(await errorCode(rejected), "invalid_limit");
+  }
+  const updated = await put(bobId, { limitBytes: 20 * MiB }, initial.version);
+  assert.equal(updated.status, 200);
+  const custom = await updated.json();
+  assert.equal(custom.limitBytes, 20 * MiB);
+  assert.equal(custom.customLimitBytes, 20 * MiB);
+  assert.notEqual(custom.version, initial.version);
+  const stale = await put(bobId, { limitBytes: 24 * MiB }, initial.version);
+  assert.equal(stale.status, 409);
+  assert.equal(await errorCode(stale), "version_conflict");
+
+  // Quota admission and the member's storage view read the same effective limit.
+  assert.equal((await (await call("bob", "/storage/chats")).json()).limitBytes, 20 * MiB);
+  assert.equal((await (await call("alice", "/storage/chats")).json()).limitBytes, null);
+
+  const owner = await (await call("alice", route(aliceId))).json();
+  assert.equal(owner.exempt, true);
+  assert.equal(owner.limitBytes, null);
+  const exempt = await put(aliceId, { limitBytes: 20 * MiB }, owner.version);
+  assert.equal(exempt.status, 409);
+  assert.equal(await errorCode(exempt), "limit_exempt");
+
+  const reset = await call("alice", route(bobId), {
+    method: "DELETE",
+    headers: { "if-match": custom.version },
+  });
+  assert.equal(reset.status, 200);
+  const restored = await reset.json();
+  assert.equal(restored.customLimitBytes, null);
+  assert.equal(restored.limitBytes, 32 * MiB);
+  const unknown = await call("alice", route(randomUUID()));
+  assert.equal(unknown.status, 404);
+  assert.equal(await errorCode(unknown), "person_not_found");
+
+  // With a tiny budget the owner can exceed both limits; members then see the shared-budget reason.
+  const small = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 12_000, userBytes: 8_000, freeFloorBytes: 1 },
+  });
+  t.after(() => small.shutdown());
+  const smallCall = fetchFrom(small);
+  const draft = {
+    name: "Synthetic limit test",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  for (let index = 0; index < 3; index += 1) {
+    const created = await smallCall("alice", "/automations", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    assert.equal(created.status, 201);
+  }
+  const blocked = await smallCall("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(blocked.status, 413);
+  const blockedError = (await blocked.json()).error;
+  assert.equal(blockedError.code, "quota_exceeded");
+  assert.match(blockedError.message, /shared storage/u);
 });

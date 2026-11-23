@@ -30,6 +30,8 @@ export type OpenClawSharedToolsOptions = {
    */
   questionPrompt?: QuestionPromptDelivery;
   toolBindings?: Readonly<Record<string, unknown>>;
+  /** Invocation-local host operations keyed and filtered by plugin ID; not serialized or implicitly inherited. */
+  toolRuntimeBindings?: Readonly<Record<string, unknown>>;
   /** Trusted runtime-only authorization for one bounded cross-conversation recall pass. */
   conversationRecall?: ConversationRecallContext;
   /** Host-resolved memory partition shared by plugin tools for this turn. */

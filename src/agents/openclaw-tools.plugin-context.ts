@@ -45,6 +45,7 @@ export type OpenClawPluginToolOptions = Pick<
   | "sandboxed"
   | "allowGatewaySubagentBinding"
   | "toolBindings"
+  | "toolRuntimeBindings"
 > & { activeProjectKeys?: readonly string[] };
 
 export function resolveOpenClawPluginToolInputs(params: {
@@ -100,6 +101,7 @@ export function resolveOpenClawPluginToolInputs(params: {
       sessionKey,
       sessionId: options?.sessionId,
       toolBindings: options?.toolBindings,
+      toolRuntimeBindings: options?.toolRuntimeBindings,
       activeProjectKeys: options?.activeProjectKeys,
       conversationRecall: options?.conversationRecall,
       activeModel,

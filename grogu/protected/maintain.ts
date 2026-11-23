@@ -8,6 +8,7 @@ import { measureStorageLimits } from "./capacity.js";
 import {
   parseDeploySettings,
   parseRuntimeSettings,
+  protectedMaxFileBytes,
   protectedOpenClawConfig,
   readSettingsJson,
   sparkyRef,
@@ -280,6 +281,49 @@ async function main() {
     );
     return;
   }
+  if (
+    action === "cleanup-web-fetch-spills" &&
+    (arg === undefined || arg === "--dry-run") &&
+    rest.length === 0
+  ) {
+    const dryRun = arg === "--dry-run";
+    const { acquireProtectedStateOwner } = await import("./state-owner.js");
+    const owner = await acquireProtectedStateOwner(stateDir);
+    if (!owner) {
+      throw new MaintenanceRefused("Stop the listener before cleaning web_fetch spill files.");
+    }
+    try {
+      const encryption = requireProtectedStorageEncryption();
+      try {
+        const stateRoot = await root(stateDir);
+        const usersRoot = await root(path.join(stateRoot.rootReal, "users"));
+        const { cleanupProtectedWebFetchSpills } = await import("./web-fetch-cleanup.js");
+        const result = await cleanupProtectedWebFetchSpills({
+          usersRoot,
+          assertCurrent: () => owner.assertCurrent(),
+          maxBytes: protectedMaxFileBytes,
+          encryption,
+          dryRun,
+        });
+        if (dryRun) {
+          process.stdout.write(
+            result.actions.length > 0
+              ? `${result.actions.map(({ kind, path: filePath }) => `${kind} ${filePath}`).join("\n")}\n`
+              : "No matching web_fetch spill files or empty directories.\n",
+          );
+        } else {
+          process.stdout.write(
+            `Removed ${result.filesRemoved} web_fetch spill files and ${result.directoriesRemoved} empty directories.\n`,
+          );
+        }
+      } finally {
+        encryption.dispose();
+      }
+    } finally {
+      owner.release();
+    }
+    return;
+  }
   if (action === "retire-bootstrap" && arg === undefined && rest.length === 0) {
     const { acquireProtectedStateOwner } = await import("./state-owner.js");
     const owner = await acquireProtectedStateOwner(stateDir);
@@ -327,7 +371,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

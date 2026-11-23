@@ -208,6 +208,31 @@ then restart the listener:
 sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
 ```
 
+### Remove legacy `web_fetch` spill files
+
+Older runtimes saved truncated `web_fetch` output under each chat's
+`web-fetch/` directory. The artifacts API discovers files directly from the
+member file owner and skips missing files; it has no spill manifest to repair.
+Chat transcripts remain unchanged.
+
+Stop the listener before updating the protected runtime. Before restarting it,
+preview matching paths with:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run cleanup-web-fetch-spills --dry-run
+```
+
+Run the same command without `--dry-run` to delete only files named
+`web-fetch-<uuid>.log` with a canonical lowercase UUID v4 under
+`chats/<chat-uuid>/web-fetch/` for every member. Other files and nonmatching
+directories survive. An emptied `web-fetch/` directory is removed
+non-recursively. Removal is immediately reflected in the live file-based quota;
+no transcript, chat, shared database, or artifact manifest is modified. The
+operation is idempotent and needs no schema migration or backup. The installed
+maintenance helper dispatches to the updated runtime source, so no helper
+reinstallation is needed after `update`; restart the listener after the
+operation.
+
 ### Member memory
 
 Grogu and Travel chats can save and search the signed-in member's memory. Notes

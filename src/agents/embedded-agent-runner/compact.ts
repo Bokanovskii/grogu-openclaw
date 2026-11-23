@@ -215,7 +215,9 @@ export async function compactEmbeddedAgentSessionDirect(
     ),
     sessionEntry: entry ? projectPublicSessionEntry(entry) : undefined,
     agentHarnessId: lockedHarnessRuntime ?? paramsBase.agentHarnessId,
-    modelSelectionLocked: entry?.modelSelectionLocked ?? paramsBase.modelSelectionLocked,
+    modelSelectionLocked: paramsBase.requestModelCredential
+      ? true
+      : (entry?.modelSelectionLocked ?? paramsBase.modelSelectionLocked),
     agentId: runSessionTarget.agentId,
     sessionId: runSessionTarget.sessionId,
     sessionKey: runSessionTarget.sessionKey,

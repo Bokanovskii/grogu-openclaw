@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createStorageValueEncryption } from "../storage/encryption.js";
 import {
   disposeSqliteStorageValueEncryption,
@@ -13,10 +13,66 @@ import { withTempDir } from "../test-utils/temp-dir.js";
 import { assertCurrentStateRuntimeSchema } from "./openclaw-state-db-fast-path.js";
 import { repairStateSchema } from "./openclaw-state-db-repair.js";
 import { assertSupportedStateSchemaVersion } from "./openclaw-state-db-schema-version.js";
+import {
+  closeOpenClawStateDatabaseByPathAsync,
+  openOpenClawStateDatabase,
+} from "./openclaw-state-db.js";
 import { cleanupProtectedSharedStateAfterMigration } from "./openclaw-state-protected-cleanup.js";
 import { readProtectedSharedStateMarker } from "./openclaw-state-protected-marker.js";
 import { migrateProtectedSharedStateInTransaction } from "./openclaw-state-protected-migration.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
+import { ensureProtectedFeedbackSchema } from "./protected-feedback.js";
+
+it("admits existing encrypted feedback storage and installs chat evidence on first use", async () => {
+  await withTempDir("protected-feedback-upgrade-", async (directory) => {
+    const stateDir = path.join(directory, "state");
+    const pathname = path.join(stateDir, "state", "openclaw.sqlite");
+    const keyPath = path.join(directory, "key");
+    mkdirSync(path.dirname(pathname), { recursive: true });
+    writeFileSync(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+    const previous = new DatabaseSync(pathname);
+    registerSqliteStorageValueEncryption(
+      previous,
+      createStorageValueEncryption(Buffer.alloc(32, 7)),
+    );
+    try {
+      previous.exec(OPENCLAW_STATE_SCHEMA_SQL);
+      previous.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA secure_delete = ON;
+        PRAGMA user_version = 20;
+        INSERT INTO schema_meta (meta_key, role, schema_version, created_at, updated_at)
+          VALUES ('primary', 'global', 20, 1, 1);
+        BEGIN IMMEDIATE;
+      `);
+      migrateProtectedSharedStateInTransaction(previous);
+      previous.exec("COMMIT");
+      cleanupProtectedSharedStateAfterMigration(previous, () => {});
+      previous.exec("DROP TABLE protected_report_chat_evidence");
+    } finally {
+      disposeSqliteStorageValueEncryption(previous);
+      previous.close();
+    }
+
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    vi.stubEnv("OPENCLAW_PROTECTED_STORAGE_KEY_FILE", keyPath);
+    try {
+      const opened = openOpenClawStateDatabase({ env: process.env, path: pathname });
+      expect(isSqliteStorageValueEncryptionStrict(opened.db)).toBe(true);
+      const evidenceTable = () =>
+        opened.db
+          .prepare("SELECT name FROM sqlite_schema WHERE name = 'protected_report_chat_evidence'")
+          .get();
+      expect(evidenceTable()).toBeUndefined();
+      ensureProtectedFeedbackSchema(opened);
+      expect(evidenceTable()).toEqual({ name: "protected_report_chat_evidence" });
+      expect(opened.db.prepare("PRAGMA user_version").get()?.user_version).toBe(21);
+    } finally {
+      await closeOpenClawStateDatabaseByPathAsync(pathname);
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 it("keeps committed plaintext until readback succeeds and publishes the protected version atomically", async () => {
   await withTempDir("protected-shared-migration-", async (directory) => {

@@ -33,7 +33,11 @@ import {
   removeProtectedAdmission,
 } from "./admission-store.js";
 import { createProtectedAgentCatalog } from "./agents.js";
-import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
+import {
+  readProtectedAutomationLifecycleStorageUsage,
+  writeProtectedAutomationLifecycle,
+  type ProtectedAutomationLifecycleAuthority,
+} from "./automation-lifecycle-store.js";
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { readProtectedAutomationStorageUsage } from "./automations-store.js";
@@ -576,7 +580,297 @@ void test("chat links grant live read-only access until revoked", async (t) => {
   assert.deepEqual(countRows(), [1, 1]);
 });
 
-void test("published automations are followed read-only until unpublished", async (t) => {
+void test("legacy public automation data remains private at the HTTP boundary", async (t) => {
+  const { stateDir, databasePath, chats, call, ok, errorCode, id } = await createSharingFixture(t);
+  const capabilities =
+    "sharing-v1, automations-public-v1, automation-results-v1, automation-runs-v1";
+  const catalog = await ok(await call("owner", "/automations/catalog"));
+  const { automation } = await ok(
+    await call("owner", "/automations", {
+      method: "POST",
+      body: {
+        name: "Synthetic legacy automation",
+        instructions: "Summarize synthetic material.",
+        whenToNotify: "Only when useful.",
+        agentId: catalog.defaultAgentId,
+        model: { provider: "sparky", id: "synthetic" },
+        schedule: { kind: "every", everyMs: 60_000 },
+      },
+    }),
+    201,
+  );
+  const publication = await runProtectedSharing(
+    stateDir,
+    "protectedSharing.publishAutomation",
+    {
+      profileId: id("owner"),
+      automationId: automation.id,
+      now: 1_000,
+      storageOverheadBytes: storageEntryOverheadBytes,
+    },
+    () => {},
+  );
+  assert.ok(publication?.created);
+  const follow = await runProtectedSharing(
+    stateDir,
+    "protectedSharing.followAutomation",
+    {
+      profileId: id("recipient"),
+      automationId: automation.id,
+      now: 1_001,
+      storageOverheadBytes: storageEntryOverheadBytes,
+      subscribed: true,
+    },
+    () => {},
+  );
+  assert.ok(follow?.created);
+
+  const runId = randomUUID();
+  const run = await commitProtectedAutomationFinishedResult(
+    stateDir,
+    {
+      automationId: automation.id,
+      definitionRevision: Number(automation.version),
+      centralOwnerProfileId: id("owner"),
+      jobId: automation.id,
+      runAtMs: 1_000,
+      runId,
+      completedAtMs: 2_000,
+      automationName: automation.name,
+      privateFinalText: "Synthetic legacy result.",
+      transcript: { sessionKey: "synthetic-session-key", sessionId: randomUUID() },
+    },
+    {
+      profileId: id("owner"),
+      revalidate: async () => {},
+      assertCurrent: () => {},
+      enrollPublication: () => ({ finish: () => {} }),
+      reserveStorage: async () => ({ settle: () => {}, release: () => {} }),
+      retainUncertainCommit: () => {},
+    },
+  );
+  assert.equal(run.status, "created");
+  if (run.status !== "created") {
+    throw new Error("Synthetic legacy run was not stored.");
+  }
+
+  const runChatId = randomUUID();
+  const ownerAuthority = { profileId: id("owner"), assertCurrent() {} };
+  await chats.create(ownerAuthority, automation.name, automation.agentId, undefined, {
+    chatId: runChatId,
+    automationId: automation.id,
+  });
+  const lifecycle: ProtectedAutomationLifecycleAuthority = {
+    profileId: id("owner"),
+    revalidate: async () => {},
+    assertCurrent() {},
+    enrollPublication: () => ({ finish: () => {} }),
+    reserveStorage: async () => ({ settle: () => {}, release: () => {} }),
+    reserveReplacement: async () => ({ settle: () => {}, release: () => {} }),
+    reserveBatchReplacement: async () => ({ settle: () => {}, release: () => {} }),
+    retireStorage: () => {},
+    retainUncertainCommit: () => assert.fail("Unexpected lifecycle reconciliation."),
+  };
+  const writeLifecycle = (command: Parameters<typeof writeProtectedAutomationLifecycle>[1]) =>
+    writeProtectedAutomationLifecycle(stateDir, command, lifecycle);
+  assert.deepEqual(
+    await writeLifecycle({
+      kind: "provision",
+      profileId: id("owner"),
+      automationId: automation.id,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(
+    await writeLifecycle({
+      kind: "queue",
+      profileId: id("owner"),
+      automationId: automation.id,
+      runId,
+      definitionRevision: Number(automation.version),
+      trigger: "manual",
+      scheduledAtMs: 1_000,
+      now: 1_001,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(
+    await writeLifecycle({
+      kind: "start",
+      profileId: id("owner"),
+      automationId: automation.id,
+      runId,
+      chatId: runChatId,
+      now: 1_002,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(
+    await writeLifecycle({
+      kind: "finish",
+      profileId: id("owner"),
+      automationId: automation.id,
+      runId,
+      now: 2_000,
+      outcome: { status: "succeeded", resultId: run.id },
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(
+    await writeLifecycle({
+      kind: "deliver",
+      profileId: id("owner"),
+      automationId: automation.id,
+      runId,
+      now: 2_001,
+    }),
+    { status: "committed" },
+  );
+
+  const legacySharingState = () => {
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      return {
+        publications: db
+          .prepare(
+            "SELECT automation_id, published_at FROM protected_automation_publications ORDER BY automation_id",
+          )
+          .all(),
+        followers: db
+          .prepare(
+            "SELECT automation_id, profile_id, added_at FROM protected_automation_members WHERE role = 'follower' ORDER BY automation_id, profile_id",
+          )
+          .all(),
+        subscriptions: db
+          .prepare(
+            "SELECT automation_id, profile_id, subscribed_at FROM protected_automation_subscriptions ORDER BY automation_id, profile_id",
+          )
+          .all(),
+      };
+    } finally {
+      db.close();
+    }
+  };
+  const retainedLegacySharingState = legacySharingState();
+  const owner = await ok(await call("owner", `/automations/${automation.id}`, {}, capabilities));
+  assert.equal(owner.automation.id, automation.id);
+  assert.equal(
+    (await ok(await call("owner", "/automations", {}, capabilities))).automations.length,
+    1,
+  );
+  const publicCatalog = await ok(await call("owner", "/automations/catalog", {}, capabilities));
+  assert.deepEqual(publicCatalog.capabilities.automations.public, {
+    publish: false,
+    follow: false,
+    notifications: false,
+  });
+  for (const pathname of [
+    "/automations/public",
+    `/automations/${automation.id}/publication`,
+    `/automations/${automation.id}/follow`,
+    `/automations/${automation.id}/notifications`,
+  ]) {
+    const response = await call(
+      "owner",
+      pathname,
+      {
+        method:
+          pathname.endsWith("/publication") ||
+          pathname.endsWith("/follow") ||
+          pathname.endsWith("/notifications")
+            ? "PUT"
+            : "GET",
+        body: pathname.endsWith("/notifications") ? { subscribed: true } : undefined,
+      },
+      capabilities,
+    );
+    assert.equal(response.status, 503, pathname);
+    assert.equal(await errorCode(response), "public_automations_unavailable");
+  }
+  for (const pathname of [
+    "/automations/public",
+    `/automations/${automation.id}/publication`,
+    `/automations/${automation.id}/notifications`,
+  ]) {
+    const response = await call(
+      "recipient",
+      pathname,
+      {
+        method:
+          pathname.endsWith("/publication") || pathname.endsWith("/notifications") ? "PUT" : "GET",
+        body: pathname.endsWith("/notifications") ? { subscribed: true } : undefined,
+      },
+      capabilities,
+    );
+    assert.equal(response.status, 503, pathname);
+    assert.equal(await errorCode(response), "public_automations_unavailable");
+  }
+  assert.deepEqual(legacySharingState(), retainedLegacySharingState);
+  for (const pathname of [
+    `/automations/${automation.id}`,
+    `/automations/${automation.id}/runs`,
+    `/automations/${automation.id}/runs/${run.id}`,
+    `/automations/${automation.id}/run-history`,
+  ]) {
+    const response = await call("recipient", pathname, {}, capabilities);
+    assert.equal(response.status, 404, pathname);
+    assert.equal(await errorCode(response), "not_found");
+  }
+  assert.deepEqual(
+    (
+      await ok(await call("owner", `/automations/${automation.id}/runs`, {}, capabilities))
+    ).runs.map((entry: { id: string }) => entry.id),
+    [run.id],
+  );
+  assert.deepEqual(
+    (
+      await ok(
+        await call("owner", `/automations/${automation.id}/runs/${run.id}`, {}, capabilities),
+      )
+    ).run.text,
+    "Synthetic legacy result.",
+  );
+  assert.deepEqual(
+    (
+      await ok(await call("owner", `/automations/${automation.id}/run-history`, {}, capabilities))
+    ).runs.map((entry: { id: string }) => entry.id),
+    [runId],
+  );
+  assert.deepEqual(
+    (await ok(await call("owner", "/automations/inbox", {}, capabilities))).entries.map(
+      (entry: { runId: string }) => entry.runId,
+    ),
+    [runId],
+  );
+  assert.deepEqual(
+    (await ok(await call("recipient", "/automations/inbox", {}, capabilities))).entries,
+    [],
+  );
+  assert.deepEqual(await listAutomationRecipients(stateDir, automation.id, () => {}), {
+    ownerProfileId: id("owner"),
+    recipients: [id("owner")],
+  });
+  assert.equal((await call("recipient", `/chats/${runChatId}`, {}, capabilities)).status, 404);
+  assert.equal(
+    (await ok(await call("owner", `/chats/${runChatId}`, {}, capabilities))).chat.id,
+    runChatId,
+  );
+
+  const share = await ok(
+    await call("owner", `/chats/${runChatId}/share`, { method: "POST" }, capabilities),
+  );
+  const sharedChat = `/shared/chats/${id("owner")}/${runChatId}`;
+  assert.equal(
+    (await call("recipient", `/shares/${share.share.id}/claim`, { method: "POST" })).status,
+    200,
+  );
+  assert.equal(
+    (await ok(await call("recipient", sharedChat, {}, capabilities))).chat.id,
+    runChatId,
+  );
+});
+
+void test.skip("retired public automation behavior is no longer a contract", async (t) => {
   const {
     app,
     stateDir,
@@ -882,7 +1176,9 @@ void test("published automations are followed read-only until unpublished", asyn
   assert.equal(await runAccess("recipient"), undefined);
   assert.equal((await call("recipient", runs, {}, results)).status, 404);
   assert.deepEqual(await recipients(), { ownerProfileId: id("owner"), recipients: [id("owner")] });
-  assert.deepEqual((await ok(await pub("recipient", "/automations/public"))).automations, []);
+  const unavailable = await pub("recipient", "/automations/public");
+  assert.equal(unavailable.status, 503);
+  assert.equal(await errorCode(unavailable), "public_automations_unavailable");
   const countRows = () => {
     const db = new DatabaseSync(databasePath, { readOnly: true });
     try {
@@ -988,7 +1284,7 @@ void test("published automations are followed read-only until unpublished", asyn
 });
 
 void test("deleting a published automation unpublishes it and removes its followers", async (t) => {
-  const { app, stateDir, databasePath, call, ok, id } = await createSharingFixture(t);
+  const { app, stateDir, databasePath, call, ok, errorCode, id } = await createSharingFixture(t);
   const capabilities = "sharing-v1, automations-public-v1, automation-delete-v1";
   const pub = (
     member: Member,
@@ -1011,13 +1307,42 @@ void test("deleting a published automation unpublishes it and removes its follow
     201,
   );
   const item = `/automations/${automation.id}`;
-  const { version } = (await ok(await pub("owner", `${item}/publication`, { method: "PUT" })))
-    .automation;
-  await ok(await pub("recipient", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
+  const version = automation.version;
+  assert.ok(
+    (
+      await runProtectedSharing(
+        stateDir,
+        "protectedSharing.publishAutomation",
+        {
+          profileId: id("owner"),
+          automationId: automation.id,
+          now: 1_000,
+          storageOverheadBytes: storageEntryOverheadBytes,
+        },
+        () => {},
+      )
+    )?.created,
+  );
+  assert.ok(
+    (
+      await runProtectedSharing(
+        stateDir,
+        "protectedSharing.followAutomation",
+        {
+          profileId: id("recipient"),
+          automationId: automation.id,
+          now: 1_001,
+          storageOverheadBytes: storageEntryOverheadBytes,
+          subscribed: true,
+        },
+        () => {},
+      )
+    )?.created,
+  );
   const member = (name: Member) => ({ profileId: id(name), assertCurrent() {} });
   assert.deepEqual(await listAutomationRecipients(stateDir, automation.id, () => {}), {
     ownerProfileId: id("owner"),
-    recipients: [id("owner"), id("recipient")],
+    recipients: [id("owner")],
   });
   await app.startAutomations(() => {});
 
@@ -1062,7 +1387,9 @@ void test("deleting a published automation unpublishes it and removes its follow
     undefined,
   );
   assert.equal(await listAutomationRecipients(stateDir, automation.id, () => {}), undefined);
-  assert.deepEqual((await ok(await pub("recipient", "/automations/public"))).automations, []);
+  const unavailable = await pub("recipient", "/automations/public");
+  assert.equal(unavailable.status, 503);
+  assert.equal(await errorCode(unavailable), "public_automations_unavailable");
   assert.deepEqual(
     await runProtectedSharing(stateDir, "protectedSharing.storageUsage", 4096, () => {}),
     [],

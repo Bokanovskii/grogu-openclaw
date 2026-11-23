@@ -24,7 +24,7 @@ export type ProtectedIdentityVerifier = (request: Request) => Promise<VerifiedPr
 export const protectedAccessProofPath = "/api/protected/v1/access-proof";
 const testClientIdHeader = "x-grogu-test-client-id";
 const testClientSecretHeader = "x-grogu-test-client-secret";
-const remoteRevalidationWindowMs = 30_000;
+const remoteRevalidationWindowMs = 5 * 60_000;
 
 function denied(): never {
   throw new ProtectedError(401, "unauthorized", "Sign in again to continue.");
@@ -249,17 +249,29 @@ export function createCloudflareAccessVerifier(options: {
         }
       };
       let lastRemoteRevalidationAt: number | undefined;
+      let lastRemoteRevalidationEmail: string | undefined;
       const revalidate = async () => {
         const remoteAge =
           lastRemoteRevalidationAt === undefined ? undefined : now() - lastRemoteRevalidationAt;
-        if (remoteAge !== undefined && remoteAge >= 0 && remoteAge < remoteRevalidationWindowMs) {
-          // Cloudflare revocation may lag up to 30 seconds; local checks still run on every call.
+        const bindingInvalidated =
+          options.bindVerifiedIdentity !== undefined &&
+          lastRemoteRevalidationEmail !== undefined &&
+          boundEmails.get(subject) !== lastRemoteRevalidationEmail;
+        if (
+          remoteAge !== undefined &&
+          remoteAge >= 0 &&
+          remoteAge < remoteRevalidationWindowMs &&
+          !bindingInvalidated
+        ) {
+          // Cloudflare revocation may lag up to five minutes; local checks still run on every call.
           assertCurrent();
           return;
         }
+        let remoteEmail: string | undefined;
         if (testClient) {
           await proveTestClient(testClient, clientSecret!);
           lastRemoteRevalidationAt = now();
+          lastRemoteRevalidationEmail = remoteEmail;
           return;
         }
         assertTokenCurrent();
@@ -282,6 +294,7 @@ export function createCloudflareAccessVerifier(options: {
               ? identity.email_address
               : undefined;
         if (!testClient && email && options.bindVerifiedIdentity) {
+          remoteEmail = email;
           const allowed = options.isAllowed({ issuer: issuer.origin, subject });
           if (!allowed) {
             boundEmails.delete(subject);
@@ -299,6 +312,7 @@ export function createCloudflareAccessVerifier(options: {
         }
         assertCurrent();
         lastRemoteRevalidationAt = now();
+        lastRemoteRevalidationEmail = remoteEmail;
       };
       await revalidate();
       return {

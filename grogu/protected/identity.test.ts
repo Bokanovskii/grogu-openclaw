@@ -109,7 +109,7 @@ void test("the test client proves its credential through a fresh Access request"
   assert.doesNotMatch(first.sessionId, new RegExp(secret));
 
   current.secret = "r".repeat(64);
-  now += 20_000;
+  now += 5 * 60_000 - 10_000;
   const proofCount = verify.proofs.length;
   await assert.rejects(first.revalidate(), { status: 401 });
   assert.equal(verify.proofs.length, proofCount + 1);
@@ -195,7 +195,7 @@ void test("human identities keep cookie and identity-lookup behavior", async () 
   assert.equal(verify.proofs.length, 0);
 });
 
-void test("human identities reuse successful remote revalidation for 30 seconds", async () => {
+void test("human identities reuse successful remote revalidation for five minutes", async () => {
   let now = Date.now();
   const verify = verifier(testClientId, undefined, () => now);
   const identity = await verify(
@@ -206,12 +206,23 @@ void test("human identities reuse successful remote revalidation for 30 seconds"
   assert.equal(verify.identityFetchCount(), 1);
   await identity.revalidate();
   assert.equal(verify.identityFetchCount(), 1);
-  now += 29_999;
+  const anotherIdentity = await verify(
+    new Request(`${origin}/me`, {
+      headers: {
+        cookie: `CF_Authorization=${token({ sub: human, exp: Math.floor(now / 1000) + 3600 })}`,
+      },
+    }),
+  );
+  assert.equal(verify.identityFetchCount(), 2);
   await identity.revalidate();
-  assert.equal(verify.identityFetchCount(), 1);
-  now++;
+  await anotherIdentity.revalidate();
+  assert.equal(verify.identityFetchCount(), 2);
+  now += 5 * 60_000 - 1;
   await identity.revalidate();
   assert.equal(verify.identityFetchCount(), 2);
+  now++;
+  await identity.revalidate();
+  assert.equal(verify.identityFetchCount(), 3);
 });
 
 void test("failed and thrown remote revalidations are never reused", async () => {
@@ -245,7 +256,7 @@ void test("failed and thrown remote revalidations are never reused", async () =>
       headers: { cookie: `CF_Authorization=${token({ sub: human })}` },
     }),
   );
-  now += 30_000;
+  now += 5 * 60_000;
   remoteFailure = "throw";
   await assert.rejects(identity.revalidate(), /synthetic Access outage/u);
   remoteFailure = "wrong-identity";
@@ -341,7 +352,7 @@ void test("other service tokens and unconfigured test clients are denied", async
 
 void test("verified email binds new admission and is cached only while admission remains current", async () => {
   const subject = "11111111-1111-1111-1111-111111111111";
-  let now = Date.now();
+  const now = Date.now();
   let allowed = false;
   let approved = true;
   let bindings = 0;
@@ -372,7 +383,6 @@ void test("verified email binds new admission and is cached only while admission
   await identity.revalidate();
   assert.equal(bindings, 1);
   verify.invalidateSubject(subject);
-  now += 30_000;
   await identity.revalidate();
   assert.equal(bindings, 2);
   approved = false;

@@ -20,7 +20,7 @@ exec_command=(
   OPENCLAW_STATE_DIR="$proof/state"
   OPENCLAW_CONFIG_PATH="$proof/state/openclaw.json"
   OPENCLAW_PROTECTED_ISOLATED_TEST=1
-  node --import ./scripts/tsx.mjs --test --test-timeout=90000
+  node --experimental-test-module-mocks --import ./scripts/tsx.mjs --test --test-timeout=90000
   grogu/protected/http.test.ts
   grogu/protected/capacity.test.ts
   grogu/protected/automations-store.test.ts

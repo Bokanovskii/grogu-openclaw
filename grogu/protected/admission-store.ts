@@ -297,3 +297,63 @@ export function bindProtectedProfile(
     input: { ...input, now: Date.now() },
   });
 }
+
+export function readProtectedStorageLimit(
+  stateDir: string,
+  input: { id: string; issuer: string; ownerSubject: string },
+) {
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.storageLimit.read",
+    input,
+  });
+}
+
+export function readProtectedProfileStorageLimit(
+  stateDir: string,
+  input: { profileId: string; issuer: string },
+) {
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.storageLimit.forProfile",
+    input,
+  });
+}
+
+export function setProtectedStorageLimit(
+  stateDir: string,
+  input: {
+    id: string;
+    issuer: string;
+    ownerSubject: string;
+    expectedLimitBytes: number | null;
+    limitBytes: number | null;
+  },
+  assertCurrent: () => void,
+) {
+  const context = captureProtectedStateWorkerContext(stateDir);
+  const assertOwnerCurrent = () => {
+    context.admission.assertCurrent();
+    assertCurrent();
+  };
+  return runOpenClawStateWorkerOperation(
+    context,
+    (scope) =>
+      scope.execute({
+        type: "protectedAccess.storageLimit.set",
+        input: { ...input, now: Date.now() },
+      }),
+    {
+      assertCurrent: assertOwnerCurrent,
+      createAdmission: () => {
+        // Recheck the owner's live grant at the transaction and commit boundaries.
+        const admission = createSqliteWorkerOperationAdmission((request, grant) => {
+          assertOwnerCurrent();
+          if (request.facts !== "storage_limit") {
+            throw new Error("Storage limit mutation lost its authority.");
+          }
+          grant();
+        });
+        return { nativeLocations: [context.admission.databasePath], admission };
+      },
+    },
+  );
+}

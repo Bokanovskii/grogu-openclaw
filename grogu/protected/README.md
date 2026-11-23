@@ -125,10 +125,16 @@ state or configuration. The profile/session stores are OpenClaw's canonical
 stores inside this isolated state directory.
 
 Initialization measures free space on the state volume. It reserves a 512 MiB
-free-space floor and takes at most one-sixteenth of the remaining space, capped
-at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
-that budget. The runtime counts canonical chat/transcript bytes and files in
+free-space floor and takes one-sixteenth of the remaining space as the shared
+member budget (`globalBytes`). The default member limit (`userBytes`) is
+512 MiB, or the shared budget if that is smaller. The owner can set a different
+limit for one member; see "Member storage limits" below. The owner has no member
+limit and is not stopped by the shared budget, but the owner's data still counts
+toward it, and the free-space floor applies to everyone. When the shared budget
+is full, members get `413 quota_exceeded` with a message that names the server's
+shared storage, not their own limit. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts. It also counts
+member memory notes, even after their chats are deleted, and counts
 each saved automation definition against its owner profile and the global
 budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
 entry overhead as stored files. The runtime limits growth per operation and
@@ -150,14 +156,74 @@ earlier visible tool-call fragments in the same user turn. A child result or
 a later user turn does not complete unfinished parent output. Saved errors
 and interrupted replies keep their failure or interruption status.
 
+`GET /api/protected/v1/artifacts` lists saved widgets, fetched files, and
+generated files for the signed-in member. Send the current profile ID in
+`X-Grogu-Profile`. Each page contains at most 100 entries and an optional
+`nextCursor`. Pass that value as `cursor` to read the next page. Entries sort by
+chat update time, newest first, then chat ID, kind, and artifact ID. The
+`updatedAt` value is the chat update time, not the artifact creation time.
+Concurrent chat changes can change the order between pages.
+
+File entries use `id`, `name`, and `size`. Widget entries use `id` and `title`.
+Both include `kind`, `chatId`, `chatTitle`, and `updatedAt`. Read files through
+`GET /api/protected/v1/files/:id` and widgets through
+`GET /api/protected/v1/chats/:chatId/widgets/:id`. These routes check chat
+ownership again. File responses are downloads, not HTML pages.
+
 `GET /api/protected/v1/storage/chats` lists the signed-in member's chats by
 estimated size, largest first. Each estimate uses the same transcript, file,
 and overhead charges as the quota. `usedBytes` also counts saved automation
 definitions and transient child work. Neither is listed as a chat. `limitBytes`
-is the member's configured limit, not the host's free disk space. To delete a
+is the member's effective limit, not the host's free disk space. It is `null`
+for the owner, who has no limit. To delete a
 reviewed chat, send its `version` in `If-Match` to the existing
 `DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
 show the new total.
+
+### Member storage limits
+
+The owner reads a member's limit with
+`GET /api/protected/v1/admin/people/:id/storage-limit`, where `:id` is the
+person ID from `/admin/people`. The response has `usedBytes` (`null` before the
+member's first sign-in), the effective `limitBytes` (`null` when `exempt`),
+`defaultLimitBytes`, `customLimitBytes` (`null` for the default), `exempt`
+(`true` for the owner), `minLimitBytes` (16 MiB), `maxLimitBytes` (the shared
+budget), and an opaque `version`.
+
+To set a limit, send `PUT` with the current `version` in `If-Match` and the JSON
+body `{ "limitBytes": N }`. To restore the default, send `DELETE` with
+`If-Match`. Both return the new state. The server checks the owner's live grant
+again just before the write. Errors: `428 version_required`,
+`409 version_conflict` (reload and retry), `409 limit_exempt` (the owner),
+`400 invalid_limit` (the message names the allowed range), and
+`404 person_not_found`. The value is stored in the shared state database and is
+deleted when the person is removed. A limit below current use deletes nothing;
+it stops further growth with `413 quota_exceeded`.
+
+Existing installs keep the limits that `init` measured. To apply the current
+policy (512 MiB default, no 256 MiB shared cap), run the following command and
+then restart the listener:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
+```
+
+### Member memory
+
+Grogu and Travel chats can save and search the signed-in member's memory. Notes
+are shared across that member's chats, not with other members or personal Grogu.
+The service encrypts notes as member-owned files; the running service and its
+administrator can read them. Search uses a temporary in-memory keyword index,
+not a paid embedding service. Existing chats are not backfilled.
+
+Clients opt in with `x-alcove-capabilities: memory-v1`; `/me` then reports
+`capabilities.memory.review`. To review notes, send `x-grogu-profile` with the
+current profile ID to `GET /api/protected/v1/memory`, then read a listed note at
+`GET /api/protected/v1/memory/:id`. List entries contain `id`, `name`, `bytes`,
+and `updatedAt` in epoch milliseconds; reads return `{ note, text }`. Note IDs
+are opaque and change when the service restarts. Refresh the list after a 404.
+An account mismatch returns 403 `profile_mismatch`; an unavailable review owner
+returns 503 `unavailable`.
 
 `PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
 Send the current chat `version` in `If-Match` and a JSON body with `title`.
@@ -282,7 +348,16 @@ or configuration from personal Grogu.
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
 levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
-available to that account. The token is used for that request only. Turns may
+available to that account. Clients can request the optional account-reported
+`vendor` on models with `X-Alcove-Capabilities: model-vendor-v1`; an absent
+vendor is unknown. Clients can request `model-context-v1` to receive
+`contextSizes` for Copilot models with distinct provider-reported input limits.
+The options include a default and a warning when the longer context can cost more
+or cache pricing is unknown. The shorter budget is the default in either case.
+Turns can send a listed `contextSize`. OpenClaw uses it as a local context budget,
+with room reserved for output. It is not a provider mode or a billing guarantee.
+An unavailable size returns `context_size_unavailable`. Omission retains the
+existing budget. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
@@ -290,6 +365,8 @@ An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
+With `model-context-v1`, usage also includes the effective `contextSize` for a
+completed turn that selected one. Older replies can omit it.
 Both include optional `inputTokens` and `outputTokens` for the latest parent
 turn, summed from its saved provider calls. The existing `contextTokens` remains
 the latest call's context size. Unknown counters and adapter-default zeros are
@@ -444,10 +521,9 @@ listener again only after maintenance succeeds.
 
 ## Protected chat agents
 
-`grogu/protected/agents.ts` owns the agent catalog. Every agent gets the same
-native tools, the same member-scoped access, and the same prompt header. Agents
-differ only in their intent instructions, packaged skills, example prompts, and
-presentation hints for the client.
+`grogu/protected/agents.ts` owns the agent catalog. Agents share member-scoped
+access and a prompt header. Their available skill reader, intent instructions,
+packaged skills, example prompts, and presentation hints can differ.
 
 - **Grogu** (`grogu`) is the default for new chats. It is the generic Alcove
   agent with no specialty. Its prompt lists the other selectable agents, and it
@@ -491,9 +567,23 @@ The command removes the file only if it is the generated default. It keeps an
 edited or linked file and refuses without printing its content. If the file is
 missing, the command does nothing. It refuses while the listener is running.
 
+To print a bounded metadata-only report of possible archive staging files, run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run archive-residue
+```
+
+The command derives the configured archive and cold roots. It refuses while the
+listener or another maintenance operation owns protected state. Every candidate
+is reported as `unknown`; writer quiescence is not established, and the command
+does not read transcript contents or delete files. This report does not authorize
+cleanup.
+
 Skills live in `grogu/protected/agent-skills/<id>/SKILL.md`, with frontmatter
 `name` and `description`. A `{{template}}` marker is replaced with that
-directory's `template.html`. The runtime archive must include
+directory's `template.html`. The prompt includes only the agent's skill names
+and descriptions; `skills_read` loads the selected skill's complete guidance
+on request without granting general filesystem reads. The runtime archive must include
 `grogu/protected/agent-skills/`; the catalog fails to load without it. The
 service owner can add agents through the `agentExtensions` option to
 `createProtectedHttp`. Extension IDs must be unique.

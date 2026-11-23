@@ -1,7 +1,11 @@
 /** Tests selected-owner fallback, caller revocation, and legacy compatibility at the resolver. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../shared/deferred.js";
-import { delegateMemoryAudience, resolveMemoryAudienceFromEntry } from "./memory-audience.js";
+import {
+  delegateMemoryAudience,
+  mintMemberMemoryAudience,
+  resolveMemoryAudienceFromEntry,
+} from "./memory-audience.js";
 import { fakeSessionOwner } from "./memory-audience.test-support.js";
 import type { MemoryCallerContext, MemoryProviderHandle } from "./memory-provider-types.js";
 import type {
@@ -135,6 +139,47 @@ async function ownerAudience(sessionKey: string) {
   return { ...resolution, entry };
 }
 describe("provider-neutral memory resolver", () => {
+  it("does not open a legacy agent index for a member audience", async () => {
+    const old = legacy(manager());
+    state.capability.runtime = old;
+    const entry = {
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      lifecycleRevision: "generation-1",
+      updatedAt: 1,
+      chatType: "direct" as const,
+    };
+    fakeSessionOwner.rows.set("agent:main:chat", entry);
+    const grant = await mintMemberMemoryAudience({
+      agentId: "main",
+      sessionKey: "agent:main:chat",
+      sessionId: entry.sessionId,
+      lifecycleRevision: entry.lifecycleRevision,
+      storePath: "/tmp/openclaw-memory-provider/main.sqlite",
+      workspaceKey: "member-workspace",
+      assertOwnerCurrent: () => {},
+    });
+    try {
+      const result = await getActiveMemoryProviderCore({
+        cfg: {},
+        agentId: "main",
+        context: {
+          authority: {
+            kind: "session",
+            sessionKey: "agent:main:chat",
+            sandboxed: true,
+            audience: grant.audience,
+          },
+          assertCurrent: () => {},
+        },
+      });
+      expect(result.provider).toBeNull();
+      expect(result.error).toContain("audience-aware provider");
+      expect(old.getMemorySearchManager).not.toHaveBeenCalled();
+    } finally {
+      grant.release();
+    }
+  });
+
   it("rejects a minted audience used by a different session", async () => {
     const { audience } = await ownerAudience("agent:main:owner");
     const openProvider = vi.fn(async () => ({ provider: provider() }));

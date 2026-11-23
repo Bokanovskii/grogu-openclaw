@@ -13,6 +13,7 @@ import {
 import {
   asPositiveSafeInteger,
   normalizeOptionalLowercaseString,
+  normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   resolveCopilotModelCompat,
@@ -86,6 +87,12 @@ type CopilotApiModelEntry = {
   policy?: {
     state?: string;
   };
+  billing?: {
+    token_prices?: {
+      default?: CopilotPriceTier;
+      long_context?: CopilotPriceTier;
+    };
+  };
   supported_endpoints?: string[];
   capabilities?: {
     type?: string;
@@ -103,16 +110,94 @@ type CopilotApiModelEntry = {
   };
 };
 
+type CopilotPriceTier = {
+  input_price?: number;
+  output_price?: number;
+  cache_read_price?: number;
+  cache_price?: number;
+  cache_write_price?: number;
+  max_prompt_tokens?: number;
+  context_max?: number;
+};
+
+type CopilotContextSizes = {
+  options: [number, number];
+  default: number;
+  longContextSurcharge: boolean;
+};
+
 type CopilotModelSelectionMetadata = {
   category?: string;
+  vendor?: string;
   pickerEnabled: boolean;
   policyState?: string;
   preview: boolean;
   streaming?: boolean;
   toolCalls: boolean;
+  contextSizes?: CopilotContextSizes;
 };
 
 const copilotModelSelectionMetadata = new WeakMap<object, CopilotModelSelectionMetadata>();
+
+export function getCopilotCatalogVendor(model: CopilotCatalogModel): string | undefined {
+  return copilotModelSelectionMetadata.get(model)?.vendor;
+}
+
+export function getCopilotCatalogContextSizes(
+  model: CopilotCatalogModel,
+): CopilotContextSizes | undefined {
+  return copilotModelSelectionMetadata.get(model)?.contextSizes;
+}
+
+function resolveCopilotContextSizes(entry: CopilotApiModelEntry): CopilotContextSizes | undefined {
+  const prices = entry.billing?.token_prices;
+  const standard = prices?.default;
+  const long = prices?.long_context;
+  const standardMax = asPositiveSafeInteger(standard?.max_prompt_tokens ?? standard?.context_max);
+  const longMax = asPositiveSafeInteger(long?.max_prompt_tokens ?? long?.context_max);
+  const nativeMax = asPositiveSafeInteger(entry.capabilities?.limits?.max_context_window_tokens);
+  if (
+    !standard ||
+    !long ||
+    !standardMax ||
+    !longMax ||
+    !nativeMax ||
+    standardMax >= longMax ||
+    longMax > nativeMax
+  ) {
+    return undefined;
+  }
+  const fields = (tier: CopilotPriceTier) => [
+    tier.input_price,
+    tier.output_price,
+    tier.cache_read_price ?? tier.cache_price,
+    tier.cache_write_price,
+  ];
+  const basePrices = fields(standard);
+  const longPrices = fields(long);
+  if (
+    basePrices
+      .slice(0, 2)
+      .some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0) ||
+    longPrices
+      .slice(0, 2)
+      .some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0) ||
+    [...basePrices, ...longPrices].some(
+      (value) => value !== undefined && (!Number.isFinite(value) || value < 0),
+    )
+  ) {
+    return undefined;
+  }
+  const longContextSurcharge = longPrices.some((price, index) => {
+    const base = basePrices[index];
+    return price === undefined || base === undefined || price > base;
+  });
+  return {
+    options: [standardMax, longMax],
+    default: longContextSurcharge ? standardMax : longMax,
+    longContextSurcharge,
+  };
+}
 
 export function isCopilotCatalogModelVisible(model: CopilotCatalogModel): boolean {
   const metadata = copilotModelSelectionMetadata.get(model);
@@ -293,11 +378,13 @@ function mapCopilotApiModelToDefinition(
   };
   copilotModelSelectionMetadata.set(definition, {
     category: normalizeOptionalLowercaseString(entry.model_picker_category),
+    vendor: normalizeOptionalString(entry.vendor),
     pickerEnabled: entry.model_picker_enabled === true,
     policyState: normalizeOptionalLowercaseString(entry.policy?.state),
     preview: entry.preview === true,
     streaming: supports?.streaming,
     toolCalls: supports?.tool_calls === true,
+    contextSizes: resolveCopilotContextSizes(entry),
   });
   return definition;
 }

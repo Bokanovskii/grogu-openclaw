@@ -5,4 +5,5 @@ export type MemoryFlushToolRunContext = {
   persistenceToolNames: readonly string[];
   lookupToolNames?: readonly string[];
   recordPersistenceToolSuccess: () => void;
+  recordPersistenceToolFailure?: () => void;
 };

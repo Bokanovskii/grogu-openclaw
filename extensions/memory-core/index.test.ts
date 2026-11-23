@@ -9,6 +9,7 @@ import type {
   AnyAgentTool,
   MemoryPluginRuntime,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { Value } from "typebox/value";
@@ -79,11 +80,14 @@ function registerMemoryCoreRuntime(): MemoryPluginRuntime {
   return runtime;
 }
 
-function captureMemoryModelContract(initialConfig: OpenClawConfig) {
+function captureMemoryModelContract(
+  initialConfig: OpenClawConfig,
+  contextOverrides: Partial<OpenClawPluginToolContext> = {},
+) {
   let promptBuilder:
     | NonNullable<Parameters<OpenClawPluginApi["registerMemoryCapability"]>[0]["promptBuilder"]>
     | undefined;
-  const factories = new Map<string, (ctx: unknown) => unknown>();
+  const factories = new Map<string, Array<(ctx: OpenClawPluginToolContext<2>) => unknown>>();
   plugin.register(
     createTestPluginApi({
       config: initialConfig,
@@ -93,9 +97,8 @@ function captureMemoryModelContract(initialConfig: OpenClawConfig) {
       },
       registerTool(factory, options) {
         for (const name of options?.names ?? []) {
-          if (typeof factory === "function") {
-            factories.set(name, factory as (ctx: unknown) => unknown);
-          }
+          const create = typeof factory === "function" ? factory : factory.create;
+          factories.set(name, [...(factories.get(name) ?? []), create]);
         }
       },
     }),
@@ -104,11 +107,16 @@ function captureMemoryModelContract(initialConfig: OpenClawConfig) {
     agentId: "main",
     config: initialConfig,
     getRuntimeConfig: () => initialConfig,
+    assertInvocationCurrent() {},
+    ...contextOverrides,
   };
-  const search = factories.get("memory_search")?.(context) as AnyAgentTool | undefined;
-  const get = factories.get("memory_get")?.(context) as
-    | { description: string; parameters: unknown }
-    | undefined;
+  const resolve = (name: string) =>
+    factories
+      .get(name)
+      ?.map((factory) => factory(context))
+      .find(Boolean) as AnyAgentTool | undefined;
+  const search = resolve("memory_search");
+  const get = resolve("memory_get");
   if (!search || !get || !promptBuilder) {
     throw new Error("expected memory model contract");
   }
@@ -116,6 +124,25 @@ function captureMemoryModelContract(initialConfig: OpenClawConfig) {
 }
 
 describe("buildPromptSection", () => {
+  it("does not fall back to agent memory for a member-private audience", async () => {
+    const { search, get } = captureMemoryModelContract(
+      { agents: { entries: { main: {} } } },
+      {
+        memoryAudience: {
+          kind: "member-private",
+          agentId: "main",
+          workspaceKey: "member-a",
+        },
+      },
+    );
+    await expect(search.execute("search", { query: "private" })).rejects.toThrow(
+      "Member memory authority is unavailable",
+    );
+    await expect(get.execute("get", { path: "MEMORY.md" })).rejects.toThrow(
+      "Member memory authority is unavailable",
+    );
+  });
+
   it("prepares explicitly owned memory tools without resolving the system agent", () => {
     let systemAgentReads = 0;
     const config: OpenClawConfig = {

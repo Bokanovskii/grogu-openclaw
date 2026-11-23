@@ -123,6 +123,41 @@ describe("plugin tool declaration membership", () => {
 });
 
 describe("versioned plugin tool authority", () => {
+  it("only exposes runtime bindings keyed to the current plugin", () => {
+    const ownBinding = { read: () => "member-private" };
+    const foreignBinding = { write: () => "other-plugin" };
+    const { entry, registry } = register(() => null);
+    const context = createPluginToolFactoryContext({
+      entry,
+      registry,
+      context: {
+        toolRuntimeBindings: {
+          [entry.pluginId]: ownBinding,
+          "other-plugin": foreignBinding,
+        },
+      },
+    });
+
+    const ownBindingFromContext = context.toolRuntimeBindings?.[entry.pluginId];
+    expect(ownBindingFromContext).toBeDefined();
+    expect(
+      typeof ownBindingFromContext === "object" &&
+        ownBindingFromContext !== null &&
+        "read" in ownBindingFromContext &&
+        typeof ownBindingFromContext.read === "function"
+        ? ownBindingFromContext.read()
+        : undefined,
+    ).toBe("member-private");
+    expect(context.toolRuntimeBindings).not.toHaveProperty("other-plugin");
+
+    const foreignOnlyContext = createPluginToolFactoryContext({
+      entry,
+      registry,
+      context: { toolRuntimeBindings: { "other-plugin": foreignBinding } },
+    });
+    expect(foreignOnlyContext.toolRuntimeBindings).toBeUndefined();
+  });
+
   it.each([false, true])(
     "does not promote legacy continuation factories, preserving direct owner=%s",
     (directOwner) => {

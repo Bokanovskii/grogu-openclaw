@@ -1,11 +1,10 @@
 import { performance } from "node:perf_hooks";
-import { telemetryRound } from "../../src/agents/model-request-telemetry-metadata.js";
-
 type Phase =
   | "admissionMs"
   | "providerRequestStartMs"
   | "firstProviderOutputMs"
   | "firstClientVisibleOutputMs";
+export type ProtectedTurnTiming = Record<Phase, number | null> & { completionMs: number };
 
 /** Only elapsed times and fixed outcomes leave the protected turn's timing owner. */
 export function createProtectedTurnTiming(startedAt: number) {
@@ -15,12 +14,20 @@ export function createProtectedTurnTiming(startedAt: number) {
     firstProviderOutputMs: null,
     firstClientVisibleOutputMs: null,
   };
-  const elapsed = () => telemetryRound(performance.now() - startedAt);
+  let admittedAt: number | undefined;
   let accessChecks = 0;
   let accessValidationMs = 0;
   return {
     mark: (phase: Phase) => {
-      phases[phase] ??= elapsed();
+      const now = performance.now();
+      if (phase === "admissionMs") {
+        if (admittedAt === undefined) {
+          phases.admissionMs = Math.round(now - startedAt);
+          admittedAt = now;
+        }
+      } else {
+        phases[phase] ??= Math.round(now - (admittedAt ?? startedAt));
+      }
     },
     accessValidation() {
       const checkingAt = performance.now();
@@ -30,16 +37,20 @@ export function createProtectedTurnTiming(startedAt: number) {
       };
     },
     finish(outcome: "complete" | "failed" | "interrupted") {
+      const result = {
+        ...phases,
+        completionMs: Math.round(performance.now() - (admittedAt ?? startedAt)),
+      };
       console.info(
         "[protected-turn-timing]",
         JSON.stringify({
-          ...phases,
+          ...result,
           accessChecks,
-          accessValidationMs: telemetryRound(accessValidationMs),
-          completionMs: elapsed(),
+          accessValidationMs: Math.round(accessValidationMs),
           outcome,
         }),
       );
+      return result satisfies ProtectedTurnTiming;
     },
   };
 }

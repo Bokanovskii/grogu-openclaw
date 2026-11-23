@@ -71,6 +71,7 @@ export function withThinking(model: ProtectedModel, catalogEntry?: ThinkingCatal
 export async function fetchProtectedCopilotModels(
   credential: { accessToken: string; expiresAt?: number },
   authority: { signal: AbortSignal; revalidate: () => Promise<void> },
+  options?: { includeVendor?: boolean; includeContextSizes?: boolean },
 ): Promise<Array<{ model: ProtectedModel; definition: CatalogModel; baseUrl: string }>> {
   if (credential.expiresAt !== undefined && credential.expiresAt <= Date.now()) {
     throw new ProtectedError(
@@ -100,21 +101,29 @@ export async function fetchProtectedCopilotModels(
       signal: authority.signal,
     });
     await authority.revalidate();
-    return catalog.filter(api.isCopilotCatalogModelVisible).map((definition) => ({
-      model: withThinking(
-        {
-          provider: "github-copilot",
-          id: definition.id,
-          label: definition.name,
-          ...(definition.contextWindow === undefined
-            ? {}
-            : { contextWindow: definition.contextWindow }),
-        },
-        { ...definition, provider: "github-copilot" },
-      ),
-      definition,
-      baseUrl: auth.baseUrl,
-    }));
+    return catalog.filter(api.isCopilotCatalogModelVisible).map((definition) => {
+      const vendor = options?.includeVendor ? api.getCopilotCatalogVendor(definition) : undefined;
+      const contextSizes = options?.includeContextSizes
+        ? api.getCopilotCatalogContextSizes(definition)
+        : undefined;
+      return {
+        model: withThinking(
+          {
+            provider: "github-copilot",
+            id: definition.id,
+            label: definition.name,
+            ...(vendor ? { vendor } : {}),
+            ...(contextSizes ? { contextSizes } : {}),
+            ...(definition.contextWindow === undefined
+              ? {}
+              : { contextWindow: definition.contextWindow }),
+          },
+          { ...definition, provider: "github-copilot" },
+        ),
+        definition,
+        baseUrl: auth.baseUrl,
+      };
+    });
   } catch (error) {
     await authority.revalidate();
     if (

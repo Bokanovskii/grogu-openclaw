@@ -186,6 +186,46 @@ quiet scans with a short status line, because native scheduling records a silent
 `NO_REPLY` after a failed tool call as a failed run. Explicit owner requests
 still receive useful answers.
 
+## Alcove feedback and usage
+
+Alcove members can rate their own saved replies and privately report a problem.
+A report requires explicit evidence consent, sets the reply's rating to down,
+and notifies the configured owner with only `{tag:"issue-report"}`. Submitting
+the same report ID again returns the original report; a second report for the
+same reply is rejected.
+
+The runtime stores the report description with the existing protected-storage
+codec. It stores evidence references, not copied prompts, replies, sources,
+widgets, or files. The owner resolves evidence from the submitting member's
+authorized saved reply; only file references, names, and sizes proven to belong
+to that turn are included. This includes newly generated HTML files, using the
+same IDs and display names as the artifact library. File HTML is not included;
+widget evidence remains the saved reply's widget IDs and titles.
+Descriptions and resolved evidence use the existing secret redactor. Ordinary
+members cannot read other members' ratings, owner reports, report assets, or
+cross-user telemetry.
+
+Detailed telemetry currently covers protected chat turns and their observed
+model requests, not automation or other feature runs. It records proven member,
+agent, provider and model attribution, outcome, token/cache usage, supported
+reasoning-summary character counts, and observed timing. Missing measurements
+remain `null`; unattributed turns remain in totals. Routine telemetry does not
+capture prompts, assets, credentials, or hidden reasoning. Historical data is
+not reconstructed.
+
+Feedback/report tables are created lazily through the existing state worker.
+Reports and detailed telemetry expire after 90 days through native cleanup;
+their storage counts toward the existing quota. Chat deletion removes ratings
+and evidence references while retaining report descriptions/counts and
+content-free run metadata until expiry. Member removal also removes ratings,
+disables evidence, clears run references, and replaces the stored member label.
+No separate cleanup scheduler or external issue/analytics service is used.
+
+The feedback client opts in with `X-Alcove-Capabilities: feedback-v1`; `/me`
+adds feedback and owner-only telemetry capabilities only for that opt-in.
+Existing clients retain their original `/me` shape. All `/admin/reports` and
+`/admin/telemetry` routes revalidate configured-owner authority server-side.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:

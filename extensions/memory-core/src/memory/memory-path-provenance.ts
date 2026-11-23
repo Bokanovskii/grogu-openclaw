@@ -6,6 +6,7 @@ import type {
   MemorySource,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { readMemoryArtifactProvenance } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import { isCuratedMemoryRoot } from "./memory-path-classification.js";
 
 type MemoryPathClassification = {
   curatedRoot: boolean;
@@ -55,9 +56,7 @@ export async function resolveMemoryPathClassification(params: {
     relativePath = path.relative(workspacePath, filePath).replaceAll(path.sep, "/");
   }
   const segments = relativePath.split("/");
-  const curatedRoot =
-    segments.length === 1 &&
-    (segments[0] === "MEMORY.md" || segments[0] === "memory.md" || segments[0] === "USER.md");
+  const curatedRoot = isCuratedMemoryRoot(relativePath);
   if (
     (segments.length === 1 && (segments[0] === "DREAMS.md" || segments[0] === "dreams.md")) ||
     (segments[0] === "memory" && (segments[1] === "dreaming" || segments[1] === ".dreams"))

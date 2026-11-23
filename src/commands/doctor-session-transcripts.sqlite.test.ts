@@ -197,6 +197,7 @@ describe("doctor session transcript repair", () => {
       cfg,
       env,
       mode: "doctor-fix",
+      beforePersistentApply: expect.any(Function),
     });
     expect(repairLegacySessionWorktreeWorkspaces).toHaveBeenCalledWith({
       apply: true,

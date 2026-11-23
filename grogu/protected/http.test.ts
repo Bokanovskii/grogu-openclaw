@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promis
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { after, before as beforeTests, test } from "node:test";
+import { after, before as beforeTests, mock, test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ProtectedAgentCatalogSchema,
@@ -15,16 +15,27 @@ import {
   ProtectedAutomationDraftValidationSchema,
   ProtectedAutomationListResponseSchema,
   ProtectedAutomationResponseSchema,
+  ProtectedMeSchema,
+  type ProtectedAutomationDraft,
+  ProtectedMemoryListResponseSchema,
+  ProtectedMemoryReadResponseSchema,
   type ProtectedModel,
   type ProtectedPeople,
 } from "@openclaw/gateway-protocol/protected";
 import { Value } from "typebox/value";
+import type { ProtectedAuthoringTurnEvent } from "../../packages/gateway-protocol/src/protected-authoring.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
+import { createCanvasDocument } from "../../src/canvas/documents.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
-import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
+import {
+  authorizedUserFilesDirectory,
+  createAuthorizedUserFiles,
+} from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
 import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
+import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
+import { createProtectedAutomationWithAdmission } from "../../src/state/protected-automation-operations.js";
 import {
   getCanonicalUserPreferences,
   setCanonicalUserPreferences,
@@ -34,12 +45,21 @@ import {
   mergeCanonicalUserProfiles,
   setCanonicalUserProfileDisplayName,
 } from "../../src/state/user-profile-writes.js";
-import { createStorageValueEncryption } from "../../src/storage/encryption.js";
-import { addProtectedSubject } from "./admission-store.js";
-import { protectedResearchAgent, type ProtectedAgentExtension } from "./agents.js";
+import {
+  createStorageValueEncryption,
+  isStorageValueEncrypted,
+} from "../../src/storage/encryption.js";
+import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
+import {
+  protectedAgentTools,
+  protectedResearchAgent,
+  type ProtectedAgentExtension,
+} from "./agents.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
+import { createProtectedMemberMemory } from "./member-memory.js";
+import { createProtectedMemoryReview } from "./memory-review.js";
 import { withThinking } from "./models.js";
 import { createProviderRelay } from "./provider-relay.js";
 import { closeProtectedServer, createProtectedServer } from "./server.js";
@@ -56,6 +76,242 @@ const protectedCleanupAgent: ProtectedAgentExtension = {
   instructions: "Create a widget so transient files are cleaned.",
   selectable: true,
 };
+
+void test("Protected turns load skills on request and retain credentials during overflow recovery", async (t) => {
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  assert.ok(
+    stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
+  );
+  protectedTestStateDirs.add(stateDir);
+  const usersDir = path.join(stateDir, "users");
+  const workspaceDir = path.join(stateDir, "workspace");
+  const agentDir = path.join(stateDir, "agents", "protected", "agent");
+  await Promise.all(
+    [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
+  );
+  const requests: Array<{
+    authorization?: string;
+    model?: string;
+    messages: Array<{ role: string; content?: unknown }>;
+    tools?: Array<{ function: { name: string } }>;
+  }> = [];
+  let overflow = false;
+  const previousAmbientKey = process.env.SPARKY_API_KEY;
+  process.env.SPARKY_API_KEY = "synthetic-ambient-key";
+  t.after(() => {
+    if (previousAmbientKey === undefined) {
+      delete process.env.SPARKY_API_KEY;
+    } else {
+      process.env.SPARKY_API_KEY = previousAmbientKey;
+    }
+  });
+  const provider = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      requests.push({ ...body, authorization: request.headers.authorization });
+      const messages = JSON.stringify(body.messages);
+      if (!overflow && messages.includes("Trigger synthetic overflow")) {
+        overflow = true;
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      const summary = messages.includes("context summarization assistant");
+      const readSkill =
+        !summary &&
+        messages.includes("Make a travel dashboard") &&
+        !body.messages.some((message: { role: string }) => message.role === "tool");
+      const delta = readSkill
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "skill-call",
+                type: "function",
+                function: { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
+              },
+            ],
+          }
+        : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}\n\n`,
+      );
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta: {}, finish_reason: readSkill ? "tool_calls" : "stop" }],
+        })}\n\n`,
+      );
+      response.end("data: [DONE]\n\n");
+    })().catch(() => response.destroy());
+  });
+  const providerOrigin = await listen(provider);
+  t.after(() => close(provider));
+  const serviceConfig = protectedOpenClawConfig(
+    stateDir,
+    fileURLToPath(new URL("../..", import.meta.url)),
+  );
+  const config: OpenClawConfig = {
+    ...serviceConfig,
+    agents: {
+      ...serviceConfig.agents,
+      defaults: {
+        ...serviceConfig.agents?.defaults,
+        compaction: { mode: "default", keepRecentTokens: 1, postIndexSync: "off" },
+      },
+      entries: { protected: { workspace: workspaceDir, agentDir } },
+    },
+    models: {
+      mode: "replace",
+      providers: {
+        sparky: {
+          baseUrl: `${providerOrigin}/v1`,
+          api: "openai-completions",
+          request: { allowPrivateNetwork: true },
+          models: [
+            {
+              id: "synthetic",
+              name: "Synthetic",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 32_000,
+              maxTokens: 1024,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://synthetic.example",
+    stateDir,
+    usersRoot: await root(usersDir),
+    encryption,
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
+    directory: { issuer: "https://synthetic.example", allowedSubjects: ["synthetic-discovery"] },
+    verifyIdentity: async () => ({
+      issuer: "https://synthetic.example",
+      subject: "synthetic-discovery",
+      kind: "human",
+      expiresAt,
+      sessionId: createHash("sha256").update("synthetic-discovery-session").digest("hex"),
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    turns: createCanonicalProtectedTurns({
+      config,
+      workspaceDir,
+      agentDir,
+      models: [{ provider: "sparky", id: "synthetic", label: "Synthetic" }],
+      resolveSparkyKey: async () => "synthetic-request-only-key",
+    }),
+  });
+  const server = createProtectedServer(origin, app.fetch);
+  const url = await listen(server);
+  t.after(() => closeProtectedServer(server, app, stateDir));
+  const call = (route: string, init?: RequestInit) =>
+    fetch(`${url}/api/protected/v1${route}`, {
+      ...init,
+      headers: { origin, "content-type": "application/json", ...init?.headers },
+    });
+  const me = await call("/me");
+  assert.equal(me.status, 200, await me.clone().text());
+  const { user } = await me.json();
+  const created = await call("/chats", { method: "POST", body: "{}" });
+  assert.equal(created.status, 200, await created.clone().text());
+  const { chat } = await created.json();
+  const sibling = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Hello"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await sibling.text(), /"type":"done"/u);
+  assert.doesNotMatch(JSON.stringify(requests[0]?.messages), /## Available skills/u);
+  const readChat = await (await call(`/chats/${chat.id}`)).json();
+  assert.equal(
+    (
+      await call(`/chats/${chat.id}/agent`, {
+        method: "PATCH",
+        headers: { "if-match": readChat.chat.version },
+        body: '{"selectedAgentId":"travel"}',
+      })
+    ).status,
+    200,
+  );
+  const firstTravel = requests.length;
+  const travel = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Make a travel dashboard"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  assert.match(await travel.text(), /"type":"done"/u);
+  const discovery = JSON.stringify(requests[firstTravel]?.messages);
+  const loaded = JSON.stringify(requests[firstTravel + 1]?.messages);
+  assert.match(
+    discovery,
+    /Travel dashboard: Plan a trip step by step and show it as a live HTML travel dashboard/u,
+  );
+  assert.doesNotMatch(discovery, /Work like a careful travel planner/u);
+  assert.match(loaded, /Work like a careful travel planner/u);
+  const toolNames = requests[firstTravel]?.tools?.map((tool) => tool.function.name);
+  assert.ok(toolNames);
+  assert.ok(toolNames.includes("skills_read"));
+  assert.ok(!toolNames.includes("create_artifact"));
+  const allowedTools = new Set<string>(["route_to_agent", ...protectedAgentTools]);
+  assert.ok(toolNames.every((name) => allowedTools.has(name)));
+
+  const overflowStart = requests.length;
+  const recovered = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Trigger synthetic overflow"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  const recoveredTrace = await recovered.text();
+  const recoveryRequests = requests.slice(overflowStart);
+  assert.ok(overflow);
+  const summaryRequest = recoveryRequests.find((request) =>
+    JSON.stringify(request.messages).includes("context summarization assistant"),
+  );
+  assert.ok(summaryRequest, "expected a summary request after the overflow");
+  assert.equal(recoveryRequests[0]?.authorization, "Bearer synthetic-request-only-key");
+  assert.equal(summaryRequest.authorization, "Bearer synthetic-request-only-key");
+  assert.equal(summaryRequest.model, "synthetic");
+  assert.match(recoveredTrace, /"type":"done"/u);
+});
 
 beforeTests(async () => {
   const command = "~/.local/bin/heavy -- bash grogu/protected/test-http-isolated.sh";
@@ -130,25 +386,67 @@ function responsesReply(
     output_tokens: 1,
     total_tokens: 4,
   },
+  summary?: string,
 ) {
   const content = { type: "output_text", text, annotations: [] };
   const message = { type: "message", id: "msg_family", role: "assistant", content: [content] };
+  const part = { type: "summary_text", text: summary ?? "" };
+  const reasoning = { type: "reasoning", id: "rs_family", summary: [part] };
+  const at = summary === undefined ? 0 : 1;
   return providerSse([
-    { type: "response.output_item.added", output_index: 0, item: { ...message, content: [] } },
+    ...(summary === undefined
+      ? []
+      : [
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { ...reasoning, summary: [] },
+          },
+          {
+            type: "response.reasoning_summary_part.added",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            part: { ...part, text: "" },
+          },
+          {
+            type: "response.reasoning_summary_text.delta",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            delta: summary,
+          },
+          {
+            type: "response.reasoning_summary_text.done",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            text: summary,
+          },
+          {
+            type: "response.reasoning_summary_part.done",
+            item_id: "rs_family",
+            output_index: 0,
+            summary_index: 0,
+            part,
+          },
+          { type: "response.output_item.done", output_index: 0, item: reasoning },
+        ]),
+    { type: "response.output_item.added", output_index: at, item: { ...message, content: [] } },
     {
       type: "response.content_part.added",
-      output_index: 0,
+      output_index: at,
       content_index: 0,
       part: { ...content, text: "" },
     },
-    { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
-    { type: "response.output_item.done", output_index: 0, item: message },
+    { type: "response.output_text.delta", output_index: at, content_index: 0, delta: text },
+    { type: "response.output_item.done", output_index: at, item: message },
     {
       type: "response.completed",
       response: {
         id: "resp_family",
         status: "completed",
-        output: [message],
+        output: [...(summary === undefined ? [] : [reasoning]), message],
         ...(usage ? { usage } : {}),
       },
     },
@@ -216,6 +514,18 @@ void test("protected responses use neutral service wording", async (t) => {
     disclosure,
     "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.",
   );
+  const memoryCapability = await app.fetch(
+    new Request(`${origin}/api/protected/v1/me`, {
+      headers: { "x-alcove-capabilities": "profile-v1,memory-v1" },
+    }),
+  );
+  assert.deepEqual((await memoryCapability.json()).capabilities.memory, { review: false });
+  const unavailableMemory = await app.fetch(
+    new Request(`${origin}/api/protected/v1/memory`, {
+      headers: { "x-grogu-profile": user.id },
+    }),
+  );
+  assert.equal(unavailableMemory.status, 503);
   for (const route of ["/providers/github-copilot/connect", "/providers/openai/renew"]) {
     const result = await app.fetch(
       new Request(`${origin}/api/protected/v1${route}`, {
@@ -240,6 +550,686 @@ void test("protected responses use neutral service wording", async (t) => {
     ],
   );
 });
+
+void test("member memory review reads only the current member's encrypted notes", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-memory-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    encryption,
+    memoryReview: createProtectedMemoryReview(),
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [],
+      async run() {},
+      async steer() {
+        assert.fail("This fixture does not steer turns.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, headers: Record<string, string> = {}) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        headers: { origin, cookie: user, ...headers },
+      }),
+    );
+  const legacyMe = await (await call("alice", "/me")).json();
+  assert.equal(legacyMe.capabilities.memory, undefined);
+  const meResponse = await call("alice", "/me", {
+    "x-alcove-capabilities": "profile-v1,memory-v1",
+  });
+  assert.equal(meResponse.status, 200, await meResponse.clone().text());
+  const me = await meResponse.json();
+  assert.deepEqual(me.capabilities.memory, { review: true });
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const owned = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: me.user.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  t.after(() => owned.dispose());
+  const content = `Synthetic private memory: ${"x".repeat(13_000)}`;
+  await owned.write("member-memory/memory/2026-01-01.md", content);
+  const aliceHeaders = { "x-grogu-profile": me.user.id };
+  const list = await (await call("alice", "/memory", aliceHeaders)).json();
+  assert.ok(Value.Check(ProtectedMemoryListResponseSchema, list));
+  assert.equal(list.notes.length, 1);
+  const read = await (await call("alice", `/memory/${list.notes[0].id}`, aliceHeaders)).json();
+  assert.ok(Value.Check(ProtectedMemoryReadResponseSchema, read));
+  assert.equal(read.text, content);
+  const bobHeaders = { "x-grogu-profile": bob.id };
+  assert.deepEqual((await (await call("bob", "/memory", bobHeaders)).json()).notes, []);
+  assert.equal((await call("bob", `/memory/${list.notes[0].id}`, bobHeaders)).status, 404);
+  assert.equal((await call("bob", "/memory", aliceHeaders)).status, 403);
+});
+
+void test("member memory follows the authenticated member across protected chats", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "cross-chat");
+});
+
+void test("a failed member memory flush stops overflow compaction", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "overflow-failure");
+});
+
+void test("in-turn compaction flushes member memory before summarizing", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "threshold");
+});
+
+async function exerciseMemberMemoryBoundary(
+  t: TestContext,
+  scenario: "cross-chat" | "overflow-failure" | "threshold",
+) {
+  const stateRoot = process.env.OPENCLAW_STATE_DIR;
+  assert.ok(
+    stateRoot &&
+      path.relative(path.resolve(".artifacts"), stateRoot).startsWith("protected-proof-"),
+  );
+  const stateDir = path.join(stateRoot, scenario);
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  t.after(() => {
+    process.env.OPENCLAW_STATE_DIR = stateRoot;
+  });
+  protectedTestStateDirs.add(stateDir);
+  const usersDir = path.join(stateDir, "users");
+  const workspaceDir = path.join(stateDir, "workspace");
+  const agentDir = path.join(stateDir, "agents", "protected", "agent");
+  await Promise.all(
+    [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
+  );
+  await writeFile(path.join(workspaceDir, "MEMORY.md"), "Synthetic forbidden workspace memory.");
+  const requests: Array<{
+    messages: Array<{ role: string; content?: unknown }>;
+    tools?: Array<{ function: { name: string } }>;
+    authorization?: string;
+  }> = [];
+  let failFlush = false;
+  let failOverflowFlush = false;
+  let failThresholdFlush = false;
+  let overflowThresholdFlush = false;
+  let overflowPending = false;
+  const provider = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      requests.push({ ...body, authorization: request.headers.authorization });
+      const messages = body.messages as Array<{ role: string; content?: unknown }>;
+      const last = messages.at(-1);
+      const prompt = messages.toReversed().find((message) => message.role === "user")?.content;
+      const command = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+      const isFlush = command.includes("Pre-compaction memory flush");
+      const isSummary = messages.some(
+        (message) =>
+          message.role === "system" &&
+          typeof message.content === "string" &&
+          message.content.includes("context summarization assistant"),
+      );
+      if (
+        overflowThresholdFlush &&
+        isFlush &&
+        JSON.stringify(messages).includes("Trigger threshold flush overflow")
+      ) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      if (overflowPending && command.includes("Trigger overflow") && !isFlush && !isSummary) {
+        overflowPending = false;
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      const tool = isFlush
+        ? {
+            name: "memory_store",
+            arguments: JSON.stringify({
+              content:
+                failFlush ||
+                (failOverflowFlush &&
+                  JSON.stringify(messages).includes("Trigger overflow failure")) ||
+                (failThresholdFlush &&
+                  JSON.stringify(messages).includes("Trigger threshold failure"))
+                  ? " "
+                  : JSON.stringify(messages).includes("Trigger overflow")
+                    ? "Synthetic in-turn compaction memory"
+                    : "Synthetic flush preserved memory",
+            }),
+          }
+        : command.includes("Remember")
+          ? {
+              name: "memory_store",
+              arguments: JSON.stringify({ content: "Synthetic blue lighthouse preference" }),
+            }
+          : command.includes("Read")
+            ? {
+                name: "memory_get",
+                arguments: JSON.stringify({
+                  path: command.slice(command.indexOf("Read ") + 5).split(/\s/u)[0],
+                }),
+              }
+            : {
+                name: "memory_search",
+                arguments: JSON.stringify({
+                  query: command.includes("forbidden") ? "forbidden workspace" : "lighthouse",
+                }),
+              };
+      const delta = isSummary
+        ? { role: "assistant", content: "Synthetic conversation summary." }
+        : last?.role === "tool"
+          ? { role: "assistant", content: isFlush ? "NO_REPLY" : JSON.stringify(last.content) }
+          : {
+              role: "assistant",
+              tool_calls: [
+                { index: 0, id: "memory-call", type: "function", function: tool },
+                ...(command.includes("Remember and inspect my automations")
+                  ? [
+                      {
+                        index: 1,
+                        id: "automation-call",
+                        type: "function",
+                        function: { name: "automations_list", arguments: "{}" },
+                      },
+                    ]
+                  : []),
+                ...(command.includes("Recall in authoring")
+                  ? [
+                      {
+                        index: 1,
+                        id: "authoring-call",
+                        type: "function",
+                        function: { name: "automation_draft_read", arguments: "{}" },
+                      },
+                    ]
+                  : []),
+              ],
+            };
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}\n\n`,
+      );
+      response.write(
+        `data: ${JSON.stringify({
+          id: "synthetic",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "synthetic",
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: isSummary || last?.role === "tool" ? "stop" : "tool_calls",
+            },
+          ],
+          ...(command.includes("Trigger threshold") && last?.role === "tool" && !isFlush
+            ? { usage: { prompt_tokens: 31_999, completion_tokens: 1, total_tokens: 32_000 } }
+            : {}),
+        })}\n\n`,
+      );
+      response.end("data: [DONE]\n\n");
+    })().catch(() => response.destroy());
+  });
+  const providerOrigin = await listen(provider);
+  t.after(() => close(provider));
+  const serviceRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const base = protectedOpenClawConfig(stateDir, serviceRoot);
+  const config: OpenClawConfig = {
+    ...base,
+    agents: {
+      ...base.agents,
+      defaults: {
+        ...base.agents?.defaults,
+        compaction: { keepRecentTokens: 128, memoryFlush: { forceFlushTranscriptBytes: 1 } },
+      },
+      entries: {
+        protected: { workspace: workspaceDir, agentDir, memory: { search: { enabled: false } } },
+      },
+    },
+    models: {
+      mode: "replace",
+      providers: {
+        sparky: {
+          baseUrl: `${providerOrigin}/v1`,
+          api: "openai-completions",
+          request: { allowPrivateNetwork: true },
+          models: [
+            {
+              id: "synthetic",
+              name: "Synthetic",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 32_000,
+              maxTokens: 1024,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 300_000;
+  const memory = createProtectedMemberMemory();
+  const { publishConfiguredModelRuntimeSnapshots } =
+    await import("../../src/gateway/server-startup-model-runtime.js");
+  await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://synthetic.example",
+    stateDir,
+    usersRoot: await root(usersDir),
+    encryption,
+    memberMemory: memory,
+    memoryReview: createProtectedMemoryReview(),
+    maxChatsPerUser: 4,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
+    directory: { issuer: "https://synthetic.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => {
+      const subject = request.headers.get("cookie")!;
+      return {
+        issuer: "https://synthetic.example",
+        subject,
+        kind: "human",
+        expiresAt,
+        sessionId: createHash("sha256").update(subject).digest("hex"),
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    turns: createCanonicalProtectedTurns({
+      config,
+      workspaceDir,
+      agentDir,
+      memberMemory: memory,
+      models: [
+        {
+          provider: "sparky",
+          id: "synthetic",
+          label: "Synthetic",
+          thinking: { levels: ["low", "medium", "ultra"], default: "ultra" },
+        },
+      ],
+      resolveSparkyKey: async () => "synthetic-request-only-key",
+    }),
+  });
+  const server = createProtectedServer(origin, app.fetch);
+  const url = await listen(server);
+  t.after(() => closeProtectedServer(server, app, stateDir));
+  const call = (user: string, route: string, init?: RequestInit) =>
+    fetch(`${url}/api/protected/v1${route}`, {
+      ...init,
+      headers: { origin, cookie: user, "content-type": "application/json", ...init?.headers },
+    });
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const chat = async (user: string, selectedAgentId: string) => {
+    const response = await call(user, "/chats", {
+      method: "POST",
+      body: JSON.stringify({ selectedAgentId }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json()).chat.id as string;
+  };
+  const turn = async (
+    user: string,
+    profileId: string,
+    id: string,
+    text: string,
+    expectFailure = false,
+    automationsChat = false,
+  ) => {
+    const response = await call(user, `/chats/${id}/turns`, {
+      method: "POST",
+      headers: {
+        "x-grogu-profile": profileId,
+        ...(automationsChat ? { "x-alcove-capabilities": "automations-chat-v1" } : {}),
+      },
+      body: JSON.stringify({ provider: "sparky", text }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    const events = await response.text();
+    assert.match(
+      events,
+      expectFailure ? /"type":"error".*"code":"unavailable"/u : /"type":"done"/u,
+      events,
+    );
+    return events;
+  };
+  const aliceGrogu = await chat("alice", "grogu");
+  if (scenario === "overflow-failure") {
+    await turn("alice", alice.id, aliceGrogu, "Remember my lighthouse preference");
+    const beforeFailedOverflow = requests.length;
+    failOverflowFlush = true;
+    overflowPending = true;
+    await turn("alice", alice.id, aliceGrogu, "Trigger overflow failure", true);
+    const failedRequests = requests.slice(beforeFailedOverflow);
+    assert.ok(
+      failedRequests.some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") &&
+          messages.includes("Trigger overflow failure")
+        );
+      }),
+      "the failed overflow must attempt to save the current conversation",
+    );
+    assert.ok(
+      failedRequests.every(
+        (request) => !JSON.stringify(request.messages).includes("context summarization assistant"),
+      ),
+      "a failed member flush must prevent compaction",
+    );
+    return;
+  }
+  if (scenario === "threshold") {
+    await turn("alice", alice.id, aliceGrogu, "Remember my lighthouse preference");
+    const beforeThreshold = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold");
+    const thresholdRequests = requests.slice(beforeThreshold);
+    const summaryIndex = thresholdRequests.findIndex((request) =>
+      JSON.stringify(request.messages).includes("context summarization assistant"),
+    );
+    assert.notEqual(summaryIndex, -1, "the turn must reach in-turn compaction");
+    assert.equal(
+      thresholdRequests[summaryIndex].authorization,
+      "Bearer synthetic-request-only-key",
+    );
+    assert.ok(
+      thresholdRequests.slice(0, summaryIndex).some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") && messages.includes("Trigger threshold")
+        );
+      }),
+      "in-turn compaction must flush the current conversation first",
+    );
+    failThresholdFlush = true;
+    const beforeFailure = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold failure");
+    const failureRequests = requests.slice(beforeFailure);
+    assert.ok(
+      failureRequests.some((request) => {
+        const messages = JSON.stringify(request.messages);
+        return (
+          messages.includes("Pre-compaction memory flush") &&
+          messages.includes("Trigger threshold failure")
+        );
+      }),
+    );
+    assert.ok(
+      failureRequests.every(
+        (request) => !JSON.stringify(request.messages).includes("context summarization assistant"),
+      ),
+      "a failed in-turn flush must prevent compaction",
+    );
+    failThresholdFlush = false;
+    overflowThresholdFlush = true;
+    const beforeFlushOverflow = requests.length;
+    await turn("alice", alice.id, aliceGrogu, "Trigger threshold flush overflow");
+    const flushOverflowRequests = requests.slice(beforeFlushOverflow);
+    const failedFlushIndex = flushOverflowRequests.findIndex((request) => {
+      const messages = JSON.stringify(request.messages);
+      return (
+        messages.includes("Pre-compaction memory flush") &&
+        messages.includes("Trigger threshold flush overflow")
+      );
+    });
+    assert.notEqual(
+      failedFlushIndex,
+      -1,
+      "the current conversation must reach the overflowing flush",
+    );
+    assert.ok(
+      flushOverflowRequests
+        .slice(failedFlushIndex)
+        .every(
+          (request) =>
+            !JSON.stringify(request.messages).includes("context summarization assistant"),
+        ),
+      "an overflowing member flush must not compact its detached snapshot",
+    );
+    assert.doesNotMatch(JSON.stringify(requests), /Synthetic forbidden workspace memory/u);
+    return;
+  }
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const aliceTravel = await chat("alice", "travel");
+  const bobGrogu = await chat("bob", "grogu");
+  const bobTravel = await chat("bob", "travel");
+  const automationCatalogResponse = await call("alice", "/automations/catalog", {
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": "automations-chat-v1",
+    },
+  });
+  assert.equal(
+    automationCatalogResponse.status,
+    200,
+    await automationCatalogResponse.clone().text(),
+  );
+  const automationCatalog = await automationCatalogResponse.json();
+  assert.equal(automationCatalog.capabilities.automations.chat?.list, true);
+  const beforeCombined = requests.length;
+  await turn("alice", alice.id, aliceGrogu, "Remember and inspect my automations", false, true);
+  const combinedRequests = requests.slice(beforeCombined);
+  const toolSets = combinedRequests.map((request) =>
+    (request.tools ?? []).map((tool) => tool.function.name),
+  );
+  assert.ok(
+    toolSets.some((names) => names.includes("memory_store") && names.includes("automations_list")),
+    JSON.stringify(toolSets),
+  );
+  const toolOutputs = combinedRequests.flatMap((request) =>
+    request.messages.flatMap((message) =>
+      message.role === "tool" && typeof message.content === "string"
+        ? [JSON.parse(message.content)]
+        : [],
+    ),
+  );
+  assert.ok(toolOutputs.some((output) => output.writeApplied === false));
+  const authoringCapabilities = "automations-chat-v1, automations-authoring-v1";
+  const authoringResponse = await call("alice", "/automations/authoring", {
+    method: "POST",
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": authoringCapabilities,
+    },
+  });
+  assert.equal(authoringResponse.status, 201, await authoringResponse.clone().text());
+  const authoringChat = (await authoringResponse.json()).chat;
+  const beforeAuthoring = requests.length;
+  const authoringTurn = await call("alice", `/chats/${authoringChat.id}/turns`, {
+    method: "POST",
+    headers: {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": authoringCapabilities,
+    },
+    body: JSON.stringify({
+      provider: "sparky",
+      text: "Recall in authoring",
+      authoring: {
+        draftRevision: "1",
+        draft: {
+          name: "Synthetic authoring draft",
+          instructions: "Summarize public project updates.",
+          whenToNotify: "Only when there is a meaningful update.",
+          agentId: "travel",
+          model: { provider: "sparky", id: "synthetic" },
+          thinking: "low",
+          schedule: { kind: "every", everyMs: 60_000 },
+        },
+      },
+    }),
+  });
+  assert.equal(authoringTurn.status, 200, await authoringTurn.clone().text());
+  assert.match(await authoringTurn.text(), /"type":"done"/u);
+  const authoringRequests = requests.slice(beforeAuthoring);
+  assert.ok(
+    authoringRequests.some((request) => {
+      const names = new Set((request.tools ?? []).map((tool) => tool.function.name));
+      return names.has("memory_search") && names.has("automation_draft_read");
+    }),
+    "authoring must offer both member memory and draft tools",
+  );
+  const authoringOutputs = authoringRequests.flatMap((request) =>
+    request.messages
+      .filter((message) => message.role === "tool" && typeof message.content === "string")
+      .map((message) => message.content),
+  );
+  assert.match(JSON.stringify(authoringOutputs), /Synthetic blue lighthouse preference/u);
+  assert.match(JSON.stringify(authoringOutputs), /Synthetic authoring draft/u);
+  await turn("alice", alice.id, aliceGrogu, "Recall lighthouse");
+  const list = await (
+    await call("alice", "/memory", { headers: { "x-grogu-profile": alice.id } })
+  ).json();
+  assert.equal(list.notes.length, 1);
+  assert.match(
+    await turn("alice", alice.id, aliceTravel, "Recall lighthouse"),
+    /Synthetic blue lighthouse preference/u,
+  );
+  const bobSearch = await turn("bob", bob.id, bobGrogu, "Recall lighthouse");
+  assert.match(bobSearch, /results/u);
+  assert.doesNotMatch(bobSearch, /Synthetic blue lighthouse preference/u);
+  const bobRead = await turn("bob", bob.id, bobTravel, `Read ${list.notes[0].name}`);
+  assert.match(bobRead, /not_found/u);
+  assert.doesNotMatch(bobRead, /Synthetic blue lighthouse preference/u);
+  const note = await (
+    await call("alice", `/memory/${list.notes[0].id}`, { headers: { "x-grogu-profile": alice.id } })
+  ).json();
+  assert.match(note.text, /Synthetic blue lighthouse preference/u);
+  assert.match(note.text, /Synthetic flush preserved memory/u);
+  const ciphertext = await readFile(
+    path.join(
+      usersDir,
+      authorizedUserFilesDirectory(alice.id),
+      "member-memory",
+      list.notes[0].name,
+    ),
+  );
+  assert.equal(isStorageValueEncrypted(ciphertext), true);
+  assert.equal(ciphertext.includes("Synthetic blue lighthouse preference"), false);
+  assert.deepEqual(
+    (await (await call("bob", "/memory", { headers: { "x-grogu-profile": bob.id } })).json()).notes,
+    [],
+  );
+  assert.equal(
+    (await call("bob", `/memory/${list.notes[0].id}`, { headers: { "x-grogu-profile": bob.id } }))
+      .status,
+    404,
+  );
+  assert.doesNotMatch(
+    await turn("bob", bob.id, bobTravel, "Recall forbidden workspace"),
+    /Synthetic forbidden workspace memory/u,
+  );
+  assert.equal(
+    (
+      await call("bob", `/chats/${aliceGrogu}/turns`, {
+        method: "POST",
+        headers: { "x-grogu-profile": alice.id },
+        body: JSON.stringify({ provider: "sparky", text: "Recall lighthouse" }),
+      })
+    ).status,
+    404,
+  );
+  assert.equal(
+    (await call("bob", "/memory", { headers: { "x-grogu-profile": alice.id } })).status,
+    403,
+  );
+  const beforeOverflow = requests.length;
+  overflowPending = true;
+  await turn("alice", alice.id, aliceGrogu, "Trigger overflow");
+  const overflowRequests = requests.slice(beforeOverflow);
+  const summaryIndex = overflowRequests.findIndex((request) =>
+    JSON.stringify(request.messages).includes("context summarization assistant"),
+  );
+  assert.notEqual(summaryIndex, -1, "the overflow must reach native compaction");
+  assert.equal(overflowRequests[summaryIndex].authorization, "Bearer synthetic-request-only-key");
+  assert.ok(
+    overflowRequests.slice(0, summaryIndex).some((request) => {
+      const messages = JSON.stringify(request.messages);
+      return (
+        messages.includes("Pre-compaction memory flush") && messages.includes("Trigger overflow")
+      );
+    }),
+    "native compaction must flush the current member conversation first",
+  );
+  assert.ok(
+    requests.some((request) =>
+      request.tools?.some((tool) => tool.function.name === "memory_store"),
+    ),
+  );
+  const failureChat = await chat("alice", "grogu");
+  await turn("alice", alice.id, failureChat, "Recall lighthouse");
+  failFlush = true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await turn("alice", alice.id, failureChat, "Recall lighthouse", true);
+  }
+  failFlush = false;
+  await turn("alice", alice.id, failureChat, "Recall lighthouse");
+  const notePath = path.join(
+    usersDir,
+    authorizedUserFilesDirectory(alice.id),
+    "member-memory",
+    list.notes[0].name,
+  );
+  const beforeRevocation = await readFile(notePath);
+  assert.equal(await app.revokeProfile(alice.id), true);
+  assert.notEqual(
+    (await call("alice", "/memory", { headers: { "x-grogu-profile": alice.id } })).status,
+    200,
+  );
+  assert.deepEqual(await readFile(notePath), beforeRevocation);
+  assert.doesNotMatch(JSON.stringify(requests), /Synthetic forbidden workspace memory/u);
+}
 
 void test("deleting another member's chat frees quota for a running turn", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-quota-http-${randomUUID()}`);
@@ -319,6 +1309,148 @@ void test("deleting another member's chat frees quota for a running turn", async
   proceed.resolve();
   await written.promise;
   await running.text();
+});
+
+void test("artifact pages expose only owned saved content through guarded reads", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-artifacts-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const origin = "https://family.example";
+  const expiresAt = Date.now() + 120_000;
+  const app = createProtectedHttp({
+    origin,
+    accessIssuer: "https://identity.example",
+    stateDir,
+    usersRoot,
+    encryption,
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    verifyIdentity: async (request) => ({
+      issuer: "https://identity.example",
+      subject: request.headers.get("cookie")!,
+      kind: "human",
+      sessionId: createHash("sha256").update(request.headers.get("cookie")!).digest("hex"),
+      expiresAt,
+      assertCurrent() {},
+      async revalidate() {},
+    }),
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [],
+      async run() {},
+      async steer() {
+        assert.fail("This fixture does not steer turns.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const call = (user: string, route: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    headers.set("cookie", user);
+    headers.set("content-type", "application/json");
+    return app.fetch(new Request(`${origin}/api/protected/v1${route}`, { ...init, headers }));
+  };
+  const alice = (await (await call("alice", "/me")).json()).user;
+  const bob = (await (await call("bob", "/me")).json()).user;
+  const chatResponse = await call("alice", "/chats", {
+    method: "POST",
+    body: '{"title":"Synthetic chat"}',
+  });
+  assert.equal(chatResponse.status, 200, await chatResponse.clone().text());
+  const { chat } = await chatResponse.json();
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: alice.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  t.after(() => files.dispose());
+  const widget = await createCanvasDocument(
+    { title: "Synthetic widget", html: "<p>widget content</p>" },
+    { storage: { files, directory: `chats/${chat.id}/widgets` } },
+  );
+  await files.write(`chats/${chat.id}/widgets/cv_${"a".repeat(32)}/index.html`, "draft");
+  const generatedName = `artifact-${randomUUID()}-portugal-itinerary.html`;
+  await files.write(`chats/${chat.id}/artifacts/${generatedName}`, "<p>generated content</p>");
+  for (let index = 0; index < 100; index++) {
+    await files.write(`chats/${chat.id}/web-fetch/file-${String(index).padStart(3, "0")}.txt`, "x");
+  }
+  const profile = { "x-grogu-profile": alice.id };
+  assert.equal((await call("alice", "/artifacts")).status, 403);
+  assert.equal((await call("bob", "/artifacts", { headers: profile })).status, 403);
+  assert.equal(
+    (await call("alice", "/artifacts?cursor=invalid", { headers: profile })).status,
+    400,
+  );
+  const first = await (await call("alice", "/artifacts", { headers: profile })).json();
+  assert.equal(first.artifacts.length, 100);
+  assert.ok(first.nextCursor);
+  const second = await (
+    await call("alice", `/artifacts?cursor=${first.nextCursor}`, { headers: profile })
+  ).json();
+  const all = [...first.artifacts, ...second.artifacts];
+  assert.equal(all.length, 102);
+  assert.equal(second.nextCursor, undefined);
+  assert.equal(new Set(all.map((item: { id: string }) => item.id)).size, 102);
+  assert.ok(
+    all.every(
+      (item: { chatId: string; chatTitle: string; updatedAt: number }) =>
+        item.chatId === chat.id &&
+        item.chatTitle === chat.title &&
+        item.updatedAt === chat.updatedAt,
+    ),
+  );
+  assert.ok(
+    all.some(
+      (item: { kind: string; id: string; title?: string }) =>
+        item.kind === "widget" && item.id === widget.id && item.title === "Synthetic widget",
+    ),
+  );
+  const generatedId = `generated~${chat.id}~${generatedName}`;
+  assert.ok(
+    all.some(
+      (item: { kind: string; id: string; name?: string }) =>
+        item.kind === "file" && item.id === generatedId && item.name === "portugal itinerary.html",
+    ),
+  );
+  assert.deepEqual(
+    (
+      await (
+        await call("bob", "/artifacts", {
+          headers: { "x-grogu-profile": bob.id },
+        })
+      ).json()
+    ).artifacts,
+    [],
+  );
+  assert.equal((await call("bob", `/files/${generatedId}`)).status, 404);
+  assert.equal((await call("bob", `/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
+  assert.equal(
+    (
+      await call("alice", `/files/${generatedId}`, {
+        headers: { "x-grogu-profile": bob.id },
+      })
+    ).status,
+    403,
+  );
+  const download = await call("alice", `/files/${generatedId}`, { headers: profile });
+  assert.equal(download.headers.get("content-type"), "application/octet-stream");
+  assert.equal(await download.text(), "<p>generated content</p>");
+  assert.match(
+    (
+      await (
+        await call("alice", `/chats/${chat.id}/widgets/${widget.id}`, {
+          headers: profile,
+        })
+      ).json()
+    ).html,
+    /widget content/,
+  );
 });
 
 void test("fixture blocks egress from work that outlives its test", () => {
@@ -539,10 +1671,32 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     widgetHost.headers.get("content-security-policy") ?? "",
     /frame-ancestors 'none'/,
   );
+  const measurement = await first.call("alice", "/widget-measurement");
+  assert.equal(measurement.status, 200);
+  for (const response of [widgetHost, measurement]) {
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  }
+  assert.match(measurement.headers.get("content-security-policy") ?? "", /script-src 'none'/);
+  assert.equal(measurement.headers.get("set-cookie"), null);
+  assert.match(await measurement.text(), /<style data-widget-base>/);
   const me = await first.call("alice", "/me");
   assert.equal(me.status, 200);
-  const { user, capabilities } = await me.json();
-  assert.deepEqual(capabilities, { copilotConnect: true, openaiConnect: true, admin: false });
+  const meResponse = await me.json();
+  assert.equal(Value.Check(ProtectedMeSchema, meResponse), false);
+  const { user, capabilities } = meResponse;
+  assert.deepEqual(capabilities, {
+    copilotConnect: true,
+    openaiConnect: true,
+    admin: false,
+  });
+  const negotiatedMe = await first.call("alice", "/me", {
+    headers: { "X-Alcove-Capabilities": "profile-v1, agents-v1" },
+  });
+  assert.equal(negotiatedMe.status, 200);
+  const negotiatedMeResponse = await negotiatedMe.json();
+  assert.equal(Value.Check(ProtectedMeSchema, negotiatedMeResponse), true);
+  assert.deepEqual(negotiatedMeResponse.capabilities, capabilities);
   const automationCatalogResponse = await first.call("alice", "/automations/catalog");
   assert.equal(automationCatalogResponse.status, 200);
   const automationCatalog = await automationCatalogResponse.json();
@@ -571,6 +1725,30 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(Value.Check(ProtectedAutomationCatalogV1Schema, automationCatalogV1), true);
   assert.equal(Value.Check(ProtectedAutomationCatalogSchema, automationCatalogV1), false);
   assert.deepEqual({ ...automationCatalogV1, agents: automationCatalog.agents }, automationCatalog);
+  assert.equal(automationCatalog.capabilities.automations.chat, undefined);
+  const negotiatedAutomationCatalogResponse = await first.call("alice", "/automations/catalog", {
+    headers: { "X-Alcove-Capabilities": "profile-v1, automations-chat-v1" },
+  });
+  assert.equal(negotiatedAutomationCatalogResponse.status, 200);
+  const negotiatedAutomationCatalog = await negotiatedAutomationCatalogResponse.json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogSchema, negotiatedAutomationCatalog), true);
+  assert.deepEqual(negotiatedAutomationCatalog.capabilities.automations.chat, {
+    list: true,
+    read: true,
+    proposeCreate: true,
+    proposePatch: true,
+  });
+  const combinedAutomationCatalog = await (
+    await first.call("alice", "/automations/catalog", {
+      headers: { "X-Alcove-Capabilities": "agents-v1, automations-chat-v1" },
+    })
+  ).json();
+  assert.equal(Value.Check(ProtectedAutomationCatalogV1Schema, combinedAutomationCatalog), true);
+  assert.deepEqual(combinedAutomationCatalog.agents, automationCatalogV1.agents);
+  assert.deepEqual(
+    combinedAutomationCatalog.capabilities.automations.chat,
+    negotiatedAutomationCatalog.capabilities.automations.chat,
+  );
   assert.deepEqual(automationCatalog.schedule.everyMs, {
     minimum: 1,
     maximum: 8_640_000_000_000_000,
@@ -591,7 +1769,7 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
   assert.equal(automationCatalog.models[0].provider, "sparky");
   assert.deepEqual(automationCatalog.models[0].thinking.levels, ["low", "medium", "ultra"]);
   assert.equal(automationCatalog.models[0].thinking.default, "ultra");
-  const automationDraft = {
+  const automationDraft: ProtectedAutomationDraft = {
     name: "Synthetic morning summary",
     instructions: "Summarize public project updates.",
     whenToNotify: "Only when there is a meaningful update.",
@@ -1246,7 +2424,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     204,
   );
   assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
-  assert.equal((await (await first.call("bob", "/storage/chats")).json()).usedBytes, 0);
+  const bobStorageAfterDelete = await (await first.call("bob", "/storage/chats")).json();
+  assert.equal(bobStorageAfterDelete.chats.length, 0);
+  assert.ok(bobStorageAfterDelete.usedBytes > 0, "90-day run telemetry remains stored");
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
   await first.shutdown();
 
@@ -1693,7 +2873,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       model?: string;
       reasoning_effort?: string;
       messages?: unknown[];
-      tools?: Array<{ function: { name: string } }>;
+      tools?: Array<{
+        function: {
+          name: string;
+          parameters?: {
+            properties?: Record<string, { properties?: Record<string, unknown> }>;
+          };
+        };
+      }>;
     };
   }> = [];
   const activeProvider = Promise.withResolvers<void>();
@@ -1755,7 +2942,17 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     account: string | null;
     key: string | null;
   }> = [];
-  const copilotBodies: Array<{ model?: string; reasoning?: { effort?: string } }> = [];
+  const copilotBodies: Array<{
+    model?: string;
+    input?: unknown;
+    reasoning?: { effort?: string; summary?: string };
+  }> = [];
+  let copilotOverflow = false;
+  let copilotSummary: string | undefined;
+  let foreignAutomationId = "";
+  let ownedAutomationId = "";
+  let ownedAutomationVersion = "";
+  let proposedAutomationDraft: Record<string, unknown> = {};
   let copilotUsage: Parameters<typeof responsesReply>[1] = {
     input_tokens: 3,
     output_tokens: 1,
@@ -1797,6 +2994,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "gpt-5.3-codex",
                   name: "Default",
                   object: "model",
+                  vendor: "OpenAI",
                   model_picker_enabled: true,
                   capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
                 },
@@ -1804,10 +3002,21 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "gpt-5.4",
                   name: "Second model",
                   object: "model",
+                  vendor: " OpenAI ",
                   model_picker_enabled: true,
+                  billing: {
+                    token_prices: {
+                      default: { input_price: 1, output_price: 1, max_prompt_tokens: 200_000 },
+                      long_context: {
+                        input_price: 2,
+                        output_price: 2,
+                        max_prompt_tokens: 1_000_000,
+                      },
+                    },
+                  },
                   capabilities: {
                     type: "chat",
-                    limits: { max_context_window_tokens: 64000 },
+                    limits: { max_context_window_tokens: 1_000_000 },
                     supports: { reasoning_effort: ["low", "high"] },
                   },
                 },
@@ -1815,6 +3024,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   id: "no-reasoning",
                   name: "No reasoning",
                   object: "model",
+                  vendor: "   ",
                   model_picker_enabled: true,
                   capabilities: { type: "chat", supports: { reasoning_effort: [] } },
                 },
@@ -1826,9 +3036,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 },
               ],
             });
-          case "https://api.business.githubcopilot.com/responses":
-            copilotBodies.push(await new Request(input, init).json());
-            return responsesReply("Canonical Copilot reply.", copilotUsage);
+          case "https://api.business.githubcopilot.com/responses": {
+            const body = await new Request(input, init).json();
+            copilotBodies.push(body);
+            if (
+              !copilotOverflow &&
+              JSON.stringify(body.input).includes("Trigger Copilot overflow")
+            ) {
+              copilotOverflow = true;
+              return Response.json(
+                {
+                  error: {
+                    message:
+                      "This model's maximum context length is 200000 tokens. However, your messages resulted in 201000 tokens.",
+                    code: "context_length_exceeded",
+                  },
+                },
+                { status: 400 },
+              );
+            }
+            return responsesReply("Canonical Copilot reply.", copilotUsage, copilotSummary);
+          }
           case "https://chatgpt.com/backend-api/codex/responses":
             return responsesReply("Canonical OpenAI reply.");
           case "https://api.anthropic.com/v1/messages":
@@ -1949,6 +3177,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       const sessionListTurn = JSON.stringify(body.messages).includes(
         "Inspect my permitted sessions.",
       );
+      const automationChatTurn = JSON.stringify(body.messages).includes(
+        "Use private automation chat tools.",
+      );
       const frames =
         groguTurn && routeArguments && !hasToolResponse
           ? [
@@ -1971,7 +3202,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
               ],
               [{}, "tool_calls"],
             ]
-          : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
+          : automationChatTurn && !hasToolResponse
             ? [
                 [
                   {
@@ -1979,9 +3210,83 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     tool_calls: [
                       {
                         index: 0,
-                        id: "call_widget_cleanup",
+                        id: "call_automations_list",
                         type: "function",
-                        function: { name: "show_widget", arguments: widgetArguments },
+                        function: {
+                          name: "automations_list",
+                          arguments: JSON.stringify({ limit: 10 }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: "call_automations_read_foreign",
+                        type: "function",
+                        function: {
+                          name: "automations_read",
+                          arguments: JSON.stringify({ automationId: foreignAutomationId }),
+                        },
+                      },
+                      {
+                        index: 2,
+                        id: "call_automations_propose_create",
+                        type: "function",
+                        function: {
+                          name: "automations_propose_create",
+                          arguments: JSON.stringify({ draft: proposedAutomationDraft }),
+                        },
+                      },
+                      {
+                        index: 3,
+                        id: "call_automations_propose_patch",
+                        type: "function",
+                        function: {
+                          name: "automations_propose_patch",
+                          arguments: JSON.stringify({
+                            automationId: ownedAutomationId,
+                            expectedVersion: ownedAutomationVersion,
+                            patch: { name: "Alice proposed automation update" },
+                          }),
+                        },
+                      },
+                      {
+                        index: 4,
+                        id: "call_sessions_list",
+                        type: "function",
+                        function: {
+                          name: "sessions_list",
+                          arguments: JSON.stringify({ limit: 25 }),
+                        },
+                      },
+                      {
+                        index: 5,
+                        id: "call_sessions_history_owned",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.permitted,
+                          }),
+                        },
+                      },
+                      {
+                        index: 6,
+                        id: "call_sessions_history_foreign",
+                        type: "function",
+                        function: {
+                          name: "sessions_history",
+                          arguments: JSON.stringify({
+                            sessionKey: sessionHistoryTargets.foreign,
+                          }),
+                        },
+                      },
+                      {
+                        index: 7,
+                        id: "callsessionssearch",
+                        type: "function",
+                        function: {
+                          name: "sessions_search",
+                          arguments: JSON.stringify({ query: "transcript marker" }),
+                        },
                       },
                     ],
                   },
@@ -1989,7 +3294,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                 ],
                 [{}, "tool_calls"],
               ]
-            : sessionListTurn && !hasToolResponse && sessionHistoryTargets
+            : (cleanupTurn || finalWidgetTurn) && !hasToolResponse
               ? [
                   [
                     {
@@ -1997,43 +3302,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                       tool_calls: [
                         {
                           index: 0,
-                          id: "call_sessions_list",
+                          id: "call_widget_cleanup",
                           type: "function",
-                          function: {
-                            name: "sessions_list",
-                            arguments: JSON.stringify({ limit: 25 }),
-                          },
-                        },
-                        {
-                          index: 1,
-                          id: "call_sessions_history_owned",
-                          type: "function",
-                          function: {
-                            name: "sessions_history",
-                            arguments: JSON.stringify({
-                              sessionKey: sessionHistoryTargets.permitted,
-                            }),
-                          },
-                        },
-                        {
-                          index: 2,
-                          id: "call_sessions_history_foreign",
-                          type: "function",
-                          function: {
-                            name: "sessions_history",
-                            arguments: JSON.stringify({
-                              sessionKey: sessionHistoryTargets.foreign,
-                            }),
-                          },
-                        },
-                        {
-                          index: 3,
-                          id: "callsessionssearch",
-                          type: "function",
-                          function: {
-                            name: "sessions_search",
-                            arguments: JSON.stringify({ query: "transcript marker" }),
-                          },
+                          function: { name: "show_widget", arguments: widgetArguments },
                         },
                       ],
                     },
@@ -2041,7 +3312,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                   ],
                   [{}, "tool_calls"],
                 ]
-              : researchTurn && !hasToolResponse
+              : sessionListTurn && !hasToolResponse && sessionHistoryTargets
                 ? [
                     [
                       {
@@ -2049,11 +3320,42 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                         tool_calls: [
                           {
                             index: 0,
-                            id: "call_fetch_research",
+                            id: "call_sessions_list",
                             type: "function",
                             function: {
-                              name: "web_fetch",
-                              arguments: JSON.stringify({ url: sourceUrl }),
+                              name: "sessions_list",
+                              arguments: JSON.stringify({ limit: 25 }),
+                            },
+                          },
+                          {
+                            index: 1,
+                            id: "call_sessions_history_owned",
+                            type: "function",
+                            function: {
+                              name: "sessions_history",
+                              arguments: JSON.stringify({
+                                sessionKey: sessionHistoryTargets.permitted,
+                              }),
+                            },
+                          },
+                          {
+                            index: 2,
+                            id: "call_sessions_history_foreign",
+                            type: "function",
+                            function: {
+                              name: "sessions_history",
+                              arguments: JSON.stringify({
+                                sessionKey: sessionHistoryTargets.foreign,
+                              }),
+                            },
+                          },
+                          {
+                            index: 3,
+                            id: "callsessionssearch",
+                            type: "function",
+                            function: {
+                              name: "sessions_search",
+                              arguments: JSON.stringify({ query: "transcript marker" }),
                             },
                           },
                         ],
@@ -2062,23 +3364,15 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                     ],
                     [{}, "tool_calls"],
                   ]
-                : !researchTurn && seen.length === 1
+                : researchTurn && !hasToolResponse
                   ? [
-                      [{ role: "assistant", reasoning_content: "Check the source. " }, null],
-                      [{ reasoning_content: "Prepare the widget." }, null],
                       [
                         {
                           role: "assistant",
                           tool_calls: [
                             {
                               index: 0,
-                              id: "call_widget_1",
-                              type: "function",
-                              function: { name: "show_widget", arguments: widgetArguments },
-                            },
-                            {
-                              index: 1,
-                              id: "call_fetch_1",
+                              id: "call_fetch_research",
                               type: "function",
                               function: {
                                 name: "web_fetch",
@@ -2091,10 +3385,48 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
                       ],
                       [{}, "tool_calls"],
                     ]
-                  : [
-                      [{ role: "assistant", content: "Committed synthetic answer." }, null],
-                      [{}, "stop"],
-                    ];
+                  : !researchTurn && seen.length === 1
+                    ? [
+                        [{ role: "assistant", reasoning_content: "Check the source. " }, null],
+                        [{ reasoning_content: "Prepare the widget." }, null],
+                        [
+                          {
+                            role: "assistant",
+                            tool_calls: [
+                              {
+                                index: 0,
+                                id: "call_widget_1",
+                                type: "function",
+                                function: { name: "show_widget", arguments: widgetArguments },
+                              },
+                              {
+                                index: 1,
+                                id: "call_fetch_1",
+                                type: "function",
+                                function: {
+                                  name: "web_fetch",
+                                  arguments: JSON.stringify({ url: sourceUrl }),
+                                },
+                              },
+                            ],
+                          },
+                          null,
+                        ],
+                        [{}, "tool_calls"],
+                      ]
+                    : [
+                        [
+                          {
+                            role: "assistant",
+                            content:
+                              automationChatTurn && hasToolResponse
+                                ? "Proposed only; nothing was saved."
+                                : "Committed synthetic answer.",
+                          },
+                          null,
+                        ],
+                        [{}, "stop"],
+                      ];
       for (const [delta, finish_reason] of frames) {
         response.write(
           `data: ${JSON.stringify({
@@ -2184,6 +3516,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const options = {
     origin,
     accessIssuer: "https://synthetic.example",
+    ownerSubject: "synthetic-sparky",
     stateDir,
     usersRoot: await root(usersDir),
     encryption,
@@ -2217,6 +3550,35 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
   };
+  const generatedFileName = `artifact-${randomUUID()}-overview.html`;
+  const generatedFileHtml = "<p>Private generated artifact content.</p>";
+  const runWithGeneratedArtifact = options.turns.run.bind(options.turns);
+  options.turns.run = async (turn) => {
+    await runWithGeneratedArtifact(turn);
+    if (turn.input.text === "Reply briefly") {
+      await turn.files.write(`chats/${turn.id}/artifacts/${generatedFileName}`, generatedFileHtml);
+    }
+  };
+  const sendNotification = mock.fn(
+    async (..._args: Parameters<typeof import("web-push").sendNotification>) => ({
+      statusCode: 201,
+    }),
+  );
+  const webPushMock = mock.module("web-push", {
+    defaultExport: {
+      generateVAPIDKeys: () => ({ publicKey: "synthetic-public", privateKey: "synthetic-private" }),
+      setVapidDetails() {},
+      sendNotification,
+    },
+  });
+  t.after(() => webPushMock.restore());
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: "synthetic-sparky",
+    }),
+    "added",
+  );
   const open = async () => {
     await publishConfiguredModelRuntimeSnapshots({ cfg: protectedConfig, workspaceDir });
     const app = createProtectedHttp(options);
@@ -2244,7 +3606,160 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const { call, shutdown } = await open();
   const me = await call("/me");
   assert.equal(me.status, 200, await me.clone().text());
-  const { user, models: fixedModels } = await me.json();
+  const meBody = await me.json();
+  const { user, models: fixedModels } = meBody;
+  await t.test("offers provider-backed context sizes only to capable clients", async () => {
+    const listing = (capability?: string) =>
+      call("/providers/github-copilot/models", {
+        method: "POST",
+        headers: {
+          "x-grogu-profile": user.id,
+          ...(capability ? { "x-alcove-capabilities": capability } : {}),
+        },
+        body: JSON.stringify({ credential: { accessToken: githubToken } }),
+      });
+    const { models } = await (await listing("model-context-v1")).json();
+    assert.deepEqual(models[1].contextSizes, {
+      options: [200_000, 1_000_000],
+      default: 200_000,
+      longContextSurcharge: true,
+    });
+    assert.equal(models[0].contextSizes, undefined);
+    assert.equal((await (await listing()).json()).models[1].contextSizes, undefined);
+  });
+  await t.test("uses and restores the selected Copilot context budget", async () => {
+    const created = await call("/chats", { method: "POST", body: "{}" });
+    const { chat } = await created.json();
+    const route = `/chats/${chat.id}`;
+    const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "model-context-v1" };
+    const turn = (contextSize: number, text = "Test selected context") =>
+      call(`${route}/turns`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          provider: "github-copilot",
+          model: "gpt-5.4",
+          text,
+          thinking: "high",
+          contextSize,
+          credential: { accessToken: githubToken },
+        }),
+      });
+    const invalid = await turn(300_000);
+    assert.equal(invalid.status, 422);
+    assert.equal((await invalid.json()).error.code, "context_size_unavailable");
+    for (const contextSize of [200_000, 1_000_000]) {
+      const response = await turn(contextSize);
+      assert.equal(response.status, 200);
+      const events = (await response.text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(events.at(-1)?.type, "done");
+      assert.equal(events.find((event) => event.type === "usage")?.contextSize, contextSize);
+      const saved = await (await call(route, { headers })).json();
+      assert.equal(saved.usage?.contextSize, contextSize);
+      const legacy = await (await call(route)).json();
+      assert.equal(legacy.usage?.contextSize, undefined);
+    }
+    const priorCompaction = protectedConfig.agents?.defaults?.compaction;
+    assert.ok(protectedConfig.agents?.defaults);
+    protectedConfig.agents.defaults.compaction = {
+      mode: "default",
+      keepRecentTokens: 1,
+      postIndexSync: "off",
+    };
+    const bodyStart = copilotBodies.length;
+    const requestStart = providerRequests.length;
+    try {
+      const recovered = await turn(200_000, "Trigger Copilot overflow");
+      const events = (await recovered.text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(copilotOverflow, true);
+      assert.ok(
+        copilotBodies
+          .slice(bodyStart)
+          .some((body) => JSON.stringify(body.input).includes("context summarization assistant")),
+      );
+      assert.ok(
+        providerRequests
+          .slice(requestStart)
+          .filter(({ endpoint }) => endpoint.endsWith("/responses"))
+          .every(({ authorization }) => authorization === `Bearer ${rawGithubToken}`),
+      );
+      assert.equal(events.at(-1)?.type, "done");
+      assert.equal(events.find((event) => event.type === "usage")?.contextSize, 200_000);
+    } finally {
+      protectedConfig.agents.defaults.compaction = priorCompaction;
+    }
+    const current = await (await call(route)).json();
+    assert.equal(
+      (await call(route, { method: "DELETE", headers: { "if-match": current.chat.version } }))
+        .status,
+      204,
+    );
+  });
+  await t.test(
+    "compacts the same retained context only at the smaller selected budget",
+    async () => {
+      assert.ok(protectedConfig.agents?.defaults);
+      const priorCompaction = protectedConfig.agents.defaults.compaction;
+      const priorUsage = copilotUsage;
+      protectedConfig.agents.defaults.compaction = {
+        mode: "default",
+        keepRecentTokens: 1,
+        postIndexSync: "off",
+      };
+      const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "model-context-v1" };
+      try {
+        for (const contextSize of [1_000_000, 200_000]) {
+          const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+          const route = `/chats/${chat.id}`;
+          const send = async (size: number, text: string) => {
+            const response = await call(`${route}/turns`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                provider: "github-copilot",
+                model: "gpt-5.4",
+                text,
+                thinking: "high",
+                contextSize: size,
+                credential: { accessToken: githubToken },
+              }),
+            });
+            assert.equal(response.status, 200);
+            const trace = await response.text();
+            assert.match(trace, /"type":"done"/u);
+          };
+          copilotUsage = { input_tokens: 210_000, output_tokens: 1, total_tokens: 210_001 };
+          await send(1_000_000, "Retain the same synthetic context");
+          copilotUsage = priorUsage;
+          const bodyStart = copilotBodies.length;
+          await send(contextSize, "Continue this conversation");
+          const summarized = copilotBodies
+            .slice(bodyStart)
+            .some((body) => JSON.stringify(body.input).includes("context summarization assistant"));
+          assert.equal(summarized, contextSize === 200_000);
+          const current = await (await call(route)).json();
+          assert.equal(
+            (await call(route, { method: "DELETE", headers: { "if-match": current.chat.version } }))
+              .status,
+            204,
+          );
+        }
+      } finally {
+        protectedConfig.agents.defaults.compaction = priorCompaction;
+        copilotUsage = priorUsage;
+      }
+    },
+  );
+  const contextProofUsage = await listProtectedUsage(stateDir, user.id, Date.now());
+  const contextProofTokens = contextProofUsage.reduce((total, day) => total + day.tokens, 0);
+  assert.equal("feedback" in meBody.capabilities, false);
+  assert.equal("telemetry" in meBody.capabilities, false);
   const sparkyModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "sparky",
   );
@@ -2268,6 +3783,23 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const created = await call("/chats", { method: "POST", body: "{}" });
   assert.equal(created.status, 200, await created.clone().text());
   const { chat } = await created.json();
+  const priorGeneratedFileName = `artifact-${randomUUID()}-overview.html`;
+  const seedFiles = await createAuthorizedUserFiles({
+    usersRoot: await root(usersDir),
+    profileId: user.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  try {
+    await seedFiles.write(
+      `chats/${chat.id}/artifacts/${priorGeneratedFileName}`,
+      "<p>Prior reply artifact.</p>",
+    );
+    await seedFiles.write(`chats/${chat.id}/web-fetch/overview.html`, "<p>Prior download.</p>");
+  } finally {
+    seedFiles.dispose();
+  }
   const response = await call(`/chats/${chat.id}/turns`, {
     method: "POST",
     body: '{"provider":"sparky","text":"Reply briefly"}',
@@ -2345,13 +3877,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   };
   const sharedPrefix = (request: (typeof seen)[number] | undefined) => {
     const text = systemText(request);
+    const start = text.indexOf("\n# Alcove\n");
     const end = text.indexOf("\n## Current agent: ");
-    assert.ok(end > 0, "the request contains the Alcove current-agent section");
-    return text.slice(0, end);
+    assert.ok(start >= 0 && end > start, "the request contains the shared Alcove section");
+    return text.slice(start, end);
   };
   assert.deepEqual(toolNames(seen[0]), mainRunTools);
   assert.match(systemText(seen[0]), /\n# Alcove\n/);
-  const { call: reopened } = await open();
+  const { call: reopened, shutdown: reopenedShutdown } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
   assert.deepEqual(read.usage, {
     contextTokens: 3,
@@ -2401,6 +3934,323 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.ok(!bytes.includes("Scoped widget body"));
     assert.ok(!bytes.includes("Synthetic widget"));
   }
+  const feedbackHeaders = { "X-Alcove-Capabilities": "feedback-v1" };
+  const feedbackMe = await reopened("/me", { headers: feedbackHeaders });
+  assert.equal(feedbackMe.status, 200);
+  assert.deepEqual((await feedbackMe.json()).capabilities, {
+    copilotConnect: false,
+    openaiConnect: false,
+    admin: true,
+    feedback: true,
+    telemetry: true,
+  });
+  const responseId = read.chat.messages.at(-1).id;
+  const ratingRoute = `/chats/${chat.id}/responses/${responseId}/feedback`;
+  const ratingResponse = await reopened(ratingRoute, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: "up" }),
+  });
+  assert.equal(ratingResponse.status, 200, await ratingResponse.clone().text());
+  assert.deepEqual(await ratingResponse.json(), {
+    feedback: { responseId, rating: "up", reportId: null },
+  });
+  const clearedRating = await reopened(ratingRoute, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: null }),
+  });
+  assert.equal(clearedRating.status, 200);
+  assert.deepEqual(await clearedRating.json(), {
+    feedback: { responseId, rating: null, reportId: null },
+  });
+  const unknownFeedback = await reopened(`/chats/${chat.id}/responses/${randomUUID()}/feedback`, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: "up" }),
+  });
+  assert.equal(unknownFeedback.status, 404);
+  assert.deepEqual(await unknownFeedback.json(), { error: "not_found" });
+  const submissionId = randomUUID();
+  const reportRoute = `/chats/${chat.id}/responses/${responseId}/reports`;
+  const reportBody = {
+    submissionId,
+    category: "other",
+    description: "password: synthetic-report-secret-123456",
+    includeEvidence: true,
+  };
+  const pushSubscription = await reopened("/admin/push/subscribe", {
+    method: "POST",
+    body: JSON.stringify({
+      endpoint: "https://push.example.invalid/device",
+      keys: { p256dh: "synthetic-key", auth: "synthetic-auth" },
+    }),
+  });
+  assert.equal(pushSubscription.status, 200, await pushSubscription.clone().text());
+  const submittedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(submittedReport.status, 201, await submittedReport.clone().text());
+  const reportResult = await submittedReport.json();
+  const replayedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(replayedReport.status, 200);
+  assert.deepEqual(await replayedReport.json(), reportResult);
+  const duplicateReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ ...reportBody, submissionId: randomUUID() }),
+  });
+  assert.equal(duplicateReport.status, 409);
+  assert.deepEqual(await duplicateReport.json(), { error: "already_reported" });
+  const feedbackList = await reopened(`/chats/${chat.id}/feedback`, {
+    headers: feedbackHeaders,
+  });
+  assert.deepEqual(await feedbackList.json(), {
+    feedback: [{ responseId, rating: "down", reportId: reportResult.report.id }],
+  });
+  const reportListResponse = await reopened("/admin/reports?status=open", {
+    headers: feedbackHeaders,
+  });
+  assert.equal(reportListResponse.status, 200);
+  const reportList = await reportListResponse.json();
+  assert.equal(reportList.openCount, 1);
+  assert.equal("reviewedAt" in reportList.reports[0], false);
+  assert.equal(reportList.reports[0].excerpt.includes("synthetic-report-secret-123456"), false);
+  const reportDetailResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    headers: feedbackHeaders,
+  });
+  assert.equal(reportDetailResponse.status, 200, await reportDetailResponse.clone().text());
+  const reportDetail = await reportDetailResponse.json();
+  assert.equal(reportDetail.report.description.includes("synthetic-report-secret-123456"), false);
+  assert.equal(reportDetail.report.evidence.state, "available");
+  assert.match(reportDetail.report.evidence.prompt, /Reply briefly/u);
+  assert.match(reportDetail.report.evidence.response, /Committed synthetic answer/u);
+  assert.deepEqual(reportDetail.report.evidence.sources, [
+    { title: "Synthetic source", url: sourceUrl },
+  ]);
+  assert.deepEqual(reportDetail.report.evidence.widgets, [
+    { id: widget.id, title: "Synthetic widget" },
+  ]);
+  assert.deepEqual(reportDetail.report.evidence.files, [
+    {
+      id: `generated~${chat.id}~${generatedFileName}`,
+      name: "overview.html",
+      size: Buffer.byteLength(generatedFileHtml),
+      origin: "produced",
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(reportDetail),
+    /Private generated artifact content|Scoped widget body/u,
+  );
+  const reviewResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    method: "PATCH",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ status: "reviewed" }),
+  });
+  assert.equal(reviewResponse.status, 200);
+  assert.equal((await reviewResponse.json()).report.status, "reviewed");
+  const telemetryRoute = `/admin/telemetry?days=7&member=${encodeURIComponent(user.id)}`;
+  const telemetryResponse = await reopened(telemetryRoute, {
+    headers: feedbackHeaders,
+  });
+  assert.equal(telemetryResponse.status, 200);
+  const telemetry = await telemetryResponse.json();
+  assert.equal(
+    telemetry.features.some((feature: { id: string }) => feature.id === "chat"),
+    true,
+  );
+  assert.equal(telemetry.totals.reports, 1);
+  assert.equal(telemetry.totals.ratingsDown, 1);
+  assert.equal(telemetry.totals.runs, 8);
+  const attributedRun = telemetry.runs.find(
+    (run: { chatId: string | null; provider: string | null; model: string | null }) =>
+      run.chatId === chat.id && run.provider === "sparky" && run.model === "synthetic",
+  );
+  assert.ok(attributedRun);
+  assert.deepEqual(Object.keys(attributedRun).toSorted(), [
+    "admissionMs",
+    "agentId",
+    "at",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "chatId",
+    "completionMs",
+    "errorCode",
+    "feature",
+    "firstOutputMs",
+    "firstVisibleMs",
+    "id",
+    "inputTokens",
+    "memberLabel",
+    "model",
+    "outputTokens",
+    "personId",
+    "provider",
+    "providerStartMs",
+    "reasoningSummaryChars",
+    "responseId",
+    "status",
+    "totalTokens",
+  ]);
+  for (const timing of [
+    attributedRun.admissionMs,
+    attributedRun.providerStartMs,
+    attributedRun.firstOutputMs,
+    attributedRun.firstVisibleMs,
+    attributedRun.completionMs,
+  ]) {
+    assert.equal(timing === null || (Number.isSafeInteger(timing) && timing >= 0), true);
+  }
+  assert.ok(
+    attributedRun.providerStartMs === null ||
+      attributedRun.firstOutputMs === null ||
+      attributedRun.providerStartMs <= attributedRun.firstOutputMs,
+  );
+  assert.ok(
+    attributedRun.firstOutputMs === null ||
+      attributedRun.completionMs === null ||
+      attributedRun.firstOutputMs <= attributedRun.completionMs,
+  );
+  const memberSubject = "synthetic-member";
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: memberSubject,
+    }),
+    "added",
+  );
+  const ordinaryApp = createProtectedHttp({
+    ...options,
+    directory: {
+      issuer: "https://synthetic.example",
+      allowedSubjects: ["synthetic-sparky", memberSubject],
+    },
+    verifyIdentity: identityFor(memberSubject, "synthetic-member-session"),
+  });
+  t.after(() => ordinaryApp.shutdown());
+  const ordinaryHeaders = new Headers(feedbackHeaders);
+  ordinaryHeaders.set("origin", origin);
+  ordinaryHeaders.set("content-type", "application/json");
+  const memberMeResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/me`, { headers: ordinaryHeaders }),
+  );
+  const memberMe = await memberMeResponse.json();
+  ordinaryHeaders.set("x-grogu-profile", memberMe.user.id);
+  const ordinaryAdminRoutes = [
+    { path: "/admin/reports?status=all", method: "GET" },
+    { path: `/admin/reports/${reportResult.report.id}`, method: "GET" },
+    {
+      path: `/admin/reports/${reportResult.report.id}`,
+      method: "PATCH",
+      body: JSON.stringify({ status: "reviewed" }),
+    },
+    { path: "/admin/telemetry", method: "GET" },
+  ];
+  for (const route of ordinaryAdminRoutes) {
+    const adminResponse = await ordinaryApp.fetch(
+      new Request(`${origin}/api/protected/v1${route.path}`, {
+        method: route.method,
+        headers: ordinaryHeaders,
+        ...(route.body ? { body: route.body } : {}),
+      }),
+    );
+    assert.equal(adminResponse.status, 403, route.path);
+    assert.deepEqual(await adminResponse.json(), { error: "owner_required" });
+  }
+  const ordinaryFeedbackRead = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${chat.id}/feedback`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  assert.equal(ordinaryFeedbackRead.status, 404);
+  const ordinaryAssetRead = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/files/${chat.id}~private.txt`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  assert.equal(ordinaryAssetRead.status, 404);
+  const memberChatResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats`, {
+      method: "POST",
+      headers: ordinaryHeaders,
+      body: "{}",
+    }),
+  );
+  assert.equal(memberChatResponse.status, 200);
+  const memberChat = (await memberChatResponse.json()).chat;
+  const memberTurnResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${memberChat.id}/turns`, {
+      method: "POST",
+      headers: ordinaryHeaders,
+      body: JSON.stringify({ provider: "sparky", text: "Synthetic member report evidence." }),
+    }),
+  );
+  const memberTurnBody = await memberTurnResponse.text();
+  assert.equal(memberTurnResponse.status, 200, memberTurnBody);
+  assert.ok(
+    memberTurnBody
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line))
+      .some((event) => event.type === "done"),
+  );
+  const memberHistoryResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${memberChat.id}`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  const memberHistory = (await memberHistoryResponse.json()).chat;
+  const memberResponse = memberHistory.messages.findLast(
+    (message: { role: string }) => message.role === "assistant",
+  );
+  assert.ok(memberResponse);
+  const memberReportResponse = await ordinaryApp.fetch(
+    new Request(
+      `${origin}/api/protected/v1/chats/${memberChat.id}/responses/${memberResponse.id}/reports`,
+      {
+        method: "POST",
+        headers: ordinaryHeaders,
+        body: JSON.stringify({
+          submissionId: randomUUID(),
+          category: "other",
+          description: "Synthetic member report",
+          includeEvidence: true,
+        }),
+      },
+    ),
+  );
+  assert.equal(memberReportResponse.status, 201);
+  const memberReport = (await memberReportResponse.json()).report;
+  const ownerPeopleResponse = await reopened("/admin/people");
+  const ownerPeople = await ownerPeopleResponse.json();
+  const admittedMember = ownerPeople.people.find(
+    (person: { subject?: string }) => person.subject === memberSubject,
+  );
+  assert.ok(admittedMember);
+  const memberReportBeforeRemoval = await (
+    await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
+  ).json();
+  assert.equal(memberReportBeforeRemoval.report.evidence.state, "available");
+  assert.equal(
+    memberReportBeforeRemoval.report.evidence.prompt,
+    "Synthetic member report evidence.",
+  );
+  const removeMemberResponse = await reopened(`/admin/people/${admittedMember.id}/remove`, {
+    method: "POST",
+  });
+  assert.equal(removeMemberResponse.status, 200);
+  const memberReportAfterRemoval = await (
+    await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
+  ).json();
+  assert.equal(memberReportAfterRemoval.report.evidence.state, "member_removed");
+  assert.equal("prompt" in memberReportAfterRemoval.report.evidence, false);
   const firstMentionedRequest = seen.length;
   const mentionedTurn = await reopened(`/chats/${chat.id}/turns`, {
     method: "POST",
@@ -2412,7 +4262,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
-  assert.ok(mentionedEvents.some((event) => event.type === "done"));
+  assert.ok(
+    mentionedEvents.some((event) => event.type === "done"),
+    JSON.stringify(mentionedEvents),
+  );
   assert.ok(
     mentionedEvents.some(
       (event) =>
@@ -2433,8 +4286,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const usage = await listProtectedUsage(stateDir, user.id, Date.now());
   assert.equal(
     usage.reduce((total, day) => total + day.tokens, 0),
-    25,
-    "usage includes both parent turns and both native child provider requests",
+    25 + contextProofTokens,
+    "usage includes the context proof, both parent turns, and both native child provider requests",
   );
   assert.equal(
     usage.reduce((total, day) => total + day.missingUsage, 0),
@@ -2566,6 +4419,30 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     headers: { "if-match": selectedRead.chat.version },
   });
   assert.equal(deleted.status, 204);
+  const retriedDeletedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(retriedDeletedReport.status, 200);
+  assert.deepEqual(await retriedDeletedReport.json(), reportResult);
+  const deletedReport = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    headers: feedbackHeaders,
+  });
+  assert.equal((await deletedReport.json()).report.evidence.state, "deleted");
+  assert.equal(
+    (
+      await reopened(`/chats/${chat.id}/feedback`, {
+        headers: feedbackHeaders,
+      })
+    ).status,
+    404,
+  );
+  const deletedTelemetry = await (
+    await reopened("/admin/telemetry?days=7", { headers: feedbackHeaders })
+  ).json();
+  assert.equal(deletedTelemetry.totals.ratingsDown, 0);
+  assert.equal(deletedTelemetry.totals.reports, 2);
   assert.equal((await reopened(`/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
 
   const { chat: travelChat } = await (
@@ -2587,13 +4464,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.match(await travelTurn.text(), /"type":"done"/);
   const travelRequest = seen[firstTravelRequest];
   assert.match(systemText(travelRequest), /\n## Current agent: Travel \(travel\)\n/);
-  assert.match(systemText(travelRequest), /\n## Skill: Travel dashboard\n/);
-  assert.match(systemText(travelRequest), /```html\n<style>[\s\S]*<details class="day" open>/);
-  assert.doesNotMatch(systemText(seen[0]), /## Skill: Travel dashboard/);
+  assert.match(systemText(travelRequest), /Travel dashboard: Plan a trip step by step/);
+  assert.doesNotMatch(systemText(travelRequest), /Work like a careful travel planner/);
+  assert.doesNotMatch(systemText(seen[0]), /## Available skills/);
   // Earlier child runs must not seed workspace onboarding into later member prompts.
   assert.doesNotMatch(systemText(travelRequest), /## Bootstrap Pending/);
-  // Grogu and Travel requests differ only after the shared header.
-  assert.deepEqual(travelRequest?.body.tools, seen[0]?.body.tools);
+  assert.deepEqual(toolNames(travelRequest), [...mainRunTools, "skills_read"].toSorted());
   assert.equal(sharedPrefix(travelRequest), sharedPrefix(seen[0]));
 
   const { chat: routedChat } = await (
@@ -2622,8 +4498,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.match(systemText(routedRequests[0]), /\n## Current agent: Grogu \(grogu\)\n/);
   const routedChild = routedRequests[1];
   assert.match(systemText(routedChild), /\n## Current agent: Travel \(travel\)\n/);
-  assert.match(systemText(routedChild), /\n## Skill: Travel dashboard\n/);
-  assert.deepEqual(toolNames(routedChild), childTools, "a routed agent cannot route again");
+  assert.match(systemText(routedChild), /Travel dashboard: Plan a trip step by step/);
+  assert.deepEqual(
+    toolNames(routedChild),
+    [...childTools, "skills_read"].toSorted(),
+    "a routed agent cannot route again",
+  );
   assert.match(JSON.stringify(routedChild?.body.messages), new RegExp(routeBrief));
   const routedRead = await (await reopened(`/chats/${routedChat.id}`)).json();
   assert.deepEqual(
@@ -2711,6 +4591,48 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "members share the same header prefix",
   );
   assert.deepEqual(foreignRequest?.body.tools, seen[0]?.body.tools);
+  const automationDraft: ProtectedAutomationDraft = {
+    name: "Synthetic private automation",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  const foreignAutomationSubject = "synthetic-automation-other-member";
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: foreignAutomationSubject,
+    }),
+    "added",
+  );
+  const foreignAutomationProfile = await ensureCanonicalUserProfileForVerifiedIdentity(
+    { issuer: "https://synthetic.example", subject: foreignAutomationSubject },
+    { env: { OPENCLAW_STATE_DIR: stateDir } },
+  );
+  assert.equal(
+    await bindProtectedProfile(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: foreignAutomationSubject,
+      profileId: foreignAutomationProfile.id,
+    }),
+    true,
+  );
+  const foreignAutomation = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    {
+      profileId: foreignAutomationProfile.id,
+      definition: { ...automationDraft, name: "Foreign member automation" },
+      now: Date.now(),
+    },
+    { profileId: foreignAutomationProfile.id, assertCurrent() {} },
+  );
+  assert.equal(foreignAutomation.status, "created");
+  if (foreignAutomation.status !== "created") {
+    assert.fail("Could not seed the other member's automation.");
+  }
+  foreignAutomationId = foreignAutomation.automation.id;
   const { chat: permitted } = await (
     await reopened("/chats", { method: "POST", body: "{}" })
   ).json();
@@ -2728,17 +4650,63 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     permitted: `agent:protected:family:${user.id}:${permitted.id}`,
     foreign: `agent:protected:family:${foreignMe.user.id}:${foreignChat.id}`,
   };
-  const sessionHistoryPrompt = "Inspect my permitted sessions.";
-  const sessionHistoryTurn = await reopened(`/chats/${coordinator.id}/turns`, {
+  const ownedAutomationResponse = await reopened("/automations", {
     method: "POST",
-    body: JSON.stringify({ provider: "sparky", text: sessionHistoryPrompt }),
+    headers: { "x-grogu-profile": user.id },
+    body: JSON.stringify({ ...automationDraft, name: "Alice private automation" }),
+  });
+  assert.equal(ownedAutomationResponse.status, 201, await ownedAutomationResponse.clone().text());
+  const ownedAutomation = await ownedAutomationResponse.json();
+  ownedAutomationId = ownedAutomation.automation.id;
+  ownedAutomationVersion = ownedAutomation.automation.version;
+  proposedAutomationDraft = {
+    ...automationDraft,
+    name: "Alice suggested automation",
+  };
+  const automationsBefore = await (
+    await reopened("/automations", { headers: { "x-grogu-profile": user.id } })
+  ).json();
+  const legacyAutomationCatalogResponse = await reopened("/automations/catalog", {
     headers: { "x-grogu-profile": user.id },
   });
+  const legacyAutomationCatalogBody = await legacyAutomationCatalogResponse.text();
+  assert.equal(legacyAutomationCatalogResponse.status, 200);
+  assert.equal(JSON.parse(legacyAutomationCatalogBody).capabilities.automations.chat, undefined);
+  const negotiatedAutomationCatalogHeaders = {
+    "x-grogu-profile": user.id,
+    "X-Alcove-Capabilities": "automations-chat-v1",
+  };
+  const negotiatedAutomationCatalogResponse = await reopened("/automations/catalog", {
+    headers: negotiatedAutomationCatalogHeaders,
+  });
+  const negotiatedAutomationCatalogBody = await negotiatedAutomationCatalogResponse.text();
+  assert.equal(negotiatedAutomationCatalogResponse.status, 200);
+  assert.deepEqual(JSON.parse(negotiatedAutomationCatalogBody).capabilities.automations.chat, {
+    list: true,
+    read: true,
+    proposeCreate: true,
+    proposePatch: true,
+  });
+  const sessionHistoryPrompt = "Inspect my permitted sessions.";
+  const automationChatPrompt = "Use private automation chat tools.";
+  const automationChatRequestBody = {
+    provider: "sparky",
+    text: `${sessionHistoryPrompt} ${automationChatPrompt}`,
+  };
+  const toolTurnRequestStart = seen.length;
+  const automationChatRoute = `/chats/${coordinator.id}/turns`;
+  const sessionHistoryTurn = await reopened(automationChatRoute, {
+    method: "POST",
+    body: JSON.stringify(automationChatRequestBody),
+    headers: negotiatedAutomationCatalogHeaders,
+  });
   assert.equal(sessionHistoryTurn.status, 200);
-  assert.match(await sessionHistoryTurn.text(), /"type":"done"/);
-  const sessionHistoryRequests = seen.filter(({ body }) =>
-    JSON.stringify(body.messages).includes(sessionHistoryPrompt),
-  );
+  const automationChatStream = await sessionHistoryTurn.text();
+  assert.match(automationChatStream, /"type":"done"/);
+  assert.match(automationChatStream, /Proposed only; nothing was saved\./);
+  const sessionHistoryRequests = seen
+    .slice(toolTurnRequestStart)
+    .filter(({ body }) => JSON.stringify(body.messages).includes(sessionHistoryPrompt));
   assert.ok(
     sessionHistoryRequests.length >= 2,
     "native session-history results return to the model",
@@ -2759,6 +4727,115 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     sessionHistoryOutput.includes(permitted.id),
     "session list includes the permitted chat",
   );
+  const automationChatRequests = seen
+    .slice(toolTurnRequestStart)
+    .filter(({ body }) => JSON.stringify(body.messages).includes(automationChatPrompt));
+  assert.equal(automationChatRequests.length, 2);
+  const automationTools = automationChatRequests[0]!.body.tools ?? [];
+  assert.deepEqual(
+    automationTools
+      .map((tool) => tool.function.name)
+      .filter((name) => name.startsWith("automations_"))
+      .toSorted(),
+    [
+      "automations_list",
+      "automations_propose_create",
+      "automations_propose_patch",
+      "automations_read",
+    ],
+  );
+  const patchTool = automationTools.find(
+    (tool) => tool.function.name === "automations_propose_patch",
+  );
+  assert.ok(patchTool);
+  const patchSchema = patchTool.function.parameters?.properties?.patch;
+  assert.ok(patchSchema?.properties);
+  assert.equal(patchSchema.properties.enabled, undefined);
+  assert.doesNotMatch(JSON.stringify(automationTools), /profileId/u);
+  const automationToolMessages =
+    automationChatRequests[1]!.body.messages?.filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "role" in message &&
+        message.role === "tool",
+    ) ?? [];
+  const automationToolOutput = JSON.stringify(
+    automationToolMessages.map((message) => {
+      const content =
+        typeof message === "object" && message !== null && "content" in message
+          ? message.content
+          : undefined;
+      if (typeof content !== "string") {
+        throw new Error("Expected automation tool result content to be JSON text");
+      }
+      return JSON.parse(content);
+    }),
+  );
+  assert.match(automationToolOutput, /Alice private automation/u);
+  assert.doesNotMatch(automationToolOutput, /Foreign member automation/u);
+  assert.match(automationToolOutput, /"status":"not_found"/u);
+  assert.match(automationToolOutput, /Alice suggested automation/u);
+  assert.match(automationToolOutput, /Alice proposed automation update/u);
+  assert.match(automationToolOutput, /"writeApplied":false/u);
+  assert.deepEqual(
+    await (await reopened("/automations", { headers: { "x-grogu-profile": user.id } })).json(),
+    automationsBefore,
+  );
+  const capturePath = process.env.OPENCLAW_AUTOMATIONS_CHAT_CAPTURE_PATH;
+  if (capturePath) {
+    await writeFile(
+      capturePath,
+      [
+        {
+          name: "legacy-automation-catalog",
+          request: {
+            method: "GET",
+            path: "/api/protected/v1/automations/catalog",
+            headers: { "x-grogu-profile": user.id },
+          },
+          response: {
+            status: legacyAutomationCatalogResponse.status,
+            contentType: legacyAutomationCatalogResponse.headers.get("content-type"),
+            body: legacyAutomationCatalogBody,
+          },
+        },
+        {
+          name: "negotiated-automation-catalog",
+          request: {
+            method: "GET",
+            path: "/api/protected/v1/automations/catalog",
+            headers: negotiatedAutomationCatalogHeaders,
+          },
+          response: {
+            status: negotiatedAutomationCatalogResponse.status,
+            contentType: negotiatedAutomationCatalogResponse.headers.get("content-type"),
+            body: negotiatedAutomationCatalogBody,
+          },
+        },
+        {
+          name: "automation-chat-turn",
+          request: {
+            method: "POST",
+            path: `/api/protected/v1${automationChatRoute}`,
+            headers: {
+              ...negotiatedAutomationCatalogHeaders,
+              "content-type": "application/json",
+            },
+            body: automationChatRequestBody,
+          },
+          response: {
+            status: sessionHistoryTurn.status,
+            contentType: sessionHistoryTurn.headers.get("content-type"),
+            body: automationChatStream,
+          },
+        },
+      ]
+        .map((capture) => JSON.stringify(capture))
+        .join("\n") + "\n",
+      { mode: 0o600 },
+    );
+  }
   assert.ok(!sessionHistoryOutput.includes(foreignChat.id), "session list omits the foreign chat");
   const searchMessage = sessionToolMessages?.find(
     (message) => "tool_call_id" in message && message.tool_call_id === "callsessionssearch",
@@ -2786,10 +4863,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
 
   const { chat: interrupted } = await (await call("/chats", { method: "POST", body: "{}" })).json();
   const route = `/chats/${interrupted.id}`;
-  const copilotModels = () =>
+  const copilotModels = (capability?: string) =>
     call("/providers/github-copilot/models", {
       method: "POST",
-      headers: { "x-grogu-profile": user.id },
+      headers: {
+        "x-grogu-profile": user.id,
+        ...(capability ? { "x-alcove-capabilities": capability } : {}),
+      },
       body: JSON.stringify({ credential: { accessToken: githubToken } }),
     });
   const copilotTurn = (thinking: string) =>
@@ -2805,14 +4885,18 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       }),
     });
   await t.test("lists the account's visible Copilot models", async () => {
-    const listing = await copilotModels();
+    const listing = await copilotModels("model-vendor-v1");
     assert.equal(listing.status, 200);
+    assert.equal(listing.headers.get("vary"), "X-Alcove-Capabilities");
     const { models } = await listing.json();
     assert.deepEqual(
       models.map((model: { id: string }) => model.id),
       ["gpt-5.3-codex", "gpt-5.4", "no-reasoning"],
     );
-    assert.equal(models[1].contextWindow, 64000);
+    assert.equal(models[0].vendor, "OpenAI");
+    assert.equal(models[1].vendor, "OpenAI");
+    assert.equal(models[1].contextWindow, 1_000_000);
+    assert.equal(models[2].vendor, undefined);
     assert.ok(models[1].thinking.levels.includes("high"));
     assert.ok(!models[1].thinking.levels.includes("max"));
     assert.deepEqual(models[1].thinking.nativeChoices, [
@@ -2824,6 +4908,13 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.deepEqual(models[2].thinking.nativeChoices, []);
     assert.deepEqual(models[2].thinking.orchestrationLevels, ["ultra"]);
     assert.equal(models[2].thinking.default, "off");
+    const legacy = await copilotModels();
+    assert.equal(legacy.headers.get("vary"), "X-Alcove-Capabilities");
+    const legacyModels = (await legacy.json()).models;
+    assert.ok(legacyModels.every((model: { vendor?: string }) => model.vendor === undefined));
+    const unknownCapability = await copilotModels("model-vendor-v10");
+    const unknownModels = (await unknownCapability.json()).models;
+    assert.ok(unknownModels.every((model: { vendor?: string }) => model.vendor === undefined));
   });
   await t.test("unbound legacy credentials still follow the ambient tenant", async () => {
     const before = providerRequests.length;
@@ -2895,14 +4986,27 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.equal((await request()).status, 403);
   });
   await t.test("runs a chosen Copilot model with the selected reasoning", async () => {
-    const chosen = await copilotTurn("high");
-    assert.equal(chosen.status, 200);
-    const chosenEvents = (await chosen.text())
+    copilotSummary = "A public Copilot reasoning summary.";
+    let chosenTrace: string;
+    try {
+      const chosen = await copilotTurn("high");
+      assert.equal(chosen.status, 200);
+      // The provider fetch runs while the NDJSON body streams.
+      chosenTrace = await chosen.text();
+    } finally {
+      copilotSummary = undefined;
+    }
+    const chosenEvents = chosenTrace
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
     assert.equal(copilotBodies.at(-1)?.model, "gpt-5.4");
     assert.equal(copilotBodies.at(-1)?.reasoning?.effort, "high");
+    assert.equal(copilotBodies.at(-1)?.reasoning?.summary, "auto");
+    const reasoning = chosenEvents.findIndex((event) => event.type === "reasoning");
+    assert.ok(reasoning > 0, JSON.stringify(chosenEvents.map(({ type }) => type)));
+    assert.equal(chosenEvents[reasoning].text, "A public Copilot reasoning summary.");
+    assert.ok(reasoning < chosenEvents.findIndex((event) => event.type === "delta"));
     assert.equal(chosenEvents.at(-1)?.type, "done");
   });
   providerRequests.length = 0;
@@ -3173,10 +5277,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   } finally {
     await restart.shutdown();
   }
+  await reopenedShutdown();
+  assert.equal(sendNotification.mock.callCount(), 2);
+  for (const notification of sendNotification.mock.calls) {
+    assert.deepEqual(JSON.parse(String(notification.arguments[1])), { tag: "issue-report" });
+  }
   const plaintextMarkers = [
     suffix,
     "Reply briefly",
     "Committed synthetic answer.",
+    "synthetic-report-secret-123456",
     "Scoped widget body",
     "Synthetic widget",
     sourceUrl,
@@ -3436,4 +5546,508 @@ void test("automation definitions consume member and global storage quota", asyn
     }),
   );
   assert.equal(disabledCreate.status, 404);
+});
+
+void test("the owner sets member storage limits and is exempt from them", async (t) => {
+  const stateDir = path.resolve(".artifacts", `storage-limit-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://limits.example";
+  const issuer = "https://identity.example";
+  const expiresAt = Date.now() + 120_000;
+  const MiB = 1024 * 1024;
+  const options = {
+    origin,
+    stateDir,
+    accessIssuer: issuer,
+    ownerSubject: "alice",
+    directory: { issuer, allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer,
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 3,
+    maxFileBytes: 64_000,
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run() {
+        assert.fail("Storage limit proof does not run an agent.");
+      },
+      async steer() {
+        assert.fail("Storage limit proof does not steer an agent.");
+      },
+    },
+  };
+  const app = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 64 * MiB, userBytes: 32 * MiB, freeFloorBytes: 1 },
+  });
+  t.after(() => app.shutdown());
+  const fetchFrom = (target: typeof app) => (subject: string, route: string, init?: RequestInit) =>
+    target.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          ...init?.headers,
+        },
+      }),
+    );
+  const call = fetchFrom(app);
+  for (const subject of ["alice", "bob"]) {
+    assert.equal(await addProtectedSubject(stateDir, { issuer, subject }), "added");
+    await call(subject, "/me");
+  }
+  const people = (await (await call("alice", "/admin/people")).json()).people as {
+    id: string;
+    subject?: string;
+  }[];
+  const bobId = people.find((person) => person.subject === "bob")!.id;
+  const aliceId = people.find((person) => person.subject === "alice")!.id;
+  const route = (id: string) => `/admin/people/${id}/storage-limit`;
+  const errorCode = async (response: Response) => (await response.json()).error.code;
+
+  assert.equal((await call("bob", route(bobId))).status, 403);
+  const initial = await (await call("alice", route(bobId))).json();
+  assert.deepEqual(
+    { ...initial, usedBytes: typeof initial.usedBytes },
+    {
+      usedBytes: "number",
+      limitBytes: 32 * MiB,
+      defaultLimitBytes: 32 * MiB,
+      customLimitBytes: null,
+      exempt: false,
+      minLimitBytes: 16 * MiB,
+      maxLimitBytes: 64 * MiB,
+      version: "default",
+    },
+  );
+  const put = (id: string, value: unknown, version?: string) =>
+    call("alice", route(id), {
+      method: "PUT",
+      headers: version ? { "if-match": version } : {},
+      body: JSON.stringify(value),
+    });
+  const missingVersion = await put(bobId, { limitBytes: 20 * MiB });
+  assert.equal(missingVersion.status, 428);
+  assert.equal(await errorCode(missingVersion), "version_required");
+  for (const value of [
+    { limitBytes: 1 },
+    { limitBytes: 65 * MiB },
+    { limitBytes: 20 * MiB, x: 1 },
+  ]) {
+    const rejected = await put(bobId, value, "default");
+    assert.equal(rejected.status, 400);
+    assert.equal(await errorCode(rejected), "invalid_limit");
+  }
+  const updated = await put(bobId, { limitBytes: 20 * MiB }, initial.version);
+  assert.equal(updated.status, 200);
+  const custom = await updated.json();
+  assert.equal(custom.limitBytes, 20 * MiB);
+  assert.equal(custom.customLimitBytes, 20 * MiB);
+  assert.notEqual(custom.version, initial.version);
+  const stale = await put(bobId, { limitBytes: 24 * MiB }, initial.version);
+  assert.equal(stale.status, 409);
+  assert.equal(await errorCode(stale), "version_conflict");
+
+  // Quota admission and the member's storage view read the same effective limit.
+  assert.equal((await (await call("bob", "/storage/chats")).json()).limitBytes, 20 * MiB);
+  assert.equal((await (await call("alice", "/storage/chats")).json()).limitBytes, null);
+
+  const owner = await (await call("alice", route(aliceId))).json();
+  assert.equal(owner.exempt, true);
+  assert.equal(owner.limitBytes, null);
+  const exempt = await put(aliceId, { limitBytes: 20 * MiB }, owner.version);
+  assert.equal(exempt.status, 409);
+  assert.equal(await errorCode(exempt), "limit_exempt");
+
+  const reset = await call("alice", route(bobId), {
+    method: "DELETE",
+    headers: { "if-match": custom.version },
+  });
+  assert.equal(reset.status, 200);
+  const restored = await reset.json();
+  assert.equal(restored.customLimitBytes, null);
+  assert.equal(restored.limitBytes, 32 * MiB);
+  const unknown = await call("alice", route(randomUUID()));
+  assert.equal(unknown.status, 404);
+  assert.equal(await errorCode(unknown), "person_not_found");
+
+  // With a tiny budget the owner can exceed both limits; members then see the shared-budget reason.
+  const small = createProtectedHttp({
+    ...options,
+    storageLimits: { globalBytes: 12_000, userBytes: 8_000, freeFloorBytes: 1 },
+  });
+  t.after(() => small.shutdown());
+  const smallCall = fetchFrom(small);
+  const draft = {
+    name: "Synthetic limit test",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky", id: "synthetic-sparky" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  for (let index = 0; index < 3; index += 1) {
+    const created = await smallCall("alice", "/automations", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    assert.equal(created.status, 201);
+  }
+  const blocked = await smallCall("bob", "/automations", {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+  assert.equal(blocked.status, 413);
+  const blockedError = (await blocked.json()).error;
+  assert.equal(blockedError.code, "quota_exceeded");
+  assert.match(blockedError.message, /shared storage/u);
+});
+
+void test("automation authoring chats hold a server binding and save only the sent draft", async (t) => {
+  const stateDir = path.resolve(".artifacts", `automation-authoring-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const origin = "https://authoring.example";
+  const expiresAt = Date.now() + 120_000;
+  const routed: boolean[] = [];
+  const app = createProtectedHttp({
+    origin,
+    stateDir,
+    accessIssuer: "https://identity.example",
+    directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
+    usersRoot: await root(stateDir),
+    verifyIdentity: async (request: Request) => {
+      const subject = request.headers.get("cookie")?.slice("synthetic=".length);
+      if (subject !== "alice" && subject !== "bob") {
+        throw new ProtectedError(401, "unauthorized", "Sign in.");
+      }
+      return {
+        issuer: "https://identity.example",
+        subject,
+        kind: "human" as const,
+        sessionId: subject,
+        expiresAt,
+        assertCurrent() {},
+        async revalidate() {},
+      };
+    },
+    agentExtensions: [protectedResearchAgent],
+    maxChatsPerUser: 10,
+    maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    turns: {
+      models: [
+        {
+          provider: "sparky" as const,
+          id: "synthetic-sparky",
+          label: "Synthetic Sparky",
+          thinking: { levels: ["low" as const], default: "low" as const },
+        },
+      ],
+      async run(turn) {
+        routed.push(turn.routing !== undefined);
+        const tools = turn.automationChat;
+        if (tools && "authoring" in tools) {
+          const current = await tools.read();
+          // One model message may carry parallel tool calls; the bindings must order them.
+          await Promise.all([
+            turn.input.text.includes("update")
+              ? tools.update({ draft: { ...current.draft, name: "Revised by chat" } })
+              : undefined,
+            turn.input.text.includes("save")
+              ? tools.save({ draftRevision: turn.input.text.split(" ").at(-1)! })
+              : undefined,
+          ]);
+        }
+        await turn.delta("Done.");
+      },
+      async steer() {
+        assert.fail("Authoring proof does not steer an agent.");
+      },
+    },
+  });
+  t.after(() => app.shutdown());
+  const negotiated = "automations-chat-v1, automations-authoring-v1";
+  const call = (subject: string, route: string, init?: RequestInit, capabilities = negotiated) =>
+    app.fetch(
+      new Request(`${origin}/api/protected/v1${route}`, {
+        ...init,
+        headers: {
+          origin,
+          cookie: `synthetic=${subject}`,
+          "content-type": "application/json",
+          "x-alcove-capabilities": capabilities,
+          ...init?.headers,
+        },
+      }),
+    );
+  const profiles: Record<string, string> = {};
+  for (const subject of ["alice", "bob"]) {
+    profiles[subject] = (await (await call(subject, "/me")).json()).user.id;
+    assert.equal(
+      await addProtectedSubject(stateDir, { issuer: "https://identity.example", subject }),
+      "added",
+    );
+  }
+  const draft = {
+    name: "Synthetic authoring draft",
+    instructions: "Summarize public project updates.",
+    whenToNotify: "Only when there is a meaningful update.",
+    agentId: "travel",
+    model: { provider: "sparky" as const, id: "synthetic-sparky" },
+    thinking: "low" as const,
+    schedule: { kind: "every" as const, everyMs: 60_000 },
+  };
+  const turn = async (
+    subject: string,
+    chatId: string,
+    text: string,
+    authoring?: Record<string, unknown>,
+    capabilities = negotiated,
+  ) => {
+    const response = await call(
+      subject,
+      `/chats/${chatId}/turns`,
+      {
+        method: "POST",
+        headers: { "x-grogu-profile": profiles[subject]! },
+        body: JSON.stringify({ provider: "sparky", text, ...(authoring ? { authoring } : {}) }),
+      },
+      capabilities,
+    );
+    const raw = await response.text();
+    if (response.status !== 200) {
+      const events: ProtectedAuthoringTurnEvent[] = [];
+      return { status: response.status, code: JSON.parse(raw).error.code as string, events };
+    }
+    const events = raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ProtectedAuthoringTurnEvent);
+    return { status: 200, code: undefined, events };
+  };
+  const ofType = <T extends ProtectedAuthoringTurnEvent["type"]>(
+    events: ProtectedAuthoringTurnEvent[],
+    type: T,
+  ) =>
+    events.filter(
+      (event): event is Extract<ProtectedAuthoringTurnEvent, { type: T }> => event.type === type,
+    );
+  const listAutomations = async () =>
+    (await (await call("alice", "/automations")).json()).automations as { id: string }[];
+
+  const plainCatalog = await (
+    await call("alice", "/automations/catalog", {}, "automations-chat-v1")
+  ).json();
+  assert.equal(plainCatalog.capabilities.automations.chat.authoring, undefined);
+  const catalog = await (await call("alice", "/automations/catalog")).json();
+  assert.equal(catalog.capabilities.automations.chat.authoring, true);
+  assert.equal(
+    (await call("alice", "/automations/authoring", { method: "POST" }, "automations-chat-v1"))
+      .status,
+    404,
+  );
+
+  // The first message creates an unsaved Grogu chat; nothing is saved or scheduled.
+  const created = await call("alice", "/automations/authoring", { method: "POST" });
+  assert.equal(created.status, 201);
+  const { chat } = await created.json();
+  assert.deepEqual(chat.authoring, { kind: "automation" });
+  assert.equal(chat.selectedAgentId, "grogu");
+  assert.deepEqual(await listAutomations(), []);
+  const agentSwitch = await call("alice", `/chats/${chat.id}/agent`, {
+    method: "PATCH",
+    headers: { "if-match": chat.version },
+    body: JSON.stringify({ selectedAgentId: "travel" }),
+  });
+  assert.equal(agentSwitch.status, 409);
+  assert.equal((await agentSwitch.json()).error.code, "authoring_chat");
+
+  // The server-held binding, not the body, decides whether a turn may author.
+  assert.equal((await turn("alice", chat.id, "Hello")).code, "authoring_required");
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "1" }, "automations-chat-v1"))
+      .code,
+    "authoring_required",
+  );
+  assert.equal((await turn("bob", chat.id, "Hello", { draft, draftRevision: "1" })).status, 404);
+  const { chat: ordinary } = await (
+    await call("alice", "/chats", { method: "POST", body: "{}" })
+  ).json();
+  assert.equal(
+    (await turn("alice", ordinary.id, "Hello", { draft, draftRevision: "1" })).status,
+    400,
+  );
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "1", automationVersion: "1" }))
+      .status,
+    400,
+  );
+
+  const updated = await turn("alice", chat.id, "Please update", { draft, draftRevision: "4" });
+  assert.deepEqual(ofType(updated.events, "automation-draft-update"), [
+    {
+      type: "automation-draft-update",
+      baseDraftRevision: "4",
+      draftRevision: "5",
+      draft: { ...draft, name: "Revised by chat" },
+    },
+  ]);
+  assert.deepEqual(await listAutomations(), []);
+  const changedThenSaved = await turn("alice", chat.id, "Please update and save 5", {
+    draft,
+    draftRevision: "5",
+  });
+  assert.deepEqual(ofType(changedThenSaved.events, "automation-save-refused"), [
+    { type: "automation-save-refused", draftRevision: "5", reason: "draft_changed" },
+  ]);
+  assert.deepEqual(await listAutomations(), []);
+
+  // A first save that stopped before binding left its record under the chat id; a retry reuses it.
+  const orphan = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    {
+      profileId: profiles.alice!,
+      definition: { ...draft, name: "Saved before binding" },
+      now: Date.now(),
+      automationId: chat.id,
+    },
+    { profileId: profiles.alice!, assertCurrent() {} },
+  );
+  assert.ok(orphan.status === "created");
+  const interrupted = await turn("alice", chat.id, "Please save 6", { draft, draftRevision: "6" });
+  assert.deepEqual(ofType(interrupted.events, "automation-save-refused"), [
+    {
+      type: "automation-save-refused",
+      draftRevision: "6",
+      reason: "version_mismatch",
+      currentVersion: String(orphan.automation.definitionRevision),
+    },
+  ]);
+  assert.deepEqual(ofType(interrupted.events, "automation-saved"), []);
+  assert.deepEqual(
+    (await listAutomations()).map(({ id }) => id),
+    [chat.id],
+  );
+  const bound = (await (await call("alice", "/chats")).json()).chats.find(
+    ({ id }: { id: string }) => id === chat.id,
+  );
+  assert.deepEqual(bound.authoring, { kind: "automation", automationId: chat.id });
+  // Released clients parse chats against strict V1 schemas without the authoring field.
+  const v1Chats = (await (await call("alice", "/chats", {}, "automations-chat-v1")).json()).chats;
+  assert.ok(v1Chats.some(({ id }: { id: string }) => id === chat.id));
+  assert.ok(v1Chats.every((summary: object) => !("authoring" in summary)));
+  const v1Chat = (
+    await (await call("alice", `/chats/${chat.id}`, {}, "automations-chat-v1")).json()
+  ).chat;
+  assert.equal("authoring" in v1Chat, false);
+  const savedEvent = {
+    automation: { version: String(orphan.automation.definitionRevision) },
+  };
+
+  // A bound chat requires the record version it was opened against.
+  assert.equal(
+    (await turn("alice", chat.id, "Hello", { draft, draftRevision: "7" })).code,
+    "version_required",
+  );
+  const resaved = await turn("alice", chat.id, "Please save 7", {
+    draft,
+    draftRevision: "7",
+    automationVersion: savedEvent.automation.version,
+  });
+  const [resavedEvent] = ofType(resaved.events, "automation-saved");
+  assert.ok(resavedEvent);
+  assert.equal(resavedEvent.automation.name, draft.name);
+  assert.equal(resavedEvent.automation.enabled, false);
+  assert.notEqual(resavedEvent.automation.version, savedEvent.automation.version);
+  assert.equal(
+    (
+      await turn("alice", chat.id, "Hello", {
+        draft,
+        draftRevision: "8",
+        automationVersion: savedEvent.automation.version,
+      })
+    ).status,
+    412,
+  );
+  assert.deepEqual(routed, [false, false, false, false]);
+
+  // Saved items reopen their one bound chat; other members cannot see or bind them.
+  const reopened = await call("alice", `/automations/${chat.id}/authoring`, { method: "POST" });
+  assert.equal(reopened.status, 200);
+  assert.equal((await reopened.json()).chat.id, chat.id);
+  assert.equal(
+    (await call("bob", `/automations/${chat.id}/authoring`, { method: "POST" })).status,
+    404,
+  );
+  const formSaved = (
+    await (
+      await call("alice", "/automations", { method: "POST", body: JSON.stringify(draft) })
+    ).json()
+  ).automation;
+  const first = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json();
+  assert.deepEqual(firstBody.chat.authoring, { kind: "automation", automationId: formSaved.id });
+  assert.equal(firstBody.automation.version, formSaved.version);
+  const again = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
+  assert.equal((await again.json()).chat.id, firstBody.chat.id);
+
+  // A form save from an unsaved authoring chat saves under that chat and binds it.
+  const formChat = (
+    await (await call("alice", "/automations/authoring", { method: "POST" })).json()
+  ).chat;
+  const formSave = (subject: string, chatId: string, capabilities = negotiated) =>
+    call(
+      subject,
+      "/automations",
+      {
+        method: "POST",
+        headers: { "x-alcove-authoring-chat": chatId },
+        body: JSON.stringify(draft),
+      },
+      capabilities,
+    );
+  assert.equal((await formSave("alice", formChat.id, "automations-chat-v1")).status, 404);
+  assert.equal((await formSave("bob", formChat.id)).status, 404);
+  const formBound = await formSave("alice", formChat.id);
+  assert.equal(formBound.status, 201);
+  const formBoundAutomation = (await formBound.json()).automation;
+  assert.equal(formBoundAutomation.id, formChat.id);
+  assert.equal(formBoundAutomation.enabled, false);
+  const formReopened = await call("alice", `/automations/${formChat.id}/authoring`, {
+    method: "POST",
+  });
+  assert.equal(formReopened.status, 200);
+  assert.deepEqual((await formReopened.json()).chat.authoring, {
+    kind: "automation",
+    automationId: formChat.id,
+  });
+  const rebound = await formSave("alice", formChat.id);
+  assert.equal(rebound.status, 409);
+  assert.equal((await rebound.json()).error.code, "authoring_bound");
 });

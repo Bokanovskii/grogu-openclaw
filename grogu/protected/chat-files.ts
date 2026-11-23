@@ -22,3 +22,7 @@ export function chatWidgetsDirectory(chatId: string) {
 export function chatArtifactsDirectory(chatId: string) {
   return `${chatFilesDirectory(chatId)}/web-fetch`;
 }
+
+export function chatGeneratedArtifactsDirectory(chatId: string) {
+  return `${chatFilesDirectory(chatId)}/artifacts`;
+}

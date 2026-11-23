@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 /** Host-resolved memory partition for one trusted session invocation. */
 export type MemoryAudience =
   | { kind: "owner-private"; agentId: string }
+  | { kind: "member-private"; agentId: string; workspaceKey: string }
   | { kind: "conversation"; agentId: string; sessionKey: string; sessionId: string };
 
 /** Authenticated caller authority supplied by the trusted host, never inferred from IDs. */

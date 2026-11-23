@@ -4,6 +4,13 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { ensureProtectedAdmissionSchema } from "./protected-admission.js";
+import { pruneProtectedFeedback } from "./protected-feedback-reports.js";
+import {
+  ensureProtectedFeedbackSchema,
+  insertProtectedTurnTelemetry,
+  type ProtectedStoredDataEntry,
+  type ProtectedTurnTelemetryInput,
+} from "./protected-feedback.js";
 
 type UsageDatabase = {
   protected_usage_daily: {
@@ -50,8 +57,9 @@ export function recordProtectedUsage(
     tokens: number | null;
     failed: boolean;
     now: number;
+    telemetry?: ProtectedTurnTelemetryInput;
   },
-): void {
+): ProtectedStoredDataEntry[] {
   if (
     !input.runId ||
     !input.profileId ||
@@ -63,7 +71,13 @@ export function recordProtectedUsage(
     throw new Error("Protected usage is invalid.");
   }
   ensureProtectedAdmissionSchema(database);
-  runOpenClawStateWriteTransaction(
+  if (input.telemetry) {
+    if (input.telemetry.id !== input.runId || input.telemetry.profileId !== input.profileId) {
+      throw new Error("Protected usage telemetry does not match its run.");
+    }
+    ensureProtectedFeedbackSchema(database);
+  }
+  return runOpenClawStateWriteTransaction(
     ({ db }) => {
       const queries = getNodeSqliteKysely<UsageDatabase>(db);
       const day = dayAt(input.now);
@@ -75,7 +89,7 @@ export function recordProtectedUsage(
           .onConflict((conflict) => conflict.column("run_id").doNothing()),
       );
       if (Number(inserted.numAffectedRows ?? 0) === 0) {
-        return;
+        return [];
       }
       const prior = executeSqliteQuerySync(
         db,
@@ -105,6 +119,7 @@ export function recordProtectedUsage(
           .values(row)
           .onConflict((conflict) => conflict.columns(["profile_id", "day"]).doUpdateSet(row)),
       );
+      return input.telemetry ? insertProtectedTurnTelemetry(db, input.telemetry) : [];
     },
     { path: database.path },
     { operationLabel: "protected.usage.record" },
@@ -138,6 +153,7 @@ export function listProtectedUsage(
 
 export function pruneProtectedUsage(database: OpenClawStateDatabase, now: number): void {
   ensureProtectedAdmissionSchema(database);
+  pruneProtectedFeedback(database, now);
   runOpenClawStateWriteTransaction(
     ({ db }) => {
       const queries = getNodeSqliteKysely<UsageDatabase>(db);

@@ -119,6 +119,8 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "modelOverride",
   "agentRuntimeOverride",
   "protectedAgentId",
+  "protectedAuthoringKind",
+  "protectedAutomationId",
   "modelOverrideSource",
   "modelOverrideRouteResolution",
   "modelOverrideFallbackOriginProvider",

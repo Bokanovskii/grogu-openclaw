@@ -12,6 +12,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import type { OpenClawConfig } from "../types.openclaw.js";
 import { runScopedSqliteArchiveOperation } from "./session-accessor.sqlite-archive-session.js";
 import type {
   MaterializedSessionStateDeletePlan,
@@ -37,6 +38,37 @@ import {
 } from "./session-accessor.sqlite-worker-request.js";
 import type { SessionColdWorkerData } from "./session-cold-storage-worker.js";
 import { withSessionHistoryWorkerDatabase } from "./session-transcript-worker-runtime.js";
+
+export type { SqliteTranscriptArchiveResidueReport } from "./session-accessor.sqlite-archive-artifact.js";
+
+export async function inspectConfiguredSqliteTranscriptArchiveResidue(input: {
+  config: OpenClawConfig;
+  env: NodeJS.ProcessEnv;
+  assertCurrent: () => void;
+}) {
+  input.assertCurrent();
+  const [
+    { inspectSqliteTranscriptArchiveResidue },
+    { resolveSqliteReadScope, resolveSqliteTranscriptArchiveDirectory },
+    { resolveConfiguredSessionStoreTargets },
+  ] = await Promise.all([
+    import("./session-accessor.sqlite-archive-artifact.js"),
+    import("./session-accessor.sqlite-scope.js"),
+    import("./targets.js"),
+  ]);
+  input.assertCurrent();
+  const roots = resolveConfiguredSessionStoreTargets(input.config, input.env).flatMap(
+    ({ agentId, storePath }) => {
+      const scope = resolveSqliteReadScope({ agentId, env: input.env, storePath });
+      const archiveRoot = resolveSqliteTranscriptArchiveDirectory(scope);
+      return [archiveRoot, path.join(archiveRoot, "cold")];
+    },
+  );
+  input.assertCurrent();
+  const report = await inspectSqliteTranscriptArchiveResidue(roots);
+  input.assertCurrent();
+  return report;
+}
 
 export function createSqliteTranscriptArchiveWorker(workerData: object): Worker {
   const workerUrl = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.sessionTranscriptArchive);

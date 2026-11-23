@@ -25,6 +25,7 @@ import type {
   EmbeddingProviderRuntime,
 } from "./embedding-provider-types.js";
 import type {
+  MemoryAudience,
   MemoryProviderOpenParams,
   MemoryProviderOpenResult,
 } from "./memory-provider-types.js";
@@ -243,6 +244,7 @@ type MemoryFlushPlanResolverParams = {
   cfg?: OpenClawConfig;
   nowMs?: number;
   contextWindowTokens?: number;
+  memoryAudience?: MemoryAudience;
 };
 
 /** Resolves a complete file flush plan; its contract is unchanged from earlier releases. */

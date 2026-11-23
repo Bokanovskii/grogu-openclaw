@@ -397,6 +397,7 @@ export function resolveMemoryFlushPlan(params: {
   cfg?: OpenClawConfig;
   nowMs?: number;
   contextWindowTokens?: number;
+  memoryAudience?: import("./memory-provider-types.js").MemoryAudience;
 }): MemoryFlushPlanResolution | null {
   const registration = getMemoryCapability();
   const source = registration?.flushPlanSource;

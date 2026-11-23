@@ -65,16 +65,21 @@ export class MemoryFlushToolsUnavailableError extends Error {
 }
 
 // A resolved error result is not persistence evidence, just like a thrown error.
-function wrapPersistenceTool(
-  tool: AnyAgentTool,
-  recordPersistenceToolSuccess: () => void,
-): AnyAgentTool {
+function wrapPersistenceTool(tool: AnyAgentTool, context: MemoryFlushToolRunContext): AnyAgentTool {
   return copyAgentToolMetadata(tool, {
     ...tool,
     execute: async (toolCallId, params, signal, onUpdate) => {
-      const result = await tool.execute(toolCallId, params, signal, onUpdate);
+      let result: Awaited<ReturnType<AnyAgentTool["execute"]>>;
+      try {
+        result = await tool.execute(toolCallId, params, signal, onUpdate);
+      } catch (error) {
+        context.recordPersistenceToolFailure?.();
+        throw error;
+      }
       if (!isToolResultError(result) && !("isError" in result && result.isError === true)) {
-        recordPersistenceToolSuccess();
+        context.recordPersistenceToolSuccess();
+      } else {
+        context.recordPersistenceToolFailure?.();
       }
       return result;
     },
@@ -101,7 +106,7 @@ export function projectMemoryFlushTools(
         return [];
       }
       if (persistenceNames.has(tool.name)) {
-        return [wrapPersistenceTool(tool, projection.recordPersistenceToolSuccess)];
+        return [wrapPersistenceTool(tool, projection)];
       }
       return lookupNames.has(tool.name) ? [tool] : [];
     });

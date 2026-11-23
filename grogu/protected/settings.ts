@@ -1,5 +1,6 @@
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import type { SecretRef } from "../../src/config/types.secrets.js";
@@ -105,6 +106,7 @@ export function parseRuntimeSettings(value: unknown) {
 }
 
 export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): OpenClawConfig {
+  const automationsChatPluginPath = fileURLToPath(new URL("./automations-chat", import.meta.url));
   return {
     // Keyless public search only; the plugin is shipped as source because it has no bundled dist.
     // The provider cache is process-wide, so a hit would reveal another member's identical query.
@@ -123,15 +125,30 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
       },
     },
     plugins: {
-      allow: ["anthropic", "duckduckgo", "github-copilot", "openai"],
-      load: { paths: [path.join(serviceRoot, "extensions", "duckduckgo")] },
+      allow: [
+        "alcove-automations-chat",
+        "anthropic",
+        "duckduckgo",
+        "github-copilot",
+        "memory-core",
+        "openai",
+      ],
+      load: {
+        paths: [
+          path.join(serviceRoot, "extensions", "duckduckgo"),
+          automationsChatPluginPath,
+          path.join(serviceRoot, "extensions", "memory-core"),
+        ],
+      },
       entries: {
+        "alcove-automations-chat": { enabled: true },
         anthropic: { enabled: true },
         duckduckgo: { enabled: true },
         "github-copilot": { enabled: true },
+        "memory-core": { enabled: true, config: { dreaming: { enabled: false } } },
         openai: { enabled: true },
       },
-      slots: { memory: "none" },
+      slots: { memory: "memory-core" },
     },
     models: {
       mode: "replace",

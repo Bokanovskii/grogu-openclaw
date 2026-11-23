@@ -10,7 +10,10 @@ import {
   projectAgentRunAttemptTerminal,
   type AgentRunAttemptTerminal,
 } from "../../agent-run-terminal-outcome.js";
-import { agentSessionSetContextReplacementHook } from "../../sessions/agent-session-compaction.js";
+import {
+  agentSessionSetBeforeAutomaticCompaction,
+  agentSessionSetContextReplacementHook,
+} from "../../sessions/agent-session-compaction.js";
 import { log } from "../logger.js";
 import { declarePromptHistoryRewrite } from "../prompt-cache-observability.js";
 import type { EmbeddedAgentQueueHandle } from "../runs.js";
@@ -49,6 +52,14 @@ export async function runEmbeddedAttemptExecutionPhase(
     toolBase.skillInstructionDeliveryCache.clear();
     attempt.onContextAccountingEvent?.({ kind: "compaction", tokensAfter });
   }, assertActive);
+  const beforeCompaction = attempt.beforeCompaction;
+  if (beforeCompaction) {
+    activeSession[agentSessionSetBeforeAutomaticCompaction](async () => {
+      assertActive();
+      await beforeCompaction();
+      assertActive();
+    });
+  }
   let repairedRejectedProviderReplay = false;
   const diagnosticOwner = createDiagnosticEmbeddedRunOwner({
     sessionId: attempt.sessionId,

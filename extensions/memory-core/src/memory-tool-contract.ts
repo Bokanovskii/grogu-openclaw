@@ -18,6 +18,7 @@ export type MemoryToolOptions = {
   agentSessionKey?: string;
   sandboxed?: boolean;
   oneShotCliRun?: boolean;
+  memoryAudience?: OpenClawPluginToolContext["memoryAudience"];
   conversationRecall?: OpenClawPluginToolContext["conversationRecall"];
   activeProjectKeys?: readonly string[];
   acquireLocalService?: MemoryCoreAcquireLocalService;
@@ -78,7 +79,9 @@ export function resolveMemoryToolContext(options: MemoryToolOptions) {
     agentId: options.agentId,
   });
   // Tool schemas and guidance need source policy; provider validation belongs to execution.
-  const settings = resolveMemorySearchIndexConfig(cfg, agentId);
+  const settings = resolveMemorySearchIndexConfig(cfg, agentId, {
+    includeDisabled: options.memoryAudience?.kind === "member-private",
+  });
   return settings
     ? { cfg, agentId, settings, sources: resolveMemorySourceContract(settings) }
     : null;

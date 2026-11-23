@@ -6,6 +6,7 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/protected-host.ts",
+    "./styles": "./src/styles.ts",
     "./transport": "./src/transport.ts"
   },
   "files": ["src", "README.md"]

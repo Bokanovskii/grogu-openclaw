@@ -71,10 +71,11 @@ export async function unsubscribeProtectedPush(params: {
   return removed;
 }
 
-export async function notifyProtectedAccessRequest(params: {
+async function notifyProtectedOwner(params: {
   stateDir: string;
   issuer: string;
   ownerSubject?: string;
+  payload: { title?: string; body?: string; tag: string; url?: string };
 }) {
   if (!params.ownerSubject || !(await hasBoundWebPushSubscriptions(params.stateDir))) {
     return;
@@ -104,12 +105,7 @@ export async function notifyProtectedAccessRequest(params: {
           assertCurrent();
           return send({
             subscriptions: targets,
-            payload: {
-              title: "Alcove",
-              body: "A request needs review.",
-              tag: "access-request",
-              url: "/settings/admin",
-            },
+            payload: params.payload,
             deliveryOptions: { TTL: 300, timeout: 10_000 },
           });
         },
@@ -121,4 +117,31 @@ export async function notifyProtectedAccessRequest(params: {
   ) {
     throw new Error("Owner push delivery failed.");
   }
+}
+
+export function notifyProtectedAccessRequest(params: {
+  stateDir: string;
+  issuer: string;
+  ownerSubject?: string;
+}) {
+  return notifyProtectedOwner({
+    ...params,
+    payload: {
+      title: "Alcove",
+      body: "A request needs review.",
+      tag: "access-request",
+      url: "/settings/admin",
+    },
+  });
+}
+
+export function notifyProtectedIssueReport(params: {
+  stateDir: string;
+  issuer: string;
+  ownerSubject?: string;
+}) {
+  return notifyProtectedOwner({
+    ...params,
+    payload: { tag: "issue-report" },
+  });
 }

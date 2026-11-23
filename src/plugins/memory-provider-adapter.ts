@@ -188,6 +188,12 @@ export async function adaptLegacyMemoryProvider(
   providerId: string,
   params: MemoryProviderOpenParams,
 ): Promise<MemoryProviderOpenResult> {
+  if (
+    params.context.authority.kind === "session" &&
+    params.context.authority.audience?.kind === "member-private"
+  ) {
+    return { provider: null, error: "Member memory requires an audience-aware provider." };
+  }
   const result = await runtime.getMemorySearchManager({
     cfg: params.cfg,
     agentId: params.agentId,

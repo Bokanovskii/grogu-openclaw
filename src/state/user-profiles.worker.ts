@@ -29,11 +29,31 @@ import {
   addProtectedSubject,
 } from "./protected-admission.js";
 import {
+  findProtectedFeedbackSubmission,
+  findProtectedFeedbackForResponse,
+  listProtectedFeedbackReports,
+  protectedFeedbackRows,
+  readProtectedFeedbackReport,
+  removeProtectedChatFeedbackEvidence,
+  setProtectedFeedbackReportStatus,
+  setProtectedResponseRating,
+  submitProtectedFeedbackReport,
+} from "./protected-feedback-reports.js";
+import {
+  listProtectedAdminTelemetry,
+  readProtectedFeedbackStoredData,
+} from "./protected-feedback-telemetry.js";
+import {
   beginProtectedPolicy,
   listPendingProtectedPolicy,
   retryProtectedPolicy,
   settleProtectedPolicy,
 } from "./protected-policy-store.js";
+import {
+  readProtectedProfileStorageLimit,
+  readProtectedStorageLimit,
+  setProtectedStorageLimit,
+} from "./protected-storage-limits.js";
 import {
   listProtectedUsage,
   pruneProtectedUsage,
@@ -288,6 +308,18 @@ export const userProfileOperations = {
     input: { id: string; email: string; revision: number; state: "synced" | "failed" | "unknown" },
     { open },
   ) => settleProtectedPolicy(open(), input),
+  "protectedAccess.storageLimit.read": (
+    input: Parameters<typeof readProtectedStorageLimit>[1],
+    { open },
+  ) => readProtectedStorageLimit(open(), input),
+  "protectedAccess.storageLimit.forProfile": (
+    input: Parameters<typeof readProtectedProfileStorageLimit>[1],
+    { open },
+  ) => readProtectedProfileStorageLimit(open(), input),
+  "protectedAccess.storageLimit.set": (
+    input: Parameters<typeof setProtectedStorageLimit>[1],
+    { open },
+  ) => setProtectedStorageLimit(open(), input),
   "protectedAccess.retryPolicy": (input: { id: string; issuer: string }, { open }) =>
     retryProtectedPolicy(open(), input),
   "protectedUsage.record": (
@@ -299,6 +331,7 @@ export const userProfileOperations = {
       tokens: number | null;
       failed: boolean;
       now: number;
+      telemetry?: Parameters<typeof recordProtectedUsage>[1]["telemetry"];
     },
     { open },
   ) => recordProtectedUsage(open(), input),
@@ -306,6 +339,44 @@ export const userProfileOperations = {
     listProtectedUsage(open(), input),
   "protectedUsage.prune": (input: { now: number }, { open }) =>
     pruneProtectedUsage(open(), input.now),
+  "protectedFeedback.listRatings": (input: { profileId: string; chatId: string }, { open }) =>
+    protectedFeedbackRows(open(), input),
+  "protectedFeedback.setRating": (
+    input: Parameters<typeof setProtectedResponseRating>[1],
+    { open },
+  ) => setProtectedResponseRating(open(), input),
+  "protectedFeedback.findSubmission": (
+    input: Parameters<typeof findProtectedFeedbackSubmission>[1],
+    { open },
+  ) => findProtectedFeedbackSubmission(open(), input),
+  "protectedFeedback.findForResponse": (
+    input: Parameters<typeof findProtectedFeedbackForResponse>[1],
+    { open },
+  ) => findProtectedFeedbackForResponse(open(), input),
+  "protectedFeedback.submitReport": (
+    input: Parameters<typeof submitProtectedFeedbackReport>[1],
+    { open },
+  ) => submitProtectedFeedbackReport(open(), input),
+  "protectedFeedback.listReports": (
+    input: Parameters<typeof listProtectedFeedbackReports>[1],
+    { open },
+  ) => listProtectedFeedbackReports(open(), input),
+  "protectedFeedback.readReport": (input: { id: string }, { open }) =>
+    readProtectedFeedbackReport(open(), input.id),
+  "protectedFeedback.setReportStatus": (
+    input: Parameters<typeof setProtectedFeedbackReportStatus>[1],
+    { open },
+  ) => setProtectedFeedbackReportStatus(open(), input),
+  "protectedFeedback.removeChat": (
+    input: Parameters<typeof removeProtectedChatFeedbackEvidence>[1],
+    { open },
+  ) => removeProtectedChatFeedbackEvidence(open(), input),
+  "protectedFeedback.storageUsage": (input: { overheadBytes: number }, { open }) =>
+    readProtectedFeedbackStoredData(open(), input.overheadBytes),
+  "protectedFeedback.telemetry.list": (
+    input: Parameters<typeof listProtectedAdminTelemetry>[1],
+    { open },
+  ) => listProtectedAdminTelemetry(open(), input),
   "protectedAccess.list": (_input: undefined, { open }) => listProtectedAccessRequests(open()),
   "protectedAccess.setStatus": (
     input: {

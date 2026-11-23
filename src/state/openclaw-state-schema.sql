@@ -2729,6 +2729,12 @@ CREATE TABLE IF NOT EXISTS protected_policy_barrier (
   revision INTEGER NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS protected_storage_limits (
+  admission_id TEXT NOT NULL PRIMARY KEY,
+  limit_bytes INTEGER NOT NULL CHECK (limit_bytes > 0),
+  updated_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS protected_usage_daily (
   profile_id TEXT NOT NULL,
   day TEXT NOT NULL,
@@ -2748,6 +2754,96 @@ CREATE TABLE IF NOT EXISTS protected_usage_runs (
 CREATE INDEX IF NOT EXISTS idx_protected_usage_daily_day ON protected_usage_daily(day);
 CREATE INDEX IF NOT EXISTS idx_protected_usage_runs_day
   ON protected_usage_runs(day);
+
+CREATE TABLE IF NOT EXISTS protected_feedback_runs (
+  id TEXT NOT NULL PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  member_label TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  feature TEXT NOT NULL CHECK (feature = 'chat'),
+  agent_id TEXT,
+  provider TEXT,
+  model TEXT,
+  status TEXT NOT NULL CHECK (status IN ('complete', 'failed', 'stopped')),
+  chat_id TEXT,
+  response_id TEXT,
+  error_code TEXT,
+  input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+  cache_write_tokens INTEGER CHECK (cache_write_tokens IS NULL OR cache_write_tokens >= 0),
+  total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),
+  reasoning_summary_chars INTEGER
+    CHECK (reasoning_summary_chars IS NULL OR reasoning_summary_chars >= 0),
+  admission_ms INTEGER CHECK (admission_ms IS NULL OR admission_ms >= 0),
+  provider_start_ms INTEGER CHECK (provider_start_ms IS NULL OR provider_start_ms >= 0),
+  first_output_ms INTEGER CHECK (first_output_ms IS NULL OR first_output_ms >= 0),
+  first_visible_ms INTEGER CHECK (first_visible_ms IS NULL OR first_visible_ms >= 0),
+  completion_ms INTEGER NOT NULL CHECK (completion_ms >= 0),
+  files_json TEXT NOT NULL CHECK (json_valid(files_json))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_feedback_requests (
+  id TEXT NOT NULL PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES protected_feedback_runs(id) ON DELETE CASCADE,
+  provider TEXT,
+  model TEXT,
+  outcome TEXT,
+  usage_source TEXT,
+  wall_duration_ms INTEGER CHECK (wall_duration_ms IS NULL OR wall_duration_ms >= 0),
+  input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+  cache_write_tokens INTEGER CHECK (cache_write_tokens IS NULL OR cache_write_tokens >= 0),
+  reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_feedback_reports (
+  id TEXT NOT NULL PRIMARY KEY,
+  submission_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  response_id TEXT NOT NULL,
+  run_id TEXT REFERENCES protected_feedback_runs(id) ON DELETE SET NULL,
+  provider TEXT,
+  model TEXT,
+  agent_id TEXT,
+  category TEXT NOT NULL CHECK (category IN ('wrong', 'ignored', 'broken', 'slow', 'unsafe', 'other')),
+  description TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open', 'reviewed')),
+  evidence_state TEXT NOT NULL CHECK (evidence_state IN ('available', 'deleted', 'member_removed')),
+  created_at INTEGER NOT NULL,
+  reviewed_at INTEGER,
+  UNIQUE(profile_id, submission_id),
+  UNIQUE(profile_id, chat_id, response_id),
+  CHECK ((status = 'open' AND reviewed_at IS NULL) OR (status = 'reviewed' AND reviewed_at IS NOT NULL))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS protected_response_feedback (
+  profile_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  response_id TEXT NOT NULL,
+  rating TEXT CHECK (rating IS NULL OR rating IN ('up', 'down')),
+  report_id TEXT REFERENCES protected_feedback_reports(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(profile_id, chat_id, response_id),
+  CHECK (rating IS NOT NULL OR report_id IS NOT NULL)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_runs_created
+  ON protected_feedback_runs(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_runs_profile
+  ON protected_feedback_runs(profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_runs_response
+  ON protected_feedback_runs(profile_id, chat_id, response_id);
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_requests_run
+  ON protected_feedback_requests(run_id);
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_reports_status
+  ON protected_feedback_reports(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_protected_feedback_reports_member
+  ON protected_feedback_reports(profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_protected_response_feedback_chat
+  ON protected_response_feedback(profile_id, chat_id, response_id);
 
 CREATE TABLE IF NOT EXISTS protected_automations (
   id TEXT NOT NULL PRIMARY KEY CHECK (
@@ -2790,6 +2886,31 @@ CREATE TABLE IF NOT EXISTS protected_automation_job_bindings (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_protected_automation_job_bindings_owner
   ON protected_automation_job_bindings(central_owner_profile_id, automation_id);
+
+-- No foreign key to protected_automations: a cascade would drop charged ciphertext without
+-- releasing its quota, and a restrict would block member removal. Rows are owner-private.
+CREATE TABLE IF NOT EXISTS protected_automation_runs (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE CHECK (
+    length(id) = 36 AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+    AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+    AND id NOT GLOB '*[^0-9a-f-]*' AND substr(id, 15, 1) = '4'
+    AND substr(id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  automation_id TEXT NOT NULL,
+  central_owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  job_id TEXT NOT NULL,
+  run_at_ms INTEGER NOT NULL CHECK (run_at_ms >= 0),
+  native_run_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  completed_at_ms INTEGER NOT NULL CHECK (completed_at_ms >= 0),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes >= 0),
+  UNIQUE (job_id, run_at_ms, native_run_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_automation_runs_owner
+  ON protected_automation_runs(central_owner_profile_id, automation_id, completed_at_ms DESC, sequence DESC);
 
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,

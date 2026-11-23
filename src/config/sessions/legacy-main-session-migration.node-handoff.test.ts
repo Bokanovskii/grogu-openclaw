@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { channel } from "node:diagnostics_channel";
+import { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { describe, expect, it } from "vitest";
 import {
@@ -57,8 +58,17 @@ function createNodeHandoff(existingCanonical = false) {
       path: target.databasePath,
       env: fixture.env,
     });
-  const artifacts = (target: ClaimTarget) =>
-    withDatabase(target, ({ db }) => {
+  // Snapshot reads must not wait on the destination write lock that legacy cleanup holds.
+  const readOnly = <T>(target: ClaimTarget, run: (database: { db: DatabaseSync }) => T) => {
+    const db = new DatabaseSync(target.databasePath, { readOnly: true });
+    try {
+      return run({ db });
+    } finally {
+      db.close();
+    }
+  };
+  const artifacts = (target: ClaimTarget, access: typeof readOnly = withDatabase) =>
+    access(target, ({ db }) => {
       const tables = new Set(
         db
           .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")
@@ -142,7 +152,16 @@ function createNodeHandoff(existingCanonical = false) {
       env: fixture.env,
       mode: "doctor-fix",
     });
-  return { source, destination, entry, withDatabase, artifacts, seedArtifacts, migrate };
+  return {
+    source,
+    destination,
+    entry,
+    withDatabase,
+    readOnly,
+    artifacts,
+    seedArtifacts,
+    migrate,
+  };
 }
 
 describe("legacy main session node artifact handoff", () => {
@@ -226,11 +245,6 @@ describe("legacy main session node artifact handoff", () => {
     }
     f.withDatabase(f.destination, ({ db }) => {
       writeSessionProgressCard(db, f.destination.key, {});
-      db.prepare(`INSERT INTO session_suggestions
-        (id, session_key, author_id, text, created_at, state)
-        VALUES ('source-suggestion', ?, 'author', 'Already resolved here', 2, 'accepted')`).run(
-        f.destination.key,
-      );
     });
     const source = f.artifacts(f.source);
     const canonical = f.artifacts(f.destination);
@@ -247,7 +261,12 @@ describe("legacy main session node artifact handoff", () => {
       f.withDatabase(f.destination, ({ db }) => readSessionProgressCard(db, f.destination.key)),
     ).toBeNull();
     expect(after.heartbeat).toEqual(canonical.heartbeat);
-    expect(after.suggestions).toEqual(canonical.suggestions);
+    expect(after.suggestions).toEqual([
+      ...canonical.suggestions,
+      ...source.suggestions.map((row) =>
+        Object.assign({}, row, { session_key: f.destination.key }),
+      ),
+    ]);
     expect(after.participants).toEqual(
       canonical.participants.map((row) => ({ ...row, last_prompted_at: 30 })),
     );
@@ -258,118 +277,173 @@ describe("legacy main session node artifact handoff", () => {
   });
 
   it.each([
-    { side: "source", artifact: "widget" },
-    { side: "destination", artifact: "membership" },
-  ] as const)(
-    "retains both nodes when $side $artifact changes after cleanup planning",
-    async ({ side, artifact }) => {
+    {
+      name: "differs",
+      detail: "missing: none; differing: source-suggestion; canonical-only: none",
+      seed: (f: ReturnType<typeof createNodeHandoff>) =>
+        f.withDatabase(f.destination, ({ db }) => {
+          db.prepare(`INSERT INTO session_suggestions
+            (id, session_key, author_id, text, created_at, state)
+            VALUES ('source-suggestion', ?, 'author', 'Already resolved here', 2, 'accepted')`).run(
+            f.destination.key,
+          );
+        }),
+    },
+    {
+      name: "belongs to another destination session",
+      detail: "missing: source-suggestion; differing: none; canonical-only: none",
+      seed: (f: ReturnType<typeof createNodeHandoff>) => {
+        const other = { ...f.destination, key: "agent:ops:other" };
+        seedClaim({ ...other, entry: { sessionId: "other-session", updatedAt: 1 }, events: [] });
+        f.withDatabase(other, ({ db }) => {
+          db.prepare(`INSERT INTO session_suggestions
+            (id, session_key, author_id, text, created_at, state)
+            VALUES ('source-suggestion', ?, 'author', 'source suggestion', 1, 'pending')`).run(
+            other.key,
+          );
+        });
+      },
+    },
+  ])(
+    "retains the source when a destination suggestion with its id $name",
+    async ({ detail, seed }) => {
       const f = createNodeHandoff(true);
       f.seedArtifacts(f.source, "source");
-      f.seedArtifacts(f.destination, "source");
+      seed(f);
       const sourceBefore = readClaim(f.source);
-      const artifactsBefore = f.artifacts(f.source);
-      const target = side === "source" ? f.source : f.destination;
-      const changedHtml = Buffer.from("<p>edited board: café 🦞</p>");
-      let injected = false;
-      let changedRows = 0;
-      let mutationError: unknown;
-      let copiedArtifacts: ReturnType<typeof f.artifacts> | undefined;
-      let changedArtifacts: ReturnType<typeof f.artifacts> | undefined;
-      const diagnostics = channel("openclaw.session.write");
-      const onPlanningComplete = (message: unknown) => {
-        if (
-          injected ||
-          !isRecord(message) ||
-          message.operation !== "session.lifecycle.delete-prepare" ||
-          message.writer !== "foreground" ||
-          message.outcome !== "ok"
-        ) {
-          return;
-        }
-        injected = true;
-        // The copy is committed and planning has released its transaction; the worker has not started.
-        try {
-          copiedArtifacts = f.artifacts(f.destination);
-          expect(copiedArtifacts.widgets).toHaveLength(1);
-          f.withDatabase(target, ({ db }) => {
-            const readNode = () => ({
-              entry: db
-                .prepare(`SELECT entry_json, current_session_id, updated_at
-                FROM session_nodes WHERE session_key = ?`)
-                .get(target.key),
-              windows: db
-                .prepare("SELECT * FROM session_windows WHERE session_key = ? ORDER BY session_id")
-                .all(target.key),
-            });
-            const nodeBefore = readNode();
-            const widgetBefore = db
-              .prepare(`SELECT revision, sha256, updated_at, length(html) AS bytes
-              FROM board_widgets WHERE session_key = ? AND name = 'status'`)
-              .get(target.key);
-            changedRows = Number(
-              artifact === "widget"
-                ? db
-                    .prepare(
-                      "UPDATE board_widgets SET html = ? WHERE session_key = ? AND name = 'status'",
-                    )
-                    .run(changedHtml, target.key).changes
-                : db
-                    .prepare(`INSERT INTO session_members (session_key, identity_id, added_by, added_at)
-                  VALUES (?, 'late-member', 'owner', 30)`)
-                    .run(target.key).changes,
-            );
-            expect(readNode()).toEqual(nodeBefore);
-            const widgetAfter = db
-              .prepare(`SELECT revision, sha256, updated_at, length(html) AS bytes
-              FROM board_widgets WHERE session_key = ? AND name = 'status'`)
-              .get(target.key);
-            expect(widgetAfter).toEqual(widgetBefore);
-            if (artifact === "widget") {
-              expect(
-                db
-                  .prepare(
-                    "SELECT hex(html) AS html FROM board_widgets WHERE session_key = ? AND name = 'status'",
-                  )
-                  .get(target.key),
-              ).toEqual({ html: changedHtml.toString("hex").toUpperCase() });
-            }
-          });
-          changedArtifacts = f.artifacts(target);
-          if (artifact === "membership") {
-            expect(changedArtifacts.members).toContainEqual({
-              session_key: target.key,
-              identity_id: "late-member",
-              added_by: "owner",
-              added_at: 30,
-            });
-          }
-        } catch (error) {
-          // Diagnostics subscribers report their errors here instead of throwing outside the awaited migration.
-          mutationError = error;
-        }
-      };
-      diagnostics.subscribe(onPlanningComplete);
-      try {
-        if (side === "destination") {
-          await expect(f.migrate()).rejects.toThrow(
-            "Canonical session changed before legacy cleanup: agent:ops:chat",
-          );
-        } else {
-          expect((await f.migrate()).complete).toBe(false);
-        }
-        expect(mutationError).toBeUndefined();
-        expect(injected).toBe(true);
-        expect(changedRows).toBe(1);
-        expect(changedArtifacts).toBeDefined();
-        expect(readClaim(f.source)).toEqual(sourceBefore);
-        expect(readClaim(f.destination)?.entry).toMatchObject(sourceBefore!.entry);
-        expect(f.artifacts(target)).toEqual(changedArtifacts);
-        expect(f.artifacts(side === "source" ? f.destination : f.source)).toEqual(
-          side === "source" ? copiedArtifacts : artifactsBefore,
-        );
-      } finally {
-        diagnostics.unsubscribe(onPlanningComplete);
-      }
+      const sourceArtifacts = f.artifacts(f.source);
+
+      const result = await f.migrate();
+
+      expect(result.complete).toBe(false);
+      expect(result.outcomes).toContainEqual({
+        kind: "divergent-canonical",
+        canonicalKey: f.destination.key,
+        detail: `canonical suggestions do not preserve the legacy source (${detail})`,
+      });
+      expect(readClaim(f.source)).toEqual(sourceBefore);
+      expect(f.artifacts(f.source)).toEqual(sourceArtifacts);
+      expect(f.artifacts(f.destination).suggestions).not.toContainEqual(
+        expect.objectContaining({ id: "source-suggestion", state: "pending" }),
+      );
     },
   );
+
+  const onCleanupPlanned = (run: () => void) => {
+    let injected = false;
+    const diagnostics = channel("openclaw.session.write");
+    const listener = (message: unknown) => {
+      if (
+        injected ||
+        !isRecord(message) ||
+        message.operation !== "session.lifecycle.delete-prepare" ||
+        message.writer !== "foreground" ||
+        message.outcome !== "ok"
+      ) {
+        return;
+      }
+      injected = true;
+      // The copy is committed and planning has released its transaction; the worker has not started.
+      run();
+    };
+    diagnostics.subscribe(listener);
+    return {
+      injected: () => injected,
+      [Symbol.dispose]: () => diagnostics.unsubscribe(listener),
+    };
+  };
+
+  it("retains both nodes when the source widget changes after cleanup planning", async () => {
+    const f = createNodeHandoff(true);
+    f.seedArtifacts(f.source, "source");
+    f.seedArtifacts(f.destination, "source");
+    const sourceBefore = readClaim(f.source);
+    const changedHtml = Buffer.from("<p>edited board: café 🦞</p>");
+    let changedRows = 0;
+    let mutationError: unknown;
+    let copiedArtifacts: ReturnType<typeof f.artifacts> | undefined;
+    let changedArtifacts: ReturnType<typeof f.artifacts> | undefined;
+    using planned = onCleanupPlanned(() => {
+      try {
+        copiedArtifacts = f.artifacts(f.destination, f.readOnly);
+        expect(copiedArtifacts.widgets).toHaveLength(1);
+        f.withDatabase(f.source, ({ db }) => {
+          const readNode = () => ({
+            entry: db
+              .prepare(`SELECT entry_json, current_session_id, updated_at
+                FROM session_nodes WHERE session_key = ?`)
+              .get(f.source.key),
+            windows: db
+              .prepare("SELECT * FROM session_windows WHERE session_key = ? ORDER BY session_id")
+              .all(f.source.key),
+          });
+          const nodeBefore = readNode();
+          const readWidget = () =>
+            db
+              .prepare(`SELECT revision, sha256, updated_at, length(html) AS bytes
+                FROM board_widgets WHERE session_key = ? AND name = 'status'`)
+              .get(f.source.key);
+          const widgetBefore = readWidget();
+          changedRows = Number(
+            db
+              .prepare(
+                "UPDATE board_widgets SET html = ? WHERE session_key = ? AND name = 'status'",
+              )
+              .run(changedHtml, f.source.key).changes,
+          );
+          expect(readNode()).toEqual(nodeBefore);
+          expect(readWidget()).toEqual(widgetBefore);
+          expect(
+            db
+              .prepare(
+                "SELECT hex(html) AS html FROM board_widgets WHERE session_key = ? AND name = 'status'",
+              )
+              .get(f.source.key),
+          ).toEqual({ html: changedHtml.toString("hex").toUpperCase() });
+        });
+        changedArtifacts = f.artifacts(f.source);
+      } catch (error) {
+        // Diagnostics subscribers report their errors here instead of throwing outside the awaited migration.
+        mutationError = error;
+      }
+    });
+    expect((await f.migrate()).complete).toBe(false);
+    expect(mutationError).toBeUndefined();
+    expect(planned.injected()).toBe(true);
+    expect(changedRows).toBe(1);
+    expect(changedArtifacts).toBeDefined();
+    expect(readClaim(f.source)).toEqual(sourceBefore);
+    expect(readClaim(f.destination)?.entry).toMatchObject(sourceBefore!.entry);
+    expect(f.artifacts(f.source)).toEqual(changedArtifacts);
+    expect(f.artifacts(f.destination)).toEqual(copiedArtifacts);
+  });
+
+  it("excludes destination writers from cleanup planning through source retirement", async () => {
+    const f = createNodeHandoff(true);
+    f.seedArtifacts(f.source, "source");
+    f.seedArtifacts(f.destination, "source");
+    const sourceBefore = readClaim(f.source);
+    let refusal: unknown;
+    let copiedArtifacts: ReturnType<typeof f.artifacts> | undefined;
+    using planned = onCleanupPlanned(() => {
+      copiedArtifacts = f.artifacts(f.destination, f.readOnly);
+      const writer = new DatabaseSync(f.destination.databasePath, { timeout: 0 });
+      try {
+        writer
+          .prepare(`INSERT INTO session_members (session_key, identity_id, added_by, added_at)
+            VALUES (?, 'late-member', 'owner', 30)`)
+          .run(f.destination.key);
+      } catch (error) {
+        refusal = error;
+      } finally {
+        writer.close();
+      }
+    });
+    expect(await f.migrate()).toMatchObject({ complete: true });
+    expect(planned.injected()).toBe(true);
+    expect(String(refusal)).toMatch(/database is locked/);
+    expect(readClaim(f.source)).toBeUndefined();
+    expect(readClaim(f.destination)?.entry).toMatchObject(sourceBefore!.entry);
+    expect(f.artifacts(f.destination)).toEqual(copiedArtifacts);
+  });
 });

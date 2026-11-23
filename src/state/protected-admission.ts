@@ -19,6 +19,7 @@ import type {
   ProtectedAutomationDatabase,
   ProtectedAutomationStorageUsage,
 } from "./protected-automations.js";
+import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -80,6 +81,7 @@ export type ProtectedAdmissionDatabase = {
     state: "pending" | "synced" | "failed" | "unknown";
   };
   protected_policy_barrier: { id: number; email: string; revision: number };
+  protected_storage_limits: { admission_id: string; limit_bytes: number; updated_at: number };
 };
 
 const getNodeSqliteKysely = (db: DatabaseSync) =>
@@ -92,6 +94,7 @@ const ensureSchema = createOpenClawStateSchemaEnsurer({
     "protected_admission_migrations",
     "protected_policy_sync",
     "protected_policy_barrier",
+    "protected_storage_limits",
     "protected_usage_daily",
     "protected_usage_runs",
   ],
@@ -482,8 +485,17 @@ export function removeProtectedAdmission(
           .set({ status: "removed", revision, updated_at: input.now })
           .where("id", "=", admission.id),
       );
+      executeSqliteQuerySync(
+        db,
+        getNodeSqliteKysely(db)
+          .deleteFrom("protected_storage_limits")
+          .where("admission_id", "=", admission.id),
+      );
       // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
       const profileId = admission.profile_id;
+      if (profileId) {
+        removeProtectedMemberFeedbackRows(db, profileId);
+      }
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
         retiredAutomations = executeSqliteQuerySync(

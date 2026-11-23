@@ -1,0 +1,21 @@
+{
+  "id": "alcove-automations-chat",
+  "name": "Alcove Automations Chat",
+  "description": "Member-scoped read, proposal, and authoring-draft tools for protected automation conversations.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "contracts": {
+    "tools": [
+      "automations_list",
+      "automations_read",
+      "automations_propose_create",
+      "automations_propose_patch",
+      "automation_draft_read",
+      "automation_draft_update",
+      "automation_draft_save"
+    ]
+  }
+}

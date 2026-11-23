@@ -171,6 +171,15 @@ when the host cannot prove an audience or when no session turn exists. Plugins
 must consume this prepared value and must not infer memory authority from
 `senderIsOwner`, session-key patterns, or session lookups.
 
+`toolRuntimeBindings` carries optional invocation-local host operations keyed
+by plugin ID. Each tool factory receives only the entry for its own plugin.
+Values are opaque to core: define a narrow plugin-owned type and validate the
+value before use. A binding is not itself proof of current authority; the host
+must close its operations over the owning invocation and revalidate at the
+effect boundary. Bindings are not serialized or implicitly passed to child
+runs. A delegated invocation needs a fresh binding explicitly issued by its
+authority owner.
+
 Tools that retain or use `memoryAudience` across awaited work must call both
 currency guards immediately before releasing data or performing an effect:
 

@@ -77,9 +77,10 @@ import { createEmbeddedAgentPluginRuntimeRefresh } from "./plugin-runtime-refres
 import { runPreparedEmbeddedLoop } from "./run-loop.js";
 import { createEmbeddedRunStageSummaryEmitter } from "./run/attempt-stage-timing.js";
 import { withExecutionPhaseDiagnostics } from "./run/execution-phase-diagnostics.js";
-import type {
-  RunEmbeddedAgentInternalParams,
-  RunEmbeddedAgentParamsWithSessionFile,
+import {
+  prepareEmbeddedRunInput,
+  type RunEmbeddedAgentInternalParams,
+  type RunEmbeddedAgentParamsWithSessionFile,
 } from "./run/internal-params.js";
 import { createEmbeddedRunLaneController } from "./run/lane-controller.js";
 import {
@@ -107,18 +108,7 @@ const EMPTY_EMBEDDED_AGENT_CONFIG: OpenClawConfig = Object.freeze({});
 export function runEmbeddedAgent(
   input: RunEmbeddedAgentInternalParams,
 ): Promise<EmbeddedAgentRunResult> {
-  if (input.requestModelCredential && !input.userFileScope) {
-    throw new Error("Request-credential runs require an admitted user-file scope.");
-  }
-  const internalParamsInput: RunEmbeddedAgentInternalParams = input.requestModelCredential
-    ? {
-        ...input,
-        allowAuthProfileFallback: false,
-        authProfileStateMode: "read-only",
-        modelFallbacksOverride: [],
-        modelSelectionLocked: true,
-      }
-    : input;
+  const internalParamsInput = prepareEmbeddedRunInput(input);
   const config = resolveEmbeddedRunConfig(internalParamsInput);
   const lifecycleGeneration =
     internalParamsInput.lifecycleGeneration ??
@@ -403,6 +393,7 @@ async function runEmbeddedAgentForSession(
               workspaceDir: workspaceResolution.workspaceDir,
               cwd: params.cwd,
               sessionId: params.sessionId,
+              contextIsolation: params.contextIsolation,
             });
             const { activeProjectKeys } = projects;
             const preparedModelRuntime = Object.freeze({
@@ -484,6 +475,7 @@ async function runEmbeddedAgentForSession(
                 modelId,
                 trigger: params.trigger,
                 inputProvenance: params.inputProvenance,
+                ...(params.contextIsolation ? { contextIsolation: params.contextIsolation } : {}),
                 ...buildAgentHookContextChannelFields(params),
                 ...buildAgentHookContextIdentityFields(params),
               };

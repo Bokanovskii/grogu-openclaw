@@ -97,3 +97,29 @@ export type EmbeddedRunAttemptInternalParams = EmbeddedRunAttemptParams &
 export type RunEmbeddedAgentParamsWithSessionFile = RunEmbeddedAgentInternalParams & {
   sessionFile: string;
 };
+
+export function prepareEmbeddedRunInput(
+  input: RunEmbeddedAgentInternalParams,
+): RunEmbeddedAgentInternalParams {
+  if (input.requestModelCredential && !input.userFileScope) {
+    throw new Error("Request-credential runs require an admitted user-file scope.");
+  }
+  if (
+    input.contextIsolation === "isolated" &&
+    (input.memoryAudience ||
+      input.memoryFlushTools ||
+      input.memoryFlushWritePath ||
+      input.beforeCompaction)
+  ) {
+    throw new Error("An isolated run cannot use a memory audience or compaction callback.");
+  }
+  return input.requestModelCredential
+    ? {
+        ...input,
+        allowAuthProfileFallback: false,
+        authProfileStateMode: "read-only",
+        modelFallbacksOverride: [],
+        modelSelectionLocked: true,
+      }
+    : input;
+}

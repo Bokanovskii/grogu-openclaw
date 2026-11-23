@@ -79,7 +79,7 @@ import {
 } from "./automations-chat/contract.js";
 import type { ProtectedBrowserBroker, ProtectedBrowserSession } from "./browser/broker.js";
 import type { StorageFiles } from "./capacity.js";
-import { chatFilesDirectory, chatWidgetsDirectory } from "./chat-files.js";
+import { chatFilesDirectory, chatWidgetsDirectory, restrictChatFiles } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
 import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
@@ -185,6 +185,18 @@ type ProtectedMemberMemoryLease = Awaited<
   ReturnType<ReturnType<typeof createProtectedMemberMemory>["open"]>
 >;
 
+function turnAgentTools(turn: ProtectedTurn, agent: ProtectedAgentDefinition) {
+  return turn.automationContextAccess === "isolated"
+    ? agent.tools.filter((name) => !name.startsWith("sessions_"))
+    : agent.tools;
+}
+
+function turnAgentPrompt(turn: ProtectedTurn, agent: ProtectedAgentDefinition) {
+  return turn.automationContextAccess === "isolated"
+    ? agent.isolatedSystemPrompt
+    : agent.systemPrompt;
+}
+
 function widgetDraftEvent(data: Record<string, unknown>, draftBytes: Map<string, number>) {
   if (
     data.phase !== "input_delta" ||
@@ -242,6 +254,9 @@ async function runMentionedAgent(
       releaseExecution: () => void;
       stopEvents: () => void;
       memoryGrant?: MemoryAudienceGrant;
+      files: AuthorizedUserFiles;
+      widgetFiles: AuthorizedUserFiles;
+      releaseFileAuthority: () => void;
     }
   >();
   let savedResult = false;
@@ -313,17 +328,23 @@ async function runMentionedAgent(
             }
           : {}),
         userFileScope: {
-          files: turn.files,
+          files: child.files,
           directory: chatFilesDirectory(sessionId),
           cacheKey: createHash("sha256")
             .update(`${turn.profileId}:${sessionId}:${runId}`)
             .digest("hex"),
         },
-        toolsAllow: [...agent.tools, ...(child.memoryGrant ? memberMemoryToolNames : [])],
-        toolExecutionAllow: [...agent.tools, ...(child.memoryGrant ? memberMemoryToolNames : [])],
+        toolsAllow: [
+          ...turnAgentTools(turn, agent),
+          ...(child.memoryGrant ? memberMemoryToolNames : []),
+        ],
+        toolExecutionAllow: [
+          ...turnAgentTools(turn, agent),
+          ...(child.memoryGrant ? memberMemoryToolNames : []),
+        ],
         extraSystemPrompt: child.memoryGrant
-          ? [agent.systemPrompt, memberMemoryGuidance].join("\n\n")
-          : agent.systemPrompt,
+          ? [turnAgentPrompt(turn, agent), memberMemoryGuidance].join("\n\n")
+          : turnAgentPrompt(turn, agent),
         skillsSnapshot: agent.skillsSnapshot,
         clientCaps: ["inline-widgets"],
       };
@@ -391,11 +412,25 @@ async function runMentionedAgent(
               releaseSessionAccess();
               throw error;
             }
+            const childChatIds = new Set([child.sessionId]);
+            const widgetChatIds = new Set([turn.id, child.sessionId]);
             children.set(child.runId, {
               ...child,
               releaseSessionAccess,
               releaseExecution,
               memoryGrant,
+              files:
+                turn.automationContextAccess === "isolated"
+                  ? restrictChatFiles(turn.files, childChatIds)
+                  : turn.files,
+              widgetFiles:
+                turn.automationContextAccess === "isolated"
+                  ? restrictChatFiles(turn.files, widgetChatIds)
+                  : turn.files,
+              releaseFileAuthority: () => {
+                childChatIds.clear();
+                widgetChatIds.clear();
+              },
               stopEvents: onAgentEventForRun(child.runId, ({ stream, data }) => {
                 if (stream === "assistant" && typeof data.text === "string") {
                   const text = data.text;
@@ -435,15 +470,19 @@ async function runMentionedAgent(
                       return;
                     }
                     await turn.revalidate();
+                    const files = children.get(child.runId)?.widgetFiles;
+                    if (!files) {
+                      throw new Error("Protected child file authority is unavailable.");
+                    }
                     await readCanvasDocumentHtmlSource(widget.id, {
                       storage: {
-                        files: turn.files,
+                        files,
                         directory: chatWidgetsDirectory(child.sessionId),
                       },
                     });
                     await turn.revalidate();
-                    await turn.files.mkdir(chatWidgetsDirectory(turn.id));
-                    await turn.files.move(
+                    await files.mkdir(chatWidgetsDirectory(turn.id));
+                    await files.move(
                       `${chatWidgetsDirectory(child.sessionId)}/${widget.id}`,
                       `${chatWidgetsDirectory(turn.id)}/${widget.id}`,
                     );
@@ -530,6 +569,7 @@ async function runMentionedAgent(
           },
           childDeleteCleanupSettled: (outcome) => {
             const child = spawnedRunId ? children.get(spawnedRunId) : undefined;
+            child?.releaseFileAuthority();
             child?.releaseSessionAccess();
             child?.releaseExecution();
             child?.memoryGrant?.release();
@@ -586,6 +626,7 @@ async function runMentionedAgent(
     .finally(() => {
       for (const child of children.values()) {
         child.stopEvents();
+        child.releaseFileAuthority();
         child.releaseSessionAccess();
         child.releaseExecution();
         child.memoryGrant?.release();
@@ -877,13 +918,15 @@ export function createCanonicalProtectedTurns(options: {
             : undefined;
         const allowedTools = [
           ...(authoring
-            ? turn.agent.tools.filter((tool) => !tool.startsWith("sessions_"))
-            : turn.agent.tools),
+            ? turnAgentTools(turn, turn.agent).filter((tool) => !tool.startsWith("sessions_"))
+            : turnAgentTools(turn, turn.agent)),
           ...automationToolNames,
-          ...(options.memberMemory ? memberMemoryToolNames : []),
+          ...(options.memberMemory && turn.automationContextAccess !== "isolated"
+            ? memberMemoryToolNames
+            : []),
           ...(browserSession ? ALCOVE_BROWSER_TOOL_NAMES : []),
         ];
-        if (options.memberMemory) {
+        if (options.memberMemory && turn.automationContextAccess !== "isolated") {
           if (!turn.memoryFiles || !turn.sessionEntry) {
             throw new Error("Member memory requires admitted storage and a current session.");
           }
@@ -900,14 +943,17 @@ export function createCanonicalProtectedTurns(options: {
           });
         }
         const userFileScope = {
-          files: turn.files,
+          files:
+            turn.automationContextAccess === "isolated"
+              ? restrictChatFiles(turn.files, new Set([turn.id]))
+              : turn.files,
           directory: chatFilesDirectory(turn.id),
           cacheKey: createHash("sha256")
             .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
             .digest("hex"),
         };
         const systemPrompt = [
-          turn.agent.systemPrompt,
+          turnAgentPrompt(turn, turn.agent),
           ...(turn.automationChat
             ? [authoring ? automationsAuthoringInstructions : automationsChatInstructions]
             : []),
@@ -1067,6 +1113,9 @@ export function createCanonicalProtectedTurns(options: {
                   preparedRunAdmission: admission,
                   requestModelCredential: requestCredential.handle,
                   memoryAudience: memberMemory?.binding.audience,
+                  ...(turn.automationContextAccess === "isolated"
+                    ? { contextIsolation: "isolated" as const }
+                    : {}),
                   beforeCompaction,
                   ...(memberMemory ? { assertInvocationCurrent: turn.assertCurrent } : {}),
                   onExecutionPhase: ({ phase }) => {

@@ -22,7 +22,6 @@ import {
   isSilentOverflowProneModel,
   resolveEffectiveCompactionMode,
 } from "../../agent-settings.js";
-import { toToolDefinitions } from "../../agent-tool-definition-adapter.js";
 import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
@@ -38,15 +37,17 @@ import { DefaultResourceLoader } from "../../sessions/resource-loader.js";
 import { createAgentSession } from "../../sessions/sdk.js";
 import { sessionManagerOpenTranscriptCohort } from "../../sessions/session-manager-core.js";
 import { withSessionManagerWrite } from "../../sessions/session-manager-write-admission.js";
-import { wrapToolDefinition } from "../../sessions/tools/tool-definition-wrapper.js";
-import { resolveToolSearchCatalogTool } from "../../tool-search.js";
+import { isIsolatedContextForbiddenTool } from "../../tool-policy-shared.js";
 import { runContextEngineMaintenance } from "../context-engine-maintenance.js";
 import { buildEmbeddedExtensionFactories } from "../extensions.js";
 import { log } from "../logger.js";
 import { declarePromptHistoryRewrite } from "../prompt-cache-observability.js";
 import { recordRuntimeContextProjection } from "../session-prompt-state.js";
 import { resolveEmbeddedAgentApiKey } from "../stream-resolution.js";
-import { prepareEmbeddedAttemptClientTools } from "./attempt-client-tools.js";
+import {
+  createDeferredAttemptToolResolver,
+  prepareEmbeddedAttemptClientTools,
+} from "./attempt-client-tools.js";
 import { createAttemptCompactionThinkingResolver } from "./attempt-compaction-thinking.js";
 import { resolveAttemptTranscriptPolicy } from "./attempt-history.js";
 import { normalizeMessagesForLlmBoundary } from "./attempt-llm-boundary.js";
@@ -78,7 +79,6 @@ import {
 } from "./runtime-context-prompt.js";
 import { resolveSessionBoundaryPromptCacheKey } from "./session-boundary-prompt-cache-key.js";
 import { resolveEmbeddedSessionContextLimits } from "./session-context-limits.js";
-import { withEmbeddedAttemptToolActivity } from "./tool-activity-heartbeat.js";
 import {
   createToolLoopBatchAdmission,
   installToolLoopRecoveryCleanup,
@@ -132,6 +132,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     // A member flush must save its unmodified snapshot before any summary.
     compactionForbidden:
       attempt.operation === "settled-tool-finalization" ||
+      attempt.contextIsolation === "isolated" ||
       (attempt.memoryAudience?.kind === "member-private" && Boolean(attempt.memoryFlushTools)),
   });
 
@@ -173,42 +174,12 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     sessionManager: input.sessionManager,
     settingsManager,
     resourceLoader,
-    resolveDeferredTool: input.clientToolPreparation.deferredDirectoryToolsCallable
-      ? ({ toolCall }) => {
-          const toolAbortSignal =
-            input.clientToolPreparation.getToolAbortSignal?.() ?? input.runAbortSignal;
-          const tool = resolveToolSearchCatalogTool(
-            {
-              config: attempt.config,
-              runtimeConfig: attempt.config,
-              agentId: input.sessionAgentId,
-              sessionKey: input.clientToolPreparation.sandboxSessionKey,
-              sessionId: attempt.sessionId,
-              runId: attempt.runId,
-              catalogRef: input.clientToolPreparation.toolSearchCatalogRef,
-              abortSignal: toolAbortSignal,
-            },
-            toolCall.name,
-          );
-          // Catalog entries own hooks; the adapter must carry the captured
-          // generation into them so approvals cannot outlive a permission change.
-          const definition = tool
-            ? toToolDefinitions(
-                [tool],
-                input.clientToolPreparation.catalogToolHookContext,
-                toolAbortSignal,
-              )[0]
-            : undefined;
-          const hydratedTool = definition ? wrapToolDefinition(definition) : undefined;
-          if (hydratedTool) {
-            log.info(`tool-search: hydrated deferred directory tool ${toolCall.name}`);
-            const originalExecute = hydratedTool.execute;
-            hydratedTool.execute = (...args: Parameters<typeof originalExecute>) =>
-              withEmbeddedAttemptToolActivity(attempt.runId, () => originalExecute(...args));
-          }
-          return hydratedTool;
-        }
-      : undefined,
+    resolveDeferredTool: createDeferredAttemptToolResolver({
+      attempt,
+      preparation: input.clientToolPreparation,
+      runAbortSignal: input.runAbortSignal,
+      sessionAgentId: input.sessionAgentId,
+    }),
     withSessionWriteSettlement: (operation) =>
       input.transcriptLifecycle.withTranscriptWrite(operation),
     cleanupProviderSessionResourcesOnDispose: false,
@@ -225,6 +196,18 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   // Publish ownership before post-construction hooks. Outer cleanup must dispose
   // the session if tool activation or terminal-hook installation fails.
   input.onSessionCreated(activeSession);
+  if (attempt.contextIsolation === "isolated") {
+    const beforeToolCall = activeSession.agent.beforeToolCall;
+    activeSession.agent.beforeToolCall = async (call, signal) => {
+      if (isIsolatedContextForbiddenTool(call.toolCall.name)) {
+        return {
+          block: true,
+          reason: "Memory and other sessions are unavailable in isolated automations.",
+        };
+      }
+      return await beforeToolCall?.(call, signal);
+    };
+  }
   installToolLoopRecoveryCleanup({ agent: activeSession.agent, runId: attempt.runId });
   activeSession.setActiveToolsByName(sessionToolAllowlist);
   const setActiveSessionSystemPrompt = (nextSystemPrompt: string) => {

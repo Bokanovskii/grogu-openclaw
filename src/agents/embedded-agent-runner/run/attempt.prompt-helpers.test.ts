@@ -91,6 +91,25 @@ describe("resolvePromptBuildHookResult drain cache", () => {
     expect(runBeforePromptBuild).toHaveBeenCalledOnce();
   });
 
+  it("leaves queued injections untouched for isolated runs while running prompt hooks", async () => {
+    const runBeforePromptBuild = vi.fn(async () => ({ prependContext: "safe hook context" }));
+    const result = await resolvePromptBuildHookResult({
+      config: {},
+      prompt: "isolated",
+      messages: [],
+      hookCtx: { runId: "isolated-run", sessionKey: "global", contextIsolation: "isolated" },
+      hookRunner: {
+        hasHooks: (hookName) => hookName === "before_prompt_build",
+        runBeforePromptBuild,
+      },
+    });
+    expect(hostHookStateMocks.drainPluginNextTurnInjectionContext).not.toHaveBeenCalled();
+    expect(runBeforePromptBuild).toHaveBeenCalledOnce();
+    expect(result.prependContext).toBe("safe hook context");
+    await build();
+    expect(hostHookStateMocks.drainPluginNextTurnInjectionContext).toHaveBeenCalledOnce();
+  });
+
   it("reuses drained injections across retries and releases them when the run ends", async () => {
     hostHookStateMocks.drainPluginNextTurnInjectionContext.mockResolvedValue({
       queuedInjections: [

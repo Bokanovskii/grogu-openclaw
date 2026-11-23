@@ -17,6 +17,7 @@ const retainedAudience = () => {};
  */
 export async function resolveEmbeddedAttemptMemoryAudience(params: {
   memoryAudience?: MemoryAudience;
+  contextIsolation?: "isolated";
   config?: OpenClawConfig;
   agentId: string;
   sessionKey: string;
@@ -25,6 +26,12 @@ export async function resolveEmbeddedAttemptMemoryAudience(params: {
   admission?: { entry: SessionEntry; storePath: string };
   assertCallerCurrent?: () => void;
 }): Promise<{ memoryAudience?: MemoryAudience; release: () => void }> {
+  if (params.contextIsolation === "isolated") {
+    if (params.memoryAudience) {
+      throw new Error("An isolated run cannot receive a memory audience.");
+    }
+    return { release: retainedAudience };
+  }
   if (params.memoryAudience) {
     if (!isHostMemoryAudience(params.memoryAudience)) {
       throw new Error("Embedded run memory audience must be host-minted.");

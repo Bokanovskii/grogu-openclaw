@@ -42,7 +42,7 @@ import { readProtectedAutomationResultStorageUsage } from "./automation-results-
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { readProtectedAutomationStorageUsage } from "./automations-store.js";
 import { measureProtectedStorage, storageEntryOverheadBytes } from "./capacity.js";
-import { chatArtifactsDirectory } from "./chat-files.js";
+import { chatArtifactsDirectory, restrictChatFiles } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import { readProtectedFeedbackStorageUsage } from "./feedback-store.js";
@@ -287,6 +287,41 @@ async function createSharingFixture(t: TestContext) {
     removeMember,
   };
 }
+
+void test("isolated child files and widget promotion stay within their run", async (t) => {
+  const { usersRoot, encryption, id } = await createSharingFixture(t);
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: id("owner"),
+    assertCurrent() {},
+    maxBytes: 4096,
+    encryption,
+  });
+  t.after(() => files.dispose());
+  const run = randomUUID();
+  const child = randomUUID();
+  const other = randomUUID();
+  const childFiles = restrictChatFiles(files, new Set([child]));
+  const promotionFiles = restrictChatFiles(files, new Set([run, child]));
+  await files.write(`chats/${run}/private.txt`, "run");
+  await files.write(`chats/${other}/private.txt`, "other");
+  await files.write("member-memory/memory/private.txt", "memory");
+  await childFiles.write(`chats/${child}/widget`, "widget");
+  for (const name of [
+    `chats/${run}/private.txt`,
+    `chats/${other}/private.txt`,
+    "member-memory/memory/private.txt",
+  ]) {
+    assert.throws(() => childFiles.readText(name), /unavailable/u);
+  }
+  assert.throws(() => promotionFiles.readText(`chats/${other}/private.txt`), /unavailable/u);
+  assert.throws(
+    () => promotionFiles.move(`chats/${child}/widget`, `chats/${other}/widget`),
+    /unavailable/u,
+  );
+  await promotionFiles.move(`chats/${child}/widget`, `chats/${run}/widget`);
+  assert.equal(await files.readText(`chats/${run}/widget`), "widget");
+});
 
 void test("chat links grant live read-only access until revoked", async (t) => {
   const {

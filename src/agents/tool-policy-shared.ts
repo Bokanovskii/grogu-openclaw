@@ -77,6 +77,17 @@ export function normalizeToolPolicyName(name: string): string {
   return TOOL_NAME_ALIASES.get(normalized) ?? normalized;
 }
 
+export function isIsolatedContextForbiddenTool(name: string): boolean {
+  const normalized = normalizeToolPolicyName(name);
+  return (
+    normalized === "sessions" ||
+    normalized.startsWith("sessions_") ||
+    normalized.startsWith("memory_") ||
+    normalized === "session_status" ||
+    normalized === "intent"
+  );
+}
+
 /** Checks whether an in-progress prefix can still resolve to an allowed tool or alias. */
 export function couldNormalizeToolNamePrefixToAllowedTool(
   prefix: string,

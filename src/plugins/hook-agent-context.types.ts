@@ -32,6 +32,8 @@ export type PluginHookAgentContext = PluginHookContextWindow & {
   sessionId?: string;
   /** Host-resolved memory partition for this turn. */
   memoryAudience?: MemoryAudience;
+  /** The host forbids access to personal memory and other sessions in this run. */
+  contextIsolation?: "isolated";
   /** Rejects the audience after any captured session incarnation changes. */
   assertMemoryAudienceCurrent?: () => void;
   /** Whether this turn's tool/runtime surface is sandboxed. */

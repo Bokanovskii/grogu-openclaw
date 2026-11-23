@@ -84,7 +84,8 @@ vi.mock("../logger.js", () => ({ log: { info: vi.fn() } }));
 vi.mock("../../sessions/resource-loader.js", () => ({
   DefaultResourceLoader: hoisted.DefaultResourceLoader,
 }));
-vi.mock("./attempt-client-tools.js", () => ({
+vi.mock("./attempt-client-tools.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./attempt-client-tools.js")>()),
   prepareEmbeddedAttemptClientTools: hoisted.prepareEmbeddedAttemptClientTools,
 }));
 vi.mock("./message-tool-terminal.js", async (importOriginal) => ({
@@ -285,6 +286,31 @@ afterEach(() => {
 });
 
 describe("prepareEmbeddedAttemptAgentSession", () => {
+  it("blocks fabricated memory and session calls before execution in isolated runs", async () => {
+    const fixture = createInput();
+    fixture.input.attempt = { ...fixture.input.attempt, contextIsolation: "isolated" };
+    const beforeToolCall = vi.fn(async () => undefined);
+    fixture.activeSession.agent.beforeToolCall = beforeToolCall;
+    await prepareEmbeddedAttemptAgentSession(fixture.input);
+    const resolveDeferredTool = hoisted.createAgentSession.mock.calls[0]![0].resolveDeferredTool;
+    const guard = fixture.activeSession.agent.beforeToolCall!;
+    for (const name of [
+      "memory_search",
+      "sessions",
+      "sessions_history",
+      "session_status",
+      "intent",
+    ]) {
+      expect(() => resolveDeferredTool({ toolCall: { name } })).toThrow(/unavailable/);
+      expect(await guard({ toolCall: { name } } as never, undefined)).toMatchObject({
+        block: true,
+      });
+    }
+    expect(beforeToolCall).not.toHaveBeenCalled();
+    await guard({ toolCall: { name: "web_search" } } as never, undefined);
+    expect(beforeToolCall).toHaveBeenCalledOnce();
+  });
+
   it("keeps effective workspace rules in automatic compaction when the process and sandbox cwd differ", async () => {
     const fixture = createInput();
     const workspaceDir = tempDirs.make("openclaw-attempt-compaction-workspace-");

@@ -63,18 +63,24 @@ export async function resolvePromptBuildHookResult(params: {
   hookRunner?: PromptBuildHookRunner | null;
 }): Promise<ResolvedPromptBuildHookResult> {
   const runId = params.hookCtx.runId;
-  const cachedInjections = runId ? promptBuildDrainCache.get(runId) : undefined;
-  const queuedContext = cachedInjections
+  const isolated = params.hookCtx.contextIsolation === "isolated";
+  const cachedInjections = !isolated && runId ? promptBuildDrainCache.get(runId) : undefined;
+  const queuedContext = isolated
     ? {
-        queuedInjections: cachedInjections,
-        ...buildPluginAgentTurnPrepareContext({ queuedInjections: cachedInjections }),
+        queuedInjections: [],
+        ...buildPluginAgentTurnPrepareContext({ queuedInjections: [] }),
       }
-    : await drainPluginNextTurnInjectionContext({
-        cfg: params.config,
-        sessionKey: params.hookCtx.sessionKey,
-        agentId: params.hookCtx.agentId,
-      });
-  if (runId && !cachedInjections) {
+    : cachedInjections
+      ? {
+          queuedInjections: cachedInjections,
+          ...buildPluginAgentTurnPrepareContext({ queuedInjections: cachedInjections }),
+        }
+      : await drainPluginNextTurnInjectionContext({
+          cfg: params.config,
+          sessionKey: params.hookCtx.sessionKey,
+          agentId: params.hookCtx.agentId,
+        });
+  if (!isolated && runId && !cachedInjections) {
     promptBuildDrainCache.delete(runId);
     pruneMapToMaxSize(promptBuildDrainCache, PROMPT_BUILD_DRAIN_CACHE_MAX - 1);
     promptBuildDrainCache.set(runId, queuedContext.queuedInjections);

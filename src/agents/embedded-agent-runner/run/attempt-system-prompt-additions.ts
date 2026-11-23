@@ -15,18 +15,22 @@ export async function prepareAttemptSystemPromptAdditions(params: {
   sessionKey?: string;
   storePath?: string;
   toolsAllow?: string[];
+  contextIsolation?: "isolated";
 }) {
   const extraSystemPrompt = await appendProgressCardSystemPrompt({
     ...params,
     extraSystemPrompt: appendIncognitoSystemPrompt(params),
   });
-  const gitCoauthorPrompt = await resolveSessionGitCoauthorPrompt({
-    config: params.config,
-    agentId: params.agentId,
-    sessionKey: params.sessionKey,
-    sessionId: params.sessionId,
-    storePath: params.storePath,
-  });
+  const gitCoauthorPrompt =
+    params.contextIsolation === "isolated"
+      ? undefined
+      : await resolveSessionGitCoauthorPrompt({
+          config: params.config,
+          agentId: params.agentId,
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          storePath: params.storePath,
+        });
   // Credit has its own retained prompt placement; do not fold it into dynamic additions.
   return { extraSystemPrompt, gitCoauthorPrompt };
 }

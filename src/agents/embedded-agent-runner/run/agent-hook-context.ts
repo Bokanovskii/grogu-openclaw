@@ -18,6 +18,7 @@ type EmbeddedAgentHookRun = Pick<
   | "workspaceDir"
   | "trigger"
   | "memoryAudience"
+  | "contextIsolation"
   | "sandbox"
 > &
   Parameters<typeof buildAgentHookContextChannelFields>[0] &
@@ -39,6 +40,7 @@ export function buildEmbeddedAgentHookContext(
     sessionKey: run.sessionKey,
     sessionId: run.sessionId,
     memoryAudience: run.memoryAudience,
+    contextIsolation: run.contextIsolation,
     assertMemoryAudienceCurrent: run.memoryAudience
       ? () => assertMemoryAudienceCurrent(run.memoryAudience!)
       : undefined,

@@ -62,6 +62,11 @@
       "import": "./dist/protected-authoring.mjs",
       "default": "./dist/protected-authoring.mjs"
     },
+    "./protected-sharing": {
+      "types": "./dist/protected-sharing.d.mts",
+      "import": "./dist/protected-sharing.mjs",
+      "default": "./dist/protected-sharing.mjs"
+    },
     "./gateway-error-details": {
       "types": "./dist/gateway-error-details.d.mts",
       "import": "./dist/gateway-error-details.mjs",

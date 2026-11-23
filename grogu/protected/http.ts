@@ -19,6 +19,7 @@ import {
   type ProtectedAutomationListResponse,
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
+  type ProtectedChatSummary,
   type ProtectedMessage,
   type ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
@@ -28,6 +29,13 @@ import {
   type ProtectedAuthoringTurnRequest,
   type ProtectedAutomationAuthoringResponse,
 } from "@openclaw/gateway-protocol/protected-authoring";
+import type {
+  ProtectedChatShareResponse,
+  ProtectedShareClaimResponse,
+  ProtectedSharedChatResponse,
+  ProtectedSharedChatSummary,
+  ProtectedSharedChatsResponse,
+} from "@openclaw/gateway-protocol/protected-sharing";
 import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { ALCOVE_CONTENT_STYLES } from "../../packages/widget-host/src/styles.js";
@@ -40,6 +48,7 @@ import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { redactSensitiveText } from "../../src/logging/redact.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
+import type { ProtectedSharingWorkerOperations } from "../../src/state/protected-sharing.worker.js";
 import {
   getCanonicalUserPreferences,
   getUserPreferenceValues,
@@ -147,6 +156,12 @@ import type { createProtectedMemoryReview } from "./memory-review.js";
 import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
+import {
+  authorizeProtectedChatRead,
+  projectProtectedChatShare,
+  runProtectedSharing,
+} from "./sharing-store.js";
+import type { StoredDataEntry } from "./storage-entry-quota.js";
 import {
   parseStorageLimitBytes,
   parseStorageLimitVersion,
@@ -391,8 +406,19 @@ export function createProtectedHttp(options: {
     chats,
     automationUsage: (profileId: string, assertCurrent: () => void) =>
       readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
-    storedDataUsage: (_profileId: string, assertCurrent: () => void) =>
-      readProtectedFeedbackStorageUsage(options.stateDir, storageEntryOverheadBytes, assertCurrent),
+    storedDataUsage: async (_profileId: string, assertCurrent: () => void) => [
+      ...(await readProtectedFeedbackStorageUsage(
+        options.stateDir,
+        storageEntryOverheadBytes,
+        assertCurrent,
+      )),
+      ...(await runProtectedSharing(
+        options.stateDir,
+        "protectedSharing.storageUsage",
+        storageEntryOverheadBytes,
+        assertCurrent,
+      )),
+    ],
   };
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
@@ -673,6 +699,7 @@ export function createProtectedHttp(options: {
         options.ownerSubject !== undefined &&
         identity.subject === options.ownerSubject;
       const feedbackCapability = hasClientCapability(request.headers, "feedback-v1");
+      const sharingCapability = hasClientCapability(request.headers, "sharing-v1");
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
@@ -1211,11 +1238,12 @@ export function createProtectedHttp(options: {
         use: (scope: Awaited<ReturnType<typeof createAuthorizedUserFiles>>) => Promise<T>,
         assert = assertCurrent,
         signal = request.signal,
+        profileId = profile.id,
       ) =>
         createAuthorizedUserFiles({
           ...options,
           encryption,
-          profileId: profile.id,
+          profileId,
           assertCurrent: assert,
           signal,
           maxBytes: options.maxFileBytes,
@@ -1231,37 +1259,90 @@ export function createProtectedHttp(options: {
             owned.dispose();
           }
         });
-      const readChat = async (id: string) => {
-        const { chat, usage } = await chats.readWithUsage(authority, id);
+      const readChat = async (id: string, owner = authority) => {
+        const { chat, usage } = await chats.readWithUsage(owner, id);
         if (!supportsAutomationsAuthoring(request)) {
           delete chat.authoring;
         }
         if (chat.messages.some((message) => message.widgets?.length)) {
-          await files(async (owned) => {
-            for (const message of chat.messages) {
-              const widgets = [];
-              for (const widget of message.widgets ?? []) {
-                try {
-                  const stat = await owned.stat(
-                    `${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`,
-                  );
-                  if (stat.isFile) {
-                    widgets.push(widget);
-                  }
-                } catch (error) {
-                  if (!(error instanceof FsSafeError && error.code === "not-found")) {
-                    throw error;
+          await files(
+            async (owned) => {
+              for (const message of chat.messages) {
+                const widgets = [];
+                for (const widget of message.widgets ?? []) {
+                  try {
+                    const stat = await owned.stat(
+                      `${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`,
+                    );
+                    if (stat.isFile) {
+                      widgets.push(widget);
+                    }
+                  } catch (error) {
+                    if (!(error instanceof FsSafeError && error.code === "not-found")) {
+                      throw error;
+                    }
                   }
                 }
+                if (message.widgets) {
+                  message.widgets = widgets;
+                }
               }
-              if (message.widgets) {
-                message.widgets = widgets;
-              }
-            }
-          });
+            },
+            owner.assertCurrent,
+            request.signal,
+            owner.profileId,
+          );
         }
         return { chat, usage };
       };
+      const fileResponse = (
+        chatId: string,
+        filename: string,
+        generated: boolean,
+        owner = authority,
+        check = revalidate,
+      ) =>
+        files(
+          async (owned) => {
+            const directory = generated
+              ? chatGeneratedArtifactsDirectory(chatId)
+              : chatArtifactsDirectory(chatId);
+            const bytes = await owned.read(`${directory}/${filename}`);
+            await check();
+            return new Response(new Uint8Array(bytes), {
+              headers: {
+                ...commonHeaders,
+                "content-disposition": `attachment; filename="${filename}"`,
+                "content-type": "application/octet-stream",
+              },
+            });
+          },
+          owner.assertCurrent,
+          request.signal,
+          owner.profileId,
+        );
+      const widgetResponse = (
+        chatId: string,
+        widgetId: string,
+        owner = authority,
+        check = revalidate,
+      ) =>
+        files(
+          async (owned) => {
+            const storage = { files: owned, directory: chatWidgetsDirectory(chatId) };
+            const { html } = await readCanvasDocumentHtmlSource(widgetId, { storage });
+            const manifest: unknown = JSON.parse(
+              await owned.readText(`${storage.directory}/${widgetId}/manifest.json`),
+            );
+            await check();
+            const title =
+              isRecord(manifest) && typeof manifest.title === "string" ? manifest.title : "Widget";
+            return json({ id: widgetId, title, html, version: widgetId });
+          },
+          owner.assertCurrent,
+          request.signal,
+          owner.profileId,
+        );
       const saveIcon = async (icon: unknown) => {
         const saved = await setCanonicalUserPreferences(
           profile.id,
@@ -1305,6 +1386,7 @@ export function createProtectedHttp(options: {
             openaiConnect: options.providerRelay !== undefined,
             admin: isOwner,
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
+            ...(sharingCapability ? { sharing: identity.kind !== "development" } : {}),
             ...(hasClientCapability(request.headers, "memory-v1")
               ? { memory: { review: options.memoryReview !== undefined } }
               : {}),
@@ -2166,20 +2248,228 @@ export function createProtectedHttp(options: {
         const [, chatId, filename] = selectedFile;
         await chats.readEntry(authority, chatId);
         await revalidate();
-        return await files(async (owned) => {
-          const directory = generatedFileId
-            ? chatGeneratedArtifactsDirectory(chatId)
-            : chatArtifactsDirectory(chatId);
-          const bytes = await owned.read(`${directory}/${filename}`);
-          await revalidate();
-          return new Response(new Uint8Array(bytes), {
-            headers: {
-              ...commonHeaders,
-              "content-disposition": `attachment; filename="${filename}"`,
-              "content-type": "application/octet-stream",
-            },
-          });
+        return await fileResponse(chatId, filename, Boolean(generatedFileId));
+      }
+      const sharing = <Key extends keyof ProtectedSharingWorkerOperations>(
+        type: Key,
+        input: ProtectedSharingWorkerOperations[Key]["input"],
+      ) => runProtectedSharing(options.stateDir, type, input, assertCurrent);
+      const retireSharing = (removed: readonly StoredDataEntry[]) =>
+        admitStorage?.retiredStoredData(removed.map((entry) => ({ removed: entry })));
+      const requireSharing = () => {
+        if (!sharingCapability) {
+          notFound();
+        }
+        requireProfile();
+        if (identity.kind === "development") {
+          throw new ProtectedError(
+            403,
+            "sharing_unavailable",
+            "Sharing is not available for this account.",
+          );
+        }
+      };
+      // Like feedback: an unknown write outcome keeps its reservation unless the entry is absent.
+      const storeSharingEntry = async <T extends { created: boolean; entries: StoredDataEntry[] }>(
+        entryId: string,
+        write: () => Promise<T | undefined>,
+      ) => {
+        const storage = await admitStorage?.(
+          profile.id,
+          assertCurrent,
+          "stored-data",
+          await storageLimit(assertCurrent),
+        );
+        const reservation = storage?.reserveStoredData(storageEntryOverheadBytes);
+        let settled = false;
+        try {
+          const result = await write();
+          reservation?.settle(result ?? { created: false, entries: [] });
+          settled = true;
+          return result;
+        } catch (error) {
+          if (reservation && !settled) {
+            try {
+              const stored = await sharing(
+                "protectedSharing.storageUsage",
+                storageEntryOverheadBytes,
+              );
+              const entry = stored.find(
+                (candidate) => candidate.profileId === profile.id && candidate.id === entryId,
+              );
+              if (entry) {
+                reservation.settle({ created: true, entries: [entry] });
+              } else {
+                reservation.release();
+              }
+            } catch {
+              process.stderr.write(
+                "Protected sharing write outcome is unknown; its storage reservation remains held.\n",
+              );
+            }
+          }
+          throw error;
+        } finally {
+          storage?.release();
+        }
+      };
+      // Reads use the owner's chat store; the sharing owner decides access before and after.
+      const ownerAuthority = (ownerProfileId: string) => ({
+        profileId: ownerProfileId,
+        assertCurrent,
+      });
+      const ownerChatSummary = async (ownerProfileId: string, chatId: string) =>
+        (await chats.list(ownerAuthority(ownerProfileId))).find((chat) => chat.id === chatId);
+      const removeOrphanShare = async (ownerProfileId: string, chatId: string) =>
+        retireSharing(
+          await sharing("protectedSharing.delete", {
+            ownerProfileId,
+            chatId,
+            storageOverheadBytes: storageEntryOverheadBytes,
+          }),
+        );
+      const shareClaim = /^\/shares\/([A-Za-z0-9_-]{43})\/claim$/u.exec(pathname);
+      if (shareClaim?.[1] && method === "POST") {
+        requireSharing();
+        await revalidate();
+        const shareId = shareClaim[1];
+        const target = await sharing("protectedSharing.resolve", {
+          profileId: profile.id,
+          shareId,
         });
+        if (!target) {
+          throw new ProtectedError(404, "share_not_found", "This link is no longer available.");
+        }
+        const chat = await ownerChatSummary(target.ownerProfileId, target.chatId);
+        if (!chat) {
+          await removeOrphanShare(target.ownerProfileId, target.chatId);
+          throw new ProtectedError(404, "share_not_found", "This link is no longer available.");
+        }
+        const now = Date.now();
+        const claimed = target.granted
+          ? target
+          : await storeSharingEntry(
+              `chat-share-grant:${target.ownerProfileId}:${target.chatId}:${profile.id}:${now}`,
+              () =>
+                sharing("protectedSharing.claim", {
+                  profileId: profile.id,
+                  shareId,
+                  now,
+                  storageOverheadBytes: storageEntryOverheadBytes,
+                }),
+            );
+        await revalidate();
+        if (!claimed) {
+          throw new ProtectedError(404, "share_not_found", "This link is no longer available.");
+        }
+        const response: ProtectedShareClaimResponse = {
+          access: claimed.access,
+          chat: {
+            id: chat.id,
+            title: chat.title,
+            updatedAt: chat.updatedAt,
+            owner: { personId: claimed.ownerProfileId, displayName: claimed.ownerDisplayName },
+          },
+        };
+        return json(response);
+      }
+      if (pathname === "/shared/chats" && method === "GET") {
+        requireSharing();
+        const grants = await sharing("protectedSharing.sharedChats", { profileId: profile.id });
+        const owned = new Map<string, ProtectedChatSummary[]>();
+        const shared: ProtectedSharedChatSummary[] = [];
+        for (const grant of grants) {
+          let ownerChats = owned.get(grant.ownerProfileId);
+          if (!ownerChats) {
+            ownerChats = await chats.list(ownerAuthority(grant.ownerProfileId));
+            owned.set(grant.ownerProfileId, ownerChats);
+          }
+          const chat = ownerChats.find((candidate) => candidate.id === grant.chatId);
+          if (!chat) {
+            await removeOrphanShare(grant.ownerProfileId, grant.chatId);
+            continue;
+          }
+          shared.push({
+            id: chat.id,
+            title: chat.title,
+            updatedAt: chat.updatedAt,
+            owner: { personId: grant.ownerProfileId, displayName: grant.ownerDisplayName },
+          });
+        }
+        await revalidate();
+        const response: ProtectedSharedChatsResponse = {
+          chats: shared.toSorted((left, right) => right.updatedAt - left.updatedAt),
+        };
+        return json(response);
+      }
+      const sharedChat = /^\/shared\/chats\/([^/]+)\/([^/]+)(?:\/(.*))?$/u.exec(pathname);
+      if (sharedChat?.[1] && sharedChat[2] && method === "GET") {
+        requireSharing();
+        const [, ownerProfileId, chatId, sharedRest] = sharedChat;
+        const target = { ownerProfileId, chatId };
+        const access = await authorizeProtectedChatRead(
+          { stateDir: options.stateDir, chats },
+          authority,
+          target,
+        );
+        await revalidate();
+        if (!access) {
+          notFound();
+        }
+        const owner = ownerAuthority(ownerProfileId);
+        const check = async () => {
+          if (
+            !(await sharing("protectedSharing.chatAccess", { profileId: profile.id, ...target }))
+          ) {
+            notFound();
+          }
+          await revalidate();
+        };
+        if (!sharedRest) {
+          const { chat } = await readChat(chatId, owner);
+          delete chat.activeRun;
+          delete chat.authoring;
+          await check();
+          const response: ProtectedSharedChatResponse = {
+            chat,
+            owner: { personId: ownerProfileId, displayName: access.ownerDisplayName },
+          };
+          return json(response);
+        }
+        if (sharedRest === "artifacts") {
+          const chat = await ownerChatSummary(ownerProfileId, chatId);
+          if (!chat) {
+            notFound();
+          }
+          return await files(
+            async (owned) => {
+              const result = await listProtectedArtifacts({
+                files: owned,
+                chats: [chat],
+                cursor: new URL(request.url).searchParams.get("cursor"),
+                maxFileBytes: options.maxFileBytes,
+              });
+              await check();
+              return json(result);
+            },
+            assertCurrent,
+            request.signal,
+            ownerProfileId,
+          );
+        }
+        const sharedFile = /^files\/(?:(generated)~)?([^/~]+)~([^/~]+)$/u.exec(sharedRest);
+        if (
+          sharedFile?.[2] === chatId &&
+          sharedFile[3] &&
+          (sharedFile[1] ? validGeneratedFilename(sharedFile[3]) : validFilename(sharedFile[3]))
+        ) {
+          return await fileResponse(chatId, sharedFile[3], Boolean(sharedFile[1]), owner, check);
+        }
+        const sharedWidget = /^widgets\/(.+)$/u.exec(sharedRest)?.[1];
+        if (sharedWidget && widgetIdPattern.test(sharedWidget)) {
+          return await widgetResponse(chatId, sharedWidget, owner, check);
+        }
+        notFound();
       }
       const match = /^\/chats\/([^/]+)(?:\/(.*))?$/u.exec(pathname);
       if (!match?.[1]) {
@@ -2479,6 +2769,71 @@ export function createProtectedHttp(options: {
           storage?.release();
         }
       }
+      if (rest === "share" || rest?.startsWith("share/")) {
+        requireSharing();
+        const ref = { ownerProfileId: profile.id, chatId: id };
+        const storageOverheadBytes = storageEntryOverheadBytes;
+        if (rest === "share" && method === "GET") {
+          const share = await sharing("protectedSharing.read", ref);
+          await revalidate();
+          const response: ProtectedChatShareResponse = {
+            share: share ? projectProtectedChatShare(share) : null,
+          };
+          return json(response);
+        }
+        if (rest === "share" && method === "POST") {
+          if (runs.has(id) || mutations.has(id)) {
+            throw new ProtectedError(409, "busy", "Try sharing again in a moment.");
+          }
+          mutations.add(id);
+          try {
+            const now = Date.now();
+            const existing = await sharing("protectedSharing.read", ref);
+            const created = existing
+              ? { share: existing }
+              : await storeSharingEntry(`chat-share:${id}:${now}`, () =>
+                  sharing("protectedSharing.create", { ...ref, now, storageOverheadBytes }),
+                );
+            await revalidate();
+            if (!created) {
+              throw new ProtectedError(
+                403,
+                "sharing_unavailable",
+                "Sharing is not available for this account.",
+              );
+            }
+            const response: ProtectedChatShareResponse = {
+              share: projectProtectedChatShare(created.share),
+            };
+            return json(response);
+          } finally {
+            mutations.delete(id);
+          }
+        }
+        if (rest === "share" && method === "DELETE") {
+          retireSharing(await sharing("protectedSharing.delete", { ...ref, storageOverheadBytes }));
+          await revalidate();
+          return noContent();
+        }
+        const recipient = /^share\/recipients\/([^/]+)$/u.exec(rest)?.[1];
+        if (recipient && method === "DELETE") {
+          const result = await sharing("protectedSharing.removeRecipient", {
+            ...ref,
+            recipientProfileId: recipient,
+            storageOverheadBytes,
+          });
+          if (!result) {
+            throw new ProtectedError(404, "share_not_found", "This chat has no link.");
+          }
+          retireSharing(result.removed);
+          await revalidate();
+          const response: ProtectedChatShareResponse = {
+            share: projectProtectedChatShare(result.share),
+          };
+          return json(response);
+        }
+        notFound();
+      }
       if (!rest && method === "DELETE") {
         const version = request.headers.get("if-match");
         if (!version) {
@@ -2494,6 +2849,13 @@ export function createProtectedHttp(options: {
             await revalidate();
           });
           await removeProtectedChatFeedback(options.stateDir, profile.id, id);
+          retireSharing(
+            await sharing("protectedSharing.delete", {
+              ownerProfileId: profile.id,
+              chatId: id,
+              storageOverheadBytes: storageEntryOverheadBytes,
+            }),
+          );
           await revalidate();
           admitStorage?.deletedChat(profile.id, id);
           await revalidate();
@@ -2565,17 +2927,7 @@ export function createProtectedHttp(options: {
         if (request.headers.has("x-grogu-profile")) {
           requireProfile();
         }
-        return files(async (owned) => {
-          const storage = { files: owned, directory: chatWidgetsDirectory(id) };
-          const { html } = await readCanvasDocumentHtmlSource(widgetId, { storage });
-          const manifest: unknown = JSON.parse(
-            await owned.readText(`${storage.directory}/${widgetId}/manifest.json`),
-          );
-          await revalidate();
-          const title =
-            isRecord(manifest) && typeof manifest.title === "string" ? manifest.title : "Widget";
-          return json({ id: widgetId, title, html, version: widgetId });
-        });
+        return widgetResponse(id, widgetId);
       }
       if (rest === "turns" && method === "POST") {
         requireProfile();

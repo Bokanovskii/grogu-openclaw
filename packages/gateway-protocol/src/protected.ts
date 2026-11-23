@@ -229,6 +229,7 @@ export const ProtectedMeSchema = node({
     feedback: Type.Optional(Type.Boolean()),
     telemetry: Type.Optional(Type.Boolean()),
     memory: Type.Optional(node({ review: Type.Boolean() })),
+    sharing: Type.Optional(Type.Boolean()),
   }),
 });
 export const ProtectedMemoryNoteSchema = node({

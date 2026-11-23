@@ -204,13 +204,6 @@ export function projectProtectedReportChat(input: {
       continue;
     }
     if (!isRecord(value.message)) {
-      if (value.type !== "session") {
-        items.push({
-          ...base,
-          kind: "notice",
-          text: "A transcript metadata entry has no conversation content.",
-        });
-      }
       continue;
     }
     const message = value.message;

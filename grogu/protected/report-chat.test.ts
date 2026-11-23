@@ -15,6 +15,9 @@ const chat: ProtectedChat = {
 void test("full-chat pages retain tools and compaction without secrets or private reasoning", () => {
   const events = [
     { type: "session" },
+    { type: "model_change", provider: "synthetic", modelId: "test" },
+    { type: "thinking_level_change", thinkingLevel: "medium" },
+    { id: "system-context", message: { role: "system", content: "System context" } },
     { id: "prompt", message: { role: "user", content: "Original question" } },
     {
       id: "tool-message",
@@ -94,6 +97,7 @@ void test("full-chat pages retain tools and compaction without secrets or privat
   assert.ok(first.nextCursor);
   assert.equal(first.redacted, true);
   assert.equal(first.redactions, null);
+  assert.equal(first.items.filter((item) => item.kind === "notice").length, 1);
   const tool = first.items.find((item) => item.kind === "tool");
   assert.ok(tool?.kind === "tool");
   assert.ok(tool.output !== null);

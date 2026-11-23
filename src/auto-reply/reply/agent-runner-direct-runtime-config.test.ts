@@ -6,7 +6,12 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { createAdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import { OAuthRefreshFailureError } from "../../agents/auth-profiles/oauth-refresh-failure.js";
 import { FailoverError } from "../../agents/failover-error.js";
+import {
+  type RequestScopedChildExecution,
+  withRequestScopedChildExecution,
+} from "../../agents/request-scoped-child-execution.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
+import { bindRequestOwnedSubagentExecution } from "../../agents/subagents/registry/subagent-registry-transient-content.js";
 import {
   appendTranscriptMessage,
   loadSessionEntry,
@@ -310,6 +315,38 @@ describe("runReplyAgent runtime config", () => {
     expect(preflightCall.cfg).toBe(freshCfg);
     expect(preflightCall.followupRun).toBe(followupRun);
   });
+
+  it.each(["active scope", "registered child"] as const)(
+    "skips pre-turn memory maintenance for an isolated %s",
+    async (source) => {
+      const { replyParams } = createDirectRuntimeReplyParams();
+      const runId = "isolated-child";
+      replyParams.opts = { ...replyParams.opts, runId };
+      const scope: RequestScopedChildExecution = {
+        provider: "openai",
+        model: "synthetic",
+        contextIsolation: "isolated",
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        async revalidate() {},
+        resolveChild: () => undefined,
+      };
+      runSessionCompactionIfNeededMock.mockImplementation(runRequiredCheckpoint);
+      if (source === "active scope") {
+        await withRequestScopedChildExecution(scope, () => runReplyAgent(replyParams));
+      } else {
+        const release = bindRequestOwnedSubagentExecution({ runId, scope });
+        try {
+          await runReplyAgent(replyParams);
+        } finally {
+          release();
+        }
+      }
+      expect(executeAgentTurnMock).toHaveBeenCalledOnce();
+      expect.soft(runSessionCompactionIfNeededMock).not.toHaveBeenCalled();
+      expect.soft(runMemoryFlushIfNeededMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes the derived runtime-policy key to pre-run maintenance", async () => {
     const { followupRun, replyParams } = createDirectRuntimeReplyParams();

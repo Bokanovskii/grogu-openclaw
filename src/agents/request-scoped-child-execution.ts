@@ -50,10 +50,13 @@ export function withRequestScopedChildExecution<T>(
   return requestScope.run(scope, run);
 }
 
-export function getRequestScopedChildExecution() {
+export function getRequestScopedChildExecution(runId?: string) {
   const scope = requestScope.getStore();
-  scope?.assertCurrent();
-  return scope;
+  if (scope) {
+    scope.assertCurrent();
+    return scope;
+  }
+  return runId ? readRequestOwnedSubagentExecution(runId) : undefined;
 }
 
 export async function resolveRequestScopedChild(
@@ -73,8 +76,7 @@ export async function prepareRequestScopedChildExecution(
   identity: Omit<ChildSessionIdentity, "lifecycleRevision">,
   entry: SessionEntry | undefined,
 ) {
-  const scope =
-    getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(identity.runId);
+  const scope = getRequestScopedChildExecution(identity.runId);
   if (readSessionTransientLifetime(entry) && !scope) {
     throw new Error("Request-scoped child execution is no longer authorized.");
   }
@@ -96,8 +98,7 @@ export async function runRequestScopedChild(
   params: RunEmbeddedAgentInternalParams,
   run: (params: RunEmbeddedAgentInternalParams) => Promise<EmbeddedAgentRunResult>,
 ) {
-  const scope =
-    getRequestScopedChildExecution() ?? readRequestOwnedSubagentExecution(identity.runId);
+  const scope = getRequestScopedChildExecution(identity.runId);
   if (!scope) {
     throw new Error("Request-scoped child execution is no longer authorized.");
   }

@@ -1,4 +1,5 @@
 import { executeOpenClawStateWorker } from "../../src/state/openclaw-state-worker-store.js";
+import type { ProtectedTurnTelemetryInput } from "../../src/state/protected-feedback.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 export function recordProtectedUsage(
@@ -11,6 +12,7 @@ export function recordProtectedUsage(
     tokens: number | null;
     failed: boolean;
     now: number;
+    telemetry?: ProtectedTurnTelemetryInput;
   },
 ) {
   return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {

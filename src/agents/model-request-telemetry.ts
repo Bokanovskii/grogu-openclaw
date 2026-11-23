@@ -9,6 +9,7 @@ import {
   modelRequestMetadataSnapshot,
   safeModelError,
   telemetryCode,
+  telemetryCounter,
   telemetryFinite,
   telemetryHash,
   telemetryIdentifier,
@@ -24,9 +25,36 @@ import type { EmbeddedRunTrigger } from "./run-trigger.js";
 
 const callContext = new AsyncLocalStorage<RequestTracker>();
 const httpContext = new AsyncLocalStorage<RequestTracker>();
-const suppressRequestTelemetry = new AsyncLocalStorage<{ onFirstOutput?: () => void }>();
-export function withoutModelRequestTelemetry<T>(run: () => T, onFirstOutput?: () => void): T {
-  return suppressRequestTelemetry.run({ onFirstOutput }, run);
+export type TerminalModelRequestMetadata = {
+  requestId: string;
+  provider: string | null;
+  model: string | null;
+  workClass: string | null;
+  outcome: string | null;
+  usageSource: string | null;
+  wallDurationMs: number | null;
+  queueWaitMs: number | null;
+  timeToHeadersMs: number | null;
+  timeToFirstByteMs: number | null;
+  timeToFirstOutputMs: number | null;
+  timeToFirstTextMs: number | null;
+  timeToFirstReasoningMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+};
+const suppressRequestTelemetry = new AsyncLocalStorage<{
+  onFirstOutput?: () => void;
+  onTerminalMetadata?: (record: TerminalModelRequestMetadata) => void;
+}>();
+export function withoutModelRequestTelemetry<T>(
+  run: () => T,
+  onFirstOutput?: () => void,
+  onTerminalMetadata?: (record: TerminalModelRequestMetadata) => void,
+): T {
+  return suppressRequestTelemetry.run({ onFirstOutput, onTerminalMetadata }, run);
 }
 const clock = { wall: () => Date.now(), monotonic: () => performance.now() };
 let store: ReturnType<typeof createRequestTelemetryClient> | undefined;
@@ -162,6 +190,10 @@ export function createRequestTracker(
     fields.kind === "http_attempt" || fields.kind === "host_gap"
       ? undefined
       : suppressRequestTelemetry.getStore()?.onFirstOutput;
+  const onTerminalMetadata =
+    fields.kind !== "http_attempt" && fields.kind !== "host_gap"
+      ? suppressRequestTelemetry.getStore()?.onTerminalMetadata
+      : undefined;
   const start = time.wall();
   const monoStart = time.monotonic();
   const jobId =
@@ -417,6 +449,33 @@ export function createRequestTracker(
       record.hostGapCount = relevantGaps.length;
       record.maxHostSchedulingGapMs = Math.max(0, ...relevantGaps.map((g) => g.schedulingGapMs));
       save();
+      if (onTerminalMetadata) {
+        try {
+          const snapshot = modelRequestMetadataSnapshot(record);
+          onTerminalMetadata({
+            requestId: record.id,
+            provider: telemetryCode(snapshot.provider),
+            model: telemetryCode(snapshot.model),
+            workClass: telemetryCode(snapshot.workClass),
+            outcome: telemetryCode(snapshot.outcome),
+            usageSource: telemetryCode(snapshot.usageSource),
+            wallDurationMs: telemetryFinite(snapshot.wallDurationMs),
+            queueWaitMs: telemetryFinite(snapshot.queueWaitMs),
+            timeToHeadersMs: telemetryFinite(snapshot.timeToHeadersMs),
+            timeToFirstByteMs: telemetryFinite(snapshot.timeToFirstByteMs),
+            timeToFirstOutputMs: telemetryFinite(snapshot.timeToFirstOutputMs),
+            timeToFirstTextMs: telemetryFinite(snapshot.timeToFirstTextMs),
+            timeToFirstReasoningMs: telemetryFinite(snapshot.timeToFirstReasoningMs),
+            inputTokens: telemetryCounter(snapshot.inputTokens),
+            outputTokens: telemetryCounter(snapshot.outputTokens),
+            cacheReadTokens: telemetryCounter(snapshot.cacheReadTokens),
+            cacheWriteTokens: telemetryCounter(snapshot.cacheWriteTokens),
+            reasoningTokens: telemetryCounter(snapshot.reasoningTokens),
+          });
+        } catch {
+          console.error("[model-request-telemetry] scoped metadata observer failed");
+        }
+      }
     },
   };
   return tracker;

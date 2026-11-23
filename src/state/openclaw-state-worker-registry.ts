@@ -154,6 +154,7 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<
   userProfiles: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
   protectedAccess: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
   protectedUsage: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
+  protectedFeedback: () => import("./user-profiles.worker.js").then((m) => m.userProfileOperations),
   protectedAutomations: () =>
     import("./protected-automations.worker.js").then((m) => m.protectedAutomationOperations),
   agentDatabaseRegistry: () =>

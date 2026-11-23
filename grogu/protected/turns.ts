@@ -15,7 +15,10 @@ import {
 import type { ClientToolDefinition } from "../../src/agents/command/shared-types.js";
 import { runEmbeddedAgent } from "../../src/agents/embedded-agent-runner/run.js";
 import { queueGuardedEmbeddedAgentMessageWithOutcomeAsync } from "../../src/agents/embedded-agent-runner/runs.js";
-import { withoutModelRequestTelemetry } from "../../src/agents/model-request-telemetry.js";
+import {
+  withoutModelRequestTelemetry,
+  type TerminalModelRequestMetadata,
+} from "../../src/agents/model-request-telemetry.js";
 import { createRequestModelCredential } from "../../src/agents/request-model-credential.js";
 import { withRequestScopedChildExecution } from "../../src/agents/request-scoped-child-execution.js";
 import { bindRequestOwnedSubagentExecution } from "../../src/agents/subagents/registry/subagent-registry-transient-content.js";
@@ -108,6 +111,8 @@ export type ProtectedTurn = {
   registerChildSession: (sessionKey: string) => () => void;
   childResult: (result: { runId: string; agentId: string; text: string }) => void;
   usage: (tokens: number | null) => void;
+  modelRequest: (record: TerminalModelRequestMetadata) => void;
+  reasoningLength: (length: number) => void;
   delta: (text: string) => Promise<void>;
   reasoning: (text: string) => Promise<void>;
   activity: (item: ProtectedActivity) => Promise<void>;
@@ -122,6 +127,7 @@ async function runMentionedAgent(
   agent: Readonly<ProtectedAgentDefinition>,
   credential: ReturnType<typeof createRequestModelCredential>,
   recordUsage: (usage: NormalizedUsage | undefined) => void,
+  recordModelRequest: (record: TerminalModelRequestMetadata) => void,
   task = turn.input.text,
 ) {
   const children = new Map<
@@ -595,6 +601,7 @@ export function createCanonicalProtectedTurns(options: {
         }
         turn.usage(tokenTotal);
       };
+      const recordModelRequest = turn.modelRequest;
       try {
         const requestCredential = createRequestModelCredential({
           provider,
@@ -666,6 +673,7 @@ export function createCanonicalProtectedTurns(options: {
                       ? text.slice(lastReasoning.length)
                       : text;
                     lastReasoning = text;
+                    turn.reasoningLength(delta.length);
                     updates = updates
                       .then(() => turn.reasoning(delta))
                       .catch((error: unknown) => {
@@ -680,6 +688,7 @@ export function createCanonicalProtectedTurns(options: {
                 }),
               ),
             () => turn.markTiming("firstProviderOutputMs"),
+            turn.modelRequest,
           ),
         );
         recordUsage(result.meta.agentMeta?.usage);
@@ -730,24 +739,35 @@ export function createCanonicalProtectedTurns(options: {
         }
         const route = readRoute(turn, result.meta.pendingToolCalls);
         if (turn.mentionedAgents.length || route) {
-          await withoutModelRequestTelemetry(() =>
-            withHostSessionAccess(turn.sessionAccess, async () => {
-              for (const agent of turn.mentionedAgents) {
-                turn.assertCurrent();
-                await runMentionedAgent(config, turn, agent, requestCredential, recordUsage);
-              }
-              if (route) {
-                turn.assertCurrent();
-                await runMentionedAgent(
-                  config,
-                  turn,
-                  route.agent,
-                  requestCredential,
-                  recordUsage,
-                  route.task,
-                );
-              }
-            }),
+          await withoutModelRequestTelemetry(
+            () =>
+              withHostSessionAccess(turn.sessionAccess, async () => {
+                for (const agent of turn.mentionedAgents) {
+                  turn.assertCurrent();
+                  await runMentionedAgent(
+                    config,
+                    turn,
+                    agent,
+                    requestCredential,
+                    recordUsage,
+                    recordModelRequest,
+                  );
+                }
+                if (route) {
+                  turn.assertCurrent();
+                  await runMentionedAgent(
+                    config,
+                    turn,
+                    route.agent,
+                    requestCredential,
+                    recordUsage,
+                    recordModelRequest,
+                    route.task,
+                  );
+                }
+              }),
+            undefined,
+            recordModelRequest,
           );
         }
       } finally {

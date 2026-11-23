@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promis
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
-import { after, before as beforeTests, test } from "node:test";
+import { after, before as beforeTests, mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ProtectedAgentCatalogSchema,
@@ -1246,7 +1246,9 @@ void test("Family HTTP isolates chats, relays device authorization, and durably 
     204,
   );
   assert.equal((await first.call("carol", "/chats", { method: "POST", body: "{}" })).status, 200);
-  assert.equal((await (await first.call("bob", "/storage/chats")).json()).usedBytes, 0);
+  const bobStorageAfterDelete = await (await first.call("bob", "/storage/chats")).json();
+  assert.equal(bobStorageAfterDelete.chats.length, 0);
+  assert.ok(bobStorageAfterDelete.usedBytes > 0, "90-day run telemetry remains stored");
   assert.equal((await first.call("bob", "/logout", { method: "POST" })).status, 204);
   await first.shutdown();
 
@@ -2184,6 +2186,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const options = {
     origin,
     accessIssuer: "https://synthetic.example",
+    ownerSubject: "synthetic-sparky",
     stateDir,
     usersRoot: await root(usersDir),
     encryption,
@@ -2217,6 +2220,22 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
   };
+  const sendNotification = mock.fn(async () => ({ statusCode: 201 }));
+  const webPushMock = mock.module("web-push", {
+    defaultExport: {
+      generateVAPIDKeys: () => ({ publicKey: "synthetic-public", privateKey: "synthetic-private" }),
+      setVapidDetails() {},
+      sendNotification,
+    },
+  });
+  t.after(() => webPushMock.restore());
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: "synthetic-sparky",
+    }),
+    "added",
+  );
   const open = async () => {
     await publishConfiguredModelRuntimeSnapshots({ cfg: protectedConfig, workspaceDir });
     const app = createProtectedHttp(options);
@@ -2244,7 +2263,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const { call, shutdown } = await open();
   const me = await call("/me");
   assert.equal(me.status, 200, await me.clone().text());
-  const { user, models: fixedModels } = await me.json();
+  const meBody = await me.json();
+  const { user, models: fixedModels } = meBody;
+  assert.equal("feedback" in meBody.capabilities, false);
+  assert.equal("telemetry" in meBody.capabilities, false);
   const sparkyModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "sparky",
   );
@@ -2351,7 +2373,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   };
   assert.deepEqual(toolNames(seen[0]), mainRunTools);
   assert.match(systemText(seen[0]), /\n# Alcove\n/);
-  const { call: reopened } = await open();
+  const { call: reopened, shutdown: reopenedShutdown } = await open();
   const read = await (await reopened(`/chats/${chat.id}`)).json();
   assert.deepEqual(read.usage, {
     contextTokens: 3,
@@ -2401,6 +2423,286 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.ok(!bytes.includes("Scoped widget body"));
     assert.ok(!bytes.includes("Synthetic widget"));
   }
+  const feedbackHeaders = { "X-Alcove-Capabilities": "feedback-v1" };
+  const feedbackMe = await reopened("/me", { headers: feedbackHeaders });
+  assert.equal(feedbackMe.status, 200);
+  assert.deepEqual((await feedbackMe.json()).capabilities, {
+    copilotConnect: false,
+    openaiConnect: false,
+    admin: true,
+    feedback: true,
+    telemetry: true,
+  });
+  const responseId = read.chat.messages.at(-1).id;
+  const ratingRoute = `/chats/${chat.id}/responses/${responseId}/feedback`;
+  const ratingResponse = await reopened(ratingRoute, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: "up" }),
+  });
+  assert.equal(ratingResponse.status, 200, await ratingResponse.clone().text());
+  assert.deepEqual(await ratingResponse.json(), {
+    feedback: { responseId, rating: "up", reportId: null },
+  });
+  const clearedRating = await reopened(ratingRoute, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: null }),
+  });
+  assert.equal(clearedRating.status, 200);
+  assert.deepEqual(await clearedRating.json(), {
+    feedback: { responseId, rating: null, reportId: null },
+  });
+  const unknownFeedback = await reopened(`/chats/${chat.id}/responses/${randomUUID()}/feedback`, {
+    method: "PUT",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ rating: "up" }),
+  });
+  assert.equal(unknownFeedback.status, 404);
+  assert.deepEqual(await unknownFeedback.json(), { error: "not_found" });
+  const submissionId = randomUUID();
+  const reportRoute = `/chats/${chat.id}/responses/${responseId}/reports`;
+  const reportBody = {
+    submissionId,
+    category: "other",
+    description: "password: synthetic-report-secret-123456",
+    includeEvidence: true,
+  };
+  const pushSubscription = await reopened("/admin/push/subscribe", {
+    method: "POST",
+    body: JSON.stringify({
+      endpoint: "https://push.example.invalid/device",
+      keys: { p256dh: "synthetic-key", auth: "synthetic-auth" },
+    }),
+  });
+  assert.equal(pushSubscription.status, 200, await pushSubscription.clone().text());
+  const submittedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(submittedReport.status, 201, await submittedReport.clone().text());
+  const reportResult = await submittedReport.json();
+  const replayedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(replayedReport.status, 200);
+  assert.deepEqual(await replayedReport.json(), reportResult);
+  const duplicateReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ ...reportBody, submissionId: randomUUID() }),
+  });
+  assert.equal(duplicateReport.status, 409);
+  assert.deepEqual(await duplicateReport.json(), { error: "already_reported" });
+  const feedbackList = await reopened(`/chats/${chat.id}/feedback`, {
+    headers: feedbackHeaders,
+  });
+  assert.deepEqual(await feedbackList.json(), {
+    feedback: [{ responseId, rating: "down", reportId: reportResult.report.id }],
+  });
+  const reportListResponse = await reopened("/admin/reports?status=open", {
+    headers: feedbackHeaders,
+  });
+  assert.equal(reportListResponse.status, 200);
+  const reportList = await reportListResponse.json();
+  assert.equal(reportList.openCount, 1);
+  assert.equal("reviewedAt" in reportList.reports[0], false);
+  assert.equal(reportList.reports[0].excerpt.includes("synthetic-report-secret-123456"), false);
+  const reportDetailResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    headers: feedbackHeaders,
+  });
+  assert.equal(reportDetailResponse.status, 200, await reportDetailResponse.clone().text());
+  const reportDetail = await reportDetailResponse.json();
+  assert.equal(reportDetail.report.description.includes("synthetic-report-secret-123456"), false);
+  assert.equal(reportDetail.report.evidence.state, "available");
+  assert.match(reportDetail.report.evidence.prompt, /Reply briefly/u);
+  assert.match(reportDetail.report.evidence.response, /Committed synthetic answer/u);
+  assert.deepEqual(reportDetail.report.evidence.sources, [
+    { title: "Synthetic source", url: sourceUrl },
+  ]);
+  assert.deepEqual(reportDetail.report.evidence.widgets, [
+    { id: widget.id, title: "Synthetic widget" },
+  ]);
+  assert.deepEqual(reportDetail.report.evidence.files, []);
+  const reviewResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    method: "PATCH",
+    headers: feedbackHeaders,
+    body: JSON.stringify({ status: "reviewed" }),
+  });
+  assert.equal(reviewResponse.status, 200);
+  assert.equal((await reviewResponse.json()).report.status, "reviewed");
+  const telemetryResponse = await reopened("/admin/telemetry?days=7", {
+    headers: feedbackHeaders,
+  });
+  assert.equal(telemetryResponse.status, 200);
+  const telemetry = await telemetryResponse.json();
+  assert.equal(
+    telemetry.features.some((feature: { id: string }) => feature.id === "chat"),
+    true,
+  );
+  assert.equal(telemetry.totals.reports, 1);
+  assert.equal(telemetry.totals.ratingsDown, 1);
+  assert.equal(telemetry.totals.runs, 1);
+  const attributedRun = telemetry.runs.find(
+    (run: { chatId: string | null; provider: string | null; model: string | null }) =>
+      run.chatId === chat.id && run.provider === "sparky" && run.model === "synthetic",
+  );
+  assert.ok(attributedRun);
+  for (const timing of [
+    attributedRun.admissionMs,
+    attributedRun.providerStartMs,
+    attributedRun.firstOutputMs,
+    attributedRun.firstVisibleMs,
+    attributedRun.completionMs,
+  ]) {
+    assert.equal(timing === null || (Number.isSafeInteger(timing) && timing >= 0), true);
+  }
+  assert.ok(
+    attributedRun.providerStartMs === null ||
+      attributedRun.firstOutputMs === null ||
+      attributedRun.providerStartMs <= attributedRun.firstOutputMs,
+  );
+  assert.ok(
+    attributedRun.firstOutputMs === null ||
+      attributedRun.completionMs === null ||
+      attributedRun.firstOutputMs <= attributedRun.completionMs,
+  );
+  const memberSubject = "synthetic-member";
+  assert.equal(
+    await addProtectedSubject(stateDir, {
+      issuer: "https://synthetic.example",
+      subject: memberSubject,
+    }),
+    "added",
+  );
+  const ordinaryApp = createProtectedHttp({
+    ...options,
+    directory: {
+      issuer: "https://synthetic.example",
+      allowedSubjects: ["synthetic-sparky", memberSubject],
+    },
+    verifyIdentity: identityFor(memberSubject, "synthetic-member-session"),
+  });
+  t.after(() => ordinaryApp.shutdown());
+  const ordinaryHeaders = new Headers(feedbackHeaders);
+  ordinaryHeaders.set("origin", origin);
+  ordinaryHeaders.set("content-type", "application/json");
+  const memberMeResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/me`, { headers: ordinaryHeaders }),
+  );
+  const memberMe = await memberMeResponse.json();
+  ordinaryHeaders.set("x-grogu-profile", memberMe.user.id);
+  const ordinaryAdminRoutes = [
+    { path: "/admin/reports?status=all", method: "GET" },
+    { path: `/admin/reports/${reportResult.report.id}`, method: "GET" },
+    {
+      path: `/admin/reports/${reportResult.report.id}`,
+      method: "PATCH",
+      body: JSON.stringify({ status: "reviewed" }),
+    },
+    { path: "/admin/telemetry", method: "GET" },
+  ];
+  for (const route of ordinaryAdminRoutes) {
+    const adminResponse = await ordinaryApp.fetch(
+      new Request(`${origin}/api/protected/v1${route.path}`, {
+        method: route.method,
+        headers: ordinaryHeaders,
+        ...(route.body ? { body: route.body } : {}),
+      }),
+    );
+    assert.equal(adminResponse.status, 403, route.path);
+    assert.deepEqual(await adminResponse.json(), { error: "owner_required" });
+  }
+  const ordinaryFeedbackRead = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${chat.id}/feedback`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  assert.equal(ordinaryFeedbackRead.status, 404);
+  const ordinaryAssetRead = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/files/${chat.id}~private.txt`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  assert.equal(ordinaryAssetRead.status, 404);
+  const memberChatResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats`, {
+      method: "POST",
+      headers: ordinaryHeaders,
+      body: "{}",
+    }),
+  );
+  assert.equal(memberChatResponse.status, 200);
+  const memberChat = (await memberChatResponse.json()).chat;
+  const memberTurnResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${memberChat.id}/turns`, {
+      method: "POST",
+      headers: ordinaryHeaders,
+      body: JSON.stringify({ provider: "sparky", text: "Synthetic member report evidence." }),
+    }),
+  );
+  const memberTurnBody = await memberTurnResponse.text();
+  assert.equal(memberTurnResponse.status, 200, memberTurnBody);
+  assert.ok(
+    memberTurnBody
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line))
+      .some((event) => event.type === "done"),
+  );
+  const memberHistoryResponse = await ordinaryApp.fetch(
+    new Request(`${origin}/api/protected/v1/chats/${memberChat.id}`, {
+      headers: ordinaryHeaders,
+    }),
+  );
+  const memberHistory = (await memberHistoryResponse.json()).chat;
+  const memberResponse = memberHistory.messages.findLast(
+    (message: { role: string }) => message.role === "assistant",
+  );
+  assert.ok(memberResponse);
+  const memberReportResponse = await ordinaryApp.fetch(
+    new Request(
+      `${origin}/api/protected/v1/chats/${memberChat.id}/responses/${memberResponse.id}/reports`,
+      {
+        method: "POST",
+        headers: ordinaryHeaders,
+        body: JSON.stringify({
+          submissionId: randomUUID(),
+          category: "other",
+          description: "Synthetic member report",
+          includeEvidence: true,
+        }),
+      },
+    ),
+  );
+  assert.equal(memberReportResponse.status, 201);
+  const memberReport = (await memberReportResponse.json()).report;
+  const ownerPeopleResponse = await reopened("/admin/people");
+  const ownerPeople = await ownerPeopleResponse.json();
+  const admittedMember = ownerPeople.people.find(
+    (person: { subject?: string }) => person.subject === memberSubject,
+  );
+  assert.ok(admittedMember);
+  const memberReportBeforeRemoval = await (
+    await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
+  ).json();
+  assert.equal(memberReportBeforeRemoval.report.evidence.state, "available");
+  assert.equal(
+    memberReportBeforeRemoval.report.evidence.prompt,
+    "Synthetic member report evidence.",
+  );
+  const removeMemberResponse = await reopened(`/admin/people/${admittedMember.id}/remove`, {
+    method: "POST",
+  });
+  assert.equal(removeMemberResponse.status, 200);
+  const memberReportAfterRemoval = await (
+    await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
+  ).json();
+  assert.equal(memberReportAfterRemoval.report.evidence.state, "member_removed");
+  assert.equal("prompt" in memberReportAfterRemoval.report.evidence, false);
   const firstMentionedRequest = seen.length;
   const mentionedTurn = await reopened(`/chats/${chat.id}/turns`, {
     method: "POST",
@@ -2412,7 +2714,10 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
-  assert.ok(mentionedEvents.some((event) => event.type === "done"));
+  assert.ok(
+    mentionedEvents.some((event) => event.type === "done"),
+    JSON.stringify(mentionedEvents),
+  );
   assert.ok(
     mentionedEvents.some(
       (event) =>
@@ -2566,6 +2871,30 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     headers: { "if-match": selectedRead.chat.version },
   });
   assert.equal(deleted.status, 204);
+  const retriedDeletedReport = await reopened(reportRoute, {
+    method: "POST",
+    headers: feedbackHeaders,
+    body: JSON.stringify(reportBody),
+  });
+  assert.equal(retriedDeletedReport.status, 200);
+  assert.deepEqual(await retriedDeletedReport.json(), reportResult);
+  const deletedReport = await reopened(`/admin/reports/${reportResult.report.id}`, {
+    headers: feedbackHeaders,
+  });
+  assert.equal((await deletedReport.json()).report.evidence.state, "deleted");
+  assert.equal(
+    (
+      await reopened(`/chats/${chat.id}/feedback`, {
+        headers: feedbackHeaders,
+      })
+    ).status,
+    404,
+  );
+  const deletedTelemetry = await (
+    await reopened("/admin/telemetry?days=7", { headers: feedbackHeaders })
+  ).json();
+  assert.equal(deletedTelemetry.totals.ratingsDown, 0);
+  assert.equal(deletedTelemetry.totals.reports, 2);
   assert.equal((await reopened(`/chats/${chat.id}/widgets/${widget.id}`)).status, 404);
 
   const { chat: travelChat } = await (
@@ -3173,10 +3502,16 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   } finally {
     await restart.shutdown();
   }
+  await reopenedShutdown();
+  assert.equal(sendNotification.mock.callCount(), 2);
+  for (const notification of sendNotification.mock.calls) {
+    assert.deepEqual(JSON.parse(String(notification.arguments[1])), { tag: "issue-report" });
+  }
   const plaintextMarkers = [
     suffix,
     "Reply briefly",
     "Committed synthetic answer.",
+    "synthetic-report-secret-123456",
     "Scoped widget body",
     "Synthetic widget",
     sourceUrl,

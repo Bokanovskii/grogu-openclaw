@@ -204,6 +204,8 @@ export const ProtectedMeSchema = node({
     copilotConnect: Type.Boolean(),
     openaiConnect: Type.Boolean(),
     admin: Type.Boolean(),
+    feedback: Type.Optional(Type.Boolean()),
+    telemetry: Type.Optional(Type.Boolean()),
   }),
 });
 export const ProtectedAutomationCapabilitiesSchema = node({

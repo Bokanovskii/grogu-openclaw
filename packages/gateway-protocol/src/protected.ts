@@ -196,6 +196,8 @@ export const ProtectedMessageSchema = node({
   status: Type.Optional(
     Type.Union([Type.Literal("complete"), Type.Literal("interrupted"), Type.Literal("failed")]),
   ),
+  // Set on a parent-chat message a member sent back from a side chat; only for side-chats-v1 clients.
+  sideNote: Type.Optional(node({ chatId: id, title: Type.String() })),
 });
 export const ProtectedChatSummarySchema = node({
   id,
@@ -658,6 +660,15 @@ export const ProtectedCreateSideChatSchema = node({
   selectedAgentId: Type.Optional(protectedAgentId),
 });
 export const ProtectedCreateSideChatResponseSchema = node({ chat: ProtectedChatSummarySchema });
+export const ProtectedReturnSideChatSchema = node({
+  requestId: Type.String({ pattern: protectedAutomationIdPattern }),
+  messageIds: Type.Array(id, { minItems: 1, maxItems: 3 }),
+  note: Type.Optional(Type.String({ maxLength: 500 })),
+});
+export const ProtectedReturnSideChatResponseSchema = node({
+  parent: node({ id, version: Type.String() }),
+  message: ProtectedMessageSchema,
+});
 // Sent instead of 204 only to clients that negotiated side-chats-v1.
 export const ProtectedDeleteChatResponseSchema = node({ deletedSideChats: Type.Array(id) });
 export const ProtectedSteerSchema = node({
@@ -691,6 +702,7 @@ export type ProtectedTurnRequest = Static<typeof ProtectedTurnRequestSchema>;
 export type ProtectedChat = Static<typeof ProtectedChatSchema>;
 export type ProtectedChatSummary = Static<typeof ProtectedChatSummarySchema>;
 export type ProtectedCreateSideChatResponse = Static<typeof ProtectedCreateSideChatResponseSchema>;
+export type ProtectedReturnSideChatResponse = Static<typeof ProtectedReturnSideChatResponseSchema>;
 export type ProtectedDeleteChatResponse = Static<typeof ProtectedDeleteChatResponseSchema>;
 export type ProtectedChatStorage = Static<typeof ProtectedChatStorageSchema>;
 export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
@@ -782,6 +794,10 @@ export const isProtectedCreateSideChat = (
   value: unknown,
 ): value is Static<typeof ProtectedCreateSideChatSchema> =>
   Value.Check(ProtectedCreateSideChatSchema, value);
+export const isProtectedReturnSideChat = (
+  value: unknown,
+): value is Static<typeof ProtectedReturnSideChatSchema> =>
+  Value.Check(ProtectedReturnSideChatSchema, value);
 export const isProtectedSteer = (value: unknown): value is Static<typeof ProtectedSteerSchema> =>
   Value.Check(ProtectedSteerSchema, value);
 export const isProtectedRenew = (value: unknown): value is Static<typeof ProtectedRenewSchema> =>

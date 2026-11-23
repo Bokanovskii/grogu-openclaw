@@ -2010,6 +2010,12 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   await prepareProtectedSharedState(stateDir, () => {});
+  // Sending a reply to the main chat writes through the process-wide state directory.
+  const ambientStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  t.after(() => {
+    process.env.OPENCLAW_STATE_DIR = ambientStateDir;
+  });
   const started = Promise.withResolvers<void>();
   const proceed = Promise.withResolvers<void>();
   t.after(() => proceed.resolve());
@@ -2169,6 +2175,59 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
   assert.equal((await artifactsOf(sideChat.id, "")).status, 404);
   assert.equal((await artifactsOf(parent.id, "")).status, 200);
 
+  // Sending a side reply to the main chat needs the negotiation, a profile and a finished side reply.
+  await seed(aliceId, sideChat.id, "Side question");
+  const sideReply = (await readChat("alice", sideChat.id)).chat.messages.find(
+    (message: { role: string }) => message.role === "assistant",
+  );
+  const sendBack = (
+    user: string,
+    profileId: string,
+    chatId: string,
+    body: Record<string, unknown>,
+    capabilities = negotiated,
+  ) =>
+    call(
+      user,
+      `/chats/${chatId}/side/return`,
+      { method: "POST", headers: { "x-grogu-profile": profileId }, body: JSON.stringify(body) },
+      capabilities,
+    );
+  const sendRequest = { requestId: randomUUID(), messageIds: [sideReply.id], note: "Use this" };
+  assert.equal((await sendBack("alice", aliceId, sideChat.id, sendRequest, "")).status, 404);
+  assert.equal((await sendBack("alice", bobId, sideChat.id, sendRequest)).status, 403);
+  assert.equal((await sendBack("bob", bobId, sideChat.id, sendRequest)).status, 404);
+  assert.equal(
+    (await sendBack("alice", aliceId, sideChat.id, { requestId: sendRequest.requestId })).status,
+    400,
+  );
+  assert.equal(
+    (
+      await sendBack("alice", aliceId, sideChat.id, {
+        ...sendRequest,
+        messageIds: [sideReply.id, randomUUID(), randomUUID(), randomUUID()],
+      })
+    ).status,
+    400,
+  );
+  const notSide = await sendBack("alice", aliceId, parent.id, sendRequest);
+  assert.equal(notSide.status, 422);
+  assert.equal((await notSide.json()).error.code, "side_unavailable");
+  const sent = await sendBack("alice", aliceId, sideChat.id, sendRequest);
+  assert.equal(sent.status, 200);
+  const sentBody = await sent.json();
+  assert.equal(sentBody.parent.id, parent.id);
+  assert.deepEqual(sentBody.message.sideNote, { chatId: sideChat.id, title: "Detour" });
+  assert.equal(sentBody.message.text, "Use this\n\nAnswer to Side question");
+  const returned = (await readChat("alice", parent.id)).chat;
+  assert.equal(returned.version, sentBody.parent.version);
+  assert.deepEqual(returned.messages.at(-1), sentBody.message);
+  assert.equal((await readChat("alice", parent.id, "")).chat.messages.at(-1).sideNote, undefined);
+  const resent = await sendBack("alice", aliceId, sideChat.id, sendRequest);
+  assert.equal(resent.status, 200);
+  assert.deepEqual((await resent.json()).message, sentBody.message);
+  assert.equal((await readChat("alice", parent.id)).chat.messages.length, returned.messages.length);
+
   // A side chat's own side chat branches from the same parent; the third chat fills the budget.
   const second = await startSide("alice", aliceId, sideChat.id, { requestId: randomUUID() });
   assert.equal(second.status, 201);
@@ -2192,8 +2251,48 @@ void test("side chats fork their parent, stay hidden without negotiation, and ar
   });
   assert.equal(busy.status, 409);
   assert.equal((await readChat("alice", sideChat.id)).status, 200);
+
+  // The main chat takes no new reply while it is running.
+  const parentRun = await call("alice", `/chats/${parent.id}/turns`, {
+    method: "POST",
+    headers: { "x-grogu-profile": aliceId },
+    body: '{"provider":"anthropic","text":"Hello","credential":{"accessToken":"synthetic-only"}}',
+  });
+  assert.equal(parentRun.status, 200);
+  const busySend = await sendBack("alice", aliceId, sideChat.id, {
+    requestId: randomUUID(),
+    messageIds: [sideReply.id],
+  });
+  assert.equal(busySend.status, 409);
+  assert.equal((await busySend.json()).error.code, "busy");
   proceed.resolve();
   await running.text();
+  await parentRun.text();
+
+  // Every new send is charged to the member. A full account refuses it, but a retry still answers.
+  await seed(aliceId, sideChat.id, "x".repeat(10_000));
+  const longReply = (await readChat("alice", sideChat.id)).chat.messages.findLast(
+    (message: { role: string }) => message.role === "assistant",
+  );
+  const beforeSends = (await readChat("alice", parent.id)).chat.messages.length;
+  let accepted = 0;
+  let refused: Response | undefined;
+  while (!refused && accepted < 60) {
+    const next = await sendBack("alice", aliceId, sideChat.id, {
+      requestId: randomUUID(),
+      messageIds: [longReply.id],
+    });
+    if (next.status === 413) {
+      refused = next;
+    } else {
+      assert.equal(next.status, 200);
+      accepted++;
+    }
+  }
+  assert.ok(refused, "the account never reached its storage limit");
+  assert.equal((await refused.json()).error.code, "quota_exceeded");
+  assert.equal((await readChat("alice", parent.id)).chat.messages.length, beforeSends + accepted);
+  assert.equal((await sendBack("alice", aliceId, sideChat.id, sendRequest)).status, 200);
 
   const deleted = await call("alice", `/chats/${parent.id}`, {
     method: "DELETE",

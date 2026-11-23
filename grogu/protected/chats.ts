@@ -50,6 +50,7 @@ import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encrypt
 import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
+import { composeSideReturnText } from "./side-return.js";
 import {
   createWidgetChain,
   projectActivity,
@@ -77,6 +78,23 @@ function sideOf(entry: SessionEntry) {
           messageCount: entry.protectedSideForkedAt.messageCount,
         },
       }
+    : undefined;
+}
+
+const sideReturnModel = "protected-side-return";
+
+/** A parent-chat message that a member sent back from one of its side chats. */
+function sideReturnOf(message: Record<string, unknown>) {
+  const note = message.protectedSideNote;
+  return message.role === "assistant" &&
+    message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
+    message.provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
+    message.model === sideReturnModel &&
+    isRecord(note) &&
+    typeof note.chatId === "string" &&
+    validId(note.chatId) &&
+    typeof note.title === "string"
+    ? { chatId: note.chatId, title: note.title }
     : undefined;
 }
 
@@ -419,6 +437,29 @@ export function createProtectedChats(options: {
                 .join("\n")
             : "";
       const provider = typeof message.provider === "string" ? message.provider : undefined;
+      const sideReturn = sideReturnOf(message);
+      if (sideReturn) {
+        // A returned reply stands alone: it is not the turn's reply and carries no usage or timing.
+        messages.push({
+          id: typeof event.id === "string" ? event.id : `${id}:${messages.length}`,
+          role: "assistant",
+          text: content,
+          status: "complete",
+          sideNote: sideReturn,
+          // These are references to the side chat's widgets, so they never join this chat's chain.
+          widgets: Array.isArray(message.protectedSideWidgets)
+            ? message.protectedSideWidgets.flatMap((widget) =>
+                isRecord(widget) &&
+                typeof widget.id === "string" &&
+                widgetIdPattern.test(widget.id) &&
+                typeof widget.title === "string"
+                  ? [{ id: widget.id, title: widget.title }]
+                  : [],
+              )
+            : [],
+        });
+        continue;
+      }
       const childMessage =
         provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
         message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
@@ -943,6 +984,111 @@ export function createProtectedChats(options: {
         throw new ProtectedError(500, "save_failed", "The chat could not be saved.");
       }
       return { chat: summary(result.entry), created: true };
+    },
+    /** Copies chosen side replies into the parent as one message; no model call. */
+    async returnSide(
+      authority: ProtectedChatAuthority,
+      sideId: string,
+      input: { requestId: string; messageIds: string[]; note?: string },
+      // Wraps only a new append, so a replay never needs storage admission.
+      withStorage: <T>(append: () => Promise<T>) => Promise<T> = (append) => append(),
+    ): Promise<{ parent: { id: string; version: string }; message: ProtectedMessage }> {
+      authority.assertCurrent();
+      const side = await readEntry(authority, sideId);
+      if (!side.protectedSideParentId) {
+        throw new ProtectedError(422, "side_unavailable", "This chat is not a side chat.");
+      }
+      const parentId = side.protectedSideParentId;
+      const source = await readTranscriptSource(authority, parentId);
+      const settle = (parent: SessionEntry, events: typeof source.events, messageId: string) => {
+        const message = projectTranscriptSource(parent, events).chat.messages.find(
+          (candidate) => candidate.id === messageId,
+        );
+        if (!message?.sideNote || message.sideNote.chatId !== sideId) {
+          throw new ProtectedError(
+            409,
+            "request_conflict",
+            "This request already sent a reply from another chat.",
+          );
+        }
+        return { parent: { id: parentId, version: String(parent.updatedAt) }, message };
+      };
+      const idempotencyKey = `protected-side-return:${input.requestId}`;
+      const prior = source.events.find(
+        (event) =>
+          isRecord(event) &&
+          isRecord(event.message) &&
+          event.message.idempotencyKey === idempotencyKey,
+      );
+      if (prior && isRecord(prior) && typeof prior.id === "string") {
+        return settle(source.entry, source.events, prior.id);
+      }
+      const own = (await readWithUsage(authority, sideId)).chat.messages;
+      const chosen = new Set(input.messageIds);
+      const replies = own.filter((message) => chosen.has(message.id));
+      if (
+        replies.length !== chosen.size ||
+        replies.some(
+          (reply) =>
+            reply.role !== "assistant" ||
+            reply.status !== "complete" ||
+            (!reply.text.trim() && !reply.widgets?.length),
+        )
+      ) {
+        throw new ProtectedError(
+          422,
+          "invalid_message",
+          "Choose finished replies from this side chat.",
+        );
+      }
+      const widgets = [
+        ...new Map(
+          replies.flatMap((reply) => reply.widgets ?? []).map((widget) => [widget.id, widget]),
+        ).values(),
+      ]
+        .slice(0, 20)
+        .map((widget) => ({ id: widget.id, title: widget.title }));
+      const title = side.displayName ?? "Side chat";
+      const message = {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: composeSideReturnText(
+              replies.map((reply) => reply.text),
+              input.note,
+              widgets.map((widget) => widget.title),
+            ),
+          },
+        ],
+        api: OPENCLAW_TRANSCRIPT_ARTIFACT_API,
+        provider: OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
+        model: sideReturnModel,
+        usage: makeZeroUsageSnapshot(),
+        stopReason: "stop",
+        timestamp: Date.now(),
+        protectedSideNote: { chatId: sideId, title },
+        protectedSideWidgets: widgets,
+      } satisfies SessionTranscriptAssistantMessage & {
+        protectedSideNote: { chatId: string; title: string };
+        protectedSideWidgets: Widget[];
+      };
+      const saved = await withStorage(() =>
+        appendExactAssistantMessageToSessionTranscript({
+          ...scope(authority, parentId),
+          expectedSessionId: parentId,
+          expectedLifecycleRevision: source.entry.lifecycleRevision ?? null,
+          idempotencyKey,
+          message,
+          assertCurrent: authority.assertCurrent,
+        }),
+      );
+      authority.assertCurrent();
+      if (!saved.ok) {
+        throw new ProtectedError(500, "save_failed", "The reply could not be sent.");
+      }
+      const after = await readTranscriptSource(authority, parentId);
+      return settle(after.entry, after.events, saved.messageId);
     },
     async selectAgent(
       authority: ProtectedChatAuthority,

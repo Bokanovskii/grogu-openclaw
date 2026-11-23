@@ -417,6 +417,60 @@ void test("chat links grant live read-only access until revoked", async (t) => {
     JSON.stringify((await ok(await call("recipient", shared))).chat.messages),
     /Synthetic reply to Second synthetic question/u,
   );
+
+  // A reply the owner sends from a side chat is plain parent text for everyone else.
+  // Sending a reply to the main chat writes through the process-wide state directory.
+  const ambientStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  t.after(() => {
+    process.env.OPENCLAW_STATE_DIR = ambientStateDir;
+  });
+  const withSide = "sharing-v1,side-chats-v1";
+  const { chat: side } = await ok(
+    await call(
+      "owner",
+      `/chats/${chat.id}/side`,
+      { method: "POST", body: { requestId: randomUUID() } },
+      withSide,
+    ),
+    201,
+  );
+  const sideTurn = await call(
+    "owner",
+    `/chats/${side.id}/turns`,
+    { method: "POST", body: { text: "Side question", provider: "sparky", model: "synthetic" } },
+    withSide,
+  );
+  assert.equal(sideTurn.status, 200);
+  await sideTurn.text();
+  const sideReply = (await ok(await call("owner", `/chats/${side.id}`, {}, withSide))).chat.messages
+    .toReversed()
+    .find((message: { role: string }) => message.role === "assistant");
+  await ok(
+    await call(
+      "owner",
+      `/chats/${side.id}/side/return`,
+      { method: "POST", body: { requestId: randomUUID(), messageIds: [sideReply.id] } },
+      withSide,
+    ),
+  );
+  const returned = (
+    await ok(await call("owner", `/chats/${chat.id}`, {}, withSide))
+  ).chat.messages.at(-1);
+  assert.deepEqual(returned.sideNote, { chatId: side.id, title: "Side chat" });
+  for (const capabilities of [withSide, "sharing-v1"]) {
+    const message = (await ok(await call("recipient", shared, {}, capabilities))).chat.messages.at(
+      -1,
+    );
+    assert.equal(message.text, "Synthetic reply to Side question");
+    assert.equal(message.sideNote, undefined);
+  }
+  assert.equal(
+    (await ok(await call("owner", `/chats/${chat.id}`, {}, "sharing-v1"))).chat.messages.at(-1)
+      .sideNote,
+    undefined,
+  );
+
   const artifacts = await ok(await call("recipient", `${shared}/artifacts`));
   assert.deepEqual(
     artifacts.artifacts.map((artifact: { id: string; kind: string }) => [

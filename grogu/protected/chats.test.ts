@@ -11,12 +11,15 @@ import { appendTranscriptMessages } from "../../src/config/sessions/session-acce
 import type { SessionTranscriptAssistantMessage } from "../../src/config/sessions/transcript.js";
 import { root } from "../../src/infra/fs-safe.js";
 import {
+  isTranscriptOnlyOpenClawAssistantMessage,
   OPENCLAW_DELIVERY_MIRROR_MODEL,
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
   OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
 import { createProtectedAgentCatalog, protectedResearchAgent } from "./agents.js";
 import { createProtectedChats } from "./chats.js";
+import { ProtectedError } from "./errors.js";
+import { sideReturnTextLimit, sideReturnTruncationMarker } from "./side-return.js";
 
 async function createChats(t: TestContext) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "protected-chat-"));
@@ -483,4 +486,239 @@ void test("side chats are refused without history, for run and authoring chats, 
   await assert.rejects(chats.createSide(authority, randomUUID(), { requestId: randomUUID() }), {
     status: 404,
   });
+});
+
+async function seedSideReturn(t: TestContext) {
+  const seeded = await seedSideParent(t);
+  const { chats, authority, parent, append, user, assistant } = seeded;
+  const widgetId = (letter: string) => `cv_${letter.repeat(32)}`;
+  const widgetTurn = (id: string, title: string, answer: string) => [
+    user(`Show ${title}`),
+    {
+      ...assistant(""),
+      stopReason: "toolUse",
+      content: [
+        { type: "toolCall", id, name: "show_widget", arguments: { title, html: "<p>x</p>" } },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "show_widget",
+      content: [{ type: "text", text: "Saved" }],
+      details: { kind: "canvas", view: { id: widgetId(id) }, presentation: { title } },
+      isError: false,
+      timestamp: Date.now(),
+    },
+    assistant(answer),
+  ];
+  await append(parent.id, [...widgetTurn("a", "Plan", "Parent plan"), user("Q"), assistant("A")]);
+  const { chat: side } = await chats.createSide(authority, parent.id, { requestId: randomUUID() });
+  await append(side.id, [
+    user("Side one"),
+    assistant("First side reply"),
+    ...widgetTurn("b", "Plan", "Second side reply"),
+    user("Side three"),
+    assistant("Third side reply"),
+  ]);
+  const replies = (await chats.read(authority, side.id)).messages.filter(
+    (message) => message.role === "assistant",
+  );
+  return { ...seeded, side, replies, widgetId };
+}
+
+void test("sending side replies adds one cited message to the parent without a model call", async (t) => {
+  const { chats, authority, parent, side, replies, rawEvents, widgetId } = await seedSideReturn(t);
+  const before = await chats.read(authority, parent.id);
+  const sideBefore = await chats.read(authority, side.id);
+  const requestId = randomUUID();
+  const sent = await chats.returnSide(authority, side.id, {
+    requestId,
+    messageIds: [replies[0]!.id, replies[1]!.id],
+    note: "  Use these.  ",
+  });
+
+  const after = await chats.read(authority, parent.id);
+  assert.equal(after.messages.length, before.messages.length + 1);
+  assert.deepEqual(after.messages.at(-1), sent.message);
+  assert.equal(sent.message.role, "assistant");
+  assert.equal(sent.message.status, "complete");
+  assert.equal(sent.message.text, "Use these.\n\nFirst side reply\n\nSecond side reply");
+  assert.deepEqual(sent.message.sideNote, { chatId: side.id, title: "Side chat" });
+  assert.deepEqual(sent.message.widgets, [{ id: widgetId("b"), title: "Plan" }]);
+  assert.deepEqual(sent.parent, { id: parent.id, version: after.version });
+  assert.notEqual(after.version, before.version);
+
+  // The parent's own history keeps its widgets: a returned widget is a reference, never a replacement.
+  assert.deepEqual(
+    after.messages.slice(0, -1).flatMap(({ widgets }) => widgets ?? []),
+    before.messages.flatMap(({ widgets }) => widgets ?? []),
+  );
+  assert.deepEqual(await chats.read(authority, side.id), sideBefore, "the side chat is unchanged");
+
+  // The next parent turn replays the copied text as an assistant message.
+  const stored = (await rawEvents(parent.id)).filter(
+    (event) => (event as { message?: { idempotencyKey?: string } }).message?.idempotencyKey,
+  ) as { message: Record<string, unknown> }[];
+  assert.equal(stored.length, 1);
+  assert.equal(isTranscriptOnlyOpenClawAssistantMessage(stored[0]!.message), false);
+});
+
+void test("sending side replies again with the same request returns the same message", async (t) => {
+  const { chats, authority, parent, side, replies } = await seedSideReturn(t);
+  const requestId = randomUUID();
+  const admitted: string[] = [];
+  const withStorage = async <T>(append: () => Promise<T>) => {
+    admitted.push("admit");
+    return await append();
+  };
+  const first = await chats.returnSide(
+    authority,
+    side.id,
+    { requestId, messageIds: [replies[0]!.id] },
+    withStorage,
+  );
+  assert.deepEqual(admitted, ["admit"]);
+  const count = (await chats.read(authority, parent.id)).messages.length;
+  assert.deepEqual(
+    await chats.returnSide(
+      authority,
+      side.id,
+      { requestId, messageIds: [replies[2]!.id] },
+      withStorage,
+    ),
+    first,
+  );
+  assert.deepEqual(admitted, ["admit"]);
+  assert.equal((await chats.read(authority, parent.id)).messages.length, count);
+
+  // A refused admission leaves the parent unchanged.
+  await assert.rejects(
+    chats.returnSide(
+      authority,
+      side.id,
+      { requestId: randomUUID(), messageIds: [replies[1]!.id] },
+      async () => {
+        throw new ProtectedError(413, "quota_exceeded", "Full.");
+      },
+    ),
+    { status: 413, code: "quota_exceeded" },
+  );
+  assert.equal((await chats.read(authority, parent.id)).messages.length, count);
+
+  // A retry key never sends from a different side chat.
+  const { chat: sibling } = await chats.createSide(authority, parent.id, {
+    requestId: randomUUID(),
+  });
+  await assert.rejects(
+    chats.returnSide(authority, sibling.id, { requestId, messageIds: [replies[0]!.id] }),
+    { status: 409, code: "request_conflict" },
+  );
+});
+
+void test("only finished replies of this side chat can be sent, and only from side chats", async (t) => {
+  const { chats, authority, parent, side, replies } = await seedSideReturn(t);
+  const own = (await chats.read(authority, side.id)).messages;
+  const question = own.find((message) => message.role === "user")!;
+  const parentReply = (await chats.read(authority, parent.id)).messages.find(
+    (message) => message.role === "assistant",
+  )!;
+  for (const messageIds of [
+    [question.id],
+    [randomUUID()],
+    [parentReply.id],
+    [replies[0]!.id, randomUUID()],
+  ]) {
+    await assert.rejects(
+      chats.returnSide(authority, side.id, { requestId: randomUUID(), messageIds }),
+      { status: 422, code: "invalid_message" },
+    );
+  }
+  // A main chat has no side chat to send from.
+  await assert.rejects(
+    chats.returnSide(authority, parent.id, {
+      requestId: randomUUID(),
+      messageIds: [replies[0]!.id],
+    }),
+    { status: 422, code: "side_unavailable" },
+  );
+  const stranger = { profileId: randomUUID(), assertCurrent() {} };
+  await assert.rejects(
+    chats.returnSide(stranger, side.id, { requestId: randomUUID(), messageIds: [replies[0]!.id] }),
+    { status: 404 },
+  );
+  await assert.rejects(
+    chats.returnSide(authority, randomUUID(), {
+      requestId: randomUUID(),
+      messageIds: [replies[0]!.id],
+    }),
+    { status: 404 },
+  );
+  assert.equal(
+    (await chats.read(authority, parent.id)).messages.some((message) => message.sideNote),
+    false,
+    "a refused request adds nothing to the parent",
+  );
+});
+
+void test("a sent reply is capped, keeps the note first and never splits a character", async (t) => {
+  const { chats, authority, side, append, assistant } = await seedSideReturn(t);
+  await append(side.id, [
+    assistant(`${"a".repeat(sideReturnTextLimit - 1)}😀${"b".repeat(50)}`),
+    assistant("x".repeat(sideReturnTextLimit + 500)),
+  ]);
+  const [long, longer] = (await chats.read(authority, side.id)).messages.slice(-2);
+  const surrogate = await chats.returnSide(authority, side.id, {
+    requestId: randomUUID(),
+    messageIds: [long!.id],
+    note: "Note",
+  });
+  assert.equal(
+    surrogate.message.text,
+    `Note\n\n${"a".repeat(sideReturnTextLimit - 1)}${sideReturnTruncationMarker}`,
+  );
+  const capped = await chats.returnSide(authority, side.id, {
+    requestId: randomUUID(),
+    messageIds: [longer!.id],
+  });
+  assert.equal(
+    capped.message.text,
+    `${"x".repeat(sideReturnTextLimit)}${sideReturnTruncationMarker}`,
+  );
+});
+
+void test("a widget-only side reply is sent with a line naming its widget", async (t) => {
+  const { chats, authority, side, append, user, assistant, widgetId } = await seedSideReturn(t);
+  await append(side.id, [
+    user("Chart it"),
+    {
+      ...assistant(""),
+      stopReason: "toolUse",
+      content: [
+        {
+          type: "toolCall",
+          id: "c",
+          name: "show_widget",
+          arguments: { title: "Chart", html: "<p>x</p>" },
+        },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "c",
+      toolName: "show_widget",
+      content: [{ type: "text", text: "Saved" }],
+      details: { kind: "canvas", view: { id: widgetId("c") }, presentation: { title: "Chart" } },
+      isError: false,
+      timestamp: Date.now(),
+    },
+    assistant(""),
+  ]);
+  const widgetReply = (await chats.read(authority, side.id)).messages.at(-1)!;
+  const sent = await chats.returnSide(authority, side.id, {
+    requestId: randomUUID(),
+    messageIds: [widgetReply.id],
+  });
+  assert.equal(sent.message.text, "Shared from a side chat: Chart");
+  assert.deepEqual(sent.message.widgets, [{ id: widgetId("c"), title: "Chart" }]);
 });

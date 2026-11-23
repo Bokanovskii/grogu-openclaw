@@ -18,6 +18,7 @@ import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.js"
 import { applyPreparedRuntimeAuthToModel } from "../provider-request-config.js";
 import { protectPreparedProviderRuntimeAuth } from "../provider-runtime-auth-protection.js";
 import { unwrapSecretSentinelsForProviderEgress } from "../provider-secret-egress.js";
+import { resolveRequestModelCredential } from "../request-model-credential.js";
 import { materializePreparedRuntimeModel } from "../runtime-plan/materialize-model.js";
 import {
   resolvePreparedRuntimeAuthAttempts,
@@ -96,6 +97,13 @@ export async function prepareDirectCompactionAttempt(
     boundHarnessRuntime: params.agentHarnessId,
     preparedRuntimePlan: params.runtimePlan,
   });
+  const assertRequestCredential = () => {
+    params.abortSignal?.throwIfAborted();
+    if (params.requestModelCredential) {
+      resolveRequestModelCredential(params.requestModelCredential, provider, modelId);
+    }
+  };
+  assertRequestCredential();
   // Keep the configured provider for harness policy, while auth/model loading below can
   // route OpenAI compaction through Codex OAuth when that runtime owns the session credentials.
   // Ensure the policy-selected harness plugin so selection can pick implicit codex.
@@ -110,6 +118,7 @@ export async function prepareDirectCompactionAttempt(
     workspaceDir: resolvedWorkspace,
     pluginRegistry: params.preparedModelRuntime.pluginRegistry!,
   });
+  assertRequestCredential();
   const fail = (reason: string, err?: unknown): EmbeddedAgentCompactResult => {
     const failureReason = classifyCompactionReason(reason);
     const failure = err ? describeFailoverError(err) : undefined;
@@ -147,6 +156,8 @@ export async function prepareDirectCompactionAttempt(
     workspaceDir: resolvedWorkspace,
     ...initialModelAuth,
     preparedModelRuntime,
+    localMetadataOnly: params.requestModelCredential !== undefined,
+    assertCurrent: assertRequestCredential,
   });
   const { model, error, authStorage, modelRegistry } = modelResolution;
   if (!model) {
@@ -171,6 +182,7 @@ export async function prepareDirectCompactionAttempt(
     agentHarnessId: boundHarnessRuntime,
     agentHarnessRuntimeOverride: selectedHarnessRuntimeOverride,
   });
+  assertRequestCredential();
   if (!harnessAuth.ok) {
     params.abortSignal?.throwIfAborted();
     return {
@@ -209,6 +221,8 @@ export async function prepareDirectCompactionAttempt(
               workspaceDir: resolvedWorkspace,
               modelIdSource: params.requestedRouteResolution === "resolved" ? "selected" : "input",
               skipAgentDiscovery: true,
+              deferProviderDynamicModelPreparation: params.requestModelCredential !== undefined,
+              assertCurrent: assertRequestCredential,
               allowBundledStaticCatalogFallback: true,
               authProfileId: profileId,
               authProfileMode,
@@ -216,21 +230,26 @@ export async function prepareDirectCompactionAttempt(
         })) ?? materializeParams.model,
       forceCredentialScopedDirectModelResolve: providerUsesProfileScopedModelMetadata,
       resolveAuth: async ({ attempt: preparedAttempt, model: attemptModel }) =>
-        await resolvePreparedRuntimeModelAuth({
-          plan: preparedAttempt.plan,
-          model: attemptModel,
-          cfg: params.config,
-          store: runtimeAuthProfileStore,
-          agentDir,
-          workspaceDir: resolvedWorkspace,
-          ...(preparedAttempt.allowAuthProfileFallback !== undefined
-            ? { allowAuthProfileFallback: preparedAttempt.allowAuthProfileFallback }
-            : {}),
-          secretSentinels: true,
-        }),
+        params.requestModelCredential
+          ? {
+              plan: preparedAttempt.plan,
+              auth: resolveRequestModelCredential(params.requestModelCredential, provider, modelId),
+            }
+          : await resolvePreparedRuntimeModelAuth({
+              plan: preparedAttempt.plan,
+              model: attemptModel,
+              cfg: params.config,
+              store: runtimeAuthProfileStore,
+              agentDir,
+              workspaceDir: resolvedWorkspace,
+              ...(preparedAttempt.allowAuthProfileFallback !== undefined
+                ? { allowAuthProfileFallback: preparedAttempt.allowAuthProfileFallback }
+                : {}),
+              secretSentinels: true,
+            }),
       errorMessage: `Prepared compaction auth attempts could not be resolved for ${provider}/${modelId}.`,
     });
-    params.abortSignal?.throwIfAborted();
+    assertRequestCredential();
   } catch (err) {
     return { ok: false as const, result: fail(formatErrorMessage(err), err) };
   }
@@ -240,6 +259,7 @@ export async function prepareDirectCompactionAttempt(
   let hasRuntimeAuthExchange = false;
   try {
     if (apiKeyInfo.apiKey) {
+      assertRequestCredential();
       const runtimeAuth = await prepareProviderRuntimeAuth({
         provider: runtimeModel.provider,
         config: params.config,
@@ -261,7 +281,7 @@ export async function prepareDirectCompactionAttempt(
           profileId: apiKeyInfo.profileId,
         },
       });
-      params.abortSignal?.throwIfAborted();
+      assertRequestCredential();
       const preparedAuth = protectPreparedProviderRuntimeAuth({
         provider: runtimeModel.provider,
         preparedAuth: runtimeAuth,

@@ -18,6 +18,10 @@ import {
 import type { ModelManifestNormalizationContext } from "../model-ref-shared.js";
 import { isOpenAIProvider } from "../openai-routing.js";
 import {
+  resolveRequestModelCredential,
+  type RequestModelCredential,
+} from "../request-model-credential.js";
+import {
   providerUsesCredentialScopedModelMetadata,
   resolveReusableRuntimeModelAuth,
 } from "../runtime-plan/credential-scoped-model.js";
@@ -150,6 +154,7 @@ export async function prepareCompactionHarnessAuth(params: {
   modelId: string;
   model?: ProviderRuntimeModel;
   reusableRuntimeAuthPlan?: AgentRuntimeAuthPlan;
+  requestModelCredential?: RequestModelCredential;
   agentDir: string;
   workspaceDir: string;
   authProfileId?: string;
@@ -169,6 +174,47 @@ export async function prepareCompactionHarnessAuth(params: {
     }
   | { ok: false; error: unknown }
 > {
+  if (params.requestModelCredential) {
+    const auth = resolveRequestModelCredential(
+      params.requestModelCredential,
+      params.provider,
+      params.modelId,
+    );
+    if (
+      !params.reusableRuntimeAuthPlan ||
+      params.reusableRuntimeAuthPlan.selectedAuthMode !== auth.mode ||
+      params.reusableRuntimeAuthPlan.forwardedAuthProfileId
+    ) {
+      throw new Error("Request credential compaction requires the original model auth plan.");
+    }
+    const plan = params.reusableRuntimeAuthPlan;
+    const runtimeAuthPreparation: PreparedAgentRuntimeAuth = {
+      plan,
+      attempts: [{ kind: "implicit", plan }],
+    };
+    const selectedPreparedHarness = selectAgentHarnessForPreparedModelProviders({
+      provider: params.provider,
+      modelId: params.modelId,
+      config: params.config,
+      agentId: params.runtimePolicyAgentId,
+      sessionKey: params.runtimePolicySessionKey ?? undefined,
+      agentHarnessId: params.agentHarnessId,
+      agentHarnessRuntimeOverride: params.agentHarnessRuntimeOverride,
+      modelProviders: [
+        projectPreparedModelProvider({ model: params.model, plan, attemptKind: "implicit" }),
+      ],
+    });
+    if (selectedPreparedHarness.id !== "openclaw") {
+      throw new Error("Request credentials require the canonical OpenClaw transport.");
+    }
+    return {
+      ok: true,
+      runtimeAuthProfileStore: { version: 1, profiles: {} },
+      runtimeAuthPreparation,
+      selectedPreparedHarness,
+      providerUsesProfileScopedModelMetadata: false,
+    };
+  }
   const useOpenAi = isOpenAIProvider(params.provider);
   const ensureStore = useOpenAi
     ? ensureAuthProfileStore

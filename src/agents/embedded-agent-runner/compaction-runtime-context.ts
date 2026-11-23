@@ -320,6 +320,7 @@ export function buildEmbeddedCompactionRuntimeContext(
     currentMessageId: params.currentMessageId ?? undefined,
     authProfileId: resolved.authProfileId,
     authProfileIdSource: params.authProfileIdSource,
+    requestModelCredential: params.requestModelCredential,
     runtimeAuthPlan,
     agentHarnessId,
     modelSelectionLocked: params.modelSelectionLocked,

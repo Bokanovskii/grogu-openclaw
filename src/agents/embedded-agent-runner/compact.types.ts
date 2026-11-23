@@ -26,6 +26,7 @@ export type CompactEmbeddedAgentSessionParams = Pick<
   | "currentMessageId"
   | "authProfileId"
   | "authProfileIdSource"
+  | "requestModelCredential"
   | "groupId"
   | "groupChannel"
   | "groupSpace"

@@ -66,7 +66,7 @@ const protectedCleanupAgent: ProtectedAgentExtension = {
   selectable: true,
 };
 
-void test("Protected skill discovery loads dashboard guidance only on request", async (t) => {
+void test("Protected turns load skills on request and retain credentials during overflow recovery", async (t) => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
     stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
@@ -79,9 +79,21 @@ void test("Protected skill discovery loads dashboard guidance only on request", 
     [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
   );
   const requests: Array<{
+    authorization?: string;
+    model?: string;
     messages: Array<{ role: string; content?: unknown }>;
     tools?: Array<{ function: { name: string } }>;
   }> = [];
+  let overflow = false;
+  const previousAmbientKey = process.env.SPARKY_API_KEY;
+  process.env.SPARKY_API_KEY = "synthetic-ambient-key";
+  t.after(() => {
+    if (previousAmbientKey === undefined) {
+      delete process.env.SPARKY_API_KEY;
+    } else {
+      process.env.SPARKY_API_KEY = previousAmbientKey;
+    }
+  });
   const provider = createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -89,9 +101,25 @@ void test("Protected skill discovery loads dashboard guidance only on request", 
         chunks.push(Buffer.from(chunk));
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      requests.push(body);
+      requests.push({ ...body, authorization: request.headers.authorization });
       const messages = JSON.stringify(body.messages);
+      if (!overflow && messages.includes("Trigger synthetic overflow")) {
+        overflow = true;
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 32000 tokens. However, your messages resulted in 33000 tokens.",
+              code: "context_length_exceeded",
+            },
+          }),
+        );
+        return;
+      }
+      const summary = messages.includes("context summarization assistant");
       const readSkill =
+        !summary &&
         messages.includes("Make a travel dashboard") &&
         !body.messages.some((message: { role: string }) => message.role === "tool");
       const delta = readSkill
@@ -106,7 +134,7 @@ void test("Protected skill discovery loads dashboard guidance only on request", 
               },
             ],
           }
-        : { role: "assistant", content: "Synthetic answer." };
+        : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(
         `data: ${JSON.stringify({
@@ -139,6 +167,10 @@ void test("Protected skill discovery loads dashboard guidance only on request", 
     ...serviceConfig,
     agents: {
       ...serviceConfig.agents,
+      defaults: {
+        ...serviceConfig.agents?.defaults,
+        compaction: { mode: "default", keepRecentTokens: 1, postIndexSync: "off" },
+      },
       entries: { protected: { workspace: workspaceDir, agentDir } },
     },
     models: {
@@ -250,6 +282,24 @@ void test("Protected skill discovery loads dashboard guidance only on request", 
   assert.ok(!toolNames.includes("create_artifact"));
   const allowedTools = new Set<string>(["route_to_agent", ...protectedAgentTools]);
   assert.ok(toolNames.every((name) => allowedTools.has(name)));
+
+  const overflowStart = requests.length;
+  const recovered = await call(`/chats/${chat.id}/turns`, {
+    method: "POST",
+    body: '{"provider":"sparky","text":"Trigger synthetic overflow"}',
+    headers: { "x-grogu-profile": user.id },
+  });
+  const recoveredTrace = await recovered.text();
+  const recoveryRequests = requests.slice(overflowStart);
+  assert.ok(overflow);
+  const summaryRequest = recoveryRequests.find((request) =>
+    JSON.stringify(request.messages).includes("context summarization assistant"),
+  );
+  assert.ok(summaryRequest, "expected a summary request after the overflow");
+  assert.equal(recoveryRequests[0]?.authorization, "Bearer synthetic-request-only-key");
+  assert.equal(summaryRequest.authorization, "Bearer synthetic-request-only-key");
+  assert.equal(summaryRequest.model, "synthetic");
+  assert.match(recoveredTrace, /"type":"done"/u);
 });
 
 beforeTests(async () => {

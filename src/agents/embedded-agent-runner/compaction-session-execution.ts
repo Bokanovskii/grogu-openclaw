@@ -29,6 +29,7 @@ import {
 import { toToolDefinitions } from "../agent-tool-definition-adapter.js";
 import { pickFallbackThinkingLevel } from "../embedded-agent-helpers.js";
 import { registerProviderStreamForModel } from "../provider-stream.js";
+import { resolveRequestModelCredential } from "../request-model-credential.js";
 import { resolveAgentRunSessionTarget } from "../run-session-target.js";
 import { guardSessionManager } from "../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairingForModel } from "../session-transcript-repair.js";
@@ -132,8 +133,14 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
     const recordCompaction =
       accountingRecorder?.recordCompaction ??
       (() => declarePromptHistoryRewrite({ ...sessionTarget, reason: "compaction" }));
-    const assertActive =
+    const assertTranscriptActive =
       memoryTranscript?.assertActive ?? captureOwnedTranscriptWriteAssertion(sessionTarget);
+    const assertActive = () => {
+      assertTranscriptActive();
+      if (params.requestModelCredential) {
+        resolveRequestModelCredential(params.requestModelCredential, provider, modelId);
+      }
+    };
     assertActive();
     const transcriptPolicy = runtimePlan.transcript.resolvePolicy(runtimePlanModelContext);
     const preparedSessionManager =
@@ -273,6 +280,7 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
           sessionId: params.sessionId,
           signal: runAbortController.signal,
           resolvedApiKey: hasRuntimeAuthExchange ? undefined : apiKeyInfo?.apiKey,
+          assertCurrent: assertActive,
           config: params.config,
           thinkLevel,
         });

@@ -77,6 +77,7 @@ export function prepareProtectedAutomationLifecycleRetirements(
   const results = allResults.filter(
     (row) =>
       command.kind === "delete" ||
+      command.kind === "remove" ||
       write.pruneRunIds.includes(row.native_run_id) ||
       write.pruneResultIds.includes(row.id),
   );
@@ -100,7 +101,8 @@ export function prepareProtectedAutomationLifecycleRetirements(
       .orderBy("sequence"),
   ).rows.filter(
     (row) =>
-      (command.kind === "delete" && row.automation_id === command.automationId) ||
+      ((command.kind === "delete" || command.kind === "remove") &&
+        row.automation_id === command.automationId) ||
       write.pruneInboxRunIds.includes(row.run_id) ||
       write.pruneResultIds.includes(row.result_id) ||
       (row.automation_id === command.automationId && write.pruneRunIds.includes(row.run_id)),
@@ -113,7 +115,7 @@ export function prepareProtectedAutomationLifecycleRetirements(
       bytes: row.charged_bytes,
     });
   }
-  if (command.kind === "delete" && chat) {
+  if ((command.kind === "delete" || command.kind === "remove") && chat) {
     write.retired.push({
       id: `protected-automation-chat:${command.automationId}`,
       profileId: chat.profile_id,

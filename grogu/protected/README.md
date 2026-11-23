@@ -347,6 +347,16 @@ reduces storage can free budget. Enabling also reserves bounded run-metadata
 capacity. A quota refusal returns `413 quota_exceeded` before the state worker
 writes.
 
+Clients that send `X-Alcove-Capabilities: automation-delete-v1` receive
+`capabilities.automations.delete: true` when deletion is available.
+`DELETE /api/protected/v1/automations/:id` requires the current version in
+`If-Match`. It returns 428 without a version, 412 for a stale version, and
+404 for a missing or foreign automation. A queued or active run or a native
+job binding returns 409 `automation_busy`. On success, the server returns 204
+and deletes the definition, its run history, results, inbox entries, and
+run-chat binding. The member's run chat and authoring chat remain available
+as ordinary chats.
+
 Member removal with automation history requires the storage-aware authority
 adapter in `admission-store.ts`. Fence and stop the target profile's writers,
 and settle enrolled automation publication before calling it. Supply the

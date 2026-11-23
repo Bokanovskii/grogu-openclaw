@@ -82,6 +82,7 @@ export type ProtectedAutomationLifecycleCommand = {
     }
   | { kind: "deliver"; runId: string; now: number }
   | { kind: "delete" }
+  | { kind: "remove"; expectedRevision: number }
 );
 
 export type ProtectedAutomationLifecycleAccess =
@@ -98,6 +99,7 @@ export type ProtectedAutomationLifecycleWrite = {
   pruneRunIds: string[];
   pruneResultIds: string[];
   pruneInboxRunIds: string[];
+  retiredDefinition?: { id: string; profileId: string; definitionBytes: number };
   replacement?: {
     previous: ProtectedAutomationResultStorageEntry[];
     current: ProtectedAutomationResultStorageEntry[];
@@ -143,6 +145,7 @@ export type ProtectedAutomationLifecycleAuthority = {
     release(rolledBack: readonly ProtectedAutomationResultStorageEntry[]): void;
   }>;
   retireStorage(entries: readonly ProtectedAutomationResultStorageEntry[]): void;
+  retireDefinition?(entry: { id: string; profileId: string; definitionBytes: number }): void;
   retainUncertainCommit(handle: ProtectedAutomationLifecycleUncertainCommit): void;
 };
 

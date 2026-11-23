@@ -14,6 +14,7 @@ import {
 import type { AgentDatabaseRequestExecutionSource } from "./openclaw-agent-execution-admission-contract.js";
 import type { AgentDatabaseExecutionFileIdentity } from "./openclaw-agent-execution-contract.js";
 import { createAgentDatabaseNativeGeneration } from "./openclaw-agent-execution-native.js";
+import { captureOpenClawAgentDatabaseExecution } from "./openclaw-agent-execution.js";
 import {
   closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
@@ -55,6 +56,23 @@ function prepareStore(state: TestState, insert = false) {
   };
   closeOpenClawAgentDatabaseByPath(database.path);
   return { pathname: database.path, identity };
+}
+
+function createSource(state: TestState): AgentDatabaseRequestExecutionSource {
+  const context = captureOpenClawStateWorkerContext({ env: state.env });
+  return {
+    assertCurrent: () => context.admission.assertCurrent(),
+    createAdmission: (binding) => () => ({
+      nativeLocations: binding.nativeLocations,
+      admission: createSqliteWorkerOperationAdmission((request, grant) => {
+        binding.authorize(request);
+        context.admission.assertCurrent();
+        if (!grant()) {
+          throw new Error("Protected owner fixture lost admission");
+        }
+      }, binding.attachment),
+    }),
+  };
 }
 
 async function runProtected(
@@ -192,3 +210,45 @@ it("refuses a missing or replaced store without creating one", async () => {
     },
   );
 });
+
+it.each(["ordinary", "protected"] as const)(
+  "refuses reusing a held %s generation under the other grant without closing it",
+  async (first) => {
+    await withOpenClawTestState(
+      {
+        label: `protected-owner-${first}`,
+        env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined },
+      },
+      async (state) => {
+        await useStorageKey(state);
+        const { identity } = prepareStore(state);
+        const options = { agentId: "protected", env: state.env };
+        const source = createSource(state);
+        const capture = (protectedStorage: boolean) =>
+          protectedStorage
+            ? captureOpenClawAgentDatabaseExecution(options, {
+                expectedIdentity: identity,
+                protectedStorage: true,
+              })
+            : captureOpenClawAgentDatabaseExecution(options);
+        const holder = capture(first === "protected");
+        const other = capture(first !== "protected");
+        try {
+          await expect(holder.runExisting(source, async () => "held")).resolves.toBe("held");
+          const claim = holder.captureGenerationClaim();
+          await expect(other.runExisting(source, async () => "reused")).rejects.toThrow(
+            /different protected grant/u,
+          );
+          claim.assertCurrent();
+          await expect(holder.runExisting(source, async () => "still held")).resolves.toBe(
+            "still held",
+          );
+          expect(holder.captureGenerationClaim().incarnation).toBe(claim.incarnation);
+        } finally {
+          await other.release();
+          await holder.release();
+        }
+      },
+    );
+  },
+);

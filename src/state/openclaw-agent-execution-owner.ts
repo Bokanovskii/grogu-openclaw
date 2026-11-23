@@ -87,6 +87,8 @@ export function createAgentDatabaseExecution(
   let creationIdentity = expectedCreationIdentity;
   let creationBorrowers = 0;
   let generation: AgentDatabaseNativeGeneration | undefined;
+  // The protected grant the current generation was opened with; fixed for its lifetime.
+  let generationProtectedStorage: true | undefined;
   let fileIdentity: AgentDatabaseExecutionFileIdentity | undefined;
   let nativeClosing: Promise<void> | undefined;
   let cleanupFailure: { error: unknown } | undefined;
@@ -192,6 +194,7 @@ export function createAgentDatabaseExecution(
     signal?: AbortSignal,
     readmitSchema = false,
     contentionDeadline?: number,
+    protectedStorage?: true,
   ): Promise<T | undefined> {
     const pending = agentDatabaseLifecycle.pending.get(pathname);
     if (pending) {
@@ -217,6 +220,10 @@ export function createAgentDatabaseExecution(
       assertCallerCurrent();
       signal?.throwIfAborted();
     }
+    // Grants are fixed per generation; refusing never closes a generation other borrowers hold.
+    if (generation && generationProtectedStorage !== protectedStorage) {
+      throw new Error("Agent database generation was opened under a different protected grant");
+    }
     if (!generation) {
       const created = createAgentDatabaseNativeGeneration(
         agentId,
@@ -236,8 +243,10 @@ export function createAgentDatabaseExecution(
         },
         fileIdentity ? undefined : (creationIdentity ?? creatingTarget),
         creationClaim?.witness,
+        protectedStorage,
       );
       generation = created;
+      generationProtectedStorage = protectedStorage;
     }
     const current = generation;
     let entered = false;
@@ -306,6 +315,7 @@ export function createAgentDatabaseExecution(
             signal,
             readmitSchema,
             deadline,
+            protectedStorage,
           );
         }
       }
@@ -321,7 +331,7 @@ export function createAgentDatabaseExecution(
     get creationIdentity() {
       return creationIdentity;
     },
-    borrow(borrowedPath, expected, creating, requestedPath) {
+    borrow(borrowedPath, expected, creating, requestedPath, protectedStorage) {
       const cleanup = getAgentDeletionDatabaseCleanup({ ...executionOptions, path: borrowedPath });
       if (cleanup?.worker && !generation?.isPrepared()) {
         registerAgentDeletionExecutionCleanup(
@@ -445,6 +455,8 @@ export function createAgentDatabaseExecution(
             creatingTarget,
             signal,
             preparationOptions?.readmitSchema,
+            undefined,
+            protectedStorage,
           );
           acceptedWork.pending.set(result, { borrower });
           void result.finally(() => acceptedWork.pending.delete(result)).catch(() => undefined);
@@ -467,6 +479,12 @@ export function createAgentDatabaseExecution(
                 },
                 expectedIdentity,
                 runOptions?.retireNativeOnFailure,
+                false,
+                undefined,
+                undefined,
+                false,
+                undefined,
+                protectedStorage,
               );
             if (runOptions?.withAdmission) {
               const queuedReadAbort = new AbortController();
@@ -664,6 +682,7 @@ export function createAgentDatabaseExecution(
       initialIdentity,
       expectedCreationIdentity,
       prepared.requestedPath,
+      prepared.protectedStorage,
     );
   } catch (error) {
     unregisterAgent();

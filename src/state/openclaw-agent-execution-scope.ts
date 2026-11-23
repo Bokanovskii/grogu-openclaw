@@ -37,6 +37,8 @@ export type AgentDatabaseExecutionCaptureConstraints = {
   expectedCreationIdentity?: DatabasePathIdentity;
   /** The caller's locator before it pinned options.path to the physical file. */
   requestedPath?: string;
+  /** Explicit protected grant; a generation never changes grant after creation. */
+  protectedStorage?: true;
 };
 
 export type AgentDatabaseExecutionPreparedTarget = {
@@ -46,6 +48,7 @@ export type AgentDatabaseExecutionPreparedTarget = {
   initialIdentity?: AgentDatabaseExecutionFileIdentity;
   expectedCreationIdentity?: DatabasePathIdentity;
   requestedPath?: string;
+  protectedStorage?: true;
 };
 
 /** A read can borrow an already-selected file owner only within its current storage scope. */

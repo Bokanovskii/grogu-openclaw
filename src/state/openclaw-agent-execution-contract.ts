@@ -76,6 +76,7 @@ export type AgentDatabaseFileExecutionOwner = {
     expectedIdentity?: AgentDatabaseExecutionFileIdentity,
     expectedCreationIdentity?: DatabasePathIdentity,
     requestedPath?: string,
+    protectedStorage?: true,
   ): OpenClawAgentDatabaseExecution;
   closeIdle(): Promise<void>;
   close(): Promise<void>;

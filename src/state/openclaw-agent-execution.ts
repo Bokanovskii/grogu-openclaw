@@ -87,6 +87,7 @@ function captureFileAgentDatabaseExecution(
           initialIdentity: constraints.expectedIdentity,
           expectedCreationIdentity,
           requestedPath: constraints.requestedPath,
+          protectedStorage: constraints.protectedStorage,
         },
         executionState,
       );
@@ -107,5 +108,6 @@ function captureFileAgentDatabaseExecution(
     constraints.expectedIdentity,
     expectedCreationIdentity,
     constraints.requestedPath,
+    constraints.protectedStorage,
   );
 }

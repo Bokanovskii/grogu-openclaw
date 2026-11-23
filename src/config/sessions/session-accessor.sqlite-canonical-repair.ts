@@ -517,13 +517,14 @@ function copySqliteSessionOwnedStateForRepair(params: {
     params.destination,
     sourceKeys,
     params.canonicalKey,
-    { includeMembers: false },
+    // Doctor verifies authenticated suggestions under destination custody before source removal.
+    { includeMembers: false, verifiesProtectedSuggestions: true },
   );
   copySessionNodeArtifactsForRepair(
     params.source,
     params.destination,
     params.preferredSessionKey ? [params.preferredSessionKey] : sourceKeys,
     params.canonicalKey,
-    { includeParticipants: false },
+    { includeParticipants: false, verifiesProtectedSuggestions: true },
   );
 }

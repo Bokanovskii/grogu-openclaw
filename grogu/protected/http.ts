@@ -716,6 +716,12 @@ export function createProtectedHttp(options: {
         },
         retireStorage: (entries) =>
           storage.retiredStoredData(entries.map((removed) => ({ removed }))),
+        retireDefinition: (entry) => {
+          storage.deletedAutomations([entry]);
+          automationRefreshes.set(entry.id, (automationRefreshes.get(entry.id) ?? 0) + 1);
+          automationMembers.delete(entry.id);
+          automationScheduler.remove(entry.id);
+        },
         retainUncertainCommit: automationStorageRecovery.retainUncertainCommit,
       },
       result: {
@@ -3539,22 +3545,34 @@ export function createProtectedHttp(options: {
           hasClientCapability(request.headers, "agents-v1")
             ? { ...automationCatalog, agents: agentCatalog.listV1() }
             : automationCatalog;
+        const deletionCatalog =
+          hasClientCapability(request.headers, "automation-delete-v1") &&
+          automationSchedulerStarted &&
+          !automationStorageRecovery.status().admissionClosed
+            ? {
+                ...baseCatalog,
+                capabilities: {
+                  ...baseCatalog.capabilities,
+                  automations: { ...baseCatalog.capabilities.automations, delete: true },
+                },
+              }
+            : baseCatalog;
         const catalog =
           automationSchedulerStarted &&
           !automationStorageRecovery.status().admissionClosed &&
           hasClientCapability(request.headers, automationRunsCapability)
             ? {
-                ...baseCatalog,
+                ...deletionCatalog,
                 capabilities: {
-                  ...baseCatalog.capabilities,
+                  ...deletionCatalog.capabilities,
                   automations: {
-                    ...baseCatalog.capabilities.automations,
+                    ...deletionCatalog.capabilities.automations,
                     scheduleControl: true,
                     run: true,
                   },
                 },
               }
-            : baseCatalog;
+            : deletionCatalog;
         const chatAvailable =
           supportsAutomationsChat(request) && catalog.capabilities.automations.list;
         return profileJson(
@@ -3832,6 +3850,98 @@ export function createProtectedHttp(options: {
         return json({ runId: queued.runId, status: "queued" }, 202);
       }
       const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
+      if (automationMatch && method === "DELETE") {
+        if (!automationCatalog?.capabilities.automations.create || !admitStorage) {
+          return notFound();
+        }
+        const version = request.headers.get("if-match");
+        if (!version) {
+          throw new ProtectedError(
+            428,
+            "version_required",
+            "Reload the automation before deleting it.",
+          );
+        }
+        await revalidate();
+        const current = await readProtectedAutomationRecord(
+          options.stateDir,
+          { profileId: profile.id, automationId: automationMatch[1]! },
+          authority,
+        );
+        if (!current) {
+          return notFound();
+        }
+        if (version !== current.version) {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before deleting it.",
+          );
+        }
+        if (!automationSchedulerStarted || automationStorageRecovery.status().admissionClosed) {
+          throw new ProtectedError(
+            503,
+            "scheduler_unavailable",
+            "Automation storage is unavailable. Try again later.",
+          );
+        }
+        const member = await findAutomationMember(profile.id);
+        if (!member) {
+          return unauthorized();
+        }
+        const assertDeletionCurrent = () => {
+          assertCurrent();
+          if (activeAutomations.has(current.id)) {
+            throw new ProtectedError(
+              409,
+              "automation_busy",
+              "This automation is busy. Try again after its run finishes.",
+            );
+          }
+        };
+        const lifecycle = createAutomationPublicationAuthority({
+          ...automationAuthority(member),
+          assertCurrent: assertDeletionCurrent,
+          revalidate,
+          storageLimit,
+        }).lifecycle;
+        let result;
+        try {
+          result = await writeProtectedAutomationLifecycle(
+            options.stateDir,
+            {
+              kind: "remove",
+              profileId: profile.id,
+              automationId: current.id,
+              expectedRevision: Number(version),
+            },
+            lifecycle,
+          );
+        } finally {
+          reconcileUncertainAutomationStorage();
+        }
+        if (result.status === "not-owner") {
+          return notFound();
+        }
+        if (result.status === "version-mismatch") {
+          throw new ProtectedError(
+            412,
+            "version_mismatch",
+            "This automation changed. Reload it before deleting it.",
+          );
+        }
+        if (result.status === "busy") {
+          throw new ProtectedError(
+            409,
+            "automation_busy",
+            "This automation is busy. Try again after its run finishes.",
+          );
+        }
+        if (result.status !== "committed") {
+          throw new ProtectedError(409, "automation_busy", "This automation cannot be deleted.");
+        }
+        return noContent();
+      }
       if (automationMatch && method === "GET") {
         if (!automationCatalog?.capabilities.automations.list) {
           return notFound();

@@ -130,6 +130,12 @@ async function writeLifecycle(
     if (!storageSettled) {
       // Retirement is idempotent in the capacity owner, including callback failures and rescans.
       authority.retireStorage(write.retired);
+      if (write.retiredDefinition) {
+        if (!authority.retireDefinition) {
+          throw new Error("Protected automation deletion requires definition retirement.");
+        }
+        authority.retireDefinition(write.retiredDefinition);
+      }
       storageSettled = true;
     }
   };
@@ -162,6 +168,9 @@ async function writeLifecycle(
     return true;
   };
   try {
+    if (command.kind === "remove" && !authority.retireDefinition) {
+      throw new Error("Protected automation deletion requires definition retirement.");
+    }
     enrollment = authority.enrollPublication();
     await lease.wait();
     await authority.revalidate();
@@ -275,6 +284,9 @@ async function writeLifecycle(
       commitStarted = false;
       if (!outcome.ok) {
         throw outcome.error;
+      }
+      if (command.kind === "remove" && outcome.value.status !== "committed") {
+        return outcome.value;
       }
       throw new Error("Protected automation lifecycle completed without a commit receipt.");
     }

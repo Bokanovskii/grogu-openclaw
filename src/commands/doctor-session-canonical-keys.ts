@@ -1,4 +1,9 @@
 import {
+  describeLostSuggestions,
+  readAuthenticatedSessionSuggestions,
+} from "../config/sessions/legacy-main-session-migration-claims.js";
+import { acquireLegacySessionDestinationCustody } from "../config/sessions/legacy-main-session-migration-durability.js";
+import {
   applySessionEntryLifecycleMutation,
   copySessionOwnedStateForCanonicalRepair,
   ensureTranscriptGenerationsForCanonicalRepair,
@@ -19,6 +24,7 @@ import { collectSessionStateIdsForEntry } from "../config/sessions/session-acces
 import { resolveSqliteTranscriptArchiveDirectory } from "../config/sessions/session-accessor.sqlite-scope.js";
 import { setCanonicalSqliteSessionMainKey } from "../config/sessions/session-canonical-key.js";
 import { preserveCreationStamp } from "../config/sessions/session-entry-provenance.js";
+import type { SessionStoreTarget } from "../config/sessions/targets-collision.js";
 import { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
 import { serializeJsonlLines } from "../config/sessions/transcript-jsonl.js";
 import type { SessionEntry } from "../config/sessions/types.js";
@@ -27,10 +33,12 @@ import {
   projectExistingAgentDatabaseTargets,
   resolveTargetSqliteOptions,
 } from "../infra/session-sqlite-migration-readers.js";
+import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import {
   openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import { hasSqliteStorageValueEncryption } from "../storage/sqlite-encryption.js";
 import {
   collectCanonicalSessionRepairGroups,
   resolveCanonicalSessionDestination,
@@ -362,6 +370,62 @@ async function repairCanonicalSessionGroupsInSingleDatabase(
   return result.archivedTranscriptDirectories;
 }
 
+/**
+ * Holds destination custody while a protected store is retired, so its rows are removed only
+ * when the durable canonical node preserves every authenticated suggestion of every removed key.
+ * A rerun after a refused retirement can select the copied row as winner, so this covers every
+ * retired store and key rather than trusting winner selection.
+ */
+function acquireProtectedStoreRetirement(params: {
+  canonicalKey: string;
+  destination: SessionStoreTarget;
+  env: NodeJS.ProcessEnv;
+  retired: readonly CanonicalSessionCandidate[];
+}): { release(): void; verifyRetired(source: OpenClawAgentDatabase): void } | undefined {
+  const writer = openOpenClawAgentDatabase(
+    resolveTargetSqliteOptions(params.destination, params.env),
+  );
+  const source = openOpenClawAgentDatabase(
+    resolveTargetSqliteOptions(params.retired[0]!, params.env),
+  );
+  if (!hasSqliteStorageValueEncryption(writer.db) && !hasSqliteStorageValueEncryption(source.db)) {
+    return undefined;
+  }
+  const { canonicalKey } = params;
+  const sessionKeys = params.retired.map((candidate) => candidate.sessionKey);
+  const custody = acquireLegacySessionDestinationCustody({
+    writer,
+    canonicalKey,
+    durable: true,
+    changed: () => new Error(`Canonical session changed before source removal: ${canonicalKey}`),
+  });
+  try {
+    // The held lock freezes the destination, so this read covers the source removal commit.
+    const destination = runSqliteDeferredTransactionSync(writer.db, () =>
+      readAuthenticatedSessionSuggestions(writer, canonicalKey),
+    );
+    return {
+      release: () => custody.release(),
+      verifyRetired: (database) => {
+        custody.assertHeld();
+        const lost = describeLostSuggestions({
+          canonicalKey,
+          destination,
+          sources: sessionKeys.flatMap((key) => readAuthenticatedSessionSuggestions(database, key)),
+        });
+        if (lost) {
+          throw new Error(
+            `Cannot remove ${sessionKeys.join(", ")} during canonical repair: ${lost}; source data was not deleted.`,
+          );
+        }
+      },
+    };
+  } catch (error) {
+    custody.release();
+    throw error;
+  }
+}
+
 async function repairCanonicalSessionGroup(
   candidates: readonly CanonicalSessionCandidate[],
   params: { cfg: OpenClawConfig; env: NodeJS.ProcessEnv },
@@ -475,21 +539,35 @@ async function repairCanonicalSessionGroup(
       continue;
     }
     const storeCandidate = storeCandidates[0]!;
-    const result = await applySessionEntryLifecycleMutation({
-      agentId: storeCandidate.agentId,
-      allowCanonicalRepair: true,
-      removals: storeCandidates.map((candidate) =>
-        createCanonicalRepairRemoval(candidate, {
-          archiveRemovedTranscript: true,
-          deleteOwnedWindows: true,
-          deliveryCleanupKeys: [winner.canonicalKey],
-        }),
-      ),
-      skipMaintenance: true,
-      storePath: storeCandidate.storePath,
+    const retirement = acquireProtectedStoreRetirement({
+      canonicalKey: winner.canonicalKey,
+      destination,
+      env: params.env,
+      retired: storeCandidates,
     });
-    // Only the selected winner is copied. Stale loser data survives solely in its
-    // verified archive, avoiding an ambiguous cross-store merge contract.
+    let result: Awaited<ReturnType<typeof applySessionEntryLifecycleMutation>>;
+    try {
+      result = await applySessionEntryLifecycleMutation({
+        agentId: storeCandidate.agentId,
+        allowCanonicalRepair: true,
+        // Runs in the removal transaction, so the verified source rows are the rows removed.
+        ...(retirement ? { afterUpsertsInTransaction: retirement.verifyRetired } : {}),
+        removals: storeCandidates.map((candidate) =>
+          createCanonicalRepairRemoval(candidate, {
+            archiveRemovedTranscript: true,
+            deleteOwnedWindows: true,
+            deliveryCleanupKeys: [winner.canonicalKey],
+          }),
+        ),
+        skipMaintenance: true,
+        storePath: storeCandidate.storePath,
+      });
+    } finally {
+      retirement?.release();
+    }
+    // Only the selected winner is copied. Stale unprotected loser data survives solely in its
+    // verified archive, avoiding an ambiguous cross-store merge contract; protected stores with
+    // unpreserved suggestions are refused above.
     for (const directory of result.archivedTranscriptDirectories) {
       archivedDirectories.add(directory);
     }

@@ -30,12 +30,16 @@ import {
   type ProtectedAuthoringTurnRequest,
   type ProtectedAutomationAuthoringResponse,
 } from "@openclaw/gateway-protocol/protected-authoring";
-import type {
-  ProtectedChatShareResponse,
-  ProtectedShareClaimResponse,
-  ProtectedSharedChatResponse,
-  ProtectedSharedChatSummary,
-  ProtectedSharedChatsResponse,
+import {
+  isProtectedAutomationFollowRequest,
+  isProtectedAutomationNotificationsRequest,
+  type ProtectedChatShareResponse,
+  type ProtectedPublicAutomationResponse,
+  type ProtectedPublicAutomationsResponse,
+  type ProtectedShareClaimResponse,
+  type ProtectedSharedChatResponse,
+  type ProtectedSharedChatSummary,
+  type ProtectedSharedChatsResponse,
 } from "@openclaw/gateway-protocol/protected-sharing";
 import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -188,6 +192,7 @@ import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import {
   authorizeProtectedChatRead,
   projectProtectedChatShare,
+  projectProtectedPublicAutomation,
   runProtectedSharing,
 } from "./sharing-store.js";
 import type { StoredDataEntry } from "./storage-entry-quota.js";
@@ -2350,6 +2355,10 @@ export function createProtectedHttp(options: {
       const reportChatCapability =
         feedbackCapability && hasClientCapability(request.headers, "report-chat-v1");
       const sharingCapability = hasClientCapability(request.headers, "sharing-v1");
+      const automationsPublicCapability = hasClientCapability(
+        request.headers,
+        "automations-public-v1",
+      );
       const profile = await resolveProtectedProfile(identity, {
         env: chats.env,
         assertCurrent: rawCurrent,
@@ -3560,6 +3569,111 @@ export function createProtectedHttp(options: {
           : { defaultAgentId, agents: agentCatalog.list() };
         return profileJson(catalog);
       }
+      const sharing = <Key extends keyof ProtectedSharingWorkerOperations>(
+        type: Key,
+        input: ProtectedSharingWorkerOperations[Key]["input"],
+      ) => runProtectedSharing(options.stateDir, type, input, assertCurrent);
+      const retireSharing = (removed: readonly StoredDataEntry[]) =>
+        admitStorage?.retiredStoredData(removed.map((entry) => ({ removed: entry })));
+      const requireSharing = () => {
+        if (!sharingCapability) {
+          notFound();
+        }
+        requireProfile();
+        if (identity.kind === "development") {
+          throw sharingUnavailable();
+        }
+      };
+      // Like feedback: an unknown write outcome keeps its reservation unless the entry is absent.
+      const storeSharingEntry = async <T extends { created: boolean; entries: StoredDataEntry[] }>(
+        entryId: string,
+        write: () => Promise<T | undefined>,
+      ) => {
+        const storage = await admitStorage?.(
+          profile.id,
+          assertCurrent,
+          "stored-data",
+          await storageLimit(assertCurrent),
+        );
+        const reservation = storage?.reserveStoredData(storageEntryOverheadBytes);
+        let settled = false;
+        try {
+          const result = await write();
+          reservation?.settle(result ?? { created: false, entries: [] });
+          settled = true;
+          return result;
+        } catch (error) {
+          if (reservation && !settled) {
+            try {
+              const stored = await sharing(
+                "protectedSharing.storageUsage",
+                storageEntryOverheadBytes,
+              );
+              const entry = stored.find(
+                (candidate) => candidate.profileId === profile.id && candidate.id === entryId,
+              );
+              if (entry) {
+                reservation.settle({ created: true, entries: [entry] });
+              } else {
+                reservation.release();
+              }
+            } catch {
+              process.stderr.write(
+                "Protected sharing write outcome is unknown; its storage reservation remains held.\n",
+              );
+            }
+          }
+          throw error;
+        } finally {
+          storage?.release();
+        }
+      };
+      const sharingUnavailable = () =>
+        new ProtectedError(
+          403,
+          "sharing_unavailable",
+          "Sharing is not available for this account.",
+        );
+      // automations-public-v1 additions; requests without it keep the earlier automation contract.
+      const requirePublicAutomations = (write: boolean) => {
+        if (!automationsPublicCapability || !automationCatalog?.capabilities.automations.list) {
+          notFound();
+        }
+        requireProfile();
+        if (write && identity.kind === "development") {
+          throw sharingUnavailable();
+        }
+      };
+      const withPublication = async (
+        automations: StoredAutomationRecord[],
+      ): Promise<ProtectedAutomationRecord[]> => {
+        if (!automationsPublicCapability) {
+          return automations.map(presentAutomation);
+        }
+        const published = new Map(
+          (await sharing("protectedSharing.automationPublications", { profileId: profile.id })).map(
+            ({ automationId, ...publication }) => [automationId, publication],
+          ),
+        );
+        return automations.map((automation) => ({
+          ...presentAutomation(automation),
+          publication: published.get(automation.id) ?? null,
+        }));
+      };
+      const readPublicAutomation = async (automationId: string) => {
+        const [automation] = await sharing("protectedSharing.publicAutomations", {
+          profileId: profile.id,
+          automationId,
+        });
+        await revalidate();
+        if (!automation) {
+          return notFound();
+        }
+        const result: ProtectedPublicAutomationResponse = {
+          automation: projectProtectedPublicAutomation(automation),
+        };
+        return json(result);
+      };
       if (pathname === "/automations/catalog" && method === "GET") {
         if (!automationCatalog) {
           return notFound();
@@ -3597,28 +3711,42 @@ export function createProtectedHttp(options: {
                 },
               }
             : deletionCatalog;
-        const chatAvailable =
-          supportsAutomationsChat(request) && catalog.capabilities.automations.list;
+        const listing = catalog.capabilities.automations.list;
+        const chatAvailable = supportsAutomationsChat(request) && listing;
+        const publicAvailable = listing && identity.kind !== "development";
         return profileJson(
-          chatAvailable
+          chatAvailable || automationsPublicCapability
             ? {
                 ...catalog,
                 capabilities: {
                   ...catalog.capabilities,
                   automations: {
                     ...catalog.capabilities.automations,
-                    chat: {
-                      list: true,
-                      read: true,
-                      proposeCreate: true,
-                      proposePatch: true,
-                      ...(supportsAutomationsAuthoring(request) &&
-                      catalog.capabilities.automations.create &&
-                      admitStorage &&
-                      agentCatalog.get(authoringAgentId)
-                        ? { authoring: true }
-                        : {}),
-                    },
+                    ...(chatAvailable
+                      ? {
+                          chat: {
+                            list: true,
+                            read: true,
+                            proposeCreate: true,
+                            proposePatch: true,
+                            ...(supportsAutomationsAuthoring(request) &&
+                            catalog.capabilities.automations.create &&
+                            admitStorage &&
+                            agentCatalog.get(authoringAgentId)
+                              ? { authoring: true }
+                              : {}),
+                          },
+                        }
+                      : {}),
+                    ...(automationsPublicCapability
+                      ? {
+                          public: {
+                            publish: publicAvailable,
+                            follow: publicAvailable,
+                            notifications: publicAvailable,
+                          },
+                        }
+                      : {}),
                   },
                 },
               }
@@ -3641,11 +3769,11 @@ export function createProtectedHttp(options: {
           return notFound();
         }
         await revalidate();
-        const automations = await listProtectedAutomationRecords(options.stateDir, authority);
+        const automations = await withPublication(
+          await listProtectedAutomationRecords(options.stateDir, authority),
+        );
         assertCurrent();
-        const result: ProtectedAutomationListResponse = {
-          automations: automations.map(presentAutomation),
-        };
+        const result: ProtectedAutomationListResponse = { automations };
         return json(result);
       }
       if (hasClientCapability(request.headers, automationRunsCapability) && method === "GET") {
@@ -3672,12 +3800,44 @@ export function createProtectedHttp(options: {
         }
       }
       if (hasClientCapability(request.headers, automationResultsCapability)) {
+        // Current followers read the owner's results under the owner's profile; everyone else
+        // stays on the owner path, whose 404 is indistinguishable.
+        const followed =
+          automationsPublicCapability && method === "GET"
+            ? /^\/automations\/([^/]+)\/runs(?:\/([^/]+))?$/u.exec(pathname)
+            : null;
+        const recheck = followed
+          ? () =>
+              followed[2] === undefined
+                ? sharing("protectedSharing.automationAccess", {
+                    profileId: profile.id,
+                    automationId: followed[1]!,
+                  })
+                : sharing("protectedSharing.automationRunAccess", {
+                    profileId: profile.id,
+                    automationId: followed[1]!,
+                    runId: followed[2],
+                  })
+          : undefined;
+        const access = await recheck?.();
+        const follower = access?.relation === "follower" ? access : undefined;
         const result = await handleProtectedAutomationResultsRoute(
           options.stateDir,
           { method, pathname },
-          { ...authority, revalidate },
+          follower
+            ? { profileId: follower.ownerProfileId, assertCurrent, revalidate }
+            : { ...authority, revalidate },
         );
         if (result) {
+          if (follower) {
+            const current = await recheck!();
+            if (
+              current?.relation !== "follower" ||
+              current.ownerProfileId !== follower.ownerProfileId
+            ) {
+              notFound();
+            }
+          }
           return json(result.body, result.status);
         }
       }
@@ -3750,8 +3910,9 @@ export function createProtectedHttp(options: {
               );
             }
           }
+          const [created] = await withPublication([automation]);
           assertCurrent();
-          const result: ProtectedAutomationResponse = { automation: presentAutomation(automation) };
+          const result: ProtectedAutomationResponse = { automation: created! };
           return json(result, 201);
         } finally {
           storage?.release();
@@ -3878,6 +4039,104 @@ export function createProtectedHttp(options: {
         );
         return json({ runId: queued.runId, status: "queued" }, 202);
       }
+      if (pathname === "/automations/public" && method === "GET" && automationsPublicCapability) {
+        requirePublicAutomations(false);
+        const automations = await sharing("protectedSharing.publicAutomations", {
+          profileId: profile.id,
+        });
+        await revalidate();
+        const result: ProtectedPublicAutomationsResponse = {
+          automations: automations.map(projectProtectedPublicAutomation),
+        };
+        return json(result);
+      }
+      const publicAutomation = automationsPublicCapability
+        ? /^\/automations\/([^/]+)\/(publication|follow|notifications)$/u.exec(pathname)
+        : null;
+      if (publicAutomation && (method === "PUT" || method === "DELETE")) {
+        const automationId = publicAutomation[1]!;
+        const target = publicAutomation[2];
+        requirePublicAutomations(true);
+        const ref = { profileId: profile.id, automationId };
+        const storageOverheadBytes = storageEntryOverheadBytes;
+        if (target === "publication") {
+          if (method === "PUT") {
+            const now = Date.now();
+            const published = await storeSharingEntry(
+              `automation-publication:${automationId}:${now}`,
+              () =>
+                sharing("protectedSharing.publishAutomation", {
+                  ...ref,
+                  now,
+                  storageOverheadBytes,
+                }),
+            );
+            if (!published) {
+              return notFound();
+            }
+          } else {
+            const removed = await sharing("protectedSharing.unpublishAutomation", {
+              ...ref,
+              storageOverheadBytes,
+            });
+            if (!removed) {
+              return notFound();
+            }
+            retireSharing(removed);
+          }
+          const automation = await readProtectedAutomationRecord(options.stateDir, ref, authority);
+          if (!automation) {
+            return notFound();
+          }
+          const [record] = await withPublication([automation]);
+          await revalidate();
+          const result: ProtectedAutomationResponse = { automation: record! };
+          return json(result);
+        }
+        if (target === "follow" && method === "DELETE") {
+          retireSharing(
+            await sharing("protectedSharing.unfollowAutomation", { ...ref, storageOverheadBytes }),
+          );
+          await revalidate();
+          return noContent();
+        }
+        if (target === "follow") {
+          const input = request.body ? await body(request) : {};
+          if (!isProtectedAutomationFollowRequest(input)) {
+            return invalid();
+          }
+          const now = Date.now();
+          const followed = await storeSharingEntry(
+            `automation-follow:${automationId}:${profile.id}:${now}`,
+            () =>
+              sharing("protectedSharing.followAutomation", {
+                ...ref,
+                ...input,
+                now,
+                storageOverheadBytes,
+              }),
+          );
+          if (!followed) {
+            return notFound();
+          }
+          return await readPublicAutomation(automationId);
+        }
+        if (target === "notifications" && method === "PUT") {
+          const input = await body(request);
+          if (!isProtectedAutomationNotificationsRequest(input)) {
+            return invalid();
+          }
+          const changed = await sharing("protectedSharing.automationSubscription", {
+            ...ref,
+            subscribed: input.subscribed,
+            now: Date.now(),
+          });
+          if (!changed) {
+            return notFound();
+          }
+          return await readPublicAutomation(automationId);
+        }
+      }
       const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
       if (automationMatch && method === "DELETE") {
         if (!automationCatalog?.capabilities.automations.create || !admitStorage) {
@@ -3984,8 +4243,9 @@ export function createProtectedHttp(options: {
         if (!automation) {
           return notFound();
         }
+        const [record] = await withPublication([automation]);
         assertCurrent();
-        const result: ProtectedAutomationResponse = { automation: presentAutomation(automation) };
+        const result: ProtectedAutomationResponse = { automation: record! };
         return json(result);
       }
       if (automationMatch && method === "PATCH") {
@@ -4072,9 +4332,9 @@ export function createProtectedHttp(options: {
               }
               await refreshProtectedAutomation(member, saved.automation.id);
             }
-            const result: ProtectedAutomationResponse = {
-              automation: presentAutomation(saved.automation),
-            };
+            const [automation] = await withPublication([saved.automation]);
+            assertCurrent();
+            const result: ProtectedAutomationResponse = { automation: automation! };
             return json(result);
           }
           case "invalid":
@@ -4340,69 +4600,6 @@ export function createProtectedHttp(options: {
         await revalidate();
         return await fileResponse(chatId, filename, Boolean(generatedFileId));
       }
-      const sharing = <Key extends keyof ProtectedSharingWorkerOperations>(
-        type: Key,
-        input: ProtectedSharingWorkerOperations[Key]["input"],
-      ) => runProtectedSharing(options.stateDir, type, input, assertCurrent);
-      const retireSharing = (removed: readonly StoredDataEntry[]) =>
-        admitStorage?.retiredStoredData(removed.map((entry) => ({ removed: entry })));
-      const requireSharing = () => {
-        if (!sharingCapability) {
-          notFound();
-        }
-        requireProfile();
-        if (identity.kind === "development") {
-          throw new ProtectedError(
-            403,
-            "sharing_unavailable",
-            "Sharing is not available for this account.",
-          );
-        }
-      };
-      // Like feedback: an unknown write outcome keeps its reservation unless the entry is absent.
-      const storeSharingEntry = async <T extends { created: boolean; entries: StoredDataEntry[] }>(
-        entryId: string,
-        write: () => Promise<T | undefined>,
-      ) => {
-        const storage = await admitStorage?.(
-          profile.id,
-          assertCurrent,
-          "stored-data",
-          await storageLimit(assertCurrent),
-        );
-        const reservation = storage?.reserveStoredData(storageEntryOverheadBytes);
-        let settled = false;
-        try {
-          const result = await write();
-          reservation?.settle(result ?? { created: false, entries: [] });
-          settled = true;
-          return result;
-        } catch (error) {
-          if (reservation && !settled) {
-            try {
-              const stored = await sharing(
-                "protectedSharing.storageUsage",
-                storageEntryOverheadBytes,
-              );
-              const entry = stored.find(
-                (candidate) => candidate.profileId === profile.id && candidate.id === entryId,
-              );
-              if (entry) {
-                reservation.settle({ created: true, entries: [entry] });
-              } else {
-                reservation.release();
-              }
-            } catch {
-              process.stderr.write(
-                "Protected sharing write outcome is unknown; its storage reservation remains held.\n",
-              );
-            }
-          }
-          throw error;
-        } finally {
-          storage?.release();
-        }
-      };
       // Reads use the owner's chat store; the sharing owner decides access before and after.
       const ownerAuthority = (ownerProfileId: string) => ({
         profileId: ownerProfileId,

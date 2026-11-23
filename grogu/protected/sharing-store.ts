@@ -1,8 +1,14 @@
-import type { ProtectedChatShare } from "@openclaw/gateway-protocol/protected-sharing";
+import type {
+  ProtectedChatShare,
+  ProtectedPublicAutomation,
+} from "@openclaw/gateway-protocol/protected-sharing";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
+import type { ProtectedAutomationReadAccess } from "../../src/state/protected-automation-sharing.js";
+import type { ProtectedPublicAutomationStorageRecord } from "../../src/state/protected-public-automations.js";
 import type { ProtectedChatShareRecord } from "../../src/state/protected-sharing.js";
 import type { ProtectedSharingWorkerOperations } from "../../src/state/protected-sharing.worker.js";
 import { validFilename, validGeneratedFilename } from "./artifacts.js";
+import { projectProtectedAutomationRecord } from "./automations-store.js";
 import type { ProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
@@ -112,4 +118,78 @@ export async function canMemberReadChatArtifact(
           parts[1] === artifact.chatId &&
           validGeneratedFilename(parts[2]!);
   return belongs && canMemberReadChat(options, member, artifact);
+}
+
+export function projectProtectedPublicAutomation(
+  record: ProtectedPublicAutomationStorageRecord,
+): ProtectedPublicAutomation {
+  const { id, name, instructions, whenToNotify, doneWhen, schedule, state } =
+    projectProtectedAutomationRecord(record.automation);
+  return {
+    id,
+    name,
+    instructions,
+    whenToNotify,
+    ...(doneWhen === undefined ? {} : { doneWhen }),
+    schedule,
+    state,
+    // The owner's scheduler state stays private; owners read it from their own record.
+    nextCheckAt: null,
+    owner: {
+      personId: record.automation.centralOwnerProfileId,
+      displayName: record.ownerDisplayName,
+    },
+    publishedAt: record.publishedAt,
+    followers: record.followers,
+    following: record.following,
+    subscribed: record.subscribed,
+  };
+}
+
+/**
+ * The automation read authority: its owner, or a current follower while it is published, with
+ * both approved and not denied. Read runs, results and run chats under `ownerProfileId`.
+ */
+export function canMemberReadAutomation(
+  stateDir: string,
+  member: ProtectedSharingMember,
+  automationId: string,
+): Promise<ProtectedAutomationReadAccess | undefined> {
+  return runProtectedSharing(
+    stateDir,
+    "protectedSharing.automationAccess",
+    { profileId: member.profileId, automationId },
+    member.assertCurrent,
+  );
+}
+
+/** Automation access for one retained run of it, under the automation's current owner. */
+export function canMemberReadAutomationRun(
+  stateDir: string,
+  member: ProtectedSharingMember,
+  run: { automationId: string; runId: string },
+): Promise<ProtectedAutomationReadAccess | undefined> {
+  return runProtectedSharing(
+    stateDir,
+    "protectedSharing.automationRunAccess",
+    { profileId: member.profileId, ...run },
+    member.assertCurrent,
+  );
+}
+
+/**
+ * The current delivery audience: the active owner, then active followers who opted in. Call it
+ * immediately before each delivery.
+ */
+export function listAutomationRecipients(
+  stateDir: string,
+  automationId: string,
+  assertCurrent: () => void,
+): Promise<{ ownerProfileId: string; recipients: string[] } | undefined> {
+  return runProtectedSharing(
+    stateDir,
+    "protectedSharing.automationRecipients",
+    { automationId },
+    assertCurrent,
+  );
 }

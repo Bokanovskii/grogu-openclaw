@@ -58,6 +58,21 @@ deletes the member's links and grants in its admission transaction. These
 additive first-use tables do not change the shared database's numeric schema
 version; older builds ignore them.
 
+### Protected automation publications
+
+`protected_automations.visibility = 'shared'` remains the canonical published
+flag. The lazily created `protected_automation_publications` row records when
+the owner published it and is written in the same transaction. Follows are
+`protected_automation_members` rows with role `follower`, and
+`protected_automation_subscriptions` records a follower's notification opt-in,
+which cascades with its member row. The tables store only ids and times. Unpublishing
+deletes the publication, subscriptions, and follower rows and returns the
+automation to private in one transaction; member removal does the same for the
+member's follows and owned publications, and deleting a published automation
+removes all three with its definition. These additive first-use tables do not
+change the shared database's numeric schema version. Older builds ignore them,
+but list only private automations, so unpublish before rolling back.
+
 The shared-state database retains `task_runs`, `task_delivery_state`, and `flow_runs`, including their existing columns and indexes. The Tasks and TaskFlow runtime, tools, and UI are removed; their non-Cron rows remain untouched and unused by the runtime. Cron owns only the `runtime = 'cron'` rows in `task_runs` through its history store. It does not move history to another table. Native execution and completion remain with the subagent registry and harness-binding owners; native Codex pending assignments use metadata in the existing parent binding, not a new table. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 
 In agent schema 23, `transcript_events` retains original event JSON as either

@@ -19,6 +19,7 @@ import {
   retireProtectedAutomationMemberDefinitions,
   retireProtectedAutomationMemberStorage,
 } from "./protected-automation-lifecycle-cleanup.js";
+import { removeProtectedMemberAutomationSharingRows } from "./protected-automation-sharing.js";
 import type { ProtectedAutomationStorageUsage } from "./protected-automations.js";
 import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
 import type { ProtectedStoredDataRetirement } from "./protected-feedback.js";
@@ -584,9 +585,14 @@ export function removeProtectedAdmission(
       const retiredStoredDataChanges: ProtectedStoredDataRetirement[] = profileId
         ? [
             ...removeProtectedMemberFeedbackRows(db, profileId, input.storageOverheadBytes),
-            ...removeProtectedMemberSharingRows(db, profileId, input.storageOverheadBytes).map(
-              (removed) => ({ removed }),
-            ),
+            ...[
+              ...removeProtectedMemberSharingRows(db, profileId, input.storageOverheadBytes),
+              ...removeProtectedMemberAutomationSharingRows(
+                db,
+                profileId,
+                input.storageOverheadBytes,
+              ),
+            ].map((removed) => ({ removed })),
           ]
         : [];
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];

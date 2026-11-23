@@ -301,6 +301,40 @@ entry each. The tables store only profile, chat, and link ids, and no chat text.
 `grogu/protected/sharing-store.ts` exports `canMemberReadChat` and
 `canMemberReadChatArtifact` for other routes that need the same read authority.
 
+### Public automations
+
+Clients opt in with `x-alcove-capabilities: automations-public-v1`. Only those
+requests receive `capabilities.automations.public` (`publish`, `follow`, and
+`notifications`, false for the development identity) in the automation catalog
+and a `publication` field (`{ publishedAt, followers }` or `null`) on owner
+automation records. The routes below return 404 without the capability, and
+other responses stay unchanged. All routes require `x-grogu-profile`.
+
+The owner publishes with `PUT /api/protected/v1/automations/:id/publication`
+and unpublishes with `DELETE` on the same path; both return the owner record.
+Owners see a follower count, never follower identities. Any admitted member
+browses `GET /api/protected/v1/automations/public`, which includes the caller's
+own published automations with `following: false`, and follows with `PUT
+.../automations/:id/follow`. Following starts without notifications unless the
+body is `{ "subscribed": true }`; `PUT .../notifications` with `{ "subscribed":
+boolean }` changes the opt-in, and `DELETE .../follow` leaves. These return the
+public DTO (no model, agent, or version, and a `nextCheckAt` that is always
+`null` because the owner's scheduler state stays private) or 404 for an
+unpublished, missing, or own automation.
+
+Followers get read-only access to the automation's runs and results under its
+owner, and never write, run, or pay for it; run history, the inbox, and run
+chats stay owner-only. Unpublishing removes every
+follower and notification opt-in, so publishing again starts empty. Leaving or
+removal from Alcove removes a follower's access, and removing the owner
+unpublishes their automations before the private-definition cleanup below.
+Publications are charged to the owner and follows to the follower as one 4 KiB
+storage entry each; member removal and unpublishing retire those exact entries
+through the removal receipt or the unpublish result. `grogu/protected/sharing-store.ts` exports
+`canMemberReadAutomation`, `canMemberReadAutomationRun`, and
+`listAutomationRecipients` (the owner, then subscribed followers) for run reads
+and delivery; callers check them immediately before each read or delivery.
+
 ## Automation discovery and draft validation
 
 `GET /api/protected/v1/automations/catalog` is authenticated feature discovery.
@@ -337,8 +371,8 @@ schema's technical range of 1 through 8,640,000,000,000,000 milliseconds; this
 does not enable scheduling or recommend a cadence. Validation itself does not
 call a model or provider, save a draft, create a schedule, or produce a run.
 
-`GET /api/protected/v1/automations` lists the signed-in member's private
-automations. `GET /api/protected/v1/automations/:id` reads one private record,
+`GET /api/protected/v1/automations` lists the automations the signed-in member
+owns, including published ones. `GET /api/protected/v1/automations/:id` reads one owned record,
 and `POST /api/protected/v1/automations` saves a validated draft. Creation
 always starts paused; an `enabled` field is not accepted on create. `PATCH
 /api/protected/v1/automations/:id` accepts partial draft fields and the
@@ -360,7 +394,10 @@ Clients that send `X-Alcove-Capabilities: automation-delete-v1` receive
 404 for a missing or foreign automation. A queued or active run or a native
 job binding returns 409 `automation_busy`. On success, the server returns 204
 and deletes the definition, its run history, results, inbox entries, and
-run-chat binding. The member's run chat and authoring chat remain available
+run-chat binding. Deleting a published automation also unpublishes it and
+removes its followers and their notification opt-ins in the same transaction,
+retiring those follow entries from the followers' storage; a follower's delete
+request returns 404. The member's run chat and authoring chat remain available
 as ordinary chats.
 
 Member removal with automation history requires the storage-aware authority
@@ -370,12 +407,14 @@ current admission revision and accounting profile; worker transaction and commit
 grants recheck current configured-owner authority and the writer fence. A changed
 target snapshot refuses removal rather than applying a fence for another profile.
 
-The same worker transaction revokes admission and deletes that member's private
-sole-owned definitions (paused or enabled), lifecycle records, sealed results,
-run-chat bindings, inbox entries, and memberships. Its committed receipt carries
-exact storage and definition retirements. Only then does the host settle quota
-and publish removal; uncertain outcomes stay with the shared recovery owner.
-Other members' storage is untouched.
+The same worker transaction revokes admission, deletes that member's follows and
+notification preferences, and unpublishes the automations they own, which
+removes every follower. It then deletes that member's private sole-owned
+definitions (paused or enabled), lifecycle records, sealed results, run-chat
+bindings, inbox entries, and memberships. Its committed receipt carries exact
+storage and definition retirements, including follow entries charged to other
+followers. Only then does the host settle quota and publish removal; uncertain outcomes stay with the shared recovery owner.
+Other members' storage is untouched apart from those follow entries.
 The same fenced adapter can retire leftovers for an already-removed admission
 using its current revision. That recovery keeps the member removed; it never
 grants member write permission or reactivates the account.
@@ -390,12 +429,14 @@ jobs.
 The internal state owner stores automation definitions, owners, followers,
 visibility, the paused/enabled state, and native Cron job bindings in the
 shared-state worker. A binding ties one native job to the current central owner
-and definition revision. Reads and mutations require an active admission and
-private definitions are exposed only to their owners. Shared definitions,
-account grants, and notifications are not exposed by HTTP.
+and definition revision. Reads and mutations require an active admission, and
+only owners can edit definitions. Other members see published definitions only
+through the public automation routes above.
 Clients that send `X-Alcove-Capabilities: automation-results-v1` can read
-existing owner-private finished results at `GET /automations/:id/runs` and
-`GET /automations/:id/runs/:runId`. Foreign and unknown records return 404.
+existing finished results at `GET /automations/:id/runs` and
+`GET /automations/:id/runs/:runId`. Owners can read their own; current followers
+that also send `automations-public-v1` read the owner's results read-only.
+Foreign and unknown records return 404.
 These routes do not start runs or enable scheduling.
 Clients that also negotiate `automation-runs-v1` can enable and pause eligible
 automations, start a run with `POST /automations/:id/run`, inspect lifecycle

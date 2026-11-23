@@ -431,7 +431,6 @@ export type PatchProtectedAutomationResult =
         | "member_inactive"
         | "automation_not_found"
         | "owner_mismatch"
-        | "not_private"
         | "version_mismatch"
         | "scheduler_required";
     };
@@ -481,9 +480,6 @@ export function patchProtectedAutomation(
       }
       if (current.centralOwnerProfileId !== input.profileId || current.relation !== "owner") {
         return { status: "owner_mismatch" as const };
-      }
-      if (current.visibility !== "private") {
-        return { status: "not_private" as const };
       }
       if (current.definitionRevision !== input.expectedRevision) {
         return { status: "version_mismatch" as const };

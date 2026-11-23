@@ -71,7 +71,7 @@ const grantEntry = (
 });
 
 // Authority is the durable admission, not a link or grant: removed or denied members never read.
-function isActiveMember(db: DatabaseSync, profileId: string): boolean {
+export function isActiveMember(db: DatabaseSync, profileId: string): boolean {
   if (!tableExists(db, "protected_admissions")) {
     return false;
   }
@@ -99,7 +99,7 @@ function isActiveMember(db: DatabaseSync, profileId: string): boolean {
   );
 }
 
-function readDisplayName(db: DatabaseSync, profileId: string) {
+export function readDisplayName(db: DatabaseSync, profileId: string) {
   return displayName(
     executeSqliteQuerySync(
       db,

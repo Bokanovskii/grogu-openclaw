@@ -265,6 +265,10 @@ export const ProtectedAutomationCapabilitiesSchema = node({
       authoring: Type.Optional(Type.Boolean()),
     }),
   ),
+  // Sent only to automations-public-v1 clients, like ProtectedAutomationRecord.publication.
+  public: Type.Optional(
+    node({ publish: Type.Boolean(), follow: Type.Boolean(), notifications: Type.Boolean() }),
+  ),
 });
 export const ProtectedAutomationScheduleSchema = Type.Union([
   node({
@@ -367,6 +371,15 @@ export const ProtectedAutomationRecordSchema = node({
   enabled: Type.Boolean(),
   state: Type.Union([Type.Literal("active"), Type.Literal("paused")]),
   nextCheckAt: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  publication: Type.Optional(
+    Type.Union([
+      node({
+        publishedAt: Type.Integer({ minimum: 0 }),
+        followers: Type.Integer({ minimum: 0 }),
+      }),
+      Type.Null(),
+    ]),
+  ),
 });
 export const ProtectedAutomationListResponseSchema = node({
   automations: Type.Array(ProtectedAutomationRecordSchema),

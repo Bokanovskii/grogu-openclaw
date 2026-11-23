@@ -30,6 +30,7 @@ import {
   type ProtectedAutomationResultDatabase,
 } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
+import { readProtectedAutomationSharingStorageUsage } from "./protected-automation-sharing.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
 export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase & {
@@ -302,14 +303,13 @@ export function prepareProtectedAutomationLifecycle(
           .select([
             "id",
             "central_owner_profile_id as profileId",
-            "visibility",
             /* kysely-allow-raw: SQLite BLOB length counts stored UTF-8 bytes. */
             sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
           ])
           .where("id", "=", command.automationId)
           .where("central_owner_profile_id", "=", command.profileId),
       ).rows[0];
-      if (!definition || definition.visibility !== "private") {
+      if (!definition) {
         return { status: "not-owner" };
       }
       const binding = executeSqliteQuerySync(
@@ -336,6 +336,15 @@ export function prepareProtectedAutomationLifecycle(
         profileId: definition.profileId,
         definitionBytes: definition.definitionBytes,
       };
+      // Deleting a published automation unpublishes it: its publication, follows and
+      // subscriptions cascade with the definition, so their ledger entries retire with it.
+      write.retired.push(
+        ...readProtectedAutomationSharingStorageUsage(
+          database,
+          entryOverheadBytes,
+          command.automationId,
+        ),
+      );
     }
     if (rows.some((row) => row.status === "queued" || row.status === "running")) {
       return { status: "busy" };

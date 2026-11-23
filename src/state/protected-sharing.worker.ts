@@ -1,4 +1,17 @@
 import {
+  followProtectedAutomation,
+  listProtectedAutomationPublications,
+  listProtectedAutomationRecipients,
+  publishProtectedAutomation,
+  readProtectedAutomationAccess,
+  readProtectedAutomationRunAccess,
+  readProtectedAutomationSharingStorageUsage,
+  setProtectedAutomationSubscription,
+  unfollowProtectedAutomation,
+  unpublishProtectedAutomation,
+} from "./protected-automation-sharing.js";
+import { listProtectedPublicAutomations } from "./protected-public-automations.js";
+import {
   claimProtectedChatShare,
   createProtectedChatShare,
   deleteProtectedChatShare,
@@ -32,8 +45,54 @@ export const protectedSharingOperations = {
   ) => listProtectedSharedChats(open(), input),
   "protectedSharing.chatAccess": (input: Parameters<typeof readProtectedChatAccess>[1], { open }) =>
     readProtectedChatAccess(open(), input),
-  "protectedSharing.storageUsage": (overheadBytes: number, { open }) =>
-    readProtectedSharingStorageUsage(open(), overheadBytes),
+  "protectedSharing.publishAutomation": (
+    input: Parameters<typeof publishProtectedAutomation>[1],
+    { open },
+  ) => publishProtectedAutomation(open(), input),
+  "protectedSharing.unpublishAutomation": (
+    input: Parameters<typeof unpublishProtectedAutomation>[1],
+    { open },
+  ) => unpublishProtectedAutomation(open(), input),
+  "protectedSharing.followAutomation": (
+    input: Parameters<typeof followProtectedAutomation>[1],
+    { open },
+  ) => followProtectedAutomation(open(), input),
+  "protectedSharing.unfollowAutomation": (
+    input: Parameters<typeof unfollowProtectedAutomation>[1],
+    { open },
+  ) => unfollowProtectedAutomation(open(), input),
+  "protectedSharing.automationSubscription": (
+    input: Parameters<typeof setProtectedAutomationSubscription>[1],
+    { open },
+  ) => setProtectedAutomationSubscription(open(), input),
+  "protectedSharing.publicAutomations": (
+    input: Parameters<typeof listProtectedPublicAutomations>[1],
+    { open },
+  ) => listProtectedPublicAutomations(open(), input),
+  "protectedSharing.automationPublications": (
+    input: Parameters<typeof listProtectedAutomationPublications>[1],
+    { open },
+  ) => listProtectedAutomationPublications(open(), input),
+  "protectedSharing.automationAccess": (
+    input: Parameters<typeof readProtectedAutomationAccess>[1],
+    { open },
+  ) => readProtectedAutomationAccess(open(), input),
+  "protectedSharing.automationRunAccess": (
+    input: Parameters<typeof readProtectedAutomationRunAccess>[1],
+    { open },
+  ) => readProtectedAutomationRunAccess(open(), input),
+  "protectedSharing.automationRecipients": (
+    input: Parameters<typeof listProtectedAutomationRecipients>[1],
+    { open },
+  ) => listProtectedAutomationRecipients(open(), input),
+  // One ledger view for every sharing entry, so HTTP write recovery finds chat and automation ids.
+  "protectedSharing.storageUsage": (overheadBytes: number, { open }) => {
+    const database = open();
+    return [
+      ...readProtectedSharingStorageUsage(database, overheadBytes),
+      ...readProtectedAutomationSharingStorageUsage(database, overheadBytes),
+    ];
+  },
 } satisfies WorkerOperationHandlers;
 
 export type ProtectedSharingWorkerOperations = WorkerOperations<typeof protectedSharingOperations>;

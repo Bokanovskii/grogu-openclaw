@@ -46,6 +46,7 @@ import {
   bindProtectedAutomationJobWithAdmission,
   createProtectedAutomationWithAdmission,
 } from "../../src/state/protected-automation-operations.js";
+import type { listProtectedAdminTelemetry } from "../../src/state/protected-feedback-telemetry.js";
 import {
   getCanonicalUserPreferences,
   setCanonicalUserPreferences,
@@ -185,6 +186,16 @@ void test("Protected turns load skills on request and retain credentials during 
           created: 1,
           model: "synthetic",
           choices: [{ index: 0, delta: {}, finish_reason: readSkill ? "tool_calls" : "stop" }],
+          ...(messages.includes("Summarize synthetic public news.")
+            ? {
+                usage: {
+                  prompt_tokens: 11,
+                  completion_tokens: 7,
+                  total_tokens: 18,
+                  prompt_tokens_details: { cached_tokens: 0 },
+                },
+              }
+            : {}),
         })}\n\n`,
       );
       response.end("data: [DONE]\n\n");
@@ -495,6 +506,32 @@ void test("Protected turns load skills on request and retain credentials during 
   const resultRows = (await results.json()).runs as Array<{ runId: string; text: string }>;
   assert.equal(resultRows.find((row) => row.runId === scheduledRun.id)?.text, "Synthetic answer.");
   assert.equal(resultRows.find((row) => row.runId === manualRun.id)?.text, "Synthetic answer.");
+  const readTelemetry = async (query = "") => {
+    const response = await call(`/admin/telemetry${query}`, {
+      headers: { "x-alcove-capabilities": "feedback-v1" },
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json()) as ReturnType<typeof listProtectedAdminTelemetry>;
+  };
+  const telemetry = await readTelemetry();
+  const automationRuns = telemetry.runs.filter((run) => run.chatId === scheduledRun.runChatId);
+  assert.equal(automationRuns.length, 2, "each completed automation turn is recorded once");
+  for (const run of automationRuns) {
+    assert.partialDeepStrictEqual(run, {
+      personId: user.id,
+      feature: "automation",
+      provider: "sparky",
+      model: "synthetic",
+      status: "complete",
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 18,
+      cacheReadTokens: 0,
+      reasoningSummaryChars: null,
+      firstVisibleMs: null,
+    });
+    assert.ok(run.completionMs !== null && run.completionMs >= 0);
+  }
   const inbox = await automationCall("/automations/inbox");
   const inboxBody = await inbox.json();
   assert.ok(Value.Check(ProtectedAutomationInboxResponseSchema, inboxBody));

@@ -20,6 +20,7 @@ import type { SqliteSessionGenerationComparison } from "./session-accessor.sqlit
 import { readSessionNodeArtifactFingerprint } from "./session-accessor.sqlite-node-artifacts.js";
 import { collectSessionStateIdsForEntry } from "./session-accessor.sqlite-references.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import { openSessionSuggestionFields } from "./session-suggestion-encryption.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 import type { SessionEntry } from "./types.js";
 
@@ -212,8 +213,8 @@ export type LegacySessionSuggestionRow = { readonly id: string } & Readonly<
 >;
 
 /**
- * Decides whether a destination suggestion preserves its source. Plaintext stores compare stored
- * columns; a protected store must compare authenticated plaintext, never resealed ciphertext.
+ * Decides whether a destination suggestion preserves its source. Rows arrive as authenticated
+ * plaintext, never resealed ciphertext; a row that failed authentication never matches.
  */
 export type LegacySessionSuggestionComparator = (
   source: LegacySessionSuggestionRow,
@@ -221,15 +222,34 @@ export type LegacySessionSuggestionComparator = (
   canonicalKey: string,
 ) => boolean;
 
-const storedSuggestionsMatch: LegacySessionSuggestionComparator = (
+const unauthenticatedSuggestions = new WeakSet<LegacySessionSuggestionRow>();
+
+const authenticatedSuggestionsMatch: LegacySessionSuggestionComparator = (
   source,
   destination,
   canonicalKey,
 ) =>
+  !unauthenticatedSuggestions.has(source) &&
+  !unauthenticatedSuggestions.has(destination) &&
   // SQLite rows have null prototypes; compare their own columns only.
   isDeepStrictEqual({ ...source, session_key: canonicalKey }, { ...destination });
 
-/** Reads suggestion rows in the snapshot that matches the claim's fenced artifact fingerprint. */
+function authenticateSuggestion<Row extends Parameters<typeof openSessionSuggestionFields>[1]>(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  row: Row,
+): Row {
+  try {
+    return openSessionSuggestionFields(database.db, row);
+  } catch {
+    unauthenticatedSuggestions.add(row);
+    return row;
+  }
+}
+
+/**
+ * Reads authenticated suggestion plaintext in the snapshot that matches the claim's fenced artifact
+ * fingerprint. Each row opens under its own store key and session-key context.
+ */
 export function readClaimSuggestions(
   database: Pick<OpenClawAgentDatabase, "db">,
   key: string,
@@ -250,7 +270,7 @@ export function readClaimSuggestions(
             .selectAll()
             .where("session_key", "=", key)
             .orderBy("id"),
-        ).rows
+        ).rows.map((row) => authenticateSuggestion(database, row))
       : [];
   });
 }
@@ -294,7 +314,7 @@ export function verifyCopiedSuggestions(
   reader: Pick<OpenClawAgentDatabase, "db">,
   claims: readonly SessionClaim[],
   changed: () => Error,
-  sameRow: LegacySessionSuggestionComparator = storedSuggestionsMatch,
+  sameRow: LegacySessionSuggestionComparator = authenticatedSuggestionsMatch,
 ): string | undefined {
   const destination = readClaimSuggestions(
     reader,

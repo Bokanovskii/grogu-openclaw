@@ -19,7 +19,6 @@ import {
   storesHaveLegacyAgentSessionKey,
 } from "./legacy-main-session-key-scan.js";
 import { claimsMatch, restoreColdSessionClaims } from "./legacy-main-session-migration-claims.js";
-import { guardProtectedCrossStoreSuggestions } from "./legacy-main-session-migration-durability.js";
 import {
   processIdenticalClaims,
   describeIdenticalClaims,
@@ -368,7 +367,6 @@ function isBlockingOutcome(outcome: LegacyMainSessionMigrationOutcome): boolean 
   return (
     outcome.kind === "legacy-json-store" ||
     outcome.kind === "store-unreadable" ||
-    outcome.kind === "protected-suggestions-unsupported" ||
     ((outcome.kind === "divergent-aliases" || outcome.kind === "divergent-canonical") &&
       outcome.resolved !== true)
   );
@@ -583,68 +581,64 @@ async function migrateLegacyMainSessionKeysInternal(
         );
 
   for (const [canonicalKey, aliases] of groupLegacyClaims(allLegacy)) {
-    await guardProtectedCrossStoreSuggestions(
-      { aliases, allCanonical, destination, canonicalKey, env, outcomes, warnings },
-      async (canonicalClaims) => {
-        if (
-          params.mode === "doctor-fix" &&
-          [...aliases, ...canonicalClaims].some(
-            (claim) =>
-              !samePhysicalStore(claim.store, destination) ||
-              resolveMissingPhysicalPath(
-                path.join(resolveSessionArtifactDirectory(claim.store.path), "cold"),
-              ) !== destinationArchiveDirectory,
-          )
-        ) {
-          await restoreColdSessionClaims(aliases, env, params.beforePersistentApply);
-          await restoreColdSessionClaims(canonicalClaims, env, params.beforePersistentApply);
-        }
-        const { destinationCanonical, divergence, divergentClaims } = compareClaimGroup(
-          aliases,
-          canonicalClaims,
-          destination,
-        );
-        if (divergence) {
-          const outcome = describeDivergentClaims(divergence, canonicalKey, divergentClaims);
-          if (params.mode === "doctor-fix") {
-            const repaired = await repairDivergentClaims({
-              beforePersistentApply: params.beforePersistentApply,
-              canonicalKey,
-              claims: divergentClaims,
-              destination,
-              ...(divergence === "divergent-canonical" && destinationCanonical
-                ? { destinationCanonical }
-                : {}),
-              env,
-              ownerAgentId,
-            });
-            outcome.quarantinedKeys = repaired.quarantinedKeys;
-            if (repaired.resolved) {
-              outcome.resolved = true;
-            }
-          }
-          if (!outcome.resolved) {
-            warnings.push(warningForDivergence(divergence, canonicalKey, divergentClaims));
-          }
-          outcomes.push(outcome);
-          return;
-        }
-
-        const outcome = await processIdenticalClaims({
-          beforePersistentApply: params.beforePersistentApply,
-          aliases,
-          ...(destinationCanonical ? { canonical: destinationCanonical } : {}),
-          canonicalKey,
-          destination,
-          env,
-          mode: params.mode,
-        });
-        outcomes.push(outcome);
-        if (outcome.kind === "divergent-aliases" || outcome.kind === "divergent-canonical") {
-          warnings.push(warningForDivergence(outcome.kind, canonicalKey, aliases));
-        }
-      },
+    const canonicalClaims = allCanonical.filter((claim) => claim.key === canonicalKey);
+    if (
+      params.mode === "doctor-fix" &&
+      [...aliases, ...canonicalClaims].some(
+        (claim) =>
+          !samePhysicalStore(claim.store, destination) ||
+          resolveMissingPhysicalPath(
+            path.join(resolveSessionArtifactDirectory(claim.store.path), "cold"),
+          ) !== destinationArchiveDirectory,
+      )
+    ) {
+      await restoreColdSessionClaims(aliases, env, params.beforePersistentApply);
+      await restoreColdSessionClaims(canonicalClaims, env, params.beforePersistentApply);
+    }
+    const { destinationCanonical, divergence, divergentClaims } = compareClaimGroup(
+      aliases,
+      canonicalClaims,
+      destination,
     );
+    if (divergence) {
+      const outcome = describeDivergentClaims(divergence, canonicalKey, divergentClaims);
+      if (params.mode === "doctor-fix") {
+        const repaired = await repairDivergentClaims({
+          beforePersistentApply: params.beforePersistentApply,
+          canonicalKey,
+          claims: divergentClaims,
+          destination,
+          ...(divergence === "divergent-canonical" && destinationCanonical
+            ? { destinationCanonical }
+            : {}),
+          env,
+          ownerAgentId,
+        });
+        outcome.quarantinedKeys = repaired.quarantinedKeys;
+        if (repaired.resolved) {
+          outcome.resolved = true;
+        }
+      }
+      if (!outcome.resolved) {
+        warnings.push(warningForDivergence(divergence, canonicalKey, divergentClaims));
+      }
+      outcomes.push(outcome);
+      continue;
+    }
+
+    const outcome = await processIdenticalClaims({
+      beforePersistentApply: params.beforePersistentApply,
+      aliases,
+      ...(destinationCanonical ? { canonical: destinationCanonical } : {}),
+      canonicalKey,
+      destination,
+      env,
+      mode: params.mode,
+    });
+    outcomes.push(outcome);
+    if (outcome.kind === "divergent-aliases" || outcome.kind === "divergent-canonical") {
+      warnings.push(warningForDivergence(outcome.kind, canonicalKey, aliases));
+    }
   }
 
   if (allLegacy.length === 0 && outcomes.length === 0) {

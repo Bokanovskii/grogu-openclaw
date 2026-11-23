@@ -177,13 +177,22 @@ export function copySessionNodeArtifactsForRepair(
   destination: OpenClawAgentDatabase,
   sourceKeys: readonly string[],
   canonicalKey: string,
-  options: { includeMembers?: boolean; includeParticipants?: boolean } = {},
+  options: {
+    includeMembers?: boolean;
+    includeParticipants?: boolean;
+    /**
+     * Set only by a caller that verifies authenticated suggestion plaintext before retiring the
+     * source; other cross-store movers keep refusing protected suggestions.
+     */
+    verifiesProtectedSuggestions?: boolean;
+  } = {},
 ): void {
   const keys = [...new Set(sourceKeys)];
   if (keys.length === 0) {
     return;
   }
   if (
+    !options.verifiesProtectedSuggestions &&
     source.db !== destination.db &&
     (hasSqliteStorageValueEncryption(source.db) ||
       hasSqliteStorageValueEncryption(destination.db)) &&
@@ -372,11 +381,20 @@ export function copySessionNodeArtifactsForRepair(
         source.db,
         sourceDb.selectFrom("session_suggestions").selectAll().where("session_key", "in", keys),
       ).rows) {
+        let opened: typeof suggestion;
+        try {
+          opened = openSessionSuggestionFields(source.db, suggestion);
+        } catch {
+          // An unauthenticated row is never resealed; the caller's verification keeps its source.
+          continue;
+        }
         executeSqliteQuerySync(
           destination.db,
           destinationDb
             .insertInto("session_suggestions")
-            .values({ ...suggestion, session_key: canonicalKey })
+            .values(
+              sealSessionSuggestionFields(destination.db, { ...opened, session_key: canonicalKey }),
+            )
             .onConflict((conflict) => conflict.column("id").doNothing()),
         );
       }

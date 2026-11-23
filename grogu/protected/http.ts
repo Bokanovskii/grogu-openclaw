@@ -142,6 +142,8 @@ import {
   resolveProtectedProfile,
   type ProtectedIdentityVerifier,
 } from "./identity.js";
+import type { createProtectedMemberMemory } from "./member-memory.js";
+import type { createProtectedMemoryReview } from "./memory-review.js";
 import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
@@ -356,11 +358,13 @@ export function createProtectedHttp(options: {
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
   answerAccessProof?: (request: Request) => Promise<Response>;
-  usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
+  usersRoot: Parameters<typeof measureProtectedStorage>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
   agentExtensions?: readonly ProtectedAgentExtension[];
   providerRelay?: ReturnType<typeof createProviderRelay>;
+  memberMemory?: ReturnType<typeof createProtectedMemberMemory>;
+  memoryReview?: ReturnType<typeof createProtectedMemoryReview>;
   maxChatsPerUser: number;
   maxFileBytes: number;
   storageLimits?: StorageLimits;
@@ -429,6 +433,9 @@ export function createProtectedHttp(options: {
       if (run.profileId === profileId) {
         run.controller.abort();
       }
+    }
+    if (options.memberMemory) {
+      void track(options.memberMemory.retire(profileId)).catch(() => {});
     }
   };
   let publicSubmissionWindow = 0;
@@ -1194,13 +1201,9 @@ export function createProtectedHttp(options: {
         }
         return json({ queued: true });
       }
-      const requireProfile = () => {
+      const requireProfile = (message = "Reload before using a device credential.") => {
         if (request.headers.get("x-grogu-profile") !== profile.id) {
-          throw new ProtectedError(
-            403,
-            "profile_mismatch",
-            "Reload before using a device credential.",
-          );
+          throw new ProtectedError(403, "profile_mismatch", message);
         }
       };
       const authority = { profileId: profile.id, assertCurrent };
@@ -1299,8 +1302,44 @@ export function createProtectedHttp(options: {
             openaiConnect: options.providerRelay !== undefined,
             admin: isOwner,
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
+            ...(hasClientCapability(request.headers, "memory-v1")
+              ? { memory: { review: options.memoryReview !== undefined } }
+              : {}),
           },
         });
+      }
+      const memoryReference = pathname.match(/^\/memory\/([A-Za-z0-9_-]{43})$/u);
+      if (method === "GET" && (pathname === "/memory" || memoryReference)) {
+        const requireMemoryProfile = () =>
+          requireProfile("Reload before viewing the current account's memory.");
+        requireMemoryProfile();
+        const memoryReview = options.memoryReview;
+        if (!memoryReview) {
+          throw new ProtectedError(503, "unavailable", "Member memory is not available.");
+        }
+        const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+          env: chats.env,
+        });
+        if (profileAuthority.profileId !== profile.id) {
+          unauthorized();
+        }
+        const assertMemoryCurrent = () => {
+          assertCurrent();
+          profileAuthority.assertCurrent();
+          requireMemoryProfile();
+        };
+        assertMemoryCurrent();
+        const result = await files(async (owned) => {
+          const review = memoryReview.open(profile.id, owned);
+          if (!memoryReference) {
+            return await review.list();
+          }
+          const note = await review.read(memoryReference[1]!);
+          return note ?? notFound();
+        }, assertMemoryCurrent);
+        await revalidate();
+        assertMemoryCurrent();
+        return json(result);
       }
       if (pathname === "/account" && method === "GET") {
         const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
@@ -2768,6 +2807,7 @@ export function createProtectedHttp(options: {
               mentionedAgents,
               storage,
               profileAuthority,
+              sessionEntry: currentEntry,
               parentLifecycleRevision: currentEntry.lifecycleRevision ?? null,
               parentSessionId: currentEntry.sessionId,
             };
@@ -2785,6 +2825,7 @@ export function createProtectedHttp(options: {
           mentionedAgents,
           storage,
           profileAuthority,
+          sessionEntry,
           parentLifecycleRevision,
           parentSessionId,
         } = admission;
@@ -2982,6 +3023,7 @@ export function createProtectedHttp(options: {
                       id,
                       options.maxFileBytes,
                     );
+                    const storageFiles = storage?.files(owned);
                     const execute = () =>
                       options.turns.run({
                         id,
@@ -2998,7 +3040,9 @@ export function createProtectedHttp(options: {
                         agent: selectedAgent,
                         ...(authoring ? {} : { routing: agentRouting }),
                         sessionAccess,
-                        files: storage?.files(owned) ?? owned,
+                        sessionEntry,
+                        files: storageFiles ?? owned,
+                        memoryFiles: storageFiles,
                         signal,
                         assertCurrent: assertRun,
                         revalidate: checkRun,
@@ -3395,7 +3439,11 @@ export function createProtectedHttp(options: {
       while (pending.size) {
         await Promise.allSettled(pending);
       }
-      ownedEncryption?.dispose();
+      try {
+        await options.memberMemory?.close();
+      } finally {
+        ownedEncryption?.dispose();
+      }
     },
     async revokeProfile(profileId: string) {
       invalidateProfile(profileId);

@@ -11,6 +11,7 @@ export {
 export {
   buildFileEntry,
   buildMultimodalChunkForIndexing,
+  buildMemoryReadResult,
   closeMemorySqliteWalMaintenance,
   configureMemorySqliteWalMaintenance,
   encodeMemoryEmbedding,

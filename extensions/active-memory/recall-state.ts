@@ -37,7 +37,9 @@ export function buildMemoryAudienceCacheIdentity(audience: MemoryAudience | unde
   return JSON.stringify(
     audience.kind === "owner-private"
       ? [audience.kind, audience.agentId]
-      : [audience.kind, audience.agentId, audience.sessionKey, audience.sessionId],
+      : audience.kind === "member-private"
+        ? [audience.kind, audience.agentId, audience.workspaceKey]
+        : [audience.kind, audience.agentId, audience.sessionKey, audience.sessionId],
   );
 }
 

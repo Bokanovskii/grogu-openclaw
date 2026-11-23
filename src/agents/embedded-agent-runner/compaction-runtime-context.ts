@@ -56,6 +56,57 @@ type EmbeddedCompactionRuntimeContextParams = Omit<
   activeProcessSessions?: ActiveProcessSessionReference[];
 };
 
+type EmbeddedCompactionRuntimeContext = Pick<
+  CompactEmbeddedAgentSessionParams,
+  | "sessionKey"
+  | "sandboxSessionKey"
+  | "sandboxAgentId"
+  | "messageChannel"
+  | "messageProvider"
+  | "clientCaps"
+  | "inlineWidgetAuthoring"
+  | "chatType"
+  | "agentAccountId"
+  | "conversationRoutePeerId"
+  | "currentChannelId"
+  | "currentThreadTs"
+  | "currentMessageId"
+  | "authProfileId"
+  | "authProfileIdSource"
+  | "runtimeAuthPlan"
+  | "agentHarnessId"
+  | "modelSelectionLocked"
+  | "workspaceDir"
+  | "bootstrapWorkspaceDir"
+  | "bootstrapContextMode"
+  | "bootstrapContextRunKind"
+  | "requestModelCredential"
+  | "cwd"
+  | "permissionMode"
+  | "sessionRoot"
+  | "requireWorkspaceOnly"
+  | "agentDir"
+  | "config"
+  | "toolOverrides"
+  | "toolsAllow"
+  | "skillsSnapshot"
+  | "senderIsOwner"
+  | "senderId"
+  | "provider"
+  | "model"
+  | "modelFallbacksOverride"
+  | "thinkLevel"
+  | "reasoningLevel"
+  | "execOverrides"
+  | "bashElevated"
+  | "extraSystemPrompt"
+  | "sourceReplyDeliveryMode"
+  | "ownerNumbers"
+> & {
+  runtimeProvider?: string;
+  activeProcessSessions?: ActiveProcessSessionReference[];
+};
+
 /** Resolve the configured compaction override against the actual model/runtime candidate. */
 export function resolveEmbeddedCompactionThinkingLevel(params: {
   config?: OpenClawConfig;
@@ -283,7 +334,7 @@ export function resolveCompactionContextTokenBudget(params: {
 export function buildEmbeddedCompactionRuntimeContext(
   params: EmbeddedCompactionRuntimeContextParams,
   profile: "full" | "after-turn" | "recovery" = "full",
-) {
+): EmbeddedCompactionRuntimeContext {
   // After-turn maintenance and overflow recovery forward narrower run context.
   const afterTurn = profile === "after-turn";
   const resolved = resolveEmbeddedCompactionTarget(params);
@@ -326,6 +377,8 @@ export function buildEmbeddedCompactionRuntimeContext(
     modelSelectionLocked: params.modelSelectionLocked,
     workspaceDir: params.workspaceDir,
     bootstrapWorkspaceDir: afterTurn ? undefined : params.bootstrapWorkspaceDir,
+    bootstrapContextMode: params.bootstrapContextMode,
+    bootstrapContextRunKind: params.bootstrapContextRunKind,
     cwd: profile === "recovery" ? undefined : (params.cwd ?? undefined),
     permissionMode: afterTurn ? undefined : params.permissionMode,
     sessionRoot: afterTurn ? undefined : params.sessionRoot,

@@ -19,9 +19,11 @@ vi.mock("../config/sessions/session-entry-read-runtime.js", async () => {
 
 import {
   assertMemoryAudienceCurrent,
+  assertMemoryAudienceDelegation,
   assertMemoryAudienceSession,
   delegateMemoryAudience,
   isHostMemoryAudience,
+  mintMemberMemoryAudience,
   type MemoryAudienceResolution,
   prepareMemoryAudienceRead,
   resolveMemoryAudienceFromEntry,
@@ -92,6 +94,79 @@ beforeEach(() => {
 });
 
 describe("memory audience resolution", () => {
+  it("keeps a delegated member audience under the host owner's authority", async () => {
+    let active = true;
+    const root = rootEntry();
+    fakeSessionOwner.rows.set(ROOT_KEY, root);
+    const grant = await mintMemberMemoryAudience({
+      agentId: AGENT_ID,
+      sessionKey: ROOT_KEY,
+      sessionId: root.sessionId,
+      lifecycleRevision: root.lifecycleRevision,
+      storePath: STORE_PATH,
+      workspaceKey: "member-workspace-generation",
+      assertOwnerCurrent: () => {
+        if (!active) {
+          throw new Error("Member access revoked.");
+        }
+      },
+    });
+    const child = rootEntry();
+    fakeSessionOwner.rows.set(CHILD_KEY, child);
+    const delegated = await delegateMemoryAudience(grant.audience, {
+      sessionKey: CHILD_KEY,
+      storePath: STORE_PATH,
+    });
+    const unrelated = await mintMemberMemoryAudience({
+      agentId: AGENT_ID,
+      sessionKey: ROOT_KEY,
+      sessionId: root.sessionId,
+      lifecycleRevision: root.lifecycleRevision,
+      storePath: STORE_PATH,
+      workspaceKey: "member-workspace-generation",
+      assertOwnerCurrent: () => {},
+    });
+    try {
+      assertMemoryAudienceSession(delegated.audience, CHILD_KEY);
+      assertMemoryAudienceDelegation(grant.audience, delegated.audience);
+      expect(() => assertMemoryAudienceDelegation(unrelated.audience, delegated.audience)).toThrow(
+        "not delegated",
+      );
+      expect(() => assertMemoryAudienceSession(delegated.audience, ROOT_KEY)).toThrow(
+        "different session",
+      );
+      assertMemoryAudienceCurrent(delegated.audience);
+      active = false;
+      expect(() => assertMemoryAudienceCurrent(delegated.audience)).toThrow(
+        "Member access revoked.",
+      );
+    } finally {
+      unrelated.release();
+      delegated.release();
+      grant.release();
+    }
+  });
+
+  it("revokes a member audience when its admitted chat incarnation changes", async () => {
+    const root = rootEntry();
+    fakeSessionOwner.rows.set(ROOT_KEY, root);
+    const grant = await mintMemberMemoryAudience({
+      agentId: AGENT_ID,
+      sessionKey: ROOT_KEY,
+      sessionId: root.sessionId,
+      lifecycleRevision: root.lifecycleRevision,
+      storePath: STORE_PATH,
+      workspaceKey: "member-workspace-generation",
+      assertOwnerCurrent: () => {},
+    });
+    try {
+      fakeSessionOwner.rows.set(ROOT_KEY, rootEntry());
+      expect(() => assertMemoryAudienceCurrent(grant.audience)).toThrow("no longer current");
+    } finally {
+      grant.release();
+    }
+  });
+
   it.each([
     ["owner direct", "direct", true, "owner-private"],
     ["non-owner direct", "direct", false, "conversation"],

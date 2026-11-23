@@ -27,6 +27,7 @@ export {
 export { readMemoryFile } from "./host/read-file.js";
 export { retryTransientMemoryRead } from "./host/read-retry.js";
 export {
+  buildMemoryReadResult,
   buildMemoryReadResultFromSlice,
   type LegacyMemoryReadResult,
   type MemoryReadResult,

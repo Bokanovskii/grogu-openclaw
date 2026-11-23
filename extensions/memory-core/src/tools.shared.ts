@@ -78,6 +78,9 @@ export function createMemoryTool(params: {
           "Memory is disabled for this agent. Enable memory search for this agent, then retry.",
         );
       }
+      if (params.options.memoryAudience?.kind === "member-private") {
+        throw new Error("Member memory is unavailable until its isolated workspace is ready.");
+      }
       return await params.execute(latestCtx)(toolCallId, toolParams, signal, onUpdate);
     },
   };

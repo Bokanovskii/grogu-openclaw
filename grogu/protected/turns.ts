@@ -19,6 +19,7 @@ import {
   withoutModelRequestTelemetry,
   type TerminalModelRequestMetadata,
 } from "../../src/agents/model-request-telemetry.js";
+import { withPreparedModelRuntimePluginGenerationScope } from "../../src/agents/prepared-model-runtime-generation-scope.js";
 import { createRequestModelCredential } from "../../src/agents/request-model-credential.js";
 import { withRequestScopedChildExecution } from "../../src/agents/request-scoped-child-execution.js";
 import { bindRequestOwnedSubagentExecution } from "../../src/agents/subagents/registry/subagent-registry-transient-content.js";
@@ -28,12 +29,16 @@ import {
   type HostSessionAccess,
 } from "../../src/agents/tools/scoped-session-access.js";
 import { makeZeroUsageSnapshot, type NormalizedUsage } from "../../src/agents/usage.js";
+import { runMemoryFlushIfNeeded } from "../../src/auto-reply/reply/agent-runner-memory.js";
+import type { FollowupRun } from "../../src/auto-reply/reply/queue.js";
 import { createDefaultDeps } from "../../src/cli/deps.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
+import { readSessionEntryReadOnlyInWorker } from "../../src/config/sessions/session-entry-read-runtime.js";
 import {
   appendExactAssistantMessageToSessionTranscript,
   type SessionTranscriptAssistantMessage,
 } from "../../src/config/sessions/transcript.js";
+import type { SessionEntry } from "../../src/config/sessions/types.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { withLocalGatewayRequestScope } from "../../src/gateway/local-request-context.js";
 import { captureGatewayOperatorRunAuthority } from "../../src/gateway/operator-run-authority.js";
@@ -48,9 +53,14 @@ import { GatewayScheduler } from "../../src/infra/gateway-scheduler.js";
 import { computeUsageTokenTotals } from "../../src/infra/session-cost-usage-pricing.js";
 import { LegacyPluginSdkResourceHost } from "../../src/plugins/legacy-sdk-resource-host.js";
 import {
+  delegateMemoryAudience,
+  type MemoryAudienceGrant,
+} from "../../src/plugins/memory-audience.js";
+import {
   getPluginRuntimeGatewayRequestScope,
   withPluginRuntimeGatewayRequestScope,
 } from "../../src/plugins/runtime/gateway-request-scope.js";
+import { withPluginRuntimeGenerationScope } from "../../src/plugins/runtime/generation-scope.js";
 import {
   OPENCLAW_DELIVERY_MIRROR_MODEL,
   OPENCLAW_TRANSCRIPT_ARTIFACT_API,
@@ -65,13 +75,18 @@ import {
   type AutomationsAuthoringBindings,
   type AutomationsChatBindings,
 } from "./automations-chat/contract.js";
+import type { StorageFiles } from "./capacity.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
+import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import { projectActivity, projectToolResult, type Source, type Widget } from "./tool-events.js";
 
 export type { ProtectedModel };
+const memberMemoryToolNames = ["memory_search", "memory_get", "memory_store"] as const;
+const memberMemoryGuidance =
+  "Use memory_search before answering questions about the member's prior preferences or decisions. Use memory_get to read relevant excerpts. Use memory_store for durable information the member wants remembered. This memory belongs only to the current member.";
 export type TurnInput = {
   text: string;
   mentions?: ProtectedAgentMention[];
@@ -104,7 +119,9 @@ export type ProtectedTurn = {
     resolve: (agentId: string) => Readonly<ProtectedAgentDefinition> | undefined;
   };
   sessionAccess: HostSessionAccess;
+  sessionEntry?: SessionEntry;
   files: AuthorizedUserFiles;
+  memoryFiles?: StorageFiles;
   signal: AbortSignal;
   assertCurrent: () => void;
   revalidate: () => Promise<void>;
@@ -136,6 +153,10 @@ const automationsAuthoringInstructions =
 const automationsChatInstructions =
   "Automation tools can only read this member's private automations or prepare suggestions. Every proposal returns writeApplied:false and has not been saved or scheduled. Never claim that a proposal changed or enabled an automation.";
 
+type ProtectedMemberMemoryLease = Awaited<
+  ReturnType<ReturnType<typeof createProtectedMemberMemory>["open"]>
+>;
+
 async function runMentionedAgent(
   config: OpenClawConfig,
   turn: ProtectedTurn,
@@ -143,6 +164,7 @@ async function runMentionedAgent(
   credential: ReturnType<typeof createRequestModelCredential>,
   recordUsage: (usage: NormalizedUsage | undefined) => void,
   recordModelRequest: (record: TerminalModelRequestMetadata) => void,
+  memberMemory: ProtectedMemberMemoryLease | undefined,
   task = turn.input.text,
 ) {
   const children = new Map<
@@ -153,6 +175,7 @@ async function runMentionedAgent(
       lifecycleRevision: string;
       releaseSessionAccess: () => void;
       releaseExecution: () => void;
+      memoryGrant?: MemoryAudienceGrant;
     }
   >();
   let savedResult = false;
@@ -195,6 +218,15 @@ async function runMentionedAgent(
           recordUsage(usage);
         },
         requestModelCredential: credential.handle,
+        memoryAudience: child.memoryGrant?.audience,
+        ...(memberMemory && child.memoryGrant
+          ? {
+              toolRuntimeBindings: {
+                "memory-core": memberMemory.bindDelegated(child.memoryGrant.audience),
+              },
+              assertInvocationCurrent: turn.assertCurrent,
+            }
+          : {}),
         userFileScope: {
           files: turn.files,
           directory: chatFilesDirectory(sessionId),
@@ -202,9 +234,11 @@ async function runMentionedAgent(
             .update(`${turn.profileId}:${sessionId}:${runId}`)
             .digest("hex"),
         },
-        toolsAllow: [...agent.tools],
-        toolExecutionAllow: agent.tools,
-        extraSystemPrompt: agent.systemPrompt,
+        toolsAllow: [...agent.tools, ...(child.memoryGrant ? memberMemoryToolNames : [])],
+        toolExecutionAllow: [...agent.tools, ...(child.memoryGrant ? memberMemoryToolNames : [])],
+        extraSystemPrompt: child.memoryGrant
+          ? [agent.systemPrompt, memberMemoryGuidance].join("\n\n")
+          : agent.systemPrompt,
         skillsSnapshot: agent.skillsSnapshot,
         clientCaps: ["inline-widgets"],
       };
@@ -242,7 +276,7 @@ async function runMentionedAgent(
             profileId: turn.profileId,
           },
           assertActive: turn.assertCurrent,
-          beforeChildDispatch: (child) => {
+          beforeChildDispatch: async (child) => {
             turn.assertCurrent();
             if (
               !child.lifecycleRevision ||
@@ -253,12 +287,22 @@ async function runMentionedAgent(
             }
             const releaseSessionAccess = turn.registerChildSession(child.sessionKey);
             let releaseExecution: (() => void) | undefined;
+            let memoryGrant: MemoryAudienceGrant | undefined;
             try {
+              if (memberMemory) {
+                memoryGrant = await delegateMemoryAudience(memberMemory.binding.audience, {
+                  sessionKey: child.sessionKey,
+                  storePath: turn.target.storePath,
+                  assertCallerCurrent: turn.assertCurrent,
+                });
+              }
+              turn.assertCurrent();
               releaseExecution = bindRequestOwnedSubagentExecution({
                 runId: child.runId,
                 scope,
               });
             } catch (error) {
+              memoryGrant?.release();
               releaseSessionAccess();
               throw error;
             }
@@ -266,6 +310,7 @@ async function runMentionedAgent(
               ...child,
               releaseSessionAccess,
               releaseExecution,
+              memoryGrant,
             });
             spawnedRunId = child.runId;
           },
@@ -315,6 +360,7 @@ async function runMentionedAgent(
             }
             child?.releaseSessionAccess();
             child?.releaseExecution();
+            child?.memoryGrant?.release();
             settle(outcome);
           },
           requesterThinkingLevel: turn.input.provider === "sparky" ? "ultra" : undefined,
@@ -342,6 +388,7 @@ async function runMentionedAgent(
     for (const child of children.values()) {
       child.releaseSessionAccess();
       child.releaseExecution();
+      child.memoryGrant?.release();
     }
     if (spawnedRunId && !usageReported) {
       recordUsage(undefined);
@@ -469,6 +516,7 @@ export function createCanonicalProtectedTurns(options: {
   agentDir: string;
   models: readonly ProtectedModel[];
   resolveSparkyKey: () => Promise<string>;
+  memberMemory?: ReturnType<typeof createProtectedMemberMemory>;
 }) {
   return {
     models: options.models,
@@ -613,6 +661,7 @@ export function createCanonicalProtectedTurns(options: {
         }
       };
       let credential: ReturnType<typeof createRequestModelCredential> | undefined;
+      let memberMemory: ProtectedMemberMemoryLease | undefined;
       let tokenTotal: number | null = 0;
       const recordUsage = (usage: NormalizedUsage | undefined) => {
         const tokens =
@@ -652,7 +701,157 @@ export function createCanonicalProtectedTurns(options: {
             ? turn.agent.tools.filter((tool) => !tool.startsWith("sessions_"))
             : turn.agent.tools),
           ...automationToolNames,
+          ...(options.memberMemory ? memberMemoryToolNames : []),
         ];
+        if (options.memberMemory) {
+          if (!turn.memoryFiles || !turn.sessionEntry) {
+            throw new Error("Member memory requires admitted storage and a current session.");
+          }
+          memberMemory = await options.memberMemory.open({
+            cfg: config,
+            profileId: turn.profileId,
+            agentId: turn.target.agentId,
+            sessionKey: turn.target.sessionKey,
+            sessionId: turn.target.nativeSessionId,
+            lifecycleRevision: turn.target.lifecycleRevision ?? undefined,
+            storePath: turn.target.storePath,
+            files: turn.memoryFiles,
+            assertCurrent: turn.assertCurrent,
+          });
+        }
+        const userFileScope = {
+          files: turn.files,
+          directory: chatFilesDirectory(turn.id),
+          cacheKey: createHash("sha256")
+            .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
+            .digest("hex"),
+        };
+        const systemPrompt = [
+          turn.agent.systemPrompt,
+          ...(turn.automationChat
+            ? [authoring ? automationsAuthoringInstructions : automationsChatInstructions]
+            : []),
+          ...(memberMemory ? [memberMemoryGuidance] : []),
+        ].join("\n\n");
+        let beforeCompaction: (() => Promise<void>) | undefined;
+        if (memberMemory && turn.sessionEntry) {
+          const memory = memberMemory;
+          const sessionFile = formatSqliteSessionFileMarker({
+            ...turn.target,
+            sessionId: turn.id,
+          });
+          const followupRun: FollowupRun = {
+            prompt: turn.input.text,
+            enqueuedAt: Date.now(),
+            abortSignal: turn.signal,
+            run: {
+              agentId: turn.target.agentId,
+              agentDir: options.agentDir,
+              sessionId: turn.id,
+              sessionKey: turn.target.sessionKey,
+              sessionFile,
+              workspaceDir: options.workspaceDir,
+              config,
+              provider,
+              model,
+              modelSelectionLocked: true,
+              timeoutMs: protectedTurnTimeoutMs,
+              blockReplyBreak: "text_end",
+              extraSystemPrompt: systemPrompt,
+              skillsSnapshot: turn.agent.skillsSnapshot,
+            },
+          };
+          const flushMemberMemory = async (forceMemberFlush: boolean) => {
+            const currentEntry = forceMemberFlush
+              ? await readSessionEntryReadOnlyInWorker(
+                  {
+                    agentId: turn.target.agentId,
+                    sessionKey: turn.target.sessionKey,
+                    storePath: turn.target.storePath,
+                    readConsistency: "latest",
+                  },
+                  turn.assertCurrent,
+                )
+              : turn.sessionEntry;
+            if (
+              !currentEntry ||
+              currentEntry.sessionId !== turn.sessionEntry?.sessionId ||
+              currentEntry.lifecycleRevision !== turn.sessionEntry.lifecycleRevision
+            ) {
+              throw new Error("Member memory flush session changed.");
+            }
+            const { acquireAgentRunPreparedModelRuntime } =
+              await import("../../src/agents/prepared-model-runtime.js");
+            await using runtime = await acquireAgentRunPreparedModelRuntime(
+              {
+                config,
+                agentId: turn.target.agentId,
+                agentDir: options.agentDir,
+                workspaceDir: options.workspaceDir,
+                allowGatewaySubagentBinding: false,
+                runtimePluginSelections: [{ provider, modelId: model, runtime: "openclaw" }],
+              },
+              { catalogMode: "static", abortSignal: turn.signal },
+            );
+            let runtimeActive = true;
+            const flushed = await (async () => {
+              try {
+                return await withPreparedModelRuntimePluginGenerationScope(
+                  runtime.pluginGeneration,
+                  () => {
+                    const runFlush = () =>
+                      withoutModelRequestTelemetry(() =>
+                        withPluginRuntimeGenerationScope(runtime.snapshot, () =>
+                          withHostSessionAccess(turn.sessionAccess, () =>
+                            runMemoryFlushIfNeeded({
+                              cfg: config,
+                              followupRun,
+                              promptForEstimate: turn.input.text,
+                              defaultModel: model,
+                              resolvedVerboseLevel: "off",
+                              sessionEntry: currentEntry,
+                              sessionKey: turn.target.sessionKey,
+                              storePath: turn.target.storePath,
+                              isHeartbeat: false,
+                              abortSignal: turn.signal,
+                              forceMemberFlush,
+                              memberMemory: {
+                                audience: memory.binding.audience,
+                                assertCurrent: turn.assertCurrent,
+                                requestModelCredential: requestCredential.handle,
+                                userFileScope,
+                                bindDelegated: memory.bindDelegated,
+                              },
+                            }),
+                          ),
+                        ),
+                      );
+                    return forceMemberFlush
+                      ? runFlush()
+                      : withProtectedGatewayAuthority(config, turn, runFlush);
+                  },
+                  () => (runtimeActive ? runtime.snapshot : undefined),
+                );
+              } finally {
+                runtimeActive = false;
+              }
+            })();
+            await turn.revalidate();
+            if (
+              flushed.outcome === "failed" ||
+              flushed.outcome === "exhausted" ||
+              (forceMemberFlush && flushed.outcome !== "completed")
+            ) {
+              throw new ProtectedError(
+                503,
+                "unavailable",
+                "Memory could not be saved before compaction. Please try again.",
+              );
+            }
+          };
+          await flushMemberMemory(false);
+          beforeCompaction = () => flushMemberMemory(true);
+        }
         const result = await withProtectedGatewayAuthority(config, turn, () =>
           withoutModelRequestTelemetry(
             () =>
@@ -673,9 +872,7 @@ export function createCanonicalProtectedTurns(options: {
                   agentDir: options.agentDir,
                   prompt: turn.input.text,
                   transcriptPrompt: turn.input.text,
-                  extraSystemPrompt: turn.automationChat
-                    ? `${turn.agent.systemPrompt}\n\n${authoring ? automationsAuthoringInstructions : automationsChatInstructions}`
-                    : turn.agent.systemPrompt,
+                  extraSystemPrompt: systemPrompt,
                   skillsSnapshot: turn.agent.skillsSnapshot,
                   trigger: "user",
                   provider,
@@ -688,6 +885,9 @@ export function createCanonicalProtectedTurns(options: {
                   agentHarnessRuntimeOverride: "openclaw",
                   preparedRunAdmission: admission,
                   requestModelCredential: requestCredential.handle,
+                  memoryAudience: memberMemory?.binding.audience,
+                  beforeCompaction,
+                  ...(memberMemory ? { assertInvocationCurrent: turn.assertCurrent } : {}),
                   onExecutionPhase: ({ phase }) => {
                     if (phase === "model_call_started") {
                       turn.markTiming("providerRequestStartMs");
@@ -711,21 +911,18 @@ export function createCanonicalProtectedTurns(options: {
                         },
                       }
                     : {}),
-                  ...(turn.automationChat
+                  ...(turn.automationChat || memberMemory
                     ? {
                         toolRuntimeBindings: {
-                          [AUTOMATIONS_CHAT_PLUGIN_ID]: turn.automationChat,
+                          ...(turn.automationChat
+                            ? { [AUTOMATIONS_CHAT_PLUGIN_ID]: turn.automationChat }
+                            : {}),
+                          ...(memberMemory ? { "memory-core": memberMemory.binding } : {}),
                         },
                       }
                     : {}),
                   clientCaps: ["inline-widgets"],
-                  userFileScope: {
-                    files: turn.files,
-                    directory: chatFilesDirectory(turn.id),
-                    cacheKey: createHash("sha256")
-                      .update(`${turn.profileId}:${turn.id}:${turn.runId}`)
-                      .digest("hex"),
-                  },
+                  userFileScope,
                   onAgentToolResult,
                   onAssistantMessageStart: () => {
                     lastReasoning = "";
@@ -827,6 +1024,7 @@ export function createCanonicalProtectedTurns(options: {
                     requestCredential,
                     recordUsage,
                     recordModelRequest,
+                    memberMemory,
                   );
                 }
                 if (route) {
@@ -838,6 +1036,7 @@ export function createCanonicalProtectedTurns(options: {
                     requestCredential,
                     recordUsage,
                     recordModelRequest,
+                    memberMemory,
                     route.task,
                   );
                 }
@@ -851,7 +1050,11 @@ export function createCanonicalProtectedTurns(options: {
           unsubscribe();
           admission.close();
         } finally {
-          credential?.close();
+          try {
+            await memberMemory?.release();
+          } finally {
+            credential?.close();
+          }
         }
       }
     },

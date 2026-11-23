@@ -1,5 +1,11 @@
 export { getMemorySearchManager } from "./src/memory/index.js";
 export { createMemoryRuntime } from "./src/runtime-provider.js";
+export {
+  closeMemberMemory,
+  createMemberMemoryNoteReader,
+  openMemberMemory,
+  retireMemberMemory,
+} from "./src/member-memory.js";
 export { createEmbeddingProvider } from "./src/memory/embeddings.js";
 export {
   resolveMemoryCacheSummary,

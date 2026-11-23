@@ -160,6 +160,8 @@ export async function buildPreparedCompactionRuntime(
             sessionId: params.sessionId,
             chatType: params.chatType,
             agentId: sessionAgentId,
+            contextMode: params.bootstrapContextMode,
+            runKind: params.bootstrapContextRunKind,
             warn: makeBootstrapWarn({
               sessionLabel,
               warn: (message) => log.warn(message),

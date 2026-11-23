@@ -7,6 +7,7 @@ export type {
 export {
   closeMemberMemory,
   createMemberMemoryNoteReader,
+  mutateMemberMemory,
   openMemberMemory,
   retireMemberMemory,
 } from "./src/member-memory.js";

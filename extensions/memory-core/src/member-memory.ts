@@ -148,8 +148,19 @@ export async function openMemberMemory(
         if (!/^memory\/\d{4}-\d{2}-\d{2}\.md$/u.test(path)) {
           throw new Error("Member memory can only append to a daily note.");
         }
+        const normalized = content.trim().replace(/\s+/gu, " ").toLowerCase();
+        for (const note of await snapshotNotes(binding.files)) {
+          if (
+            note.content
+              .split(/\r?\n/u)
+              .some((line) => line.trim().replace(/\s+/gu, " ").toLowerCase() === normalized)
+          ) {
+            return false;
+          }
+        }
         index.markDirty();
         await binding.files.append(path, content);
+        return true;
       }),
     release: index.release,
   };
@@ -157,6 +168,22 @@ export async function openMemberMemory(
 
 export async function retireMemberMemory(memberKey: string): Promise<void> {
   await indexes.retire(memberKey);
+}
+
+/** Serialize external file mutations with member searches and writes. */
+export async function mutateMemberMemory<T>(
+  access: { memberKey: string; workspaceGeneration: string; assertCurrent: () => void },
+  operation: () => Promise<T>,
+): Promise<T> {
+  const index = await indexes.acquire(access);
+  try {
+    return await index.run(async () => {
+      index.markDirty();
+      return await operation();
+    });
+  } finally {
+    await index.release();
+  }
 }
 
 export async function closeMemberMemory(): Promise<void> {

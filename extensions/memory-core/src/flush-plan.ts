@@ -122,11 +122,11 @@ export const buildMemoryProviderFlushPlan: MemoryProviderFlushPlanResolver = (pa
   return {
     ...timing,
     prompt: [
-      "Pre-compaction memory flush. Use memory_store to append durable member memories.",
+      "Pre-compaction memory flush. Usually store nothing. Use memory_store only for a short explicit or well-supported durable personal preference that helps future conversations. Search first and do not duplicate existing memories. Do not save chat summaries, itineraries, automation instructions, or run details.",
       `If nothing to store, reply with ${SILENT_REPLY_TOKEN}.`,
     ].join(" "),
     systemPrompt:
-      "Pre-compaction memory flush turn. Store durable member memories only through memory_store.",
+      "Pre-compaction memory flush turn. Usually store nothing. Store only short, useful, durable personal context through memory_store, and search before saving. Never save session summaries or routine task details.",
     persistenceToolNames: ["memory_store"],
     lookupToolNames: ["memory_search", "memory_get"],
   };

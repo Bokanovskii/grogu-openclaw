@@ -18,6 +18,7 @@ const [
   { createStorageValueEncryption },
   { createProtectedHttp },
   { createProtectedMemoryReview },
+  { createProtectedMemberMemory },
   { createProtectedServer, closeProtectedServer },
 ] = await Promise.all([
   import("../../src/infra/fs-safe.js"),
@@ -25,6 +26,7 @@ const [
   import("../../src/storage/encryption.js"),
   import("./http.js"),
   import("./memory-review.js"),
+  import("./member-memory.js"),
   import("./server.js"),
 ]);
 
@@ -42,6 +44,7 @@ const app = createProtectedHttp({
   usersRoot,
   encryption,
   memoryReview: createProtectedMemoryReview(),
+  memberMemory: createProtectedMemberMemory(),
   directory: { issuer: "https://synthetic.example", allowedSubjects: ["alice", "bob"] },
   verifyIdentity: async (request) => {
     const cookie = request.headers.get("cookie") ?? "";
@@ -117,9 +120,11 @@ for (const [subject, content] of [
 const server = createProtectedServer(uiOrigin, async (request) => {
   const pathname = new URL(request.url).pathname;
   if (
-    request.method !== "GET" ||
-    (pathname !== "/api/protected/v1/me" &&
-      !/^\/api\/protected\/v1\/memory(?:\/[A-Za-z0-9_-]+)?$/u.test(pathname))
+    !(
+      (request.method === "GET" && pathname === "/api/protected/v1/me") ||
+      ((request.method === "GET" || request.method === "DELETE") &&
+        /^\/api\/protected\/v1\/memory(?:\/[A-Za-z0-9_-]+)?$/u.test(pathname))
+    )
   ) {
     return new Response(null, { status: 404 });
   }

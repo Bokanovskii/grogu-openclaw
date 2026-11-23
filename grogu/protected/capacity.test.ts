@@ -74,10 +74,31 @@ void test("retained member memory counts against global and owner storage withou
   const admit = createStorageAdmission(options);
   const second = await admit("second", () => {}, "stored-data");
   const first = await admit("first", () => {}, "stored-data");
+  const owned = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    assertCurrent: () => {},
+    maxBytes: 16_384,
+    encryption,
+  });
+  const deletion = await admit("first", () => {}, "delete");
   try {
     assert.throws(() => first.charge(8_000), { code: "quota_exceeded" });
+    assert.equal(
+      await deletion
+        .files(owned)
+        .removeFileIfBytesMatch(
+          "member-memory/memory/note.md",
+          Buffer.from("x".repeat(1_000)),
+          async () => {},
+        ),
+      true,
+    );
+    first.charge(8_000);
     second.charge(8_000);
   } finally {
+    deletion.release();
+    owned.dispose();
     first.release();
     second.release();
   }
@@ -152,6 +173,16 @@ void test("concurrent encrypted memory updates preserve both writes and enforce 
       code: "file_too_large",
     });
     assert.equal(await files.readText(name), "first\nsecond\n");
+    const removable = first.files(files);
+    assert.equal(
+      await removable.removeFileIfBytesMatch(name, Buffer.from("first\n"), async () => {}),
+      false,
+    );
+    assert.equal(
+      await removable.removeFileIfBytesMatch(name, Buffer.from("first\nsecond\n"), async () => {}),
+      true,
+    );
+    assert.equal(await secondMemory.read("memory/note.md"), undefined);
     first.release();
     await assert.rejects(firstMemory.read("memory/note.md"), /Storage admission is closed/);
     await assert.rejects(firstMemory.append("memory/note.md", "x"), /Storage admission is closed/);

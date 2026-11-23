@@ -18,6 +18,8 @@ import { createMemberMemoryFiles } from "./memory-files.js";
 
 const log = createSubsystemLogger("protected/member-memory");
 const loadMemoryCore = () => import("../../extensions/memory-core/api.js");
+const workspaceGeneration = (profileId: string, revision: number) =>
+  createHash("sha256").update(profileId).update("\0").update(String(revision)).digest("hex");
 
 /** Owns member grants and retires derived plaintext when profile authority changes. */
 export function createProtectedMemberMemory() {
@@ -66,18 +68,14 @@ export function createProtectedMemberMemory() {
         }
       };
       assertCurrent();
-      const workspaceGeneration = createHash("sha256")
-        .update(params.profileId)
-        .update("\0")
-        .update(String(revision))
-        .digest("hex");
+      const generation = workspaceGeneration(params.profileId, revision);
       const grant = await mintMemberMemoryAudience({
         agentId: params.agentId,
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,
         lifecycleRevision: params.lifecycleRevision,
         storePath: params.storePath,
-        workspaceKey: workspaceGeneration,
+        workspaceKey: generation,
         assertOwnerCurrent: assertCurrent,
       });
       try {
@@ -87,7 +85,7 @@ export function createProtectedMemberMemory() {
         const binding: MemberMemoryBinding = {
           audience: grant.audience,
           memberKey: params.profileId,
-          workspaceGeneration,
+          workspaceGeneration: generation,
           files: createMemberMemoryFiles(params.files),
         };
         const settings = resolveMemorySearchIndexConfig(params.cfg, params.agentId, {
@@ -140,6 +138,28 @@ export function createProtectedMemberMemory() {
         grant.release();
         throw error;
       }
+    },
+    async mutate<T>(
+      profileId: string,
+      assertOwnerCurrent: () => void,
+      operation: () => Promise<T>,
+    ) {
+      const revision = readUserProfileAliasRevision();
+      const assertCurrent = () => {
+        assertOwnerCurrent();
+        if (closed || readUserProfileAliasRevision() !== revision) {
+          throw new Error("Member memory profile authority is no longer current.");
+        }
+      };
+      const memory = await loadMemoryCore();
+      return await memory.mutateMemberMemory(
+        {
+          memberKey: profileId,
+          workspaceGeneration: workspaceGeneration(profileId, revision),
+          assertCurrent,
+        },
+        operation,
+      );
     },
     retire,
     async close() {

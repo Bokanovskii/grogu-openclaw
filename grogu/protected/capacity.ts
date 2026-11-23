@@ -41,6 +41,11 @@ export const defaultUserLimitBytes = 512 * MiB;
 export const minimumUserLimitBytes = 16 * MiB;
 
 export type StorageFiles = AuthorizedUserFiles & {
+  removeFileIfBytesMatch(
+    name: string,
+    expected: Buffer,
+    revalidate: () => Promise<void>,
+  ): Promise<boolean>;
   updateText(name: string, update: (current: string | undefined) => string): Promise<void>;
 };
 
@@ -295,7 +300,7 @@ export function createStorageAdmission(
   const admit = async (
     profileId: string,
     assertCurrent: () => void,
-    operation: "create" | "turn" | "automation" | "stored-data",
+    operation: "create" | "turn" | "automation" | "stored-data" | "delete",
     // null exempts the caller (the owner) from member and shared budgets, not the disk floor.
     userLimitBytes: number | null = options.limits.userBytes,
   ): Promise<StorageAdmission> => {
@@ -337,7 +342,11 @@ export function createStorageAdmission(
       }
     };
     try {
-      assertDisk();
+      if (operation === "delete") {
+        assertCurrent();
+      } else {
+        assertDisk();
+      }
       const measure = async () => {
         const deleted = new Set<string>();
         const deletedAutomations = new Map<
@@ -719,6 +728,26 @@ export function createStorageAdmission(
             },
             remove(name) {
               return withMutation(() => files.remove(name));
+            },
+            removeFile(name) {
+              return withMutation(() => files.removeFile(name));
+            },
+            async removeFileIfBytesMatch(name, expected, revalidate) {
+              let removed = false;
+              await withMutation(async () => {
+                if (!active) {
+                  throw new Error("Storage admission is closed.");
+                }
+                await revalidate();
+                if (!(await files.read(name)).equals(expected)) {
+                  return;
+                }
+                const bytes = await size(name);
+                await files.removeFile(name);
+                refund(bytes);
+                removed = true;
+              });
+              return removed;
             },
             removeEmptyDirectory(name) {
               return withMutation(() => files.removeEmptyDirectory(name));

@@ -400,7 +400,10 @@ These routes do not start runs or enable scheduling.
 Clients that also negotiate `automation-runs-v1` can enable and pause eligible
 automations, start a run with `POST /automations/:id/run`, inspect lifecycle
 history at `GET /automations/:id/run-history`, and read the owner's inbox at
-`GET /automations/inbox`. Runs use the owner's protected turn and one dedicated
+`GET /automations/inbox`. Manual runs work while paused and leave the schedule
+paused. Scheduled runs require an enabled automation. A first manual run reserves
+the same bounded run-metadata capacity as enabling a schedule, within the existing
+storage budgets. Runs use the owner's protected turn and one dedicated
 chat per automation. At most 50 runs and results per automation and 200 inbox
 entries per recipient are retained, oldest first. Push is not started; an inbox
 delivery that cannot fit remains pending for retry.

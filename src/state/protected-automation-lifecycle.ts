@@ -280,7 +280,7 @@ export function prepareProtectedAutomationLifecycle(
     if (automation.definitionRevision !== command.definitionRevision) {
       return { status: "definition-changed" };
     }
-    if (!automation.enabled) {
+    if (command.trigger === "scheduled" && !automation.enabled) {
       return { status: "disabled" };
     }
     if (
@@ -359,7 +359,7 @@ export function prepareProtectedAutomationLifecycle(
       if (row.status !== "queued" || command.now < row.queued_at_ms) {
         return { status: "conflict" };
       }
-      if (!automation.enabled) {
+      if (row.trigger === "scheduled" && !automation.enabled) {
         return { status: "disabled" };
       }
       if (automation.definitionRevision !== row.definition_revision) {

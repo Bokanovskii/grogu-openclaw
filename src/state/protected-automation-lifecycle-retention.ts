@@ -205,7 +205,7 @@ export function protectedAutomationResultLifecycleCurrent(
         .where("run.status", "=", "running")
         .where("run.definition_revision", "=", input.definitionRevision)
         .where("run.scheduled_at_ms", "=", input.runAtMs)
-        .where("automation.enabled", "=", 1)
+        .where((eb) => eb.or([eb("run.trigger", "=", "manual"), eb("automation.enabled", "=", 1)]))
         .whereRef("automation.definition_revision", "=", "run.definition_revision")
         .limit(1),
     ).rows[0],

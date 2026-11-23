@@ -45,6 +45,7 @@ import {
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { createProtectedAutomationStorageRecoveryOwner } from "./automation-storage-recovery.js";
+import { readOwnedProtectedAutomationStorageRecord } from "./automations-store.js";
 import {
   readProtectedFeedbackStorageUsage,
   submitProtectedFeedbackReport,
@@ -254,6 +255,109 @@ function authority(profileId: string) {
     pending: () => pending,
   };
 }
+
+void test("paused automations allow manual lifecycle runs but refuse scheduled runs", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId);
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+  const scheduledRunId = randomUUID();
+  assert.deepEqual(
+    await write({
+      kind: "queue",
+      runId: scheduledRunId,
+      definitionRevision: f.revision,
+      trigger: "scheduled",
+      scheduledAtMs: 10,
+      now: 10,
+    }),
+    { status: "committed" },
+  );
+  const paused = await patchProtectedAutomationWithAdmission(
+    captureProtectedStateWorkerContext(f.stateDir),
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      expectedRevision: f.revision,
+      definition: f.definition,
+      enabled: false,
+      now: 11,
+    },
+    { profileId: f.ownerId, assertCurrent: () => {}, admitStorage: () => {} },
+  );
+  assert.equal(paused.status, "updated");
+  if (paused.status !== "updated") {
+    throw new Error("Synthetic automation was not paused.");
+  }
+  const chatId = randomUUID();
+  assert.deepEqual(await write({ kind: "start", runId: scheduledRunId, chatId, now: 12 }), {
+    status: "disabled",
+  });
+  assert.deepEqual(
+    await write({
+      kind: "finish",
+      runId: scheduledRunId,
+      now: 12,
+      outcome: { status: "skipped", errorCode: "automation_disabled" },
+    }),
+    { status: "committed" },
+  );
+  const queue = {
+    kind: "queue" as const,
+    runId: randomUUID(),
+    definitionRevision: paused.automation.definitionRevision,
+    scheduledAtMs: 13,
+    now: 13,
+  };
+  assert.deepEqual(await write({ ...queue, trigger: "scheduled" }), { status: "disabled" });
+  assert.deepEqual(await write({ ...queue, trigger: "manual" }), { status: "committed" });
+  assert.deepEqual(await write({ ...queue, runId: randomUUID(), trigger: "manual" }), {
+    status: "busy",
+  });
+  assert.deepEqual(await write({ kind: "start", runId: queue.runId, chatId, now: 14 }), {
+    status: "committed",
+  });
+  const result = await commitProtectedAutomationFinishedResult(
+    f.stateDir,
+    {
+      automationId: f.automationId,
+      centralOwnerProfileId: f.ownerId,
+      definitionRevision: queue.definitionRevision,
+      jobId: f.automationId,
+      runId: queue.runId,
+      runAtMs: queue.scheduledAtMs,
+      completedAtMs: 15,
+      automationName: f.definition.name,
+      privateFinalText: "Synthetic paused-run result.",
+      transcript: { sessionKey: "synthetic-paused-run", sessionId: chatId },
+    },
+    owner.resultAdmission,
+  );
+  assert.equal(result.status, "created");
+  if (result.status !== "created") {
+    throw new Error("Synthetic paused-run result was not created.");
+  }
+  assert.deepEqual(
+    await write({
+      kind: "finish",
+      runId: queue.runId,
+      now: 15,
+      outcome: { status: "succeeded", resultId: result.id },
+    }),
+    { status: "committed" },
+  );
+  const automation = await readOwnedProtectedAutomationStorageRecord(
+    f.stateDir,
+    f.automationId,
+    owner.admission,
+  );
+  assert.equal(automation?.enabled, false);
+});
 
 void test("worker-backed lifecycle admission, sealed-result delivery, retention and quota settlement", async (t) => {
   const f = await fixture(t);

@@ -5,7 +5,10 @@ import { getEnvironmentData, setEnvironmentData } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION,
+} from "../state/openclaw-agent-db-contract.js";
 import { OPENCLAW_AGENT_SCHEMA_SQL } from "../state/openclaw-agent-schema.js";
 import { prepareOpenClawDatabaseSchemaContracts } from "../state/openclaw-database-schema-contracts.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
@@ -249,8 +252,9 @@ it("inherits complete expected schemas through a cold carrier while rechecking a
       found: true,
       expectedStatements: 0,
     });
-    database.exec(`PRAGMA user_version=${OPENCLAW_AGENT_SCHEMA_VERSION + 1};
-      UPDATE schema_meta SET schema_version=${OPENCLAW_AGENT_SCHEMA_VERSION + 1};`);
+    const futureVersion = PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION + 1;
+    database.exec(`PRAGMA user_version=${futureVersion};
+      UPDATE schema_meta SET schema_version=${futureVersion};`);
     await expect(inspect("open-agent")).resolves.toMatchObject({
       error: expect.stringMatching(/newer|newest supported/u),
       found: undefined,

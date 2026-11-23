@@ -197,7 +197,10 @@ same reply is rejected.
 The runtime stores the report description with the existing protected-storage
 codec. It stores evidence references, not copied prompts, replies, sources,
 widgets, or files. The owner resolves evidence from the submitting member's
-authorized saved reply; only files proven to belong to that turn are included.
+authorized saved reply; only file references, names, and sizes proven to belong
+to that turn are included. This includes newly generated HTML files, using the
+same IDs and display names as the artifact library. File HTML is not included;
+widget evidence remains the saved reply's widget IDs and titles.
 Descriptions and resolved evidence use the existing secret redactor. Ordinary
 members cannot read other members' ratings, owner reports, report assets, or
 cross-user telemetry.

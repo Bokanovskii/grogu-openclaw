@@ -66,7 +66,12 @@ import {
   withdrawProtectedAccessRequest,
 } from "./admission-store.js";
 import { createProtectedAgentCatalog, type ProtectedAgentExtension } from "./agents.js";
-import { listProtectedArtifacts, validFilename, validGeneratedFilename } from "./artifacts.js";
+import {
+  listProtectedArtifacts,
+  listProtectedChatFileCandidates,
+  validFilename,
+  validGeneratedFilename,
+} from "./artifacts.js";
 import {
   createProtectedAutomationRecord,
   listProtectedAutomationRecords,
@@ -170,30 +175,24 @@ async function listChatArtifactFiles(
   chatId: string,
   maxFileBytes: number,
 ): Promise<ProtectedProducedFile[]> {
-  let names: string[];
-  try {
-    names = await files.list(chatArtifactsDirectory(chatId));
-  } catch (error) {
-    if (error instanceof FsSafeError && error.code === "not-found") {
-      return [];
-    }
-    throw error;
-  }
   const result: ProtectedProducedFile[] = [];
-  for (const name of names) {
-    if (!validFilename(name)) {
-      continue;
-    }
-    const info = await files.stat(`${chatArtifactsDirectory(chatId)}/${name}`);
-    const id = `${chatId}~${name}`;
-    if (
-      info.isFile &&
-      info.size <= maxFileBytes &&
-      id.length <= 200 &&
-      redactFeedbackText(id) === id &&
-      redactFeedbackText(name) === name
-    ) {
-      result.push({ id, name, size: info.size, origin: "produced" });
+  for (const candidate of await listProtectedChatFileCandidates(files, chatId)) {
+    const { id, displayName: name } = candidate;
+    try {
+      const info = await files.stat(`${candidate.directory}/${candidate.name}`);
+      if (
+        info.isFile &&
+        info.size <= maxFileBytes &&
+        id.length <= 200 &&
+        redactFeedbackText(id) === id &&
+        redactFeedbackText(name) === name
+      ) {
+        result.push({ id, name, size: info.size, origin: "produced" });
+      }
+    } catch (error) {
+      if (!(error instanceof FsSafeError && error.code === "not-found")) {
+        throw error;
+      }
     }
   }
   return result;
@@ -2685,10 +2684,10 @@ export function createProtectedHttp(options: {
                     const result = await (storage
                       ? withTranscriptWriteBudget(storage.charge, execute)
                       : execute());
-                    const beforeNames = new Set(beforeArtifacts.map((file) => file.name));
+                    const beforeIds = new Set(beforeArtifacts.map((file) => file.id));
                     producedFiles = (
                       await listChatArtifactFiles(owned, id, options.maxFileBytes)
-                    ).filter((file) => !beforeNames.has(file.name));
+                    ).filter((file) => !beforeIds.has(file.id));
                     return result;
                   },
                   assertRun,

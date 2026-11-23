@@ -1,5 +1,4 @@
 import { executeSqliteQuerySync, sqliteStringSet } from "../../infra/kysely-sync.js";
-import { readSqliteDataVersion } from "../../infra/sqlite-schema-facts.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
 import {
   isOpenClawAgentDatabasePathCurrent,
@@ -26,8 +25,9 @@ import {
   readClaim,
 } from "./legacy-main-session-migration-claims.js";
 import {
-  checkpointProtectedLegacySessionCopy,
+  acquireLegacySessionDestinationCustody,
   isProtectedLegacySessionMove,
+  type LegacySessionDestinationCustody,
 } from "./legacy-main-session-migration-durability.js";
 import type {
   LegacyMainSessionMigrationMode,
@@ -423,6 +423,7 @@ async function deleteCopiedClaims(params: {
   const destinationIdentity = readOpenClawAgentDatabaseIdentity(writer).identity;
   const retained = borrowOpenClawAgentDatabase(options);
   let reader: OpenClawAgentReadOnlyDatabaseHandle | undefined;
+  let custody: LegacySessionDestinationCustody | undefined;
   try {
     const opened = openOpenClawAgentDatabaseReadOnly(options);
     if (!opened.found) {
@@ -443,38 +444,26 @@ async function deleteCopiedClaims(params: {
         throw changed();
       }
     };
-    if (isProtectedLegacySessionMove({ writer, sources, env: params.env, changed })) {
-      params.beforePersistentApply?.();
-      assertCurrent();
-      checkpointProtectedLegacySessionCopy(writer, params.canonicalKey);
-      assertCurrent();
+    params.beforePersistentApply?.();
+    assertCurrent();
+    custody = acquireLegacySessionDestinationCustody({
+      writer,
+      canonicalKey: params.canonicalKey,
+      durable: isProtectedLegacySessionMove({ writer, sources, env: params.env, changed }),
+      changed,
+    });
+    const held = custody;
+    // The held lock freezes the destination, so one verified read covers every source commit.
+    const destination = hasOpenClawAgentReadOnlySchema(destinationReader)
+      ? readClaim(destinationReader, params.destination, params.canonicalKey, params.canonicalKey)
+      : undefined;
+    if (!destination || !claimUnchanged(destination, params.receipt)) {
+      throw changed();
     }
-    let verifiedVersion: number | undefined;
     const assertCopied = () => {
       params.beforePersistentApply?.();
       assertCurrent();
-      const version = readSqliteDataVersion(destinationReader.db);
-      if (version === verifiedVersion) {
-        return;
-      }
-      if (!hasOpenClawAgentReadOnlySchema(destinationReader)) {
-        throw changed();
-      }
-      const destination = readClaim(
-        destinationReader,
-        params.destination,
-        params.canonicalKey,
-        params.canonicalKey,
-      );
-      if (!destination || !claimUnchanged(destination, params.receipt)) {
-        throw changed();
-      }
-      assertCurrent();
-      if (readSqliteDataVersion(destinationReader.db) !== version) {
-        throw changed();
-      }
-      // Only this dedicated reader can reuse its counter; no snapshot survives the assertion.
-      verifiedVersion = version;
+      held.assertHeld();
     };
     assertCopied();
     for (const claim of sources) {
@@ -485,6 +474,7 @@ async function deleteCopiedClaims(params: {
     return undefined;
   } finally {
     try {
+      custody?.release();
       reader?.close();
     } finally {
       retained.release();

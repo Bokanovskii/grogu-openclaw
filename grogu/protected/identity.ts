@@ -54,7 +54,7 @@ async function boundedJson(response: Response, maxBytes: number): Promise<unknow
   }
 }
 
-const testSubjectPrefix = "service-token:";
+export const protectedTestClientSubject = (clientId: string) => `service-token:${clientId}`;
 
 /**
  * Uses only the pinned Access issuer, never a URL supplied by a token. An Access service token
@@ -198,7 +198,7 @@ export function createCloudflareAccessVerifier(options: {
       }
       const verified = await verifyToken(token);
       const { testClient, expiresAt } = verified;
-      const subject = testClient ? `${testSubjectPrefix}${testClient}` : verified.subject;
+      const subject = testClient ? protectedTestClientSubject(testClient) : verified.subject;
       const clientSecret = request.headers.get(testClientSecretHeader);
       if (
         testClient &&

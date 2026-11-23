@@ -784,8 +784,13 @@ across assertions and changes when the secret is rotated. Signing out lasts
 until the secret is rotated. The raw secret is
 kept only in memory for the request. The
 user gets the subject `service-token:CLIENT_ID`, which cannot match a person.
-That subject gets its own profile and storage, like any other user. The future
-sharing feature must exclude it. To revoke the test user, delete
+That subject gets its own profile and storage, like any other user. Sharing
+excludes it. At startup the listener records an approved admission for that
+subject when it is missing, so the test user can own automations and has a
+storage limit like other members. The owner's People list shows this row.
+Removing it there revokes the test profile like any member, and startup never
+re-approves it; only a new client ID can test again. `test-client none` does not
+delete the row; remove it from People if the credential is retired. To revoke the test user, delete
 the service token or its Access policy, or run `test-client none` and restart.
 For owner-driven revocation, stop the listener before invoking
 `revoke-profile PROFILE_ID` and restart after it succeeds; the canonical denial

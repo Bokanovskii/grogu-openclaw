@@ -6,6 +6,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
 import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
+import { loadTranscriptEvents } from "../../src/config/sessions/session-accessor.js";
 import { appendTranscriptMessages } from "../../src/config/sessions/session-accessor.transcript-turn.js";
 import type { SessionTranscriptAssistantMessage } from "../../src/config/sessions/transcript.js";
 import { root } from "../../src/infra/fs-safe.js";
@@ -288,11 +289,13 @@ async function seedSideParent(t: TestContext) {
       { messages: messages.map((message) => ({ message })) },
     );
   const user = (text: string) => ({ role: "user", content: text, timestamp: Date.now() });
-  return { chats, authority, parent, append, user, assistant };
+  const rawEvents = (chatId: string) =>
+    loadTranscriptEvents({ ...chats.scope(authority, chatId), sessionId: chatId });
+  return { chats, authority, parent, append, user, assistant, rawEvents };
 }
 
 void test("a side chat forks the parent's completed prefix and projects only its own messages", async (t) => {
-  const { chats, authority, parent, append, user, assistant } = await seedSideParent(t);
+  const { chats, authority, parent, append, user, assistant, rawEvents } = await seedSideParent(t);
   await append(parent.id, [
     user("First question"),
     assistant("First answer"),
@@ -312,14 +315,17 @@ void test("a side chat forks the parent's completed prefix and projects only its
   assert.deepEqual(side.side?.forkedAt, { messageId: parentMessages[3]?.id, messageCount: 4 });
   assert.equal((await chats.read(authority, side.id)).messages.length, 0);
 
-  const transcript = (id: string) =>
-    chats.readReportChatSource(authority, id).then(({ events }) => events);
-  const parentEvents = await transcript(parent.id);
-  const sideEvents = await transcript(side.id);
+  const parentEvents = await rawEvents(parent.id);
+  const sideEvents = await rawEvents(side.id);
   const messageEvents = (events: unknown[]) =>
     events.filter((event) => (event as { type?: string }).type === "message");
   // The inherited prefix is copied unchanged, including its entry ids, and stops before the open turn.
   assert.deepEqual(messageEvents(sideEvents), messageEvents(parentEvents).slice(0, 4));
+  assert.deepEqual(
+    (await chats.readReportChatSource(authority, side.id)).events,
+    [],
+    "report evidence for a side chat excludes the inherited parent prefix",
+  );
 
   await append(side.id, [user("A side question"), assistant("A side answer")]);
   assert.deepEqual(
@@ -329,18 +335,32 @@ void test("a side chat forks the parent's completed prefix and projects only its
       { role: "assistant", text: "A side answer" },
     ],
   );
+  const report = await chats.readReportChatSource(authority, side.id);
+  assert.deepEqual(
+    messageEvents(report.events).map(
+      (event) => (event as { message: { role: string } }).message.role,
+    ),
+    ["user", "assistant"],
+  );
+  assert.deepEqual(
+    (await chats.readReportChatSource(authority, side.id, 1)).chat.messages.map(({ text }) => text),
+    ["A side question"],
+    "a retained report bound counts only the side chat's own events",
+  );
   assert.equal((await chats.read(authority, parent.id)).messages.length, 5);
   assert.equal(
-    messageEvents(await transcript(parent.id)).length,
+    messageEvents(await rawEvents(parent.id)).length,
     5,
     "the parent transcript does not receive side chat messages",
   );
   assert.deepEqual(
-    (await chats.list(authority)).map(({ id, side: link }) => ({ id, parentId: link?.parentId })),
+    (await chats.list(authority))
+      .map(({ id, side: link }) => ({ id, parentId: link?.parentId }))
+      .toSorted((a, b) => a.id.localeCompare(b.id)),
     [
       { id: parent.id, parentId: undefined },
       { id: side.id, parentId: parent.id },
-    ],
+    ].toSorted((a, b) => a.id.localeCompare(b.id)),
   );
 });
 

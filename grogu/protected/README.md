@@ -341,7 +341,9 @@ visible history up to its last completed reply, copied with the original entry
 ids so the prefix stays byte-identical and prompt-prefix caching can reuse it.
 Turns on the side chat continue that history. Only a real compaction can
 rewrite it. `GET /chats/:sideId` returns just the side chat's own messages;
-the client shows the shared prefix from the parent. Isolated automation runs
+the client shows the shared prefix from the parent. Feedback reports that include
+a side chat attach only its own transcript events, never the parent's. Isolated
+automation runs
 never carry this history, because only chats created through this route
 reference a parent.
 

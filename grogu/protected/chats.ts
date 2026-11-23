@@ -64,7 +64,13 @@ function validId(id: string) {
 
 function sideOf(entry: SessionEntry) {
   return entry.protectedSideParentId && entry.protectedSideForkedAt
-    ? { parentId: entry.protectedSideParentId, forkedAt: { ...entry.protectedSideForkedAt } }
+    ? {
+        parentId: entry.protectedSideParentId,
+        forkedAt: {
+          messageId: entry.protectedSideForkedAt.messageId,
+          messageCount: entry.protectedSideForkedAt.messageCount,
+        },
+      }
     : undefined;
 }
 
@@ -603,12 +609,15 @@ export function createProtectedChats(options: {
     readWithUsage,
     async readReportChatSource(authority: ProtectedChatAuthority, id: string, eventCount?: number) {
       const { entry, events } = await readTranscriptSource(authority, id);
+      // Report evidence for a side chat is its own events; the parent's prefix is not part of it.
+      const inherited = entry.protectedSideForkedAt?.eventCount ?? 0;
+      const own = events.slice(inherited);
       return {
         ...projectTranscriptSource(
           entry,
-          eventCount === undefined ? events : events.slice(0, eventCount),
+          eventCount === undefined ? events : events.slice(0, inherited + eventCount),
         ),
-        events,
+        events: own,
       };
     },
     capacityEntries,
@@ -899,7 +908,11 @@ export function createProtectedChats(options: {
           "Send a message in this chat before starting a side chat.",
         );
       }
-      entry.protectedSideForkedAt = { messageId: last.id, messageCount: inherited.length };
+      entry.protectedSideForkedAt = {
+        messageId: last.id,
+        messageCount: inherited.length,
+        eventCount: forkEvents.length,
+      };
       const result = await createSessionEntryWithTranscript(
         scope(authority, id),
         ({ existingEntry }) => {

@@ -508,8 +508,11 @@ type SessionEntryCore = SessionRestartRecoveryState &
     protectedAutomationRunId?: string;
     /** Protected side chat: the owner's main chat it was forked from; one level only. */
     protectedSideParentId?: string;
-    /** Last parent message in a side chat's forked prefix; the chat's own messages follow it. */
-    protectedSideForkedAt?: { messageId: string; messageCount: number };
+    /**
+     * A side chat's forked prefix: its last parent message, the visible messages it holds, and
+     * the transcript events copied from the parent. The chat's own entries follow them.
+     */
+    protectedSideForkedAt?: { messageId: string; messageCount: number; eventCount: number };
     /** Client request that created this side chat, so a retried create returns the same chat. */
     protectedSideRequestId?: string;
     /**

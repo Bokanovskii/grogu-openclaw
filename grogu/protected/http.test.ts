@@ -5071,6 +5071,14 @@ void test("automation authoring chats hold a server binding and save only the se
     ({ id }: { id: string }) => id === chat.id,
   );
   assert.deepEqual(bound.authoring, { kind: "automation", automationId: chat.id });
+  // Released clients parse chats against strict V1 schemas without the authoring field.
+  const v1Chats = (await (await call("alice", "/chats", {}, "automations-chat-v1")).json()).chats;
+  assert.ok(v1Chats.some(({ id }: { id: string }) => id === chat.id));
+  assert.ok(v1Chats.every((summary: object) => !("authoring" in summary)));
+  const v1Chat = (
+    await (await call("alice", `/chats/${chat.id}`, {}, "automations-chat-v1")).json()
+  ).chat;
+  assert.equal("authoring" in v1Chat, false);
   const savedEvent = {
     automation: { version: String(orphan.automation.definitionRevision) },
   };

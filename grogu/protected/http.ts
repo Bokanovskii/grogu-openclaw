@@ -1230,6 +1230,9 @@ export function createProtectedHttp(options: {
         });
       const readChat = async (id: string) => {
         const { chat, usage } = await chats.readWithUsage(authority, id);
+        if (!supportsAutomationsAuthoring(request)) {
+          delete chat.authoring;
+        }
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(async (owned) => {
             for (const message of chat.messages) {
@@ -2005,6 +2008,10 @@ export function createProtectedHttp(options: {
         const result = await chats.list(authority);
         await revalidate();
         for (const chat of result) {
+          // Clients that did not negotiate authoring parse chats against strict V1 schemas.
+          if (!supportsAutomationsAuthoring(request)) {
+            delete chat.authoring;
+          }
           const active = runs.get(chat.id);
           if (active?.profileId === profile.id && active.sessionHash === identity.sessionId) {
             chat.activeRun = { id: active.id };

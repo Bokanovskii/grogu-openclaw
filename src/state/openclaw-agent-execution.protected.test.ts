@@ -58,7 +58,10 @@ function prepareStore(state: TestState, insert = false) {
   return { pathname: database.path, identity };
 }
 
-function createSource(state: TestState): AgentDatabaseRequestExecutionSource {
+function createSource(
+  state: TestState,
+  admitted = { count: 0 },
+): AgentDatabaseRequestExecutionSource {
   const context = captureOpenClawStateWorkerContext({ env: state.env });
   return {
     assertCurrent: () => context.admission.assertCurrent(),
@@ -67,6 +70,7 @@ function createSource(state: TestState): AgentDatabaseRequestExecutionSource {
       admission: createSqliteWorkerOperationAdmission((request, grant) => {
         binding.authorize(request);
         context.admission.assertCurrent();
+        admitted.count += 1;
         if (!grant()) {
           throw new Error("Protected owner fixture lost admission");
         }
@@ -185,7 +189,7 @@ it("refuses a missing or replaced store without creating one", async () => {
       await expect(runProtected(state, pathname, identity)).rejects.toThrow(/needs setup/u);
       await expect(
         runProtected(state, pathname, identity, { createIfMissing: true }),
-      ).rejects.toThrow(/never initializes/u);
+      ).rejects.toThrow(/needs setup/u);
       await expect(fs.stat(pathname)).rejects.toThrow(/ENOENT/u);
 
       const replacement = prepareStore(state, true);
@@ -252,3 +256,43 @@ it.each(["ordinary", "protected"] as const)(
     );
   },
 );
+
+it("prepares an existing protected store without initializing a missing one", async () => {
+  await withOpenClawTestState(
+    { label: "protected-owner-prepare", env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined } },
+    async (state) => {
+      await useStorageKey(state);
+      const { pathname, identity } = prepareStore(state, true);
+      const options = { agentId: "protected", env: state.env };
+      const admitted = { count: 0 };
+      const source = createSource(state, admitted);
+      const constraints = { expectedIdentity: identity, protectedStorage: true } as const;
+      const execution = captureOpenClawAgentDatabaseExecution(options, constraints);
+      try {
+        await execution.prepare(source, undefined, { readmitSchema: true });
+        const claim = execution.capturePreparedGenerationClaim();
+        expect(claim?.identity).toBe(identity.physicalIdentity);
+        const warm = admitted.count;
+        await execution.prepare(source);
+        expect(admitted.count).toBe(warm);
+        // A warm protected generation still honors requested schema readmission.
+        await execution.prepare(source, undefined, { readmitSchema: true });
+        expect(admitted.count).toBeGreaterThan(warm);
+        expect(execution.capturePreparedGenerationClaim()?.incarnation).toBe(claim?.incarnation);
+      } finally {
+        await execution.release();
+      }
+      await closeOpenClawAgentDatabasesAsync();
+      const missing = captureOpenClawAgentDatabaseExecution(options, constraints);
+      try {
+        for (const suffix of ["", "-wal", "-shm"]) {
+          await fs.rm(`${pathname}${suffix}`, { force: true });
+        }
+        await expect(missing.prepare(source)).rejects.toThrow(/needs setup|ENOENT/u);
+      } finally {
+        await missing.release();
+      }
+      await expect(fs.stat(pathname)).rejects.toThrow(/ENOENT/u);
+    },
+  );
+});

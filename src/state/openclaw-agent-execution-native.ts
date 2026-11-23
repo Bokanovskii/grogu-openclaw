@@ -522,15 +522,15 @@ export function createAgentDatabaseNativeGeneration(
       assertCallerCurrent?.();
       signal?.throwIfAborted();
     };
-    assertProtectedAgentStoreRun(protectedStorage, createIfMissing);
+    // Protected prepare keeps preparation and readmission but never initializes a missing store.
     const wasPrepared = preparationPublished;
     // Opening publishes registration before another caller can reuse this generation.
     const store = preparationPublished
       ? openedStore
-      : await open(source, assertCallerCurrent, createIfMissing, signal);
+      : await open(source, assertCallerCurrent, createIfMissing && !protectedStorage, signal);
     assertOperationCurrent();
     if (!store) {
-      assertProtectedAgentStoreRun(protectedStorage, createIfMissing, true);
+      assertProtectedAgentStoreRun(protectedStorage);
       return undefined;
     }
     const schema = createIfMissing

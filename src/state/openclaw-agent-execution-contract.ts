@@ -158,15 +158,9 @@ export function createAgentDatabaseFileExecutionOpen(
 }
 
 /** Protected execution never initializes a store; a missing one stays unadmitted until setup. */
-export function assertProtectedAgentStoreRun(
-  protectedStorage: true | undefined,
-  createIfMissing: boolean,
-  missing = false,
-): void {
-  if (protectedStorage && createIfMissing) {
-    throw new Error("Protected agent execution never initializes its physical store");
-  }
-  if (protectedStorage && missing) {
+/** Called when the existing-only open found no store. */
+export function assertProtectedAgentStoreRun(protectedStorage: true | undefined): void {
+  if (protectedStorage) {
     throw new Error("Protected agent store is missing; it needs setup before admission");
   }
 }

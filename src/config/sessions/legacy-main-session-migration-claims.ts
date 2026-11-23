@@ -206,3 +206,119 @@ export async function restoreColdSessionClaims(
     claims[index] = refreshed.value;
   }
 }
+
+export type LegacySessionSuggestionRow = { readonly id: string } & Readonly<
+  Record<string, unknown>
+>;
+
+/**
+ * Decides whether a destination suggestion preserves its source. Plaintext stores compare stored
+ * columns; a protected store must compare authenticated plaintext, never resealed ciphertext.
+ */
+export type LegacySessionSuggestionComparator = (
+  source: LegacySessionSuggestionRow,
+  destination: LegacySessionSuggestionRow,
+  canonicalKey: string,
+) => boolean;
+
+const storedSuggestionsMatch: LegacySessionSuggestionComparator = (
+  source,
+  destination,
+  canonicalKey,
+) =>
+  // SQLite rows have null prototypes; compare their own columns only.
+  isDeepStrictEqual({ ...source, session_key: canonicalKey }, { ...destination });
+
+/** Reads suggestion rows in the snapshot that matches the claim's fenced artifact fingerprint. */
+export function readClaimSuggestions(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  key: string,
+  expectedNodeArtifactFingerprint: string,
+): LegacySessionSuggestionRow[] | undefined {
+  return runSqliteDeferredTransactionSync(database.db, () => {
+    if (readSessionNodeArtifactFingerprint(database, key) !== expectedNodeArtifactFingerprint) {
+      return undefined;
+    }
+    const present = database.db
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_suggestions'")
+      .get();
+    return present
+      ? executeSqliteQuerySync(
+          database.db,
+          getSessionKysely(database.db)
+            .selectFrom("session_suggestions")
+            .selectAll()
+            .where("session_key", "=", key)
+            .orderBy("id"),
+        ).rows
+      : [];
+  });
+}
+
+/**
+ * Compares the copied suggestion set by id. Missing and differing rows lose source data; extra
+ * destination rows are the canonical node's own rows, which the destination receipt fences.
+ */
+export function compareCopiedSuggestions(params: {
+  canonicalKey: string;
+  destination: readonly LegacySessionSuggestionRow[];
+  sameRow: LegacySessionSuggestionComparator;
+  sources: readonly LegacySessionSuggestionRow[];
+}): { differing: string[]; extra: string[]; missing: string[] } {
+  const destination = new Map(params.destination.map((row) => [row.id, row]));
+  const sourceIds = new Set<string>();
+  const differing: string[] = [];
+  const missing: string[] = [];
+  for (const source of params.sources) {
+    sourceIds.add(source.id);
+    const copied = destination.get(source.id);
+    if (!copied) {
+      missing.push(source.id);
+    } else if (!params.sameRow(source, copied, params.canonicalKey)) {
+      differing.push(source.id);
+    }
+  }
+  return {
+    differing,
+    extra: params.destination.filter((row) => !sourceIds.has(row.id)).map((row) => row.id),
+    missing,
+  };
+}
+
+/**
+ * Verifies, under destination custody, that every source suggestion survived the copy. Returns the
+ * divergence that keeps both copies, or undefined when source retirement may proceed.
+ */
+export function verifyCopiedSuggestions(
+  params: { canonicalKey: string; env: NodeJS.ProcessEnv; receipt: SessionClaim },
+  reader: Pick<OpenClawAgentDatabase, "db">,
+  claims: readonly SessionClaim[],
+  changed: () => Error,
+  sameRow: LegacySessionSuggestionComparator = storedSuggestionsMatch,
+): string | undefined {
+  const destination = readClaimSuggestions(
+    reader,
+    params.canonicalKey,
+    params.receipt.nodeArtifactFingerprint,
+  );
+  const sources = claims.map((claim) => {
+    const read = withOpenClawAgentDatabaseReadOnly(
+      (database) => readClaimSuggestions(database, claim.key, claim.nodeArtifactFingerprint),
+      { agentId: claim.store.databaseAgentId, env: params.env, path: claim.store.path },
+    );
+    return read.found ? read.value : undefined;
+  });
+  if (!destination || sources.some((rows) => !rows)) {
+    throw changed();
+  }
+  const { differing, extra, missing } = compareCopiedSuggestions({
+    canonicalKey: params.canonicalKey,
+    destination,
+    sameRow,
+    sources: sources.flatMap((rows) => rows ?? []),
+  });
+  const list = (ids: string[]) => ids.join(", ") || "none";
+  return missing.length > 0 || differing.length > 0
+    ? `canonical suggestions do not preserve the legacy source (missing: ${list(missing)}; differing: ${list(differing)}; canonical-only: ${list(extra)})`
+    : undefined;
+}

@@ -128,7 +128,6 @@ export type AdminTelemetryQuery = {
 };
 
 type MetricRun = ProtectedTelemetryRun & {
-  runCount: number;
   ratingUp: number;
   ratingDown: number;
   reportCount: number;
@@ -190,6 +189,34 @@ function metrics(rows: readonly MetricRun[]): Metrics {
     firstOutputMs: distMetric(rows, "firstOutputMs"),
     firstVisibleMs: distMetric(rows, "firstVisibleMs"),
     completionMs: distMetric(rows, "completionMs"),
+  };
+}
+
+function toPublicRun(run: MetricRun): ProtectedTelemetryRun {
+  return {
+    id: run.id,
+    at: run.at,
+    personId: run.personId,
+    memberLabel: run.memberLabel,
+    feature: run.feature,
+    agentId: run.agentId,
+    provider: run.provider,
+    model: run.model,
+    status: run.status,
+    chatId: run.chatId,
+    responseId: run.responseId,
+    errorCode: run.errorCode,
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+    cacheReadTokens: run.cacheReadTokens,
+    cacheWriteTokens: run.cacheWriteTokens,
+    totalTokens: run.totalTokens,
+    reasoningSummaryChars: run.reasoningSummaryChars,
+    admissionMs: run.admissionMs,
+    providerStartMs: run.providerStartMs,
+    firstOutputMs: run.firstOutputMs,
+    firstVisibleMs: run.firstVisibleMs,
+    completionMs: run.completionMs,
   };
 }
 
@@ -292,7 +319,6 @@ export function listProtectedAdminTelemetry(
     const key = JSON.stringify([run.personId, run.chatId, run.responseId]);
     const responseRating = ratings.get(key);
     return Object.assign(run, {
-      runCount: 1,
       ratingUp: responseRating?.up ?? 0,
       ratingDown: responseRating?.down ?? 0,
       reportCount: reportsByRun.get(run.id) ?? reportsByResponse.get(key) ?? 0,
@@ -366,7 +392,7 @@ export function listProtectedAdminTelemetry(
           : { key: "unattributed", label: "Not attributed" },
       ),
     },
-    runs: page,
+    runs: page.map(toPublicRun),
     nextCursor:
       hasMore && last ? Buffer.from(`${last.at}:${last.id}`, "utf8").toString("base64url") : null,
     features: [{ id: "chat", label: "Chat" }],

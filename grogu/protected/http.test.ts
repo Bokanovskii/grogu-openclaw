@@ -2551,6 +2551,31 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       run.chatId === chat.id && run.provider === "sparky" && run.model === "synthetic",
   );
   assert.ok(attributedRun);
+  assert.deepEqual(Object.keys(attributedRun).toSorted(), [
+    "admissionMs",
+    "agentId",
+    "at",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "chatId",
+    "completionMs",
+    "errorCode",
+    "feature",
+    "firstOutputMs",
+    "firstVisibleMs",
+    "id",
+    "inputTokens",
+    "memberLabel",
+    "model",
+    "outputTokens",
+    "personId",
+    "provider",
+    "providerStartMs",
+    "reasoningSummaryChars",
+    "responseId",
+    "status",
+    "totalTokens",
+  ]);
   for (const timing of [
     attributedRun.admissionMs,
     attributedRun.providerStartMs,

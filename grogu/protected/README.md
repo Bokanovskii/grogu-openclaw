@@ -816,6 +816,10 @@ Text events replace the child's current text snapshot. A `child-result` follows
 the saved result. Chat reads include the same run ID on saved child messages.
 Widget references resolve through the parent chat's widget endpoint. Legacy
 clients do not receive the new events or the saved run ID.
+If a started child ends without a saved result, the turn owner saves a failed
+entry with its agent and run ID. Stop and timeout cancel execution, but do not
+remove this failure record. The write still requires current member access
+and the original parent session generation.
 
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each

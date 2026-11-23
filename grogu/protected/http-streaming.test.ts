@@ -15,6 +15,8 @@ void test("protected chunks publish without remote access work and stop at local
   // No canonical model runner or provider fixture is loaded by this HTTP boundary proof.
   t.mock.method(globalThis, "fetch", () => assert.fail("Network is forbidden in this proof."));
   const stateDir = path.resolve(".artifacts", `protected-streaming-${randomUUID()}`);
+  const priorStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = stateDir;
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
   const origin = "https://synthetic.example";
@@ -79,6 +81,11 @@ void test("protected chunks publish without remote access work and stop at local
     releaseHeld();
     await app.shutdown();
     await rm(stateDir, { recursive: true, force: true });
+    if (priorStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = priorStateDir;
+    }
   });
   const call = (subject: string, route: string, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -190,7 +197,8 @@ void test("protected chunks publish without remote access work and stop at local
     const value: unknown = timing[phase];
     assert.equal(typeof value, "number");
     assert.ok(typeof value === "number" && value >= previous);
-    previous = value;
+    // Admission measures pre-run work; the remaining phases start after admission.
+    previous = phase === "admissionMs" ? 0 : value;
   }
   t.diagnostic(
     JSON.stringify({
@@ -207,7 +215,9 @@ void test("protected chunks publish without remote access work and stop at local
     const started = Promise.withResolvers<ProtectedTurn>();
     const release = Promise.withResolvers<void>();
     releaseHeld = release.resolve;
+    const childRunId = randomUUID();
     run = async (turn) => {
+      turn.childEvent({ type: "child-start", runId: childRunId, agentId: "travel" });
       await turn.delta("before-invalidation");
       started.resolve(turn);
       await release.promise;
@@ -248,6 +258,18 @@ void test("protected chunks publish without remote access work and stop at local
     assert.match(tail, /before-invalidation/u);
     assert.doesNotMatch(tail, /forbidden-after-invalidation|"id":"forbidden"|"type":"done"/u);
     assert.match(tail, /"type":"error"/u);
+    if (kind === "stop") {
+      const stoppedChat = await (
+        await call(subject, route, {
+          headers: { "x-alcove-capabilities": "specialist-stream-v1" },
+        })
+      ).json();
+      const reply = stoppedChat.chat.messages.at(-1);
+      assert.equal(reply?.agentId, "travel");
+      assert.equal(reply.runId, childRunId);
+      assert.equal(reply.status, "failed");
+      assert.match(reply.text, /did not finish/u);
+    }
   }
 
   const coalesced = await setup("coalesced");

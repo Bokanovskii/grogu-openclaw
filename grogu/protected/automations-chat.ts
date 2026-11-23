@@ -321,7 +321,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
           await input.bind(automation.id);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
-          if (!isDeepStrictEqual(definitionOf(automation), withoutUndefined(validation.draft))) {
+          if (!savesDraft(automation, validation.draft)) {
             return refuse("version_mismatch", automation.version);
           }
         } else {
@@ -382,6 +382,11 @@ export function createProtectedAutomationAuthoringBindings(input: {
       });
     },
   };
+}
+
+/** Whether a stored record is exactly this validated draft, as a retried keyed create finds it. */
+export function savesDraft(automation: ProtectedAutomationRecord, draft: ProtectedAutomationDraft) {
+  return isDeepStrictEqual(definitionOf(automation), withoutUndefined(draft));
 }
 
 function withoutUndefined<T extends object>(value: T) {

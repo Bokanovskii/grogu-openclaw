@@ -84,6 +84,7 @@ import {
 import {
   createProtectedAutomationAuthoringBindings,
   createProtectedAutomationsChatBindings,
+  savesDraft,
 } from "./automations-chat.js";
 import {
   createProtectedAutomationRecord,
@@ -1655,27 +1656,69 @@ export function createProtectedHttp(options: {
         if (!admitStorage) {
           return notFound();
         }
-        const storage = await admitStorage(
-          profile.id,
-          assertCurrent,
-          "automation",
-          await storageLimit(assertCurrent),
-        );
+        // A form save from an unsaved authoring chat saves under that chat's key and binds it, so
+        // the chat cannot later create a second record.
+        const authoringChatId = request.headers.get("x-alcove-authoring-chat") ?? undefined;
+        if (authoringChatId !== undefined) {
+          if (!supportsAutomationsAuthoring(request)) {
+            return notFound();
+          }
+          const entry = await chats.readEntry(authority, authoringChatId);
+          if (entry.protectedAuthoringKind !== "automation") {
+            return notFound();
+          }
+          if (entry.protectedAutomationId !== undefined) {
+            throw new ProtectedError(
+              409,
+              "authoring_bound",
+              "This chat already saved its automation. Reload it before saving.",
+            );
+          }
+          if (runs.has(authoringChatId) || mutations.has(authoringChatId)) {
+            throw new ProtectedError(409, "busy", "Wait for the chat to finish before saving.");
+          }
+          mutations.add(authoringChatId);
+        }
+        let storage;
         try {
+          storage = await admitStorage(
+            profile.id,
+            assertCurrent,
+            "automation",
+            await storageLimit(assertCurrent),
+          );
           const automation = await createProtectedAutomationRecord(
             options.stateDir,
-            { profileId: profile.id, definition: validation.draft, now: Date.now() },
+            {
+              profileId: profile.id,
+              definition: validation.draft,
+              now: Date.now(),
+              ...(authoringChatId === undefined ? {} : { automationId: authoringChatId }),
+            },
             authority,
             storage,
           );
           if (!automation) {
             unauthorized();
           }
+          if (authoringChatId !== undefined) {
+            await chats.bindAutomation(authority, authoringChatId, automation.id);
+            if (!savesDraft(automation, validation.draft)) {
+              throw new ProtectedError(
+                412,
+                "version_mismatch",
+                "This chat already saved a different version. Reload it before saving.",
+              );
+            }
+          }
           assertCurrent();
           const result: ProtectedAutomationResponse = { automation };
           return json(result, 201);
         } finally {
-          storage.release();
+          storage?.release();
+          if (authoringChatId !== undefined) {
+            mutations.delete(authoringChatId);
+          }
         }
       }
       const authoringMatch = /^\/automations\/(?:([^/]+)\/)?authoring$/u.exec(pathname);

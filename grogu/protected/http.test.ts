@@ -5122,4 +5122,38 @@ void test("automation authoring chats hold a server binding and save only the se
   assert.equal(firstBody.automation.version, formSaved.version);
   const again = await call("alice", `/automations/${formSaved.id}/authoring`, { method: "POST" });
   assert.equal((await again.json()).chat.id, firstBody.chat.id);
+
+  // A form save from an unsaved authoring chat saves under that chat and binds it.
+  const formChat = (
+    await (await call("alice", "/automations/authoring", { method: "POST" })).json()
+  ).chat;
+  const formSave = (subject: string, chatId: string, capabilities = negotiated) =>
+    call(
+      subject,
+      "/automations",
+      {
+        method: "POST",
+        headers: { "x-alcove-authoring-chat": chatId },
+        body: JSON.stringify(draft),
+      },
+      capabilities,
+    );
+  assert.equal((await formSave("alice", formChat.id, "automations-chat-v1")).status, 404);
+  assert.equal((await formSave("bob", formChat.id)).status, 404);
+  const formBound = await formSave("alice", formChat.id);
+  assert.equal(formBound.status, 201);
+  const formBoundAutomation = (await formBound.json()).automation;
+  assert.equal(formBoundAutomation.id, formChat.id);
+  assert.equal(formBoundAutomation.enabled, false);
+  const formReopened = await call("alice", `/automations/${formChat.id}/authoring`, {
+    method: "POST",
+  });
+  assert.equal(formReopened.status, 200);
+  assert.deepEqual((await formReopened.json()).chat.authoring, {
+    kind: "automation",
+    automationId: formChat.id,
+  });
+  const rebound = await formSave("alice", formChat.id);
+  assert.equal(rebound.status, 409);
+  assert.equal((await rebound.json()).error.code, "authoring_bound");
 });

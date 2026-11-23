@@ -59,8 +59,10 @@ import {
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import type { ProtectedAgentDefinition } from "./agents.js";
 import {
+  AUTOMATIONS_AUTHORING_TOOL_NAMES,
   AUTOMATIONS_CHAT_PLUGIN_ID,
   AUTOMATIONS_CHAT_TOOL_NAMES,
+  type AutomationsAuthoringBindings,
   type AutomationsChatBindings,
 } from "./automations-chat/contract.js";
 import { chatFilesDirectory } from "./chat-files.js";
@@ -91,11 +93,11 @@ export type ProtectedTurn = {
     lifecycleRevision: string | null;
   };
   input: TurnInput;
-  automationChat?: AutomationsChatBindings;
+  automationChat?: AutomationsChatBindings | AutomationsAuthoringBindings;
   mentionedAgents: readonly Readonly<ProtectedAgentDefinition>[];
   agent: Readonly<ProtectedAgentDefinition>;
-  /** The chat agent may hand the request to one other selectable agent. */
-  routing: {
+  /** The chat agent may hand the request to one other selectable agent; authoring turns cannot. */
+  routing?: {
     tool: ClientToolDefinition;
     briefMaxChars: number;
     resolve: (agentId: string) => Readonly<ProtectedAgentDefinition> | undefined;
@@ -127,6 +129,8 @@ export type ProtectedTurn = {
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
 };
 
+const automationsAuthoringInstructions =
+  "This chat edits one automation draft that the member sees beside the conversation. Read it with automation_draft_read before changing it. automation_draft_update replaces the unsaved draft in the member's form; it is not saved or scheduled. Call automation_draft_save only when the member explicitly asks to save, and never after updating the draft in the same turn. Saving always keeps the automation paused; you cannot turn it on.";
 const automationsChatInstructions =
   "Automation tools can only read this member's private automations or prepare suggestions. Every proposal returns writeApplied:false and has not been saved or scheduled. Never claim that a proposal changed or enabled an automation.";
 
@@ -349,6 +353,13 @@ function readRoute(
 ) {
   if (!calls?.length) {
     return undefined;
+  }
+  if (!turn.routing) {
+    throw new ProtectedError(
+      502,
+      "agent_failed",
+      `${turn.agent.name} could not finish this request.`,
+    );
   }
   const call = calls.length === 1 ? calls[0] : undefined;
   const params =
@@ -621,9 +632,17 @@ export function createCanonicalProtectedTurns(options: {
           assertCurrent: turn.assertCurrent,
         });
         credential = requestCredential;
+        const authoring = turn.automationChat && "authoring" in turn.automationChat;
+        const automationToolNames = turn.automationChat
+          ? authoring
+            ? AUTOMATIONS_AUTHORING_TOOL_NAMES
+            : AUTOMATIONS_CHAT_TOOL_NAMES
+          : [];
         const allowedTools = [
-          ...turn.agent.tools,
-          ...(turn.automationChat ? AUTOMATIONS_CHAT_TOOL_NAMES : []),
+          ...(authoring
+            ? turn.agent.tools.filter((tool) => !tool.startsWith("sessions_"))
+            : turn.agent.tools),
+          ...automationToolNames,
         ];
         const result = await withProtectedGatewayAuthority(config, turn, () =>
           withoutModelRequestTelemetry(
@@ -646,7 +665,7 @@ export function createCanonicalProtectedTurns(options: {
                   prompt: turn.input.text,
                   transcriptPrompt: turn.input.text,
                   extraSystemPrompt: turn.automationChat
-                    ? `${turn.agent.systemPrompt}\n\n${automationsChatInstructions}`
+                    ? `${turn.agent.systemPrompt}\n\n${authoring ? automationsAuthoringInstructions : automationsChatInstructions}`
                     : turn.agent.systemPrompt,
                   skillsSnapshot: turn.agent.skillsSnapshot,
                   trigger: "user",
@@ -667,14 +686,16 @@ export function createCanonicalProtectedTurns(options: {
                   disableToolSearch: true,
                   disableTrajectory: true,
                   codeModeOverride: false,
-                  toolsAllow: [...allowedTools, turn.routing.tool.function.name],
+                  toolsAllow: turn.routing
+                    ? [...allowedTools, turn.routing.tool.function.name]
+                    : allowedTools,
                   toolExecutionAllow: allowedTools,
-                  clientTools: [turn.routing.tool],
+                  clientTools: turn.routing ? [turn.routing.tool] : [],
                   ...(turn.automationChat
                     ? {
                         runtimePluginToolGrant: {
                           pluginId: AUTOMATIONS_CHAT_PLUGIN_ID,
-                          toolNames: AUTOMATIONS_CHAT_TOOL_NAMES,
+                          toolNames: automationToolNames,
                         },
                       }
                     : {}),

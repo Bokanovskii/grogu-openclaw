@@ -68,6 +68,14 @@ function summary(entry: SessionEntry): ProtectedChatSummary {
       /^[a-z][a-z0-9-]{0,47}$/u.test(entry.protectedAgentId)
         ? entry.protectedAgentId
         : legacyDefaultProtectedAgentId,
+    ...(entry.protectedAuthoringKind === "automation"
+      ? {
+          authoring: {
+            kind: "automation" as const,
+            ...(entry.protectedAutomationId ? { automationId: entry.protectedAutomationId } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -151,12 +159,29 @@ export function createProtectedChats(options: {
     authority: ProtectedChatAuthority,
     id: string,
     version: string,
-    patch: Partial<Pick<SessionEntry, "displayName" | "protectedAgentId">>,
+    patch: Partial<
+      Pick<SessionEntry, "displayName" | "protectedAgentId" | "protectedAutomationId">
+    >,
     conflict: ProtectedError,
   ): Promise<ProtectedChatSummary> => {
     const current = await readEntry(authority, id);
     if (String(current.updatedAt) !== version) {
       throw conflict;
+    }
+    if (current.protectedAuthoringKind && patch.protectedAgentId !== undefined) {
+      throw new ProtectedError(409, "authoring_chat", "Authoring chats always use Grogu.");
+    }
+    if (
+      patch.protectedAutomationId !== undefined &&
+      (current.protectedAuthoringKind !== "automation" ||
+        (current.protectedAutomationId !== undefined &&
+          current.protectedAutomationId !== patch.protectedAutomationId))
+    ) {
+      throw new ProtectedError(
+        409,
+        "authoring_bound",
+        "This chat already belongs to another automation.",
+      );
     }
     let committed = false;
     const entry = await applySessionEntryOperation(
@@ -595,6 +620,7 @@ export function createProtectedChats(options: {
       authority: ProtectedChatAuthority,
       title = "New chat",
       selectedAgentId = options.agentCatalog.defaultAgentId,
+      authoring?: { kind: "automation"; automationId?: string },
     ): Promise<ProtectedChat> {
       authority.assertCurrent();
       if ((await list(authority)).length >= options.maxChatsPerUser) {
@@ -621,6 +647,14 @@ export function createProtectedChats(options: {
               createdAt: now,
               displayName: title,
               protectedAgentId: selectedAgentId,
+              ...(authoring
+                ? {
+                    protectedAuthoringKind: authoring.kind,
+                    ...(authoring.automationId
+                      ? { protectedAutomationId: authoring.automationId }
+                      : {}),
+                  }
+                : {}),
               createdVia: "plugin",
               createdActor: { type: "human", source: "profile", id: authority.profileId },
             },
@@ -651,6 +685,41 @@ export function createProtectedChats(options: {
           "This chat changed. Reload before changing its agent.",
         ),
       );
+    },
+    /** Binds an unsaved authoring chat to its first saved automation; idempotent, never rebinds. */
+    async bindAutomation(
+      authority: ProtectedChatAuthority,
+      id: string,
+      automationId: string,
+    ): Promise<ProtectedChatSummary> {
+      // A running turn may advance the entry between the read and the guarded write.
+      for (let attempt = 0; ; attempt++) {
+        const current = await readEntry(authority, id);
+        if (current.protectedAutomationId === automationId) {
+          return summary(current);
+        }
+        try {
+          return await updateMetadata(
+            authority,
+            id,
+            String(current.updatedAt),
+            { protectedAutomationId: automationId },
+            new ProtectedError(
+              409,
+              "version_conflict",
+              "This chat changed. Reload it and try again.",
+            ),
+          );
+        } catch (error) {
+          if (
+            attempt >= 2 ||
+            !(error instanceof ProtectedError) ||
+            error.code !== "version_conflict"
+          ) {
+            throw error;
+          }
+        }
+      }
     },
     async rename(
       authority: ProtectedChatAuthority,

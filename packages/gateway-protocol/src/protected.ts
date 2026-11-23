@@ -4,6 +4,8 @@ import { MAX_DATE_TIMESTAMP_MS } from "./schema/cron-shared.js";
 
 const id = Type.String({ minLength: 1, maxLength: 256 });
 const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
+const protectedAutomationIdPattern =
+  "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
 export const ProtectedAgentToolSchema = Type.Union([
@@ -157,6 +159,12 @@ export const ProtectedChatSummarySchema = node({
   updatedAt: Type.Number(),
   selectedAgentId: Type.Optional(protectedAgentId),
   activeRun: Type.Optional(node({ id })),
+  authoring: Type.Optional(
+    node({
+      kind: Type.Literal("automation"),
+      automationId: Type.Optional(Type.String({ pattern: protectedAutomationIdPattern })),
+    }),
+  ),
 });
 export const ProtectedChatSchema = node({
   ...ProtectedChatSummarySchema.properties,
@@ -224,6 +232,7 @@ export const ProtectedAutomationCapabilitiesSchema = node({
       read: Type.Boolean(),
       proposeCreate: Type.Boolean(),
       proposePatch: Type.Boolean(),
+      authoring: Type.Optional(Type.Boolean()),
     }),
   ),
 });
@@ -239,7 +248,7 @@ export const ProtectedAutomationScheduleSchema = Type.Union([
   }),
 ]);
 export const ProtectedAutomationIdSchema = Type.String({
-  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+  pattern: protectedAutomationIdPattern,
 });
 export const ProtectedAutomationCronCatalogSchema = node({
   format: Type.Literal("5-field"),

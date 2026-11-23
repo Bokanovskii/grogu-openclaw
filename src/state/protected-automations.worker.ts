@@ -12,7 +12,12 @@ import type { WorkerOperationHandlers, WorkerOperations } from "./worker-operati
 
 export const protectedAutomationOperations = {
   "protectedAutomations.create": (
-    input: { profileId: string; definition: ProtectedAutomationDraft; now: number },
+    input: {
+      profileId: string;
+      definition: ProtectedAutomationDraft;
+      now: number;
+      automationId?: string;
+    },
     { open },
   ) => createProtectedAutomation(open(), input),
   "protectedAutomations.list": (input: { profileId: string }, { open }) =>

@@ -457,6 +457,23 @@ incrementally. Terminal non-cron task records expire after seven days only when
 delivery and lifecycle owners no longer reference them. These policies do not
 delete durable research topics or sources.
 
+Older protected Alcove runtimes also left unreadable `web_fetch` spill files in
+members' chat storage. Stop the protected listener before updating its runtime,
+then run the fixed maintenance command below before restarting it. It deletes
+only UUID-named `web-fetch-<uuid>.log` files under each chat's `web-fetch/`
+directory, removes that directory only when empty, and leaves chat transcripts
+and other files untouched. The artifact library discovers current files, so
+removed spills no longer appear there; no manifest needs updating. Use
+`--dry-run` to list the exact stored paths without changing them.
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run cleanup-web-fetch-spills
+```
+
+The existing maintenance helper dispatches into the updated runtime tree, so it
+needs no separate helper installation or schema migration. The cleanup makes
+no backup and adds no scheduler.
+
 After large logical deletions, offline Doctor compaction can repack SQLite files.
 The deployment owner stops the Gateway and runs
 `openclaw doctor --session-sqlite compact --session-sqlite-all-agents --json`,

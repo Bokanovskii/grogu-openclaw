@@ -12,6 +12,7 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { hasLegacyAcpMigrationProvenanceColumn } from "../../state/openclaw-agent-legacy-acp-schema.js";
 import { ensureOpenClawAgentProgressCardSchemaInTransaction } from "../../state/openclaw-agent-progress-card-schema.js";
 import { ensureSessionParticipantsSchema } from "../../state/openclaw-agent-session-participants-schema.js";
+import { hasSqliteStorageValueEncryption } from "../../storage/sqlite-encryption.js";
 import { copyLegacyAcpMigrationSourcesForRepair } from "./session-accessor.sqlite-acp-provenance.js";
 import {
   copySessionInputCompletionsForRepair,
@@ -20,9 +21,22 @@ import {
 import { deleteSessionPendingInputs } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { mergeParticipantAggregate } from "./session-participant-identity.js";
+import {
+  openSessionSuggestionFields,
+  sealSessionSuggestionFields,
+} from "./session-suggestion-encryption.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 
 type AgentCacheDatabase = Pick<OpenClawAgentKyselyDatabase, "cache_entries">;
+
+export class ProtectedCrossStoreSuggestionError extends Error {
+  constructor(sessionKey: string) {
+    super(
+      `Protected cross-store suggestion migration is unsupported for ${sessionKey}; no data was deleted.`,
+    );
+    this.name = "ProtectedCrossStoreSuggestionError";
+  }
+}
 
 /** Logical-node facts survive history cleanup and are fenced at final entry deletion. */
 export function readSessionNodeArtifactFingerprint(
@@ -135,17 +149,56 @@ export function clearSessionCollaborationForKey(
   }
 }
 
+export function hasSessionSuggestions(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  sessionKeys: readonly string[],
+): boolean {
+  if (
+    sessionKeys.length === 0 ||
+    !readSessionNodeArtifactTables(database).has("session_suggestions")
+  ) {
+    return false;
+  }
+  return Boolean(
+    executeSqliteQueryTakeFirstSync(
+      database.db,
+      getSessionKysely(database.db)
+        .selectFrom("session_suggestions")
+        .select("id")
+        .where("session_key", "in", [...sessionKeys])
+        .limit(1),
+    ),
+  );
+}
+
 /** Copy logical-session artifacts into their canonical node within one agent store or across two. */
 export function copySessionNodeArtifactsForRepair(
   source: Pick<OpenClawAgentDatabase, "db" | "path">,
   destination: OpenClawAgentDatabase,
   sourceKeys: readonly string[],
   canonicalKey: string,
-  options: { includeMembers?: boolean; includeParticipants?: boolean } = {},
+  options: {
+    includeMembers?: boolean;
+    includeParticipants?: boolean;
+    /**
+     * Set only by a caller that verifies authenticated suggestion plaintext before retiring the
+     * source; other cross-store movers keep refusing protected suggestions.
+     */
+    verifiesProtectedSuggestions?: boolean;
+  } = {},
 ): void {
   const keys = [...new Set(sourceKeys)];
   if (keys.length === 0) {
     return;
+  }
+  if (
+    !options.verifiesProtectedSuggestions &&
+    source.db !== destination.db &&
+    (hasSqliteStorageValueEncryption(source.db) ||
+      hasSqliteStorageValueEncryption(destination.db)) &&
+    (hasSessionSuggestions(source, keys) || hasSessionSuggestions(destination, [canonicalKey]))
+  ) {
+    throw new ProtectedCrossStoreSuggestionError(canonicalKey);
   }
   copySessionPendingInputsForRepair(source, destination, keys, canonicalKey);
   copySessionInputCompletionsForRepair(source, destination, keys, canonicalKey);
@@ -271,7 +324,9 @@ export function copySessionNodeArtifactsForRepair(
     }
   }
   if (sourceTables.has("session_suggestions") && destinationTables.has("session_suggestions")) {
-    if (source.db === destination.db) {
+    const protectedMove =
+      hasSqliteStorageValueEncryption(source.db) || hasSqliteStorageValueEncryption(destination.db);
+    if (source.db === destination.db && !protectedMove) {
       executeSqliteQuerySync(
         destination.db,
         destinationDb
@@ -279,16 +334,67 @@ export function copySessionNodeArtifactsForRepair(
           .set({ session_key: canonicalKey })
           .where("session_key", "in", keys),
       );
+    } else if (source.db === destination.db) {
+      if (!destination.db.isTransaction) {
+        throw new Error("Protected suggestion repair requires the destination transaction");
+      }
+      let after: string | undefined;
+      for (;;) {
+        let query = sourceDb
+          .selectFrom("session_suggestions")
+          .selectAll()
+          .where("session_key", "in", keys)
+          .where("session_key", "!=", canonicalKey)
+          .orderBy("id")
+          .limit(64);
+        if (after !== undefined) {
+          query = query.where("id", ">", after);
+        }
+        const batch = executeSqliteQuerySync(source.db, query).rows;
+        if (batch.length === 0) {
+          break;
+        }
+        for (const suggestion of batch) {
+          const opened = openSessionSuggestionFields(source.db, suggestion);
+          const sealed = sealSessionSuggestionFields(destination.db, {
+            ...opened,
+            session_key: canonicalKey,
+          });
+          executeSqliteQuerySync(
+            destination.db,
+            destinationDb
+              .updateTable("session_suggestions")
+              .set({
+                session_key: sealed.session_key,
+                author_id: sealed.author_id,
+                author_label: sealed.author_label,
+                text: sealed.text,
+              })
+              .where("id", "=", suggestion.id)
+              .where("session_key", "=", suggestion.session_key),
+          );
+          after = suggestion.id;
+        }
+      }
     } else {
       for (const suggestion of executeSqliteQuerySync(
         source.db,
         sourceDb.selectFrom("session_suggestions").selectAll().where("session_key", "in", keys),
       ).rows) {
+        let opened: typeof suggestion;
+        try {
+          opened = openSessionSuggestionFields(source.db, suggestion);
+        } catch {
+          // An unauthenticated row is never resealed; the caller's verification keeps its source.
+          continue;
+        }
         executeSqliteQuerySync(
           destination.db,
           destinationDb
             .insertInto("session_suggestions")
-            .values({ ...suggestion, session_key: canonicalKey })
+            .values(
+              sealSessionSuggestionFields(destination.db, { ...opened, session_key: canonicalKey }),
+            )
             .onConflict((conflict) => conflict.column("id").doNothing()),
         );
       }

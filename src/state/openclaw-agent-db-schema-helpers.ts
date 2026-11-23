@@ -29,6 +29,7 @@ import {
   CANONICAL_SESSION_VALIDATION_SCHEMA_VERSION,
   CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION,
   AGENT_STORAGE_SCHEMA_VERSION,
+  OPENCLAW_AGENT_SCHEMA_VERSION,
 } from "./openclaw-agent-db-contract.js";
 import { AGENT_SCHEMA_COMPATIBILITY } from "./openclaw-agent-db-schema-compatibility.js";
 import {
@@ -64,6 +65,7 @@ import {
   SESSION_ENTRY_SNAPSHOTS_SCHEMA_VERSION,
   withoutSessionEntrySnapshotsSchema,
 } from "./openclaw-agent-session-snapshots-schema.js";
+import { SESSION_TRANSCRIPT_ARCHIVES_TABLE } from "./openclaw-agent-session-transcript-archive-schema.js";
 import { withLegacyAgentStorageSchema } from "./openclaw-agent-storage-schema.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 
@@ -78,10 +80,24 @@ export {
 
 /** Compare historical migration targets against only the representation they support. */
 export function getOpenClawAgentMigrationSchema(targetVersion: number): string {
+  const archiveBlobColumn = "  archive_blob BLOB NOT NULL,\n";
+  const currentSchemaSql =
+    targetVersion >= OPENCLAW_AGENT_SCHEMA_VERSION + 2
+      ? OPENCLAW_AGENT_SCHEMA_SQL.replace(
+          archiveBlobColumn,
+          `${archiveBlobColumn}  protected_attribution TEXT,\n`,
+        )
+      : OPENCLAW_AGENT_SCHEMA_SQL;
+  if (
+    targetVersion >= OPENCLAW_AGENT_SCHEMA_VERSION + 2 &&
+    currentSchemaSql === OPENCLAW_AGENT_SCHEMA_SQL
+  ) {
+    throw new Error("Protected agent archive schema marker is missing.");
+  }
   const canonicalSchemaSql =
     targetVersion < CANONICAL_SESSION_WRITER_VALIDATION_SCHEMA_VERSION
-      ? withLegacyCanonicalSessionValidationTriggers(OPENCLAW_AGENT_SCHEMA_SQL)
-      : OPENCLAW_AGENT_SCHEMA_SQL;
+      ? withLegacyCanonicalSessionValidationTriggers(currentSchemaSql)
+      : currentSchemaSql;
   const sessionSchemaSql =
     targetVersion < SESSION_ENTRY_SNAPSHOTS_SCHEMA_VERSION
       ? withoutSessionEntrySnapshotsSchema(canonicalSchemaSql)
@@ -121,7 +137,11 @@ export function assertOpenClawAgentSchemaContains(
   const compatibility = {
     ...AGENT_SCHEMA_COMPATIBILITY,
     allowedMissingTables: [
-      ...AGENT_SCHEMA_COMPATIBILITY.allowedMissingTables,
+      ...AGENT_SCHEMA_COMPATIBILITY.allowedMissingTables.filter(
+        (table) =>
+          table !== SESSION_TRANSCRIPT_ARCHIVES_TABLE ||
+          !schemaSql.includes("  protected_attribution TEXT,\n"),
+      ),
       // Legacy migration preflight precedes creation of the required v20 table.
       ...(participantSchema === "legacy" ? ["session_transcript_cold_archives"] : []),
     ],
@@ -164,7 +184,11 @@ export function assertOpenClawAgentCurrentRuntimeSchema(
       `OpenClaw agent database ${options.pathname} retains retired state_leases storage; run openclaw doctor --fix before using it.`,
     );
   }
-  assertOpenClawAgentSchemaContains(database, options.pathname, OPENCLAW_AGENT_SCHEMA_SQL);
+  assertOpenClawAgentSchemaContains(
+    database,
+    options.pathname,
+    getOpenClawAgentMigrationSchema(schemaVersion),
+  );
 }
 
 function hasAnyCanonicalTable(database: DatabaseSync, schemaSql: string): boolean {

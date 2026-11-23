@@ -352,7 +352,8 @@ async function copyClaimCrossStore(params: {
                   destinationDatabase,
                   [fresh.key],
                   params.canonicalKey,
-                  { includeMembers: false },
+                  // deleteCopiedClaims compares authenticated suggestions before any source deletion.
+                  { includeMembers: false, verifiesProtectedSuggestions: true },
                 );
                 return readClaim(
                   destinationDatabase,

@@ -225,6 +225,8 @@ void test("the public page has a separate static asset tree", async (t) => {
   const get = (pathname: string) => serve(new Request(`https://alcove.example${pathname}`));
   assert.equal(await (await get("/request-access"))?.text(), "Public request");
   assert.equal(await (await get("/settings/admin"))?.text(), "Private app");
+  assert.equal(await (await get("/s/share-token"))?.text(), "Private app");
+  assert.equal(await get("/s/share-token/extra"), undefined);
   for (const [name, content] of [
     ["index-private.js", "private"],
     ["privateApp-compiled.js", "private entry"],

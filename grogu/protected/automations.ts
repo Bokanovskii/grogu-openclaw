@@ -179,7 +179,11 @@ export function validateProtectedAutomationDraft(
     }
   }
   const resolvedDraft = draft
-    ? { ...draft, thinking: draft.thinking ?? model.thinking.default }
+    ? {
+        ...draft,
+        schedule: canonicalSchedule(draft.schedule),
+        thinking: draft.thinking ?? model.thinking.default,
+      }
     : undefined;
   if (resolvedDraft) {
     const scheduleError = validateSchedule(resolvedDraft.schedule, catalog);
@@ -233,6 +237,22 @@ export function applyProtectedAutomationPatch(
   return definition;
 }
 
+const calendarCronPattern = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5|6)$/u;
+
+// Clients parse calendar cron strictly, so every accepted draft carries `M H * * D` without
+// leading zeros; otherwise a valid update can be published in a form the member's form rejects.
+function canonicalSchedule(
+  schedule: ProtectedAutomationDraft["schedule"],
+): ProtectedAutomationDraft["schedule"] {
+  if (schedule.kind !== "cron") {
+    return schedule;
+  }
+  const match = calendarCronPattern.exec(schedule.expr);
+  return match
+    ? { ...schedule, expr: `${Number(match[1])} ${Number(match[2])} * * ${match[3]}` }
+    : schedule;
+}
+
 function validateSchedule(
   schedule: ProtectedAutomationDraft["schedule"],
   catalog: ProtectedAutomationCatalog,
@@ -248,7 +268,7 @@ function validateSchedule(
   }
 
   const cron = catalog.schedule.cron;
-  const match = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5|6)$/u.exec(schedule.expr);
+  const match = calendarCronPattern.exec(schedule.expr);
   if (!catalog.schedule.kinds.includes("cron") || !cron) {
     return error("schedule", "unsupported_schedule", "Choose a supported schedule.");
   }

@@ -110,6 +110,9 @@
       "@openclaw/gateway-protocol/protected-authoring": [
         "./packages/gateway-protocol/src/protected-authoring.ts"
       ],
+      "@openclaw/gateway-protocol/protected-sharing": [
+        "./packages/gateway-protocol/src/protected-sharing.ts"
+      ],
       "@openclaw/gateway-protocol/restart-unavailable": [
         "./packages/gateway-protocol/src/restart-unavailable.ts"
       ],

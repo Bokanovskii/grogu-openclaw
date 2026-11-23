@@ -5990,6 +5990,15 @@ void test("automation authoring chats hold a server binding and save only the se
     { type: "automation-save-refused", draftRevision: "5", reason: "draft_changed" },
   ]);
   assert.deepEqual(await listAutomations(), []);
+  // A starter draft's [bracketed] placeholders must be replaced before chat can save it.
+  const unfinished = await turn("alice", chat.id, "Please save 5", {
+    draft: { ...draft, instructions: "Check the forecast for [your town or area]." },
+    draftRevision: "5",
+  });
+  assert.deepEqual(ofType(unfinished.events, "automation-save-refused"), [
+    { type: "automation-save-refused", draftRevision: "5", reason: "invalid" },
+  ]);
+  assert.deepEqual(await listAutomations(), []);
 
   // A first save that stopped before binding left its record under the chat id; a retry reuses it.
   const orphan = await createProtectedAutomationWithAdmission(
@@ -6058,7 +6067,7 @@ void test("automation authoring chats hold a server binding and save only the se
     ).status,
     412,
   );
-  assert.deepEqual(routed, [false, false, false, false]);
+  assert.deepEqual(routed, [false, false, false, false, false]);
 
   // Saved items reopen their one bound chat; other members cannot see or bind them.
   const reopened = await call("alice", `/automations/${chat.id}/authoring`, { method: "POST" });

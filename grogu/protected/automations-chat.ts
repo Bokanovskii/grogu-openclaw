@@ -303,6 +303,19 @@ export function createProtectedAutomationAuthoringBindings(input: {
         ) {
           return refuse("draft_changed");
         }
+        const placeholders = placeholderFields(input.sent.draft);
+        if (placeholders.length > 0) {
+          await refuse("invalid");
+          return {
+            status: "invalid" as const,
+            writeApplied: false as const,
+            errors: placeholders.map((field) => ({
+              field,
+              code: "placeholder",
+              message: "Replace the [bracketed] placeholder with real details before saving.",
+            })),
+          };
+        }
         let automation: ProtectedAutomationRecord | undefined;
         if (input.boundAutomationId === undefined) {
           const validation = validate(input.sent.draft, null);
@@ -385,6 +398,17 @@ export function createProtectedAutomationAuthoringBindings(input: {
 }
 
 /** Whether a stored record is exactly this validated draft, as a retried keyed create finds it. */
+// Starter and blank drafts mark details the member still has to supply as `[...]`; Markdown links
+// are not placeholders.
+const placeholderPattern = /\[[^[\]\n]+\](?!\()/u;
+
+function placeholderFields(draft: ProtectedAutomationDraft) {
+  return (["name", "instructions", "whenToNotify", "doneWhen"] as const).filter((field) => {
+    const value = draft[field];
+    return typeof value === "string" && placeholderPattern.test(value);
+  });
+}
+
 export function savesDraft(automation: ProtectedAutomationRecord, draft: ProtectedAutomationDraft) {
   return isDeepStrictEqual(definitionOf(automation), withoutUndefined(draft));
 }

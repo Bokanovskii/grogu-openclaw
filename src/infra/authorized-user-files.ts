@@ -27,6 +27,7 @@ export type AuthorizedUserFiles = {
   write(name: string, data: string | Buffer): Promise<void>;
   move(from: string, to: string): Promise<void>;
   remove(name: string): Promise<void>;
+  removeEmptyDirectory(name: string): Promise<void>;
   dispose(): void;
 };
 
@@ -197,6 +198,8 @@ async function createAuthorizedUserFilesOwner(options: {
           signal: options.signal,
         }),
       ),
+    removeEmptyDirectory: (name) =>
+      run(() => root.remove(relativeName(name), { recursive: false, force: false })),
     dispose: () => {
       disposed = true;
     },
@@ -536,6 +539,26 @@ export async function measureAuthorizedUserFileTrees(options: {
     },
   );
   return measured;
+}
+
+/** Run one short operation through each admitted member-file owner. */
+export async function forEachAuthorizedUserFiles(
+  options: {
+    usersRoot: UserFilesMigrationRoot;
+    assertCurrent: () => void;
+    maxBytes: number;
+    encryption?: StorageValueEncryption;
+  },
+  operation: (files: AuthorizedUserFiles, userDirectory: string) => Promise<void>,
+): Promise<void> {
+  await forEachAuthorizedUserFilesOwner(
+    { ...options, allowUnrelatedEntries: true },
+    async (owner, userDirectory) => {
+      options.assertCurrent();
+      await operation(owner.files, userDirectory);
+      options.assertCurrent();
+    },
+  );
 }
 
 export async function verifyAuthorizedUserFiles(options: {

@@ -710,6 +710,9 @@ export function createStorageAdmission(
             remove(name) {
               return withMutation(() => files.remove(name));
             },
+            removeEmptyDirectory(name) {
+              return withMutation(() => files.removeEmptyDirectory(name));
+            },
             async updateText(name, update) {
               if (!active) {
                 throw new Error("Storage admission is closed.");

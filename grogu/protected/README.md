@@ -247,6 +247,11 @@ The service encrypts notes as member-owned files; the running service and its
 administrator can read them. Search uses a temporary in-memory keyword index,
 not a paid embedding service. Existing chats are not backfilled.
 
+Ordinary chats, itineraries, automation instructions, and run details do not
+need memory notes. Grogu saves short personal context only when it can help
+future chats. The memory tool rejects entries over 500 characters and skips
+exact duplicates. Existing notes remain unchanged.
+
 Clients opt in with `x-alcove-capabilities: memory-v1`; `/me` then reports
 `capabilities.memory.review`. To review notes, send `x-grogu-profile` with the
 current profile ID to `GET /api/protected/v1/memory`, then read a listed note at
@@ -255,6 +260,17 @@ and `updatedAt` in epoch milliseconds; reads return `{ note, text }`. Note IDs
 are opaque and change when the service restarts. Refresh the list after a 404.
 An account mismatch returns 403 `profile_mismatch`; an unavailable review owner
 returns 503 `unavailable`.
+
+Clients that support deletion opt in with `memory-v2`. The memory capability
+also includes `delete`, and note reads include an opaque `revision`. Send that
+revision in `If-Match` to `DELETE /api/protected/v1/memory/:id`. The service
+returns 204 when it removes the selected file. It returns 428
+`precondition_required` without a revision and 409 `memory_changed` when the
+file changed. Reload the note before trying again. A legacy daily file can
+contain several memories. Deleting it removes the whole file, not just one
+entry. Notes do not record a reliable source chat, and deleting a note does
+not delete a chat. The accepted design is recorded in
+[the maintainer discussion](https://github.com/Bokanovskii/grogu-openclaw/issues/180#issuecomment-7108651602).
 
 `PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
 Send the current chat `version` in `If-Match` and a JSON body with `title`.

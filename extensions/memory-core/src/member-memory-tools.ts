@@ -39,12 +39,12 @@ export function createMemberMemoryTool(params: {
         ? "Before answering questions about prior work or preferences, search this member's private memory by keywords. Results do not include chat transcripts."
         : name === "memory_get"
           ? "Read a bounded excerpt from this member's private memory."
-          : "Append durable information the member wants remembered to their private memory.",
+          : "Save one short, useful and durable personal preference or fact. Do not save chat summaries, travel plans, automation instructions, or run details. Search for an existing memory first.",
     parameters:
       name === "memory_store"
         ? {
             type: "object",
-            properties: { content: { type: "string", minLength: 1, maxLength: 16000 } },
+            properties: { content: { type: "string", minLength: 1, maxLength: 500 } },
             required: ["content"],
             additionalProperties: false,
           }
@@ -108,11 +108,14 @@ export function createMemberMemoryTool(params: {
           );
         }
         const content = readStringParam(args, "content", { required: true });
-        if (content.length > 16_000) {
+        if (content.length > 500) {
           throw new Error("Member memory content exceeds its limit.");
         }
-        await owner.append(resolveMemoryNotePath(current.cfg, Date.now()), `\n${content}\n`);
-        return jsonResult({ stored: true });
+        const stored = await owner.append(
+          resolveMemoryNotePath(current.cfg, Date.now()),
+          `\n${content.trim().replace(/\s+/gu, " ")}\n`,
+        );
+        return jsonResult({ stored });
       } finally {
         await owner.release();
       }

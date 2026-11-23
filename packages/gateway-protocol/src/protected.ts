@@ -2,6 +2,15 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { MAX_DATE_TIMESTAMP_MS } from "./schema/cron-shared.js";
 
+export {
+  ProtectedMemoryNoteSchema,
+  ProtectedMemoryListResponseSchema,
+  ProtectedMemoryReadResponseSchema,
+  type ProtectedMemoryNote,
+  type ProtectedMemoryListResponse,
+  type ProtectedMemoryReadResponse,
+} from "./protected-memory.js";
+
 const id = Type.String({ minLength: 1, maxLength: 256 });
 const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
 const protectedAutomationIdPattern =
@@ -232,22 +241,9 @@ export const ProtectedMeSchema = node({
     feedback: Type.Optional(Type.Boolean()),
     telemetry: Type.Optional(Type.Boolean()),
     reportChat: Type.Optional(Type.Boolean()),
-    memory: Type.Optional(node({ review: Type.Boolean() })),
+    memory: Type.Optional(node({ review: Type.Boolean(), delete: Type.Optional(Type.Boolean()) })),
     sharing: Type.Optional(Type.Boolean()),
   }),
-});
-export const ProtectedMemoryNoteSchema = node({
-  id: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }),
-  name: Type.String({ minLength: 1 }),
-  bytes: Type.Integer({ minimum: 0 }),
-  updatedAt: Type.Integer({ minimum: 0 }),
-});
-export const ProtectedMemoryListResponseSchema = node({
-  notes: Type.Array(ProtectedMemoryNoteSchema),
-});
-export const ProtectedMemoryReadResponseSchema = node({
-  note: ProtectedMemoryNoteSchema,
-  text: Type.String(),
 });
 export const ProtectedAutomationCapabilitiesSchema = node({
   catalog: Type.Boolean(),
@@ -646,9 +642,6 @@ export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
-export type ProtectedMemoryNote = Static<typeof ProtectedMemoryNoteSchema>;
-export type ProtectedMemoryListResponse = Static<typeof ProtectedMemoryListResponseSchema>;
-export type ProtectedMemoryReadResponse = Static<typeof ProtectedMemoryReadResponseSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
 export type ProtectedAutomationCatalogV1 = Static<typeof ProtectedAutomationCatalogV1Schema>;

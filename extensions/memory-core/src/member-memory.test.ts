@@ -2,9 +2,9 @@ import "openclaw/plugin-sdk/compiled-subprocess-testing";
 import { describe, expect, it } from "vitest";
 import type { MemberMemoryBinding, MemberMemoryFiles } from "./member-memory-binding.js";
 import { createMemberMemoryTool } from "./member-memory-tools.js";
-import { openMemberMemory, retireMemberMemory } from "./member-memory.js";
+import { mutateMemberMemory, openMemberMemory, retireMemberMemory } from "./member-memory.js";
 
-function files(): MemberMemoryFiles {
+function files(): MemberMemoryFiles & { remove(path: string): void } {
   const contents = new Map<string, string>();
   return {
     assertCurrent() {},
@@ -31,6 +31,9 @@ function files(): MemberMemoryFiles {
     async append(path, text) {
       contents.set(path, `${contents.get(path) ?? ""}${text}`);
     },
+    remove(path) {
+      contents.delete(path);
+    },
   };
 }
 
@@ -42,11 +45,12 @@ describe("member memory owner", () => {
       agentId: "protected",
       workspaceKey: "a-generation",
     };
+    const ownedFiles = files();
     const binding: MemberMemoryBinding = {
       audience,
       memberKey: "a",
       workspaceGeneration: "generation",
-      files: files(),
+      files: ownedFiles,
     };
     const otherAudience = { ...audience, workspaceKey: "b-generation" };
     const otherBinding = {
@@ -69,6 +73,11 @@ describe("member memory owner", () => {
       expect((await other.read("memory/2026-01-01.md")).status).toBe("not_found");
       expect((await second.read("memory/2026-01-01.md")).text).toContain("yellow lantern");
       await expect(first.append("../other.md", "no")).rejects.toThrow();
+      await mutateMemberMemory(
+        { memberKey: "a", workspaceGeneration: "generation", assertCurrent: () => {} },
+        async () => ownedFiles.remove("memory/2026-01-01.md"),
+      );
+      expect(await second.search("lantern", 10)).toEqual([]);
       await retireMemberMemory("a");
       await expect(second.search("lantern", 10)).rejects.toThrow("no longer current");
     } finally {
@@ -105,7 +114,17 @@ describe("member memory owner", () => {
       }
       return result;
     };
-    await tool("memory_store").execute("store", { content: "Likes imaginary blue boats." });
+    const stored = await tool("memory_store").execute("store", {
+      content: "Likes imaginary blue boats.",
+    });
+    expect(stored.details).toMatchObject({ stored: true });
+    const duplicate = await tool("memory_store").execute("store-again", {
+      content: "Likes imaginary blue boats.",
+    });
+    expect(duplicate.details).toMatchObject({ stored: false });
+    await expect(
+      tool("memory_store").execute("oversized", { content: "x".repeat(501) }),
+    ).rejects.toThrow("limit");
     const search = await tool("memory_search").execute("search", { query: "blue boats" });
     expect(search.details).toMatchObject({
       mode: "keyword",

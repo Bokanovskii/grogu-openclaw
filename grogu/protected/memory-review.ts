@@ -13,6 +13,15 @@ export function createProtectedMemoryReview() {
   const key = randomBytes(32);
   const id = (profileId: string, path: string) =>
     createHmac("sha256", key).update(profileId).update("\0").update(path).digest("base64url");
+  const revision = (profileId: string, path: string, content: Buffer) =>
+    createHmac("sha256", key)
+      .update("revision\0")
+      .update(profileId)
+      .update("\0")
+      .update(path)
+      .update("\0")
+      .update(content)
+      .digest("base64url");
   const open = (profileId: string, files: AuthorizedUserFiles) => {
     const reader = createMemberMemoryNoteReader(createMemberMemoryReadFiles(files));
     const list = async () => {
@@ -28,13 +37,37 @@ export function createProtectedMemoryReview() {
       async list(): Promise<ProtectedMemoryListResponse> {
         return { notes: await list() };
       },
-      async read(reference: string): Promise<ProtectedMemoryReadResponse | undefined> {
+      async read(
+        reference: string,
+        includeRevision = false,
+      ): Promise<ProtectedMemoryReadResponse | undefined> {
         const note = (await list()).find((entry) => entry.id === reference);
         if (!note) {
           return undefined;
         }
-        const text = await reader.readFull(note.name);
-        return text === undefined ? undefined : { note, text };
+        const content = await files.read(`member-memory/${note.name}`);
+        return {
+          note,
+          text: content.toString("utf8"),
+          ...(includeRevision ? { revision: revision(profileId, note.name, content) } : {}),
+        };
+      },
+      async remove(
+        reference: string,
+        expectedRevision: string,
+        removeIfMatches: (path: string, content: Buffer) => Promise<boolean>,
+      ): Promise<"missing" | "changed" | "deleted"> {
+        const note = (await list()).find((entry) => entry.id === reference);
+        if (!note) {
+          return "missing";
+        }
+        const content = await files.read(`member-memory/${note.name}`);
+        if (revision(profileId, note.name, content) !== expectedRevision) {
+          return "changed";
+        }
+        return (await removeIfMatches(`member-memory/${note.name}`, content))
+          ? "deleted"
+          : "changed";
       },
     };
   };

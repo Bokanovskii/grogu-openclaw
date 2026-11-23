@@ -1024,11 +1024,13 @@ void test("member memory review reads only the current member's encrypted notes"
   const stateDir = path.resolve(".artifacts", `protected-memory-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
   const usersRoot = await root(stateDir);
   const encryption = createStorageValueEncryption(randomBytes(32));
   t.after(() => encryption.dispose());
   const origin = "https://family.example";
   const expiresAt = Date.now() + 120_000;
+  const memberMemory = createProtectedMemberMemory();
   const app = createProtectedHttp({
     origin,
     accessIssuer: "https://identity.example",
@@ -1036,6 +1038,7 @@ void test("member memory review reads only the current member's encrypted notes"
     usersRoot,
     encryption,
     memoryReview: createProtectedMemoryReview(),
+    memberMemory,
     directory: { issuer: "https://identity.example", allowedSubjects: ["alice", "bob"] },
     verifyIdentity: async (request) => ({
       issuer: "https://identity.example",
@@ -1048,6 +1051,7 @@ void test("member memory review reads only the current member's encrypted notes"
     }),
     maxChatsPerUser: 3,
     maxFileBytes: 64_000,
+    storageLimits: { userBytes: 1_000_000, globalBytes: 2_000_000, freeFloorBytes: 1 },
     turns: {
       models: [],
       async run() {},
@@ -1057,9 +1061,15 @@ void test("member memory review reads only the current member's encrypted notes"
     },
   });
   t.after(() => app.shutdown());
-  const call = (user: string, route: string, headers: Record<string, string> = {}) =>
+  const call = (
+    user: string,
+    route: string,
+    headers: Record<string, string> = {},
+    method = "GET",
+  ) =>
     app.fetch(
       new Request(`${origin}/api/protected/v1${route}`, {
+        method,
         headers: { origin, cookie: user, ...headers },
       }),
     );
@@ -1080,19 +1090,108 @@ void test("member memory review reads only the current member's encrypted notes"
     encryption,
   });
   t.after(() => owned.dispose());
+  const bobOwned = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: bob.id,
+    assertCurrent() {},
+    maxBytes: 64_000,
+    encryption,
+  });
+  t.after(() => bobOwned.dispose());
+  await bobOwned.write("member-memory/memory/bob.md", "Bob's synthetic memory.");
   const content = `Synthetic private memory: ${"x".repeat(13_000)}`;
   await owned.write("member-memory/memory/2026-01-01.md", content);
   const aliceHeaders = { "x-grogu-profile": me.user.id };
   const list = await (await call("alice", "/memory", aliceHeaders)).json();
   assert.ok(Value.Check(ProtectedMemoryListResponseSchema, list));
   assert.equal(list.notes.length, 1);
-  const read = await (await call("alice", `/memory/${list.notes[0].id}`, aliceHeaders)).json();
+  const note = list.notes[0];
+  assert.ok(note);
+  const read = await (await call("alice", `/memory/${note.id}`, aliceHeaders)).json();
   assert.ok(Value.Check(ProtectedMemoryReadResponseSchema, read));
   assert.equal(read.text, content);
   const bobHeaders = { "x-grogu-profile": bob.id };
-  assert.deepEqual((await (await call("bob", "/memory", bobHeaders)).json()).notes, []);
-  assert.equal((await call("bob", `/memory/${list.notes[0].id}`, bobHeaders)).status, 404);
+  assert.equal((await (await call("bob", "/memory", bobHeaders)).json()).notes.length, 1);
+  assert.equal((await call("bob", `/memory/${note.id}`, bobHeaders)).status, 404);
   assert.equal((await call("bob", "/memory", aliceHeaders)).status, 403);
+
+  await owned.write("member-memory/memory/other.md", "A different synthetic memory.");
+  await owned.write("chats/synthetic/keep.txt", "Keep this chat file.");
+  const v2Headers = { ...aliceHeaders, "x-alcove-capabilities": "memory-v2" };
+  const v2Me = await (await call("alice", "/me", v2Headers)).json();
+  assert.deepEqual(v2Me.capabilities.memory, { review: true, delete: true });
+  const v2Read = await (await call("alice", `/memory/${note.id}`, v2Headers)).json();
+  assert.match(v2Read.revision, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal((await call("alice", `/memory/${note.id}`, v2Headers, "DELETE")).status, 428);
+  assert.equal(
+    (
+      await call(
+        "alice",
+        `/memory/${note.id}`,
+        { ...v2Headers, origin: "https://untrusted.example", "if-match": v2Read.revision },
+        "DELETE",
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await call(
+        "bob",
+        `/memory/${note.id}`,
+        {
+          ...bobHeaders,
+          "x-alcove-capabilities": "memory-v2",
+          "if-match": v2Read.revision,
+        },
+        "DELETE",
+      )
+    ).status,
+    404,
+  );
+  await owned.write("member-memory/memory/2026-01-01.md", `${content}\nNewer memory.`);
+  const stale = await call(
+    "alice",
+    `/memory/${note.id}`,
+    { ...v2Headers, "if-match": v2Read.revision },
+    "DELETE",
+  );
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error.code, "memory_changed");
+  const fresh = await (await call("alice", `/memory/${note.id}`, v2Headers)).json();
+  assert.equal(
+    (
+      await call(
+        "alice",
+        `/memory/${note.id}`,
+        { ...v2Headers, "if-match": fresh.revision },
+        "DELETE",
+      )
+    ).status,
+    204,
+  );
+  assert.equal(
+    await owned.readText("member-memory/memory/other.md"),
+    "A different synthetic memory.",
+  );
+  assert.equal(await owned.readText("chats/synthetic/keep.txt"), "Keep this chat file.");
+  assert.equal(await bobOwned.readText("member-memory/memory/bob.md"), "Bob's synthetic memory.");
+  assert.equal((await call("alice", `/memory/${note.id}`, v2Headers)).status, 404);
+  await owned.write("member-memory/memory/legacy.md", Buffer.from([0xff]));
+  const updatedList = await (await call("alice", "/memory", v2Headers)).json();
+  const legacy = updatedList.notes.find(
+    (entry: { name: string }) => entry.name === "memory/legacy.md",
+  );
+  assert.ok(legacy);
+  const legacyRead = await (await call("alice", `/memory/${legacy.id}`, v2Headers)).json();
+  await owned.write("member-memory/memory/legacy.md", Buffer.from([0xfe]));
+  const changedBytes = await call(
+    "alice",
+    `/memory/${legacy.id}`,
+    { ...v2Headers, "if-match": legacyRead.revision },
+    "DELETE",
+  );
+  assert.equal(changedBytes.status, 409);
 });
 
 void test("member memory follows the authenticated member across protected chats", async (t) => {

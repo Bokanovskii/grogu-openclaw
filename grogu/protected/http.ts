@@ -3249,6 +3249,7 @@ export function createProtectedHttp(options: {
         return projectIcon(profile.id, preferences.entries[iconPreference]);
       };
       const profileCapability = hasClientCapability(request.headers, "profile-v1");
+      const memoryV2 = hasClientCapability(request.headers, "memory-v2");
       // Setup completes only through a saved canonical name, never a rendered fallback.
       const accountUser = (displayName: string | null, icon: unknown) => {
         const name = displayName?.trim() ?? "";
@@ -3272,14 +3273,28 @@ export function createProtectedHttp(options: {
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
             ...(reportChatCapability ? { reportChat: true } : {}),
             ...(sharingCapability ? { sharing: identity.kind !== "development" } : {}),
-            ...(hasClientCapability(request.headers, "memory-v1")
-              ? { memory: { review: options.memoryReview !== undefined } }
+            ...(memoryV2 || hasClientCapability(request.headers, "memory-v1")
+              ? {
+                  memory: {
+                    review: options.memoryReview !== undefined,
+                    ...(memoryV2
+                      ? {
+                          delete:
+                            options.memoryReview !== undefined &&
+                            options.memberMemory !== undefined,
+                        }
+                      : {}),
+                  },
+                }
               : {}),
           },
         });
       }
       const memoryReference = pathname.match(/^\/memory\/([A-Za-z0-9_-]{43})$/u);
-      if (method === "GET" && (pathname === "/memory" || memoryReference)) {
+      if (
+        (method === "GET" && (pathname === "/memory" || memoryReference)) ||
+        (method === "DELETE" && memoryReference && memoryV2)
+      ) {
         const requireMemoryProfile = () =>
           requireProfile("Reload before viewing the current account's memory.");
         requireMemoryProfile();
@@ -3299,17 +3314,78 @@ export function createProtectedHttp(options: {
           requireMemoryProfile();
         };
         assertMemoryCurrent();
+        if (method === "DELETE" && memoryReference) {
+          if (!options.memberMemory) {
+            throw new ProtectedError(503, "unavailable", "Member memory is not available.");
+          }
+          const expected = request.headers.get("if-match");
+          if (!expected) {
+            throw new ProtectedError(
+              428,
+              "precondition_required",
+              "Reload the memory before deleting it.",
+            );
+          }
+          if (!/^[A-Za-z0-9_-]{43}$/u.test(expected)) {
+            invalid();
+          }
+          const result = await options.memberMemory.mutate(profile.id, assertMemoryCurrent, () =>
+            files(async (owned) => {
+              const review = memoryReview.open(profile.id, owned);
+              return await review.remove(
+                memoryReference[1]!,
+                expected,
+                async (filePath, content) => {
+                  await revalidate();
+                  assertMemoryCurrent();
+                  const storage = await admitStorage?.(
+                    profile.id,
+                    assertMemoryCurrent,
+                    "delete",
+                    await storageLimit(assertMemoryCurrent),
+                  );
+                  try {
+                    if (storage) {
+                      return await storage
+                        .files(owned)
+                        .removeFileIfBytesMatch(filePath, content, revalidate);
+                    }
+                    await revalidate();
+                    if (!(await owned.read(filePath)).equals(content)) {
+                      return false;
+                    }
+                    await owned.removeFile(filePath);
+                    return true;
+                  } finally {
+                    storage?.release();
+                  }
+                },
+              );
+            }, assertMemoryCurrent),
+          );
+          if (result === "missing") {
+            notFound();
+          }
+          if (result === "changed") {
+            throw new ProtectedError(
+              409,
+              "memory_changed",
+              "Memory changed. Reload it before deleting.",
+            );
+          }
+          return noContent();
+        }
         const result = await files(async (owned) => {
           const review = memoryReview.open(profile.id, owned);
           if (!memoryReference) {
             return await review.list();
           }
-          const note = await review.read(memoryReference[1]!);
+          const note = await review.read(memoryReference[1]!, memoryV2);
           return note ?? notFound();
         }, assertMemoryCurrent);
         await revalidate();
         assertMemoryCurrent();
-        return json(result);
+        return profileJson(result);
       }
       if (pathname === "/account" && method === "GET") {
         const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {

@@ -27,6 +27,7 @@ export type AuthorizedUserFiles = {
   write(name: string, data: string | Buffer): Promise<void>;
   move(from: string, to: string): Promise<void>;
   remove(name: string): Promise<void>;
+  removeFile(name: string): Promise<void>;
   removeEmptyDirectory(name: string): Promise<void>;
   dispose(): void;
 };
@@ -198,6 +199,8 @@ async function createAuthorizedUserFilesOwner(options: {
           signal: options.signal,
         }),
       ),
+    removeFile: (name) =>
+      run(() => root.remove(relativeName(name), { recursive: false, force: false })),
     removeEmptyDirectory: (name) =>
       run(() => root.remove(relativeName(name), { recursive: false, force: false })),
     dispose: () => {

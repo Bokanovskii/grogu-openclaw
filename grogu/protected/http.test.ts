@@ -2857,7 +2857,11 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       await turn.files.write(`chats/${turn.id}/artifacts/${generatedFileName}`, generatedFileHtml);
     }
   };
-  const sendNotification = mock.fn(async () => ({ statusCode: 201 }));
+  const sendNotification = mock.fn(
+    async (..._args: Parameters<typeof import("web-push").sendNotification>) => ({
+      statusCode: 201,
+    }),
+  );
   const webPushMock = mock.module("web-push", {
     defaultExport: {
       generateVAPIDKeys: () => ({ publicKey: "synthetic-public", privateKey: "synthetic-private" }),

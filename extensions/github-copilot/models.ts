@@ -13,6 +13,7 @@ import {
 import {
   asPositiveSafeInteger,
   normalizeOptionalLowercaseString,
+  normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   resolveCopilotModelCompat,
@@ -105,6 +106,7 @@ type CopilotApiModelEntry = {
 
 type CopilotModelSelectionMetadata = {
   category?: string;
+  vendor?: string;
   pickerEnabled: boolean;
   policyState?: string;
   preview: boolean;
@@ -113,6 +115,10 @@ type CopilotModelSelectionMetadata = {
 };
 
 const copilotModelSelectionMetadata = new WeakMap<object, CopilotModelSelectionMetadata>();
+
+export function getCopilotCatalogVendor(model: CopilotCatalogModel): string | undefined {
+  return copilotModelSelectionMetadata.get(model)?.vendor;
+}
 
 export function isCopilotCatalogModelVisible(model: CopilotCatalogModel): boolean {
   const metadata = copilotModelSelectionMetadata.get(model);
@@ -293,6 +299,7 @@ function mapCopilotApiModelToDefinition(
   };
   copilotModelSelectionMetadata.set(definition, {
     category: normalizeOptionalLowercaseString(entry.model_picker_category),
+    vendor: normalizeOptionalString(entry.vendor),
     pickerEnabled: entry.model_picker_enabled === true,
     policyState: normalizeOptionalLowercaseString(entry.policy?.state),
     preview: entry.preview === true,

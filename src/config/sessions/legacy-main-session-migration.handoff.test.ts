@@ -342,6 +342,9 @@ describe("legacy main session history handoff", () => {
         });
         if (beforeCopy || phase === "during-delete") {
           expect((await migration).complete).toBe(false);
+        } else if (phase !== "destination-disposal") {
+          // Destination custody excludes independent destination writers through source commits.
+          await expect(migration).rejects.toThrow("database is locked");
         } else {
           await expect(migration).rejects.toThrow(
             "Canonical session changed before legacy cleanup: agent:ops:chat",

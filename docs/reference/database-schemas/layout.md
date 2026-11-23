@@ -31,10 +31,20 @@ followers. A binding ties one native Cron job to its automation, central owner,
 and definition revision; Cron remains the owner of the schedule and execution
 receipts.
 
-The first release does not store Research Topics references or result/inbox
-data in these tables. The additive feature schema does not change the shared
+The first release does not store Research Topics references or inbox data in
+these tables. The additive feature schema does not change the shared
 database's numeric schema version. Alcove upgrades are forward-only; an older
 build does not understand these records.
+
+`protected_automation_runs` lazily stores each finished private run of an
+automation. The payload (name snapshot, final text, native transcript identity)
+is sealed with the protected storage key, bound to the immutable row id. The
+row records the native job, `runAtMs`, and invocation run id, which are unique
+together, and the byte count charged once to the central owner. It has no
+foreign key to `protected_automations`: removing an owner or automation must
+retire the charged bytes through the existing quota owner, so a cascade would
+free ciphertext without releasing quota. Only the owner can read these rows;
+nothing deletes them yet.
 
 The shared-state database retains `task_runs`, `task_delivery_state`, and `flow_runs`, including their existing columns and indexes. The Tasks and TaskFlow runtime, tools, and UI are removed; their non-Cron rows remain untouched and unused by the runtime. Cron owns only the `runtime = 'cron'` rows in `task_runs` through its history store. It does not move history to another table. Native execution and completion remain with the subagent registry and harness-binding owners; native Codex pending assignments use metadata in the existing parent binding, not a new table. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 

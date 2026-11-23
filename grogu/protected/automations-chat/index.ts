@@ -157,7 +157,7 @@ function createAuthoringTools(
       name: "automation_draft_update",
       label: "Update automation draft",
       description:
-        "Replace the member's unsaved automation draft with a complete revised draft. The member sees it in the form; nothing is saved or scheduled.",
+        "Replace the member's unsaved automation draft with a complete revised draft. On draft_updated the app shows the member a card of the new draft; nothing is saved or scheduled. Call this before describing a change, and only describe changes it returned draft_updated for.",
       parameters: AutomationsAuthoringUpdateParametersSchema,
       async execute(_toolCallId: string, params: unknown) {
         return isAutomationsAuthoringUpdateParameters(params)
@@ -169,7 +169,7 @@ function createAuthoringTools(
       name: "automation_draft_save",
       label: "Save automation draft",
       description:
-        "Only when the member explicitly asks to save: save exactly the draft revision they sent this turn as a paused automation. It never turns the automation on. Do not call it after updating the draft in the same turn.",
+        "Only when the member explicitly asks to save: save exactly the draft revision they sent this turn as a paused automation. It never turns the automation on. Do not call it after updating the draft in the same turn or while any [bracketed] placeholder remains; such a save is refused.",
       parameters: AutomationsAuthoringSaveParametersSchema,
       async execute(_toolCallId: string, params: unknown) {
         return isAutomationsAuthoringSaveParameters(params)

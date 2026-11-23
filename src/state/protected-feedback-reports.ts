@@ -239,7 +239,8 @@ export function submitProtectedFeedbackReport(
       feedback: ProtectedFeedbackValue;
       entries: ProtectedStoredDataEntry[];
     }
-  | { kind: "already_reported" | "submission_conflict" } {
+  | { kind: "already_reported" }
+  | { kind: "submission_conflict" } {
   ensureProtectedFeedbackSchema(database);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {

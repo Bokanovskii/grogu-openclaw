@@ -927,7 +927,7 @@ export function createProtectedHttp(options: {
                 origin: "sent" | "produced";
               }>;
             }
-          | { state: "deleted" | "member_removed" } = { state: report.evidence };
+          | { state: "deleted" | "member_removed" };
         let evidenceState = report.evidence;
         if (report.evidence === "available") {
           try {
@@ -979,6 +979,8 @@ export function createProtectedHttp(options: {
             evidenceState = "deleted";
             evidence = { state: "deleted" };
           }
+        } else {
+          evidence = { state: report.evidence };
         }
         const summary = feedbackReportSummary({ ...report, evidence: evidenceState });
         return json({

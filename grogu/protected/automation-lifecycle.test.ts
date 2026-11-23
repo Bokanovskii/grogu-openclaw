@@ -46,6 +46,10 @@ import { readProtectedAutomationResultStorageUsage } from "./automation-results-
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { createProtectedAutomationStorageRecoveryOwner } from "./automation-storage-recovery.js";
 import {
+  readProtectedFeedbackStorageUsage,
+  submitProtectedFeedbackReport,
+} from "./feedback-store.js";
+import {
   captureProtectedStateWorkerContext,
   prepareProtectedSharedState,
 } from "./state-worker-context.js";
@@ -54,6 +58,7 @@ import {
   createStoredDataBatchReplacementReservation,
   createStoredDataReservation,
   retireStoredData,
+  storedDataEntryKey,
   type StoredDataLedger,
 } from "./storage-entry-quota.js";
 
@@ -747,6 +752,39 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
       );
       assert.ok(member);
       const input = { id: member.id, issuer, ownerSubject: f.operatorSubject };
+      const report = await submitProtectedFeedbackReport(f.stateDir, {
+        profileId: f.ownerId,
+        memberLabel: "Synthetic member",
+        chatId: randomUUID(),
+        responseId: randomUUID(),
+        submissionId: randomUUID(),
+        category: "other",
+        description: "Synthetic retained report",
+        now: 5_005,
+        storageOverheadBytes: 4096,
+        chatReference: {
+          title: "Synthetic retained chat",
+          eventCount: 2,
+          digest: "a".repeat(64),
+          capturedAt: 5_005,
+          files: [],
+        },
+      });
+      assert.equal(report.kind, "created");
+      if (report.kind !== "created") {
+        throw new Error("Synthetic removal report was not created.");
+      }
+      const feedback = await readProtectedFeedbackStorageUsage(f.stateDir, 4096, assertOperator);
+      for (const entry of feedback) {
+        owner.ledger.storedEntries.set(storedDataEntryKey(entry), entry);
+        owner.ledger.globalBytes += entry.bytes;
+        owner.ledger.users.set(
+          entry.profileId,
+          (owner.ledger.users.get(entry.profileId) ?? 0) + entry.bytes,
+        );
+      }
+      const description = feedback.find((entry) => entry.id === `report:${report.report.id}`);
+      assert.ok(description);
       const before = [
         ...(await readProtectedAutomationLifecycleStorageUsage(f.stateDir, assertOperator)),
         ...(await readProtectedAutomationResultStorageUsage(f.stateDir, assertOperator)),
@@ -772,7 +810,12 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
           f.stateDir,
           input,
           assertOperator,
-          (_subject, _profileId, retired) => definitions.push(...retired.map((entry) => entry.id)),
+          (_subject, _profileId, retired, changes = []) => {
+            definitions.push(...retired.map((entry) => entry.id));
+            for (const change of changes) {
+              retireStoredData(owner.ledger, change);
+            }
+          },
           () => {
             notifications++;
           },
@@ -793,6 +836,7 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
       const nativeInput = {
         ...input,
         now: 6_000,
+        storageOverheadBytes: 4096,
         retireAutomationStorage: true as const,
         expectedProfileId: f.ownerId,
         expectedRevision: member.revision,
@@ -850,7 +894,10 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
       assert.deepEqual(await recovery.reconcile(), { resolved: 1, pending: 0 });
       recovery.assertSettled();
       recovery.reopen();
-      assert.equal(owner.ledger.globalBytes, 0);
+      assert.equal(owner.ledger.globalBytes, description.bytes + 4096 + 64);
+      assert.deepEqual(await readProtectedFeedbackStorageUsage(f.stateDir, 4096, assertOperator), [
+        ...owner.ledger.storedEntries.values(),
+      ]);
       assert.equal(owner.pending(), 0);
       assert.deepEqual(
         await readProtectedAutomationLifecycleStorageUsage(f.stateDir, () => {}),
@@ -886,7 +933,7 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
         (await listProtectedAdmissions(f.stateDir)).find((entry) => entry.id === member.id)?.status,
         "removed",
       );
-      assert.equal(owner.ledger.globalBytes, 0);
+      assert.equal(owner.ledger.globalBytes, description.bytes + 4096 + 64);
       recovery.assertSettled();
       recovery.reopen();
       assert.deepEqual(

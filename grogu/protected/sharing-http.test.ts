@@ -22,9 +22,11 @@ import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-d
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { migrateProtectedSubjects } from "./admission-store.js";
 import { createProtectedAgentCatalog } from "./agents.js";
+import { measureProtectedStorage, storageEntryOverheadBytes } from "./capacity.js";
 import { chatArtifactsDirectory } from "./chat-files.js";
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
+import { readProtectedFeedbackStorageUsage } from "./feedback-store.js";
 import { createProtectedHttp } from "./http.js";
 import {
   canMemberReadChat,
@@ -80,6 +82,7 @@ void test("chat links grant live read-only access until revoked", async (t) => {
   await migrateProtectedSubjects(stateDir, { issuer, subjects: [...allowed] });
   const encryption = createStorageValueEncryption(randomBytes(32));
   const usersRoot = await root(usersDir);
+  const storageLimits = { globalBytes: 50_000_000, userBytes: 10_000_000, freeFloorBytes: 1 };
   const app = createProtectedHttp({
     origin: "https://alcove.example",
     accessIssuer: issuer,
@@ -111,7 +114,7 @@ void test("chat links grant live read-only access until revoked", async (t) => {
     },
     maxChatsPerUser: 5,
     maxFileBytes: 4096,
-    storageLimits: { globalBytes: 50_000_000, userBytes: 10_000_000, freeFloorBytes: 1 },
+    storageLimits,
     turns: {
       models: [
         {
@@ -440,6 +443,49 @@ void test("chat links grant live read-only access until revoked", async (t) => {
   const nextShare = await ok(await call("owner", `/chats/${next.id}/share`, { method: "POST" }));
   await ok(await claim("recipient", nextShare.share.id));
   await ok(await claim("second", nextShare.share.id));
+  await ok(
+    await call("outsider", "/account/name", {
+      method: "PUT",
+      body: { displayName: "Synthetic Other" },
+    }),
+  );
+  const pendingShare = async () => {
+    const { chat: pending } = await ok(
+      await call("outsider", "/chats", { method: "POST", body: {} }),
+    );
+    return (await ok(await call("outsider", `/chats/${pending.id}/share`, { method: "POST" })))
+      .share;
+  };
+  const firstPending = await pendingShare();
+  const globalUsage = async () =>
+    (
+      await measureProtectedStorage(
+        {
+          chats,
+          usersRoot,
+          maxFileBytes: 4096,
+          encryption,
+          storedDataUsage: async (_profileId, assertCurrent) => [
+            ...(await readProtectedFeedbackStorageUsage(
+              stateDir,
+              storageEntryOverheadBytes,
+              assertCurrent,
+            )),
+            ...(await runProtectedSharing(
+              stateDir,
+              "protectedSharing.storageUsage",
+              storageEntryOverheadBytes,
+              assertCurrent,
+            )),
+          ],
+        },
+        id("second"),
+        () => {},
+        true,
+      )
+    ).globalBytes;
+  storageLimits.globalBytes = (await globalUsage()) + storageEntryOverheadBytes / 2;
+  assert.equal((await claim("second", firstPending.id)).status, 413);
   const { people } = await ok(await call("admin", "/admin/people"));
   const personId = (name: Member) =>
     people.find((person: { subject?: string }) => person.subject === subjects[name]).id;
@@ -449,13 +495,25 @@ void test("chat links grant live read-only access until revoked", async (t) => {
       body: {},
     }),
   );
-  assert.deepEqual(countRows(), [1, 1]);
+  assert.deepEqual(countRows(), [2, 1]);
   assert.equal((await claim("second", nextShare.share.id)).status, 404);
   await ok(await call("second", `/shared/chats/${id("owner")}/${next.id}`));
+  await t.test(
+    "member removal immediately releases a removed recipient's grant quota",
+    async () => {
+      await ok(await claim("second", firstPending.id));
+    },
+  );
+  storageLimits.globalBytes = 50_000_000;
   await ok(
     await call("admin", `/admin/people/${personId("owner")}/remove`, { method: "POST", body: {} }),
   );
   assert.equal((await call("second", `/shared/chats/${id("owner")}/${next.id}`)).status, 404);
-  assert.deepEqual((await ok(await call("second", "/shared/chats"))).chats, []);
-  assert.deepEqual(countRows(), [0, 0]);
+  assert.deepEqual(
+    (await ok(await call("second", "/shared/chats"))).chats.map(
+      (item: { owner: { personId: string } }) => item.owner.personId,
+    ),
+    [id("outsider")],
+  );
+  assert.deepEqual(countRows(), [1, 1]);
 });

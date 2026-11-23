@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import {
@@ -10,7 +11,38 @@ import type {
   FeedbackDatabase,
   ProtectedProducedFile,
   ProtectedReportChatReference,
+  ProtectedStoredDataEntry,
 } from "./protected-feedback.js";
+
+export function readProtectedReportChatStoredData(
+  db: DatabaseSync,
+  overheadBytes: number,
+  profileId?: string,
+): ProtectedStoredDataEntry[] {
+  const schema = getAdmittedSqliteSchemaFacts(db);
+  if (!schema) {
+    throw new Error("Protected report storage requires an admitted database.");
+  }
+  if (!schema.tables.has("protected_report_chat_evidence")) {
+    return [];
+  }
+  let query = getNodeSqliteKysely<FeedbackDatabase>(db)
+    .selectFrom("protected_report_chat_evidence as c")
+    .innerJoin("protected_feedback_reports as r", "r.id", "c.report_id")
+    .select([
+      "c.report_id",
+      "r.profile_id",
+      sql<number>`coalesce(length(CAST(c.reference AS BLOB)), 0) + 64`.as("bytes"),
+    ]);
+  if (profileId !== undefined) {
+    query = query.where("r.profile_id", "=", profileId);
+  }
+  return executeSqliteQuerySync(db, query).rows.map((row) => ({
+    id: `report-chat:${row.report_id}`,
+    profileId: row.profile_id,
+    bytes: overheadBytes + row.bytes,
+  }));
+}
 
 export function reportChatReferenceContext(id: string) {
   return protectedStorageValueContext("protected_report_chat_evidence", "reference", [id]);

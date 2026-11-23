@@ -144,6 +144,12 @@ definition to free space, or contact the server operator. The runtime does not
 evict chats or keep backups. A volume below its floor stops accepting writes
 until space is available. Chat deletion remains available.
 
+Member removal retires deleted response ratings, sharing links and grants in the warmed quota
+ledger as part of committed removal publication, including grants charged to
+other members. Clearing a whole-chat report reference releases its ciphertext
+charge immediately; its retained consent row keeps the existing entry overhead.
+Report descriptions and retention are unchanged. No restart or rescan is needed.
+
 An answer can finish with a widget and no closing text. When the native agent
 confirms successful terminal tool execution, Alcove saves a completion receipt
 in the canonical transcript. The receipt completes the existing reply after

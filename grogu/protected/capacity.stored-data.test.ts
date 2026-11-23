@@ -7,6 +7,53 @@ import { root } from "../../src/infra/fs-safe.js";
 import { createStorageAdmission } from "./capacity.js";
 import type { StoredDataEntry } from "./storage-entry-quota.js";
 
+void test("batch replacement funds one pool from measured entries at full quota without double charging its retained identity", async (t) => {
+  const anchor = { id: "automation:pool", profileId: "owner", bytes: 40 };
+  const legacy = { id: "automation:legacy-run", profileId: "owner", bytes: 60 };
+  const pool = { ...anchor, bytes: 100 };
+  const admit = await createFixture(t, 100, async () => [anchor, legacy]);
+  const holder = await admit("owner", () => {}, "stored-data");
+  const replacement = holder.reserveStoredDataBatchReplacement({
+    previous: [anchor, legacy],
+    current: [pool],
+  });
+  assert.throws(() => replacement.settle([{ ...pool, bytes: 99 }]));
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  replacement.settle([pool]);
+  admit.retiredStoredData([{ removed: legacy }]);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  admit.retiredStoredData([{ removed: pool }]);
+  const available = holder.reserveStoredData(100);
+  available.release();
+  holder.release();
+});
+
+void test("uncertain batch growth remains charged until exact rollback, and shrink credit waits for commit", async (t) => {
+  const first = { id: "automation:anchor", profileId: "owner", bytes: 10 };
+  const second = { id: "automation:run", profileId: "owner", bytes: 30 };
+  const grown = { ...first, bytes: 60 };
+  const admit = await createFixture(t, 70, async () => [first, second]);
+  const holder = await admit("owner", () => {}, "stored-data");
+  const growing = holder.reserveStoredDataBatchReplacement({
+    previous: [first, second],
+    current: [grown],
+  });
+  assert.throws(() => growing.release([first]));
+  assert.throws(() => holder.reserveStoredData(11), { code: "quota_exceeded" });
+  growing.release([second, first]);
+  const shrunk = { ...first, bytes: 30 };
+  const shrinking = holder.reserveStoredDataBatchReplacement({
+    previous: [first, second],
+    current: [shrunk],
+  });
+  assert.throws(() => holder.reserveStoredData(31), { code: "quota_exceeded" });
+  shrinking.settle([shrunk]);
+  const available = holder.reserveStoredData(40);
+  assert.throws(() => holder.reserveStoredData(1), { code: "quota_exceeded" });
+  available.release();
+  holder.release();
+});
+
 async function createFixture(
   t: TestContext,
   limit: number,

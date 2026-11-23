@@ -676,8 +676,12 @@ export function createProtectedChats(options: {
       title = "New chat",
       selectedAgentId = options.agentCatalog.defaultAgentId,
       authoring?: { kind: "automation"; automationId?: string },
+      automationRun?: { chatId: string; automationId: string },
     ): Promise<ProtectedChat> {
       authority.assertCurrent();
+      if (automationRun && (authoring || !validId(automationRun.automationId))) {
+        throw new ProtectedError(400, "invalid_request", "The automation identity is invalid.");
+      }
       if ((await list(authority)).length >= options.maxChatsPerUser) {
         throw new ProtectedError(
           413,
@@ -685,7 +689,10 @@ export function createProtectedChats(options: {
           "Your chat budget is full. Export or delete a chat.",
         );
       }
-      const id = randomUUID();
+      const id = automationRun?.chatId ?? randomUUID();
+      if (!validId(id)) {
+        throw new ProtectedError(400, "invalid_request", "The chat identity is invalid.");
+      }
       const now = Date.now();
       const result = await createSessionEntryWithTranscript(
         scope(authority, id),
@@ -702,6 +709,7 @@ export function createProtectedChats(options: {
               createdAt: now,
               displayName: title,
               protectedAgentId: selectedAgentId,
+              ...(automationRun ? { protectedAutomationRunId: automationRun.automationId } : {}),
               ...(authoring
                 ? {
                     protectedAuthoringKind: authoring.kind,

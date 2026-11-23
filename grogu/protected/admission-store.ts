@@ -1,16 +1,24 @@
+import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
 import {
   createSqliteWorkerOperationAdmission,
   observeSqliteWorkerCommittedFacts,
 } from "../../src/infra/sqlite-worker-operation-admission.js";
+import type { RetainedWorkerTransactionAdmission } from "../../src/infra/sqlite-worker-operation-settlement.js";
 import {
   executeOpenClawStateWorker,
   runOpenClawStateWorkerOperation,
 } from "../../src/state/openclaw-state-worker-store.js";
+import type { ProtectedAdmissionAutomationRetirementFacts } from "../../src/state/protected-admission.js";
+import type { ProtectedAutomationMemberRetirementAuthority } from "../../src/state/protected-automation-lifecycle.types.js";
 import type { ProtectedAutomationStorageUsage } from "../../src/state/protected-automations.js";
+import { readProtectedAutomationRetirementReceipt } from "./automation-retirement-receipt.js";
+import { protectedAutomationStorageLeases } from "./automation-storage-leases.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 export type { ProtectedAccessRequest } from "../../src/state/protected-admission.js";
+export type { ProtectedAutomationMemberRetirementAuthority } from "../../src/state/protected-automation-lifecycle.types.js";
 
 export function submitProtectedAccessRequest(
   stateDir: string,
@@ -63,13 +71,21 @@ function ownerMutationAdmission(
     retiredAutomations: ProtectedAutomationStorageUsage["entries"],
   ) => void,
   onPolicyChanged: () => void,
+  onNativeRemovalCommitted?: () => void,
+  removalFacts?: ProtectedAdmissionAutomationRetirementFacts,
 ) {
   const admission = createSqliteWorkerOperationAdmission((request, grant) => {
     assertCurrent();
-    if (request.facts !== status) {
+    if (
+      (status === "removed" && request.stage !== "transaction" && request.stage !== "commit") ||
+      !isDeepStrictEqual(request.facts, removalFacts ?? status)
+    ) {
       throw new Error("Access request mutation lost its authority.");
     }
-    grant();
+    const granted = grant();
+    if (status === "removed" && !granted) {
+      throw new Error("Member removal native admission was not granted.");
+    }
   });
   observeSqliteWorkerCommittedFacts(admission, ({ facts }) => {
     if (status !== "removed") {
@@ -95,6 +111,10 @@ function ownerMutationAdmission(
       )
     ) {
       throw new Error("Access removal committed with invalid publication facts.");
+    }
+    if (onNativeRemovalCommitted) {
+      onNativeRemovalCommitted();
+      return;
     }
     onRemovalCommitted(facts.subject, facts.profileId, facts.retiredAutomations);
     onPolicyChanged();
@@ -145,18 +165,30 @@ export function removeProtectedAdmission(
     retiredAutomations: ProtectedAutomationStorageUsage["entries"],
   ) => void,
   onPolicyChanged: () => void,
+  retirement?: ProtectedAutomationMemberRetirementAuthority,
 ) {
   const context = captureProtectedStateWorkerContext(stateDir);
+  const captured = { id: input.id, issuer: input.issuer, ownerSubject: input.ownerSubject };
   const assertOwnerCurrent = () => {
     context.admission.assertCurrent();
     assertCurrent();
   };
+  if (retirement) {
+    return removeWithAutomationStorage(
+      context,
+      captured,
+      assertOwnerCurrent,
+      onRemovalCommitted,
+      onPolicyChanged,
+      retirement,
+    );
+  }
   return runOpenClawStateWorkerOperation(
     context,
     (scope) =>
       scope.execute({
         type: "protectedAccess.removeAdmission",
-        input: { ...input, now: Date.now() },
+        input: { ...captured, now: Date.now() },
       }),
     {
       assertCurrent: assertOwnerCurrent,
@@ -170,6 +202,192 @@ export function removeProtectedAdmission(
         ),
     },
   );
+}
+
+async function removeWithAutomationStorage(
+  context: ReturnType<typeof captureProtectedStateWorkerContext>,
+  input: { id: string; issuer: string; ownerSubject: string },
+  assertOwnerCurrent: () => void,
+  onRemovalCommitted: (
+    subject: string | undefined,
+    profileId: string | undefined,
+    retiredAutomations: ProtectedAutomationStorageUsage["entries"],
+  ) => void,
+  onPolicyChanged: () => void,
+  retirement: ProtectedAutomationMemberRetirementAuthority,
+) {
+  const target = {
+    profileId: retirement.profileId,
+    admissionRevision: retirement.admissionRevision,
+  };
+  if (
+    (target.profileId !== null && (typeof target.profileId !== "string" || !target.profileId)) ||
+    !Number.isSafeInteger(target.admissionRevision) ||
+    target.admissionRevision < 1 ||
+    target.admissionRevision >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error(
+      "Member retirement requires its bound admission revision and accounting profile.",
+    );
+  }
+  const expected = { ...input, ...target };
+  const lease = protectedAutomationStorageLeases.reserve([
+    JSON.stringify([context.admission.databasePath, "member-removal", input.id]),
+  ]);
+  if (!lease) {
+    throw new Error("Protected member removal could not retain its native identity.");
+  }
+  const native: {
+    admission?: ReturnType<typeof ownerMutationAdmission>["admission"];
+    retained?: RetainedWorkerTransactionAdmission;
+  } = {};
+  let enrollment: ReturnType<typeof retirement.enrollPublication> | undefined;
+  let handedOff = false;
+  let started = false;
+  let settled = false;
+  let chargedRetired = false;
+  let published = false;
+  let policyNotified = false;
+  const assertControl = () => {
+    assertOwnerCurrent();
+    retirement.assertWritersStopped(target.profileId);
+  };
+  const verifyReceipt = (facts: unknown) =>
+    Boolean(readProtectedAutomationRetirementReceipt(facts, expected));
+  const settleStorage = () => {
+    const receipt = readProtectedAutomationRetirementReceipt(
+      native.admission?.committed?.facts,
+      expected,
+    );
+    if (!receipt) {
+      throw new Error("Member removal requires its atomic automation retirement receipt.");
+    }
+    if (!chargedRetired) {
+      retirement.retireStorage(receipt.retiredStoredData);
+      chargedRetired = true;
+    }
+    if (!published) {
+      onRemovalCommitted(receipt.subject, receipt.profileId, receipt.retiredAutomations);
+      published = true;
+    }
+    if (!policyNotified) {
+      onPolicyChanged();
+      policyNotified = true;
+    }
+    settled = true;
+  };
+  const retain = () => {
+    if (!native.admission || !native.retained) {
+      return false;
+    }
+    retirement.retainUncertainRemovalCommit({
+      admission: native.admission,
+      retained: native.retained,
+      lease,
+      verifyReceipt,
+      settleStorage,
+      releaseStorage: () => {},
+    });
+    handedOff = true;
+    return true;
+  };
+  try {
+    enrollment = retirement.enrollPublication();
+    await lease.wait();
+    await retirement.revalidate();
+    assertControl();
+    const nativeInput = {
+      ...input,
+      now: Date.now(),
+      retireAutomationStorage: true as const,
+      expectedProfileId: target.profileId,
+      expectedRevision: target.admissionRevision,
+    };
+    const removalFacts: ProtectedAdmissionAutomationRetirementFacts = {
+      kind: "protected-member-automation-retirement",
+      id: input.id,
+      issuer: input.issuer,
+      ownerSubject: input.ownerSubject,
+      now: nativeInput.now,
+      expectedProfileId: target.profileId,
+      expectedRevision: target.admissionRevision,
+    };
+    started = true;
+    const outcome = await runOpenClawStateWorkerOperation(
+      context,
+      (scope) =>
+        scope.execute({
+          type: "protectedAccess.removeAdmission",
+          input: nativeInput,
+        }),
+      {
+        assertCurrent: assertControl,
+        createAdmission: (operation) => {
+          native.retained = operation;
+          const created = ownerMutationAdmission(
+            context,
+            "removed",
+            assertControl,
+            onRemovalCommitted,
+            onPolicyChanged,
+            () => {
+              assertControl();
+              settleStorage();
+            },
+            removalFacts,
+          );
+          native.admission = created.admission;
+          return created;
+        },
+      },
+    ).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    if (!native.admission || !native.retained) {
+      started = false;
+      if (!outcome.ok) {
+        throw outcome.error;
+      }
+      throw new Error("Member removal completed without native admission.");
+    }
+    const result = await native.retained.settled;
+    const stopped =
+      result.kind !== "unknown" ||
+      result.nativeStopped === true ||
+      native.admission.settlement?.kind === "completed";
+    if (settled && stopped) {
+      if (!outcome.ok) {
+        throw outcome.error;
+      }
+      return outcome.value;
+    }
+    if (
+      result.kind === "not-entered" ||
+      (result.kind === "completed" &&
+        native.admission.settlement?.kind === "completed" &&
+        !native.admission.committed)
+    ) {
+      started = false;
+      if (!outcome.ok) {
+        throw outcome.error;
+      }
+      return outcome.value;
+    }
+    retain();
+    throw new SqliteWorkerError(
+      "Member removal requires storage reconciliation",
+      "outcome-unknown",
+    );
+  } finally {
+    if (!handedOff && started && !settled) {
+      retain();
+    }
+    if (!handedOff) {
+      lease.release();
+    }
+    enrollment?.finish(handedOff ? "recovery-required" : "settled");
+  }
 }
 
 export function migrateProtectedSubjects(
@@ -230,6 +448,16 @@ export function listProtectedAdmissions(stateDir: string) {
   return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
     type: "protectedAccess.listAdmissions",
     input: undefined,
+  });
+}
+
+export function isProtectedAdmissionCurrent(
+  stateDir: string,
+  input: { id: string; profileId: string; issuer: string; subject: string; revision: number },
+) {
+  return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {
+    type: "protectedAccess.isAdmissionCurrent",
+    input,
   });
 }
 

@@ -7,6 +7,14 @@ export type StoredDataReplacementReservation = {
   // Supply the exact restored entry only after the producer proves rollback.
   release(rolledBack: StoredDataEntry): void;
 };
+export type StoredDataBatchReplacement = {
+  previous: readonly StoredDataEntry[];
+  current: readonly StoredDataEntry[];
+};
+export type StoredDataBatchReplacementReservation = {
+  settle(committed: readonly StoredDataEntry[]): void;
+  release(rolledBack: readonly StoredDataEntry[]): void;
+};
 export type StoredDataReservation = {
   settle(result: { created: boolean; entries: readonly StoredDataEntry[] }): void;
   // Only release after a proven abort. An uncertain commit keeps its reservation.
@@ -197,6 +205,110 @@ export function createStoredDataReplacementReservation(
   };
 }
 
+/** One producer transaction may fund a bounded pool by replacing its exact measured entries. */
+export function createStoredDataBatchReplacementReservation(
+  options: Omit<StoredDataReservationOptions, "bytes"> & { change: StoredDataBatchReplacement },
+): StoredDataBatchReplacementReservation {
+  const capture = (entries: readonly StoredDataEntry[]) => {
+    const result = new Map<string, StoredDataEntry>();
+    for (const original of entries) {
+      const entry = { ...original };
+      const key = storedDataEntryKey(entry);
+      if (entry.profileId !== options.profileId || result.has(key)) {
+        throw new Error("Stored data batch replacement requires unique entries for its owner.");
+      }
+      result.set(key, entry);
+    }
+    if (result.size === 0) {
+      throw new Error("Stored data batch replacement requires nonempty accounting facts.");
+    }
+    return result;
+  };
+  const previous = capture(options.change.previous);
+  const current = capture(options.change.current);
+  const baseline = new Map(
+    Array.from(previous.keys(), (key) => [key, options.account.storedEntries.get(key)] as const),
+  );
+  const assertBaseline = () => {
+    for (const [key, entry] of previous) {
+      const measured = baseline.get(key);
+      if (
+        !measured ||
+        options.account.storedEntries.get(key) !== measured ||
+        measured.bytes !== entry.bytes ||
+        options.account.retiredStoredEntries.has(key)
+      ) {
+        throw new Error("Stored data batch replacement disagrees with measured storage.");
+      }
+    }
+    for (const key of current.keys()) {
+      if (
+        options.account.retiredStoredEntries.has(key) ||
+        (!previous.has(key) && options.account.storedEntries.has(key))
+      ) {
+        throw new Error("Stored data batch replacement target is occupied or retired.");
+      }
+    }
+  };
+  const bytes = (entries: Map<string, StoredDataEntry>) => {
+    const total = Array.from(entries.values()).reduce((sum, entry) => sum + entry.bytes, 0);
+    if (!Number.isSafeInteger(total)) {
+      throw new Error("Stored data batch replacement size is invalid.");
+    }
+    return total;
+  };
+  const before = bytes(previous);
+  const after = bytes(current);
+  const growth = Math.max(0, after - before);
+  const assertReceipt = (
+    entries: readonly StoredDataEntry[],
+    expected: Map<string, StoredDataEntry>,
+  ) => {
+    const observed = capture(entries);
+    if (
+      observed.size !== expected.size ||
+      Array.from(expected).some(([key, entry]) => observed.get(key)?.bytes !== entry.bytes)
+    ) {
+      throw new Error("Stored data batch replacement receipt disagrees with its reservation.");
+    }
+  };
+  assertBaseline();
+  if (growth > 0) {
+    options.charge(growth);
+  }
+  options.begin();
+  let closed = false;
+  return {
+    settle(committed) {
+      if (closed) {
+        throw new Error("Stored data batch replacement already settled.");
+      }
+      assertReceipt(committed, current);
+      assertBaseline();
+      for (const key of previous.keys()) {
+        options.account.storedEntries.delete(key);
+        if (!current.has(key)) {
+          options.account.retiredStoredEntries.set(key, null);
+        }
+      }
+      for (const [key, entry] of current) {
+        options.account.storedEntries.set(key, entry);
+      }
+      options.refund(Math.max(0, before - after));
+      closed = true;
+      options.finish();
+    },
+    release(rolledBack) {
+      if (closed) {
+        return;
+      }
+      assertReceipt(rolledBack, previous);
+      options.refund(growth);
+      closed = true;
+      options.finish();
+    },
+  };
+}
 export function createStoredDataReservation(
   options: StoredDataReservationOptions,
 ): StoredDataReservation {

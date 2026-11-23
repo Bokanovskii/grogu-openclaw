@@ -49,6 +49,7 @@ import type { agentRecoveryOperations } from "./agent-deletion-recovery.worker.j
 import type { agentDeletionOperations } from "./agent-deletion.worker.js";
 import type { OnboardingRecommendationWriteOperations } from "./onboarding-recommendations.kernel.js";
 import type { AgentDatabaseRegistryWorkerOperations } from "./openclaw-agent-db-contract.js";
+import type { ProtectedAutomationLifecycleWorkerOperations } from "./protected-automation-lifecycle.worker.js";
 import type { ProtectedAutomationResultWorkerOperations } from "./protected-automation-results.worker.js";
 import type { ProtectedAutomationWorkerOperations } from "./protected-automations.worker.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
@@ -109,6 +110,7 @@ export type RegisteredStateWorkerOperations = WorkerOperations<typeof gatewayBoo
   WorkerTranscriptCommitOperations &
   RepositoryWorkspaceWorkerOperations &
   ProtectedAutomationWorkerOperations &
+  ProtectedAutomationLifecycleWorkerOperations &
   ProtectedAutomationResultWorkerOperations &
   UserProfileWorkerOperations;
 
@@ -162,6 +164,10 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<
   protectedAutomationResults: () =>
     import("./protected-automation-results.worker.js").then(
       (m) => m.protectedAutomationResultOperations,
+    ),
+  protectedAutomationLifecycle: () =>
+    import("./protected-automation-lifecycle.worker.js").then(
+      (m) => m.protectedAutomationLifecycleOperations,
     ),
   agentDatabaseRegistry: () =>
     import("./openclaw-agent-db-registry.worker.js").then((m) => m.agentDatabaseRegistryOperations),

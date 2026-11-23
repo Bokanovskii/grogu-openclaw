@@ -24,6 +24,7 @@ import {
   setProtectedRequestStatus,
   bindProtectedAdmission,
   listProtectedAdmissions,
+  isProtectedAdmissionCurrent,
   bindProtectedProfile,
   removeProtectedAdmission,
   addProtectedSubject,
@@ -290,12 +291,16 @@ export const userProfileOperations = {
   ) => bindProtectedAdmission(open(), input),
   "protectedAccess.listAdmissions": (_input: undefined, { open }) =>
     listProtectedAdmissions(open()),
+  "protectedAccess.isAdmissionCurrent": (
+    input: Parameters<typeof isProtectedAdmissionCurrent>[1],
+    { open },
+  ) => isProtectedAdmissionCurrent(open(), input),
   "protectedAccess.bindProfile": (
     input: { issuer: string; subject: string; profileId: string; now: number },
     { open },
   ) => bindProtectedProfile(open(), input),
   "protectedAccess.removeAdmission": (
-    input: { id: string; issuer: string; ownerSubject: string; now: number },
+    input: Parameters<typeof removeProtectedAdmission>[1],
     { open },
   ) => removeProtectedAdmission(open(), input),
   "protectedAccess.listPendingPolicy": (_input: undefined, { open }) =>

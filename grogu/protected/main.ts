@@ -6,6 +6,7 @@ import {
   verifyAuthorizedUserFiles,
 } from "../../src/infra/authorized-user-files.js";
 import { protectedResearchAgent } from "./agents.js";
+import { publicError } from "./errors.js";
 import { configureProtectedRuntimeWorkers, ProtectedWorkerBuildError } from "./runtime-workers.js";
 import {
   parseRuntimeSettings,
@@ -229,6 +230,13 @@ async function main() {
   if (recovered.skipped) {
     throw new ProtectedStartupError(
       "Child ownership is ambiguous. Inspect the isolated state before starting.",
+    );
+  }
+  try {
+    await app.startAutomations(stateOwner.assertCurrent);
+  } catch (error) {
+    process.stderr.write(
+      `Protected automations could not start (${publicError(error).code}); scheduling is unavailable. Check owner access and protected storage recovery before restarting.\n`,
     );
   }
   const retention = await startProtectedUsageRetention(stateDir);

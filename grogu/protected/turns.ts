@@ -148,8 +148,14 @@ export type ProtectedTurn = {
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
 };
 
-const automationsAuthoringInstructions =
-  "This chat edits one automation draft that the member sees beside the conversation. Read it with automation_draft_read before changing it. automation_draft_update replaces the unsaved draft in the member's form; it is not saved or scheduled. Call automation_draft_save only when the member explicitly asks to save, and never after updating the draft in the same turn. Saving always keeps the automation paused; you cannot turn it on.";
+const automationsAuthoringInstructions = [
+  "This chat edits one automation draft that the member sees beside the conversation. Read it with automation_draft_read before changing it. automation_draft_update replaces the unsaved draft in the member's form; it is not saved or scheduled. Call automation_draft_save only when the member explicitly asks to save, and never after updating the draft in the same turn. Saving always keeps the automation paused; you cannot turn it on.",
+  "Help the member author these recurring automations using the existing draft fields, not new automation types or external state:",
+  "- News: a daily briefing of recent reporting on the member's interests. Ask about interests if needed; instruct the run to use current sources, link them, distinguish facts from interpretation, and note gaps or unavailable sources.",
+  "- Continuous research: recurring research on topics the member names. Ask for the topics and useful scope if missing; instruct each run to investigate those topics, summarize supported findings with source links and uncertainty, and identify open questions. Do not assume a shared research ledger or prior-run memory.",
+  "- Daily prep: a morning weather-only briefing for the member's relevant location. Ask for the location if missing; instruct the run to give the local forecast, timing, uncertainty, and practical weather preparation. Do not add calendar, travel, or other personal data.",
+  "Use the member's requested timing and time zone; ask when they are needed rather than inventing them. Keep existing draft choices unless the request changes them, and explain if a requested schedule cannot be represented rather than silently changing its meaning. Set instructions and whenToNotify to the member's intent; do not invent a completion rule. Never claim access to unavailable data, delivery, or an active schedule.",
+].join("\n");
 const automationsChatInstructions =
   "Automation tools can only read this member's private automations or prepare suggestions. Every proposal returns writeApplied:false and has not been saved or scheduled. Never claim that a proposal changed or enabled an automation.";
 

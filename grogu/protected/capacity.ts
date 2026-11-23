@@ -14,6 +14,7 @@ import type { ProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import {
   createStoredDataReplacementReservation,
+  createStoredDataBatchReplacementReservation,
   createStoredDataReservation,
   retireStoredData,
   storedDataTransferKey,
@@ -21,6 +22,8 @@ import {
   storedDataEntryKey,
   storedDataRetirementKey,
   type StoredDataEntry,
+  type StoredDataBatchReplacement,
+  type StoredDataBatchReplacementReservation,
   type StoredDataLedger,
   type StoredDataReplacement,
   type StoredDataReplacementReservation,
@@ -59,6 +62,9 @@ export type StorageAdmission = {
   // Await admission before the native transaction. Reserve synchronously against its
   // measured ledger; retain the receipt through commit/rollback, including unknown outcomes.
   reserveStoredDataReplacement(change: StoredDataReplacement): StoredDataReplacementReservation;
+  reserveStoredDataBatchReplacement(
+    change: StoredDataBatchReplacement,
+  ): StoredDataBatchReplacementReservation;
   files(files: AuthorizedUserFiles): StorageFiles;
 };
 
@@ -522,6 +528,10 @@ export function createStorageAdmission(
           assertDisk();
           return createStoredDataReplacementReservation({ ...storedDataOptions, change });
         },
+        reserveStoredDataBatchReplacement(change: StoredDataBatchReplacement) {
+          assertDisk();
+          return createStoredDataBatchReplacementReservation({ ...storedDataOptions, change });
+        },
         chargeChatCreation() {
           charge(chatBytes);
         },
@@ -766,6 +776,54 @@ export function createStorageAdmission(
           },
           release() {
             reservation.release();
+            admission.release();
+          },
+        };
+      } catch (error) {
+        admission.release();
+        throw error;
+      }
+    },
+    async reserveStoredDataReplacement(
+      profileId: string,
+      assertCurrent: () => void,
+      change: StoredDataReplacement,
+      userLimitBytes: number | null = options.limits.userBytes,
+    ) {
+      const admission = await admit(profileId, assertCurrent, "stored-data", userLimitBytes);
+      try {
+        const reservation = admission.reserveStoredDataReplacement(change);
+        return {
+          settle(committed: StoredDataEntry) {
+            reservation.settle(committed);
+            admission.release();
+          },
+          release(rolledBack: StoredDataEntry) {
+            reservation.release(rolledBack);
+            admission.release();
+          },
+        };
+      } catch (error) {
+        admission.release();
+        throw error;
+      }
+    },
+    async reserveStoredDataBatchReplacement(
+      profileId: string,
+      assertCurrent: () => void,
+      change: StoredDataBatchReplacement,
+      userLimitBytes: number | null = options.limits.userBytes,
+    ) {
+      const admission = await admit(profileId, assertCurrent, "stored-data", userLimitBytes);
+      try {
+        const reservation = admission.reserveStoredDataBatchReplacement(change);
+        return {
+          settle(committed: readonly StoredDataEntry[]) {
+            reservation.settle(committed);
+            admission.release();
+          },
+          release(rolledBack: readonly StoredDataEntry[]) {
+            reservation.release(rolledBack);
             admission.release();
           },
         };

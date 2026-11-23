@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { sql } from "kysely";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely as getTypedSqliteKysely,
@@ -15,10 +14,12 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
-import type {
-  ProtectedAutomationDatabase,
-  ProtectedAutomationStorageUsage,
-} from "./protected-automations.js";
+import {
+  hasProtectedAutomationMemberStorage,
+  retireProtectedAutomationMemberDefinitions,
+  retireProtectedAutomationMemberStorage,
+} from "./protected-automation-lifecycle-cleanup.js";
+import type { ProtectedAutomationStorageUsage } from "./protected-automations.js";
 import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
 
 export type ProtectedAccessRequest = {
@@ -44,6 +45,26 @@ export type ProtectedAdmission = {
   status: "approved" | "removed";
   revision: number;
   policyState?: "pending" | "synced" | "failed" | "unknown";
+};
+
+export type ProtectedAdmissionRemovalInput = {
+  id: string;
+  issuer: string;
+  ownerSubject: string;
+  now: number;
+  retireAutomationStorage?: true;
+  expectedProfileId?: string | null;
+  expectedRevision?: number;
+};
+
+export type ProtectedAdmissionAutomationRetirementFacts = {
+  kind: "protected-member-automation-retirement";
+  id: string;
+  issuer: string;
+  ownerSubject: string;
+  now: number;
+  expectedProfileId: string | null;
+  expectedRevision: number;
 };
 
 export type ProtectedAdmissionDatabase = {
@@ -455,14 +476,61 @@ export function listProtectedAdmissions(database: OpenClawStateDatabase): Protec
   }));
 }
 
+export function isProtectedAdmissionCurrent(
+  database: OpenClawStateDatabase,
+  input: { id: string; profileId: string; issuer: string; subject: string; revision: number },
+): boolean {
+  return Boolean(
+    executeSqliteQuerySync(
+      database.db,
+      getNodeSqliteKysely(database.db)
+        .selectFrom("protected_admissions")
+        .select("id")
+        .where("id", "=", input.id)
+        .where("profile_id", "=", input.profileId)
+        .where("issuer", "=", input.issuer)
+        .where("subject", "=", input.subject)
+        .where("revision", "=", input.revision)
+        .where("status", "=", "approved"),
+    ).rows[0],
+  );
+}
+
 export function removeProtectedAdmission(
   database: OpenClawStateDatabase,
-  input: { id: string; issuer: string; ownerSubject: string; now: number },
+  input: ProtectedAdmissionRemovalInput,
 ): ProtectedAdmission | "owner_protected" | undefined {
+  let retirementFacts: ProtectedAdmissionAutomationRetirementFacts | undefined;
+  if (input.retireAutomationStorage === true) {
+    const expectedProfileId = input.expectedProfileId;
+    const expectedRevision = input.expectedRevision;
+    if (
+      (expectedProfileId !== null &&
+        (typeof expectedProfileId !== "string" || !expectedProfileId)) ||
+      typeof expectedRevision !== "number" ||
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 1 ||
+      expectedRevision >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error(
+        "Member retirement requires its exact admission revision and accounting profile.",
+      );
+    }
+    retirementFacts = {
+      kind: "protected-member-automation-retirement",
+      id: input.id,
+      issuer: input.issuer,
+      ownerSubject: input.ownerSubject,
+      now: input.now,
+      expectedProfileId,
+      expectedRevision,
+    };
+  }
+  const removalFacts = retirementFacts ?? "removed";
   ensureProtectedAdmissionSchema(database);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
-      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: "removed" });
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: removalFacts });
       const admission = executeSqliteQuerySync(
         db,
         getNodeSqliteKysely(db)
@@ -471,12 +539,28 @@ export function removeProtectedAdmission(
           .where("id", "=", input.id)
           .where("issuer", "=", input.issuer),
       ).rows[0];
-      if (!admission || admission.status !== "approved") {
+      // Fenced owner recovery may retire older removal leftovers without reactivating the member.
+      if (!admission || (admission.status !== "approved" && !retirementFacts)) {
         return undefined;
       }
       if (admission.subject === input.ownerSubject) {
         return "owner_protected";
       }
+      if (
+        retirementFacts &&
+        (admission.profile_id !== retirementFacts.expectedProfileId ||
+          admission.revision !== retirementFacts.expectedRevision)
+      ) {
+        throw new Error(
+          "Member retirement target changed; refresh its admission and writer fence.",
+        );
+      }
+      const profileId = admission.profile_id;
+      if (!retirementFacts && profileId && hasProtectedAutomationMemberStorage(db, profileId)) {
+        throw new Error("Member removal requires fenced automation storage retirement authority.");
+      }
+      const retiredStoredData =
+        retirementFacts && profileId ? retireProtectedAutomationMemberStorage(db, profileId) : [];
       const revision = admission.revision + 1;
       executeSqliteQuerySync(
         db,
@@ -491,60 +575,16 @@ export function removeProtectedAdmission(
           .deleteFrom("protected_storage_limits")
           .where("admission_id", "=", admission.id),
       );
-      // Save-only drafts need no scheduler drain. Leave all wider retirement to its owner.
-      const profileId = admission.profile_id;
       if (profileId) {
         removeProtectedMemberFeedbackRows(db, profileId);
       }
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {
-        retiredAutomations = executeSqliteQuerySync(
+        retiredAutomations = retireProtectedAutomationMemberDefinitions(
           db,
-          getTypedSqliteKysely<ProtectedAutomationDatabase>(db)
-            .deleteFrom("protected_automations")
-            .where("creator_profile_id", "=", profileId)
-            .where("central_owner_profile_id", "=", profileId)
-            .where("visibility", "=", "private")
-            .where("enabled", "=", 0)
-            .where((expression) =>
-              expression.exists(
-                expression
-                  .selectFrom("protected_automation_members")
-                  .select("automation_id")
-                  .whereRef("automation_id", "=", "protected_automations.id")
-                  .where("profile_id", "=", profileId)
-                  .where("role", "=", "owner"),
-              ),
-            )
-            .where((expression) =>
-              expression.not(
-                expression.exists(
-                  expression
-                    .selectFrom("protected_automation_members")
-                    .select("automation_id")
-                    .whereRef("automation_id", "=", "protected_automations.id")
-                    .where("profile_id", "!=", profileId)
-                    .where("role", "=", "owner"),
-                ),
-              ),
-            )
-            .where((expression) =>
-              expression.not(
-                expression.exists(
-                  expression
-                    .selectFrom("protected_automation_job_bindings")
-                    .select("automation_id")
-                    .whereRef("automation_id", "=", "protected_automations.id"),
-                ),
-              ),
-            )
-            .returning([
-              "id",
-              "central_owner_profile_id as profileId",
-              /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for deleted definitions. */
-              sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
-            ]),
-        ).rows;
+          profileId,
+          Boolean(retirementFacts),
+        );
       }
       if (admission.email) {
         executeSqliteQuerySync(
@@ -574,8 +614,19 @@ export function removeProtectedAdmission(
         status: "removed",
         revision,
       };
-      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: "removed" });
-      deferSqliteWorkerCommitReceipt(db, { ...result, retiredAutomations });
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: removalFacts });
+      deferSqliteWorkerCommitReceipt(db, {
+        ...result,
+        retiredAutomations,
+        retiredStoredData,
+        ...(retirementFacts
+          ? {
+              kind: "protected-member-automation-retired",
+              ownerSubject: retirementFacts.ownerSubject,
+              previousRevision: retirementFacts.expectedRevision,
+            }
+          : {}),
+      });
       return result;
     },
     { path: database.path },

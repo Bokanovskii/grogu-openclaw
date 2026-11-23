@@ -40,6 +40,8 @@ import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files
 import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { redactSensitiveText } from "../../src/logging/redact.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
+import type { ProtectedAutomationRunError } from "../../src/state/protected-automation-lifecycle.types.js";
+import type { ProtectedAutomationResultAdmission } from "../../src/state/protected-automation-results.types.js";
 import {
   getCanonicalUserPreferences,
   getUserPreferenceValues,
@@ -61,6 +63,7 @@ import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/sto
 import {
   bindProtectedProfile,
   editProtectedAccessRequest,
+  isProtectedAdmissionCurrent,
   listPendingProtectedPolicy,
   listProtectedAdmissions,
   listProtectedAccessRequests,
@@ -82,13 +85,35 @@ import {
   validGeneratedFilename,
 } from "./artifacts.js";
 import {
+  listProtectedAutomationLifecycleRuns,
+  listProtectedAutomationOwnerInbox,
+  readProtectedAutomationLastScheduledAttempt,
+  readProtectedAutomationInterruptedRunForOwner,
+  readProtectedAutomationLifecycleStorageUsage,
+  readProtectedAutomationRunChat,
+  writeProtectedAutomationLifecycle,
+  writeProtectedAutomationLifecycleForOwner,
+  type ProtectedAutomationLifecycleAuthority,
+  type ProtectedAutomationLifecycleOwnerAuthority,
+} from "./automation-lifecycle-store.js";
+import { handleProtectedAutomationResultsRoute } from "./automation-results-http.js";
+import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
+import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
+import {
+  createProtectedAutomationScheduler,
+  type ProtectedScheduledAutomation,
+} from "./automation-scheduler.js";
+import { createProtectedAutomationStorageRecoveryOwner } from "./automation-storage-recovery.js";
+import {
   createProtectedAutomationAuthoringBindings,
   createProtectedAutomationsChatBindings,
   savesDraft,
 } from "./automations-chat.js";
 import {
   createProtectedAutomationRecord,
+  listOwnedProtectedAutomationStorageRecords,
   listProtectedAutomationRecords,
+  readOwnedProtectedAutomationStorageRecord,
   readProtectedAutomationRecord,
   readProtectedAutomationStorageUsage,
   saveProtectedAutomationPatch,
@@ -165,13 +190,21 @@ const directoryPreference = "grogu.protected.directory";
 const loadProtectedPush = createLazyRuntimeModule(() => import("./push.js"));
 const automationsChatCapability = "automations-chat-v1";
 const automationsAuthoringCapability = "automations-authoring-v1";
+const automationResultsCapability = "automation-results-v1";
+const automationRunsCapability = "automation-runs-v1";
 const authoringAgentId = "grogu";
 type Run = {
   id: string;
   profileId: string;
-  sessionHash: string;
+  sessionHash?: string;
   controller: AbortController;
   steering: Map<string, AbortController>;
+};
+type ProtectedTurnCompletion = {
+  runId: string;
+  outcome: "complete" | "failed" | "interrupted";
+  errorCode: string | null;
+  responseId: string | null;
 };
 
 function json(data: unknown, status = 200) {
@@ -391,8 +424,15 @@ export function createProtectedHttp(options: {
     chats,
     automationUsage: (profileId: string, assertCurrent: () => void) =>
       readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
-    storedDataUsage: (_profileId: string, assertCurrent: () => void) =>
-      readProtectedFeedbackStorageUsage(options.stateDir, storageEntryOverheadBytes, assertCurrent),
+    storedDataUsage: async (_profileId: string, assertCurrent: () => void) => [
+      ...(await readProtectedFeedbackStorageUsage(
+        options.stateDir,
+        storageEntryOverheadBytes,
+        assertCurrent,
+      )),
+      ...(await readProtectedAutomationResultStorageUsage(options.stateDir, assertCurrent)),
+      ...(await readProtectedAutomationLifecycleStorageUsage(options.stateDir, assertCurrent)),
+    ],
   };
   const admitStorage = options.storageLimits
     ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
@@ -423,6 +463,8 @@ export function createProtectedHttp(options: {
   const pending = new Set<Promise<unknown>>();
   const revokedSessions = new Set<string>();
   const deniedProfiles = new Set<string>();
+  const retiringProfiles = new Set<string>();
+  const retiringAdmissions = new Set<string>();
   const creating = new Set<string>();
   const mutations = new Set<string>();
   const shutdown = new AbortController();
@@ -500,6 +542,1579 @@ export function createProtectedHttp(options: {
     void work.then(settled, settled);
     return work;
   };
+  const withProtectedFiles = <T>(
+    profileId: string,
+    use: (scope: Awaited<ReturnType<typeof createAuthorizedUserFiles>>) => Promise<T>,
+    assertCurrent: () => void,
+    signal: AbortSignal,
+  ) =>
+    createAuthorizedUserFiles({
+      ...options,
+      encryption,
+      profileId,
+      assertCurrent,
+      signal,
+      maxBytes: options.maxFileBytes,
+    }).then(async (owned) => {
+      try {
+        return await use(owned);
+      } catch (error) {
+        if (error instanceof FsSafeError && error.code === "not-found") {
+          return notFound();
+        }
+        throw error;
+      } finally {
+        owned.dispose();
+      }
+    });
+  const automationAuthority = (
+    member: {
+      id: string;
+      profileId: string;
+      issuer: string;
+      subject: string;
+      revision: number;
+    },
+    run?: { automationId: string; version: number },
+  ) => {
+    const assertGrant = () => {
+      shutdown.signal.throwIfAborted();
+      assertAutomationHostCurrent();
+      if (deniedProfiles.has(member.profileId) || retiringProfiles.has(member.profileId)) {
+        throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
+      }
+    };
+    const checkGrant = async (assert = assertGrant) => {
+      assert();
+      const current = await isProtectedAdmissionCurrent(options.stateDir, member);
+      assert();
+      if (!current) {
+        throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
+      }
+      if (run) {
+        const automation = await readOwnedProtectedAutomationStorageRecord(
+          options.stateDir,
+          run.automationId,
+          { profileId: member.profileId, assertCurrent: assert },
+        );
+        assert();
+        if (!automation?.enabled) {
+          throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
+        }
+        if (automation.definitionRevision !== run.version) {
+          throw new ProtectedError(
+            409,
+            "definition_changed",
+            "This automation changed before the run started.",
+          );
+        }
+      }
+    };
+    const storageLimit = (assert: () => void) =>
+      storageLimitFor(
+        {
+          id: member.profileId,
+          owner: member.issuer === options.accessIssuer && member.subject === options.ownerSubject,
+        },
+        assert,
+      );
+    const files = <T>(
+      use: (scope: Awaited<ReturnType<typeof createAuthorizedUserFiles>>) => Promise<T>,
+      assert = assertGrant,
+      signal = shutdown.signal,
+    ) => withProtectedFiles(member.profileId, use, assert, signal);
+    return {
+      profile: { id: member.profileId },
+      authority: { profileId: member.profileId, assertCurrent: assertGrant },
+      assertCurrent: assertGrant,
+      assertGrant,
+      revalidate: () => checkGrant(),
+      checkGrant,
+      storageLimit,
+      files,
+    };
+  };
+  let assertAutomationHostCurrent: () => void = () => {
+    throw new Error("Protected automation host has not started.");
+  };
+  const automationStorageRecovery = createProtectedAutomationStorageRecoveryOwner(() => {
+    shutdown.signal.throwIfAborted();
+    assertAutomationHostCurrent();
+  });
+  const createAutomationPublicationAuthority = (
+    member: ReturnType<typeof automationAuthority>,
+  ): {
+    lifecycle: ProtectedAutomationLifecycleAuthority;
+    result: ProtectedAutomationResultAdmission;
+  } => {
+    if (!admitStorage) {
+      throw new ProtectedError(503, "storage_unavailable", "Automation storage is unavailable.");
+    }
+    const storage = admitStorage;
+    const common = {
+      profileId: member.profile.id,
+      revalidate: member.revalidate,
+      assertCurrent: member.assertCurrent,
+      enrollPublication: automationStorageRecovery.enrollPublication,
+      reserveStorage: async (bytes: number) => {
+        await member.revalidate();
+        const limit = await member.storageLimit(member.assertCurrent);
+        return storage.reserveStoredData(member.profile.id, member.assertCurrent, bytes, limit);
+      },
+    };
+    return {
+      lifecycle: {
+        ...common,
+        reserveReplacement: async (change) => {
+          await member.revalidate();
+          const limit = await member.storageLimit(member.assertCurrent);
+          return storage.reserveStoredDataReplacement(
+            member.profile.id,
+            member.assertCurrent,
+            change,
+            limit,
+          );
+        },
+        reserveBatchReplacement: async (change) => {
+          await member.revalidate();
+          const limit = await member.storageLimit(member.assertCurrent);
+          return storage.reserveStoredDataBatchReplacement(
+            member.profile.id,
+            member.assertCurrent,
+            change,
+            limit,
+          );
+        },
+        retireStorage: (entries) =>
+          storage.retiredStoredData(entries.map((removed) => ({ removed }))),
+        retainUncertainCommit: automationStorageRecovery.retainUncertainCommit,
+      },
+      result: {
+        ...common,
+        retainUncertainCommit: automationStorageRecovery.retainUncertainResultCommit,
+      },
+    };
+  };
+  const startProtectedTurn = async (context: {
+    request: Request;
+    id: string;
+    profile: { id: string; displayName?: string | null };
+    sessionHash?: string;
+    authority: { profileId: string; assertCurrent: () => void };
+    assertCurrent: () => void;
+    assertGrant: () => void;
+    revalidate: () => Promise<void>;
+    checkGrant: (assert?: () => void) => Promise<void>;
+    storageLimit: (assert: () => void) => Promise<number | null>;
+    files: <T>(
+      use: (scope: Awaited<ReturnType<typeof createAuthorizedUserFiles>>) => Promise<T>,
+      assert?: () => void,
+      signal?: AbortSignal,
+    ) => Promise<T>;
+    startedAt: number;
+    textLimit?: number;
+  }): Promise<{ response: Response; completion: Promise<ProtectedTurnCompletion> }> => {
+    const {
+      request,
+      id,
+      profile,
+      sessionHash,
+      authority,
+      assertGrant,
+      revalidate,
+      checkGrant,
+      storageLimit,
+      files,
+      startedAt,
+      textLimit = 16_000,
+    } = context;
+    const requestBody = await body(request);
+    let data: ProtectedTurnRequest;
+    let authoringInput: ProtectedAuthoringTurnRequest["authoring"] | undefined;
+    if (isProtectedAuthoringTurnRequest(requestBody)) {
+      const { authoring, ...turnRequest } = requestBody;
+      data = turnRequest;
+      authoringInput = authoring;
+    } else if (isProtectedTurnRequest(requestBody)) {
+      data = requestBody;
+    } else {
+      return invalid();
+    }
+    const fixedModel = options.turns.models.find(
+      (candidate) =>
+        candidate.provider === data.provider &&
+        (data.model === undefined || candidate.id === data.model),
+    );
+    const credential = data.credential;
+    if (credential !== undefined && (!isRecord(credential) || data.provider === "sparky")) {
+      return invalid();
+    }
+    const expiresAt = isRecord(credential) ? credential.expiresAt : undefined;
+    if (
+      expiresAt !== undefined &&
+      (typeof expiresAt !== "number" || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now())
+    ) {
+      throw new ProtectedError(
+        401,
+        "provider_credential_expired",
+        "Reconnect or renew this provider first.",
+      );
+    }
+    let copilotModel: Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number] | undefined;
+    if (data.provider === "github-copilot") {
+      if (!credential) {
+        throw new ProtectedError(
+          401,
+          "provider_credential_required",
+          "Connect this provider first.",
+        );
+      }
+      const models = await fetchProtectedCopilotModels(
+        credential,
+        { signal: request.signal, revalidate },
+        { includeContextSizes: data.contextSize !== undefined },
+      );
+      const requested = data.model ?? fixedModel?.id;
+      copilotModel = models.find(({ model }) => model.id === requested);
+    }
+    const model =
+      copilotModel?.model ??
+      (data.provider === "github-copilot" ? undefined : fixedModel && withThinking(fixedModel));
+    if (!model) {
+      throw new ProtectedError(422, "model_unavailable", "This model is not available.");
+    }
+    if (data.thinking !== undefined && !model.thinking?.levels.includes(data.thinking)) {
+      throw new ProtectedError(
+        422,
+        "thinking_unavailable",
+        "This reasoning level is not available.",
+      );
+    }
+    if (
+      data.contextSize !== undefined &&
+      !copilotModel?.model.contextSizes?.options.includes(data.contextSize)
+    ) {
+      throw new ProtectedError(
+        422,
+        "context_size_unavailable",
+        "This context size is not available.",
+      );
+    }
+    const input: TurnInput = {
+      provider: model.provider,
+      model: model.id,
+      text: text(data.text, textLimit),
+      ...(data.mentions ? { mentions: data.mentions } : {}),
+      thinking: data.thinking ?? model.thinking?.default,
+      ...(data.contextSize === undefined ? {} : { contextSize: data.contextSize }),
+      ...(copilotModel ? { copilotModel } : {}),
+      ...(isRecord(credential)
+        ? {
+            credential: {
+              accessToken: text(credential.accessToken, 16_000),
+              expiresAt,
+            },
+          }
+        : {}),
+    };
+    // The server-held binding decides authoring; the body only carries the client-held draft.
+    const admitAuthoringTurn = async (entry: Awaited<ReturnType<typeof chats.readEntry>>) => {
+      if (entry.protectedAuthoringKind !== "automation") {
+        if (authoringInput) {
+          invalid();
+        }
+        return undefined;
+      }
+      if (
+        !authoringInput ||
+        !supportsAutomationsAuthoring(request) ||
+        model.provider !== "sparky" ||
+        data.mentions?.length ||
+        !automationCatalog?.capabilities.automations.create ||
+        !admitStorage
+      ) {
+        throw new ProtectedError(
+          409,
+          "authoring_required",
+          "Update Alcove to continue this automation chat.",
+        );
+      }
+      const automationId = entry.protectedAutomationId;
+      if (automationId === undefined) {
+        if (authoringInput.automationVersion !== undefined) {
+          invalid();
+        }
+        return { input: authoringInput, catalog: automationCatalog, admitStorage };
+      }
+      if (authoringInput.automationVersion === undefined) {
+        throw new ProtectedError(
+          428,
+          "version_required",
+          "Reload the automation before continuing.",
+        );
+      }
+      const saved = await readProtectedAutomationRecord(
+        options.stateDir,
+        { profileId: profile.id, automationId },
+        authority,
+      );
+      if (!saved) {
+        throw new ProtectedError(
+          409,
+          "automation_unavailable",
+          "This automation was deleted. Your unsaved draft was not changed.",
+        );
+      }
+      if (saved.enabled) {
+        throw new ProtectedError(
+          409,
+          "automation_enabled",
+          "Pause this automation before editing it in chat.",
+        );
+      }
+      if (saved.version !== authoringInput.automationVersion) {
+        throw new ProtectedError(
+          412,
+          "version_mismatch",
+          "This automation changed. Reload it before continuing.",
+        );
+      }
+      return { input: authoringInput, catalog: automationCatalog, admitStorage, automationId };
+    };
+    await revalidate();
+    if (runs.has(id) || mutations.has(id)) {
+      throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+    }
+    // Reserve the chat while its persisted selection and turn storage are admitted.
+    mutations.add(id);
+    const admission = await (async () => {
+      let storage: Awaited<ReturnType<NonNullable<typeof admitStorage>>> | undefined;
+      try {
+        const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+          env: chats.env,
+        });
+        if (profileAuthority.profileId !== profile.id) {
+          unauthorized();
+        }
+        profileAuthority.assertCurrent();
+        // Storage charges continue after the client disconnects, so they check only the grant.
+        storage = await admitStorage?.(
+          profile.id,
+          assertGrant,
+          "turn",
+          await storageLimit(assertGrant),
+        );
+        if (shutdown.signal.aborted || runs.has(id)) {
+          throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+        }
+        if (request.signal.aborted) {
+          request.signal.throwIfAborted();
+        }
+        const currentEntry = await chats.readEntry(authority, id);
+        const authoring = await admitAuthoringTurn(currentEntry);
+        const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
+        const selectedAgent = agentCatalog.get(selectedAgentId);
+        if (!selectedAgent) {
+          throw new ProtectedError(422, "agent_unavailable", "This chat's agent is unavailable.");
+        }
+        const mentionedAgents = (data.mentions ?? []).map((mention) => {
+          const agent = agentCatalog.getSelectable(mention.agentId);
+          if (!agent || agent.id === selectedAgentId) {
+            throw new ProtectedError(
+              422,
+              "agent_unavailable",
+              "One or more mentioned agents are unavailable.",
+            );
+          }
+          return agent;
+        });
+        if (!currentEntry.sessionId) {
+          throw new ProtectedError(
+            409,
+            "session_unavailable",
+            "This chat cannot start a request-scoped agent.",
+          );
+        }
+        await revalidate();
+        profileAuthority.assertCurrent();
+        if (shutdown.signal.aborted || runs.has(id)) {
+          throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
+        }
+        const run: Run = {
+          id: randomUUID(),
+          profileId: profile.id,
+          ...(sessionHash === undefined ? {} : { sessionHash }),
+          controller: new AbortController(),
+          steering: new Map(),
+        };
+        runs.set(id, run);
+        return {
+          run,
+          authoring,
+          selectedAgent,
+          mentionedAgents,
+          storage,
+          profileAuthority,
+          sessionEntry: currentEntry,
+          parentLifecycleRevision: currentEntry.lifecycleRevision ?? null,
+          parentSessionId: currentEntry.sessionId,
+        };
+      } catch (error) {
+        storage?.release();
+        throw error;
+      } finally {
+        mutations.delete(id);
+      }
+    })();
+    const {
+      run,
+      authoring,
+      selectedAgent,
+      mentionedAgents,
+      storage,
+      profileAuthority,
+      sessionEntry,
+      parentLifecycleRevision,
+      parentSessionId,
+    } = admission;
+    const timing = createProtectedTurnTiming(startedAt);
+    timing.mark("admissionMs");
+    // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
+    // detaches from the stream, and the reply still finishes and saves.
+    const signal = AbortSignal.any([
+      shutdown.signal,
+      run.controller.signal,
+      AbortSignal.timeout(protectedTurnTimeoutMs + 5000),
+    ]);
+    const assertRun = () => {
+      assertGrant();
+      profileAuthority.assertCurrent();
+      signal.throwIfAborted();
+      if (runs.get(id) !== run) {
+        unauthorized();
+      }
+    };
+    let validation: Promise<void> | undefined;
+    const checkRun = async () => {
+      assertRun();
+      if (!validation) {
+        const finishTiming = timing.accessValidation();
+        validation = track(checkGrant(assertRun))
+          .catch((error: unknown) => {
+            run.controller.abort();
+            throw error;
+          })
+          .finally(() => {
+            finishTiming();
+            validation = undefined;
+          });
+      }
+      await validation;
+      assertRun();
+    };
+    const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
+    // Assigned when the stream starts; authoring tools run only inside that stream.
+    let publishAuthoring: ((event: ProtectedAuthoringTurnEvent) => Promise<void>) | undefined;
+    const automationChat = authoring
+      ? createProtectedAutomationAuthoringBindings({
+          stateDir: options.stateDir,
+          catalog: authoring.catalog,
+          retainedAgent: (agentId) => agentCatalog.get(agentId),
+          authority: runAuthority,
+          revalidate: checkRun,
+          chatId: id,
+          ...(authoring.automationId === undefined
+            ? {}
+            : { boundAutomationId: authoring.automationId }),
+          sent: authoring.input,
+          admitStorage: async () =>
+            authoring.admitStorage(
+              profile.id,
+              assertRun,
+              "automation",
+              await storageLimit(assertRun),
+            ),
+          bind: async (automationId) => {
+            await chats.bindAutomation(runAuthority, id, automationId);
+          },
+          publish: async (event) => {
+            if (!publishAuthoring) {
+              throw new ProtectedError(409, "busy", "This automation chat is not streaming.");
+            }
+            await publishAuthoring(event);
+          },
+        })
+      : supportsAutomationsChat(request) &&
+          model.provider === "sparky" &&
+          automationCatalog?.capabilities.automations.list
+        ? createProtectedAutomationsChatBindings({
+            stateDir: options.stateDir,
+            catalog: automationCatalog,
+            authority: runAuthority,
+            revalidate: checkRun,
+          })
+        : undefined;
+    const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
+    const profileSessionPrefix = chats.scope(runAuthority, "").sessionKey;
+    const ownedChildSessionKeys = new Set<string>();
+    const saveChildResult: ProtectedTurn["saveChildResult"] = async (result) => {
+      await checkRun();
+      const save = () =>
+        chats.saveChildResult(runAuthority, id, {
+          ...result,
+          parentLifecycleRevision,
+        });
+      await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
+      await checkRun();
+    };
+    const sessionAccess = {
+      creatorProfileId: profile.id,
+      assertCurrent: assertRun,
+      revalidate: checkRun,
+      signal,
+      resolve: async ({
+        requesterSessionKey,
+        reference,
+      }: {
+        requesterSessionKey: string;
+        reference: string;
+      }) => {
+        await checkRun();
+        if (
+          requesterSessionKey !== parentSessionKey &&
+          !ownedChildSessionKeys.has(requesterSessionKey)
+        ) {
+          return undefined;
+        }
+        const targetId = reference.startsWith(profileSessionPrefix)
+          ? reference.slice(profileSessionPrefix.length)
+          : reference;
+        try {
+          const entry = await chats.readEntry(runAuthority, targetId);
+          await checkRun();
+          return {
+            sessionKey: chats.scope(runAuthority, targetId).sessionKey,
+            sessionId: entry.sessionId,
+            agentId: chats.agentId,
+          };
+        } catch (error) {
+          if (error instanceof ProtectedError && error.status === 404) {
+            await checkRun();
+            return undefined;
+          }
+          throw error;
+        }
+      },
+    };
+    const liveCheck = setInterval(() => {
+      void checkRun().catch(() => run.controller.abort());
+    }, 5000);
+    liveCheck.unref();
+    let attached = true;
+    let completion!: Promise<ProtectedTurnCompletion>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        const write = (line: string) => {
+          if (attached) {
+            try {
+              controller.enqueue(encoder.encode(line));
+              return true;
+            } catch {
+              attached = false;
+            }
+          }
+          return false;
+        };
+        const send = (event: ProtectedAuthoringTurnEvent) => {
+          // Only a fixed terminal error may cross the boundary after authority is lost.
+          if (event.type !== "error") {
+            assertRun();
+          }
+          const published = write(`${JSON.stringify(event)}\n`);
+          if (
+            published &&
+            event.type !== "start" &&
+            event.type !== "done" &&
+            event.type !== "error"
+          ) {
+            timing.mark("firstClientVisibleOutputMs");
+          }
+        };
+        if (authoring) {
+          publishAuthoring = async (event) => {
+            send(event);
+          };
+        }
+        // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
+        // from closing an idle response; clients skip blank lines.
+        const keepalive = setInterval(() => write("\n"), 15_000);
+        keepalive.unref();
+        const complete = async (): Promise<ProtectedTurnCompletion> => {
+          let outcome: "complete" | "failed" | "interrupted" = "failed";
+          let tokens: number | null = null;
+          let contextBudget: number | undefined;
+          let messageCount: number | null = null;
+          let failed = true;
+          let errorCode: string | null = null;
+          let responseId: string | null = null;
+          let producedFiles: ProtectedProducedFile[] = [];
+          let reasoningSummaryChars = input.thinking === "off" ? 0 : null;
+          const modelRequests: TerminalModelRequestMetadata[] = [];
+          try {
+            assertRun();
+            send({ type: "start", runId: run.id });
+            const before = await chats.read(runAuthority, id);
+            await files(
+              async (owned) => {
+                const beforeArtifacts = await listChatArtifactFiles(
+                  owned,
+                  id,
+                  options.maxFileBytes,
+                );
+                const storageFiles = storage?.files(owned);
+                const execute = () =>
+                  options.turns.run({
+                    id,
+                    runId: run.id,
+                    profileId: profile.id,
+                    target: {
+                      ...chats.scope(runAuthority, id),
+                      nativeSessionId: parentSessionId,
+                      lifecycleRevision: parentLifecycleRevision,
+                    },
+                    input,
+                    ...(automationChat ? { automationChat } : {}),
+                    mentionedAgents,
+                    agent: selectedAgent,
+                    ...(authoring ? {} : { routing: agentRouting }),
+                    sessionAccess,
+                    sessionEntry,
+                    files: storageFiles ?? owned,
+                    memoryFiles: storageFiles,
+                    signal,
+                    assertCurrent: assertRun,
+                    revalidate: checkRun,
+                    markTiming: timing.mark,
+                    saveChildResult,
+                    cleanupChildFiles: (sessionId) =>
+                      chats.removeTransientFiles(
+                        {
+                          profileId: profile.id,
+                          assertCurrent: () => profileAuthority.assertCurrent(),
+                        },
+                        sessionId,
+                      ),
+                    chargeChildCreation: () => storage?.chargeChatCreation(),
+                    registerChildSession: (sessionKey) => {
+                      ownedChildSessionKeys.add(sessionKey);
+                      return () => ownedChildSessionKeys.delete(sessionKey);
+                    },
+                    childResult: (result) => {
+                      send({
+                        type: "child-result",
+                        runId: result.runId,
+                        agentId: result.agentId,
+                        text: result.text,
+                      });
+                    },
+                    usage: (value) => {
+                      tokens = value;
+                    },
+                    contextBudget: (value) => {
+                      contextBudget = value;
+                    },
+                    modelRequest: (record) => {
+                      modelRequests.push(record);
+                    },
+                    reasoningLength: (length) => {
+                      if (reasoningSummaryChars !== null) {
+                        const next = reasoningSummaryChars + length;
+                        reasoningSummaryChars = Number.isSafeInteger(next) ? next : null;
+                      } else if (length > 0) {
+                        reasoningSummaryChars = length;
+                      }
+                    },
+                    delta: async (value) => {
+                      send({ type: "delta", text: value });
+                    },
+                    reasoning: async (value) => {
+                      send({ type: "reasoning", text: value });
+                    },
+                    activity: async (item) => {
+                      send({ type: "activity", ...item });
+                    },
+                    sources: async (sources) => {
+                      send({ type: "sources", sources });
+                    },
+                    widget: async (widget) => {
+                      await owned.stat(`${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`);
+                      send({ type: "widget", ...widget });
+                    },
+                    widgetDraft: async (draft) => {
+                      send(draft);
+                    },
+                  });
+                const result = await (storage
+                  ? withTranscriptWriteBudget(storage.charge, execute)
+                  : execute());
+                const beforeIds = new Set(beforeArtifacts.map((file) => file.id));
+                producedFiles = (
+                  await listChatArtifactFiles(owned, id, options.maxFileBytes)
+                ).filter((file) => !beforeIds.has(file.id));
+                return result;
+              },
+              assertRun,
+              signal,
+            );
+            storage?.assertResult();
+            let { chat, usage } = await chats.readWithUsage(runAuthority, id);
+            await checkRun();
+            const newMessages = chat.messages.slice(before.messages.length);
+            messageCount = newMessages.length;
+            const latestMessage = newMessages.at(-1);
+            responseId =
+              latestMessage?.role === "assistant" && latestMessage.status === "complete"
+                ? latestMessage.id
+                : null;
+            if (responseId === null) {
+              producedFiles = [];
+            }
+            if (
+              !newMessages.some(
+                (message) => message.role === "user" && message.text === input.text,
+              ) ||
+              newMessages.at(-1)?.role !== "assistant" ||
+              newMessages.at(-1)?.status !== "complete"
+            ) {
+              throw new ProtectedError(
+                500,
+                "save_failed",
+                "The reply could not be confirmed as saved.",
+              );
+            }
+            if (
+              contextBudget !== undefined &&
+              responseId !== null &&
+              usage?.provider === input.provider &&
+              usage.model === input.model
+            ) {
+              const size = contextBudget;
+              const completedResponseId = responseId;
+              const saveBudget = () =>
+                chats.saveContextBudget(runAuthority, id, {
+                  runId: run.id,
+                  responseId: completedResponseId,
+                  contextSize: size,
+                  lifecycleRevision: parentLifecycleRevision,
+                });
+              await (storage
+                ? withTranscriptWriteBudget(storage.charge, saveBudget)
+                : saveBudget());
+              ({ chat, usage } = await chats.readWithUsage(runAuthority, id));
+              await checkRun();
+              if (usage?.contextSize !== size) {
+                throw new ProtectedError(
+                  500,
+                  "save_failed",
+                  "The context budget could not be confirmed as saved.",
+                );
+              }
+            }
+            failed = false;
+            if (usage && usage.provider === input.provider && usage.model === input.model) {
+              send({
+                type: "usage",
+                contextTokens: usage.contextTokens,
+                ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+                ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+                ...(usage.contextSize !== undefined &&
+                hasClientCapability(request.headers, "model-context-v1")
+                  ? { contextSize: usage.contextSize }
+                  : {}),
+              });
+            }
+            send({ type: "done", chatVersion: chat.version });
+            outcome = "complete";
+          } catch (error) {
+            outcome = signal.aborted ? "interrupted" : "failed";
+            let failure = error;
+            try {
+              storage?.assertResult();
+            } catch (capacityError) {
+              failure = capacityError;
+            }
+            const issue = signal.aborted
+              ? new ProtectedError(409, "interrupted", "The turn was interrupted.")
+              : publicError(failure);
+            errorCode = issue.code;
+            send({ type: "error", code: issue.code, message: issue.message });
+          } finally {
+            const timingMetrics = timing.finish(outcome);
+            const telemetryRequests = modelRequests.map((record) => ({
+              requestId: record.requestId,
+              provider: record.provider,
+              model: record.model,
+              outcome: record.outcome,
+              usageSource: record.usageSource,
+              wallDurationMs:
+                record.wallDurationMs === null ? null : Math.round(record.wallDurationMs),
+              inputTokens: record.inputTokens,
+              outputTokens: record.outputTokens,
+              cacheReadTokens: record.cacheReadTokens,
+              cacheWriteTokens: record.cacheWriteTokens,
+              reasoningTokens: record.reasoningTokens,
+            }));
+            const telemetry: ProtectedTurnTelemetryInput = {
+              id: run.id,
+              profileId: profile.id,
+              memberLabel: redactFeedbackText(profile.displayName?.trim() || "User"),
+              createdAt: Date.now(),
+              agentId: selectedAgent.id,
+              status:
+                outcome === "complete"
+                  ? "complete"
+                  : outcome === "interrupted"
+                    ? "stopped"
+                    : "failed",
+              chatId: id,
+              responseId,
+              errorCode,
+              reasoningSummaryChars,
+              admissionMs: timingMetrics.admissionMs,
+              providerStartMs: timingMetrics.providerRequestStartMs,
+              firstOutputMs: timingMetrics.firstProviderOutputMs,
+              firstVisibleMs: timingMetrics.firstClientVisibleOutputMs,
+              completionMs: timingMetrics.completionMs,
+              files: producedFiles,
+              requests: telemetryRequests,
+              storageOverheadBytes: storageEntryOverheadBytes,
+            };
+            const telemetryBytes =
+              storageEntryOverheadBytes +
+              Buffer.byteLength(JSON.stringify(telemetry.files), "utf8") +
+              Buffer.byteLength(telemetry.memberLabel, "utf8") +
+              telemetry.id.length +
+              telemetry.requests.reduce(
+                (total, record) =>
+                  total +
+                  storageEntryOverheadBytes +
+                  Buffer.byteLength(JSON.stringify(record), "utf8") +
+                  record.requestId.length,
+                0,
+              );
+            let recordTelemetry = true;
+            let telemetryReservation:
+              | ReturnType<NonNullable<typeof storage>["reserveStoredData"]>
+              | undefined;
+            if (storage) {
+              try {
+                telemetryReservation = storage.reserveStoredData(telemetryBytes);
+              } catch {
+                recordTelemetry = false;
+                process.stderr.write(
+                  "Protected telemetry was not recorded because storage capacity was unavailable.\n",
+                );
+              }
+            }
+            try {
+              const storedEntries = await recordProtectedUsage(options.stateDir, {
+                runId: run.id,
+                profileId: profile.id,
+                model: `${input.provider}/${input.model}`,
+                messages: messageCount,
+                tokens,
+                failed,
+                now: telemetry.createdAt,
+                ...(recordTelemetry ? { telemetry } : {}),
+              });
+              telemetryReservation?.settle({
+                created: storedEntries.length > 0,
+                entries: storedEntries,
+              });
+            } catch {
+              if (telemetryReservation) {
+                try {
+                  const expected = new Set([
+                    `run:${run.id}`,
+                    ...telemetryRequests.map((record) => `request:${record.requestId}`),
+                  ]);
+                  const storedEntries = (
+                    await readProtectedFeedbackStorageUsage(
+                      options.stateDir,
+                      storageEntryOverheadBytes,
+                      assertGrant,
+                    )
+                  ).filter((entry) => entry.profileId === profile.id && expected.has(entry.id));
+                  telemetryReservation.settle({
+                    created: storedEntries.some((entry) => entry.id === `run:${run.id}`),
+                    entries: storedEntries,
+                  });
+                } catch {
+                  process.stderr.write(
+                    "Protected telemetry write outcome is unknown; its storage reservation remains held.\n",
+                  );
+                }
+              }
+              process.stderr.write("Protected usage could not be recorded for a completed run.\n");
+            }
+            clearInterval(keepalive);
+            storage?.release();
+            clearInterval(liveCheck);
+            runs.delete(id);
+            for (const queued of run.steering.values()) {
+              queued.abort();
+            }
+            if (attached) {
+              attached = false;
+              controller.close();
+            }
+          }
+          return { runId: run.id, outcome, errorCode, responseId };
+        };
+        completion = track(complete());
+      },
+      cancel() {
+        // Stop is an explicit route. A closed connection only detaches the reader.
+        attached = false;
+      },
+    });
+    return {
+      response: new Response(stream, {
+        headers: { ...commonHeaders, "content-type": "application/x-ndjson; charset=utf-8" },
+      }),
+      completion,
+    };
+  };
+  const executeProtectedAutomationTurn = async (
+    member: Parameters<typeof automationAuthority>[0],
+    automation: NonNullable<Awaited<ReturnType<typeof readOwnedProtectedAutomationStorageRecord>>>,
+    chatId: string,
+  ) => {
+    const definition = automation.definition;
+    const authority = automationAuthority(member, {
+      automationId: automation.id,
+      version: automation.definitionRevision,
+    });
+    const prompt = [
+      `Automation: ${definition.name}`,
+      definition.instructions,
+      `Notification intent: ${definition.whenToNotify}`,
+      ...(definition.doneWhen ? [`Completion intent: ${definition.doneWhen}`] : []),
+    ].join("\n\n");
+    const request = new Request(`${options.origin}${base}/chats/${chatId}/turns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: definition.model.provider,
+        model: definition.model.id,
+        text: prompt,
+        ...(definition.thinking ? { thinking: definition.thinking } : {}),
+      }),
+    });
+    const turn = await startProtectedTurn({
+      request,
+      id: chatId,
+      ...authority,
+      startedAt: performance.now(),
+      textLimit: 32_000,
+    });
+    await turn.response.body?.cancel();
+    return await turn.completion;
+  };
+  type AutomationMember = Parameters<typeof automationAuthority>[0];
+  const automationMembers = new Map<string, AutomationMember>();
+  const automationRefreshes = new Map<string, number>();
+  const activeAutomations = new Map<string, { profileId: string; completion?: Promise<void> }>();
+  const orphanedAutomationRuns = new Map<string, { profileId: string; runId: string }>();
+  const recoveringAutomationRuns = new Map<string, Promise<void>>();
+  let automationOperator: AutomationMember | undefined;
+  const automationOwnerAuthority = (
+    profileId: string,
+    maintenance: boolean,
+  ): ProtectedAutomationLifecycleOwnerAuthority => {
+    if (!automationOperator) {
+      throw new ProtectedError(
+        503,
+        "owner_unavailable",
+        "The configured owner must be active to recover automation runs.",
+      );
+    }
+    const operator = automationOperator;
+    const actor = automationAuthority(operator);
+    const target = {
+      ...actor,
+      profile: { id: profileId },
+      storageLimit: (assert: () => void) =>
+        storageLimitFor({ id: profileId, owner: profileId === operator.profileId }, assert),
+    };
+    const publication = createAutomationPublicationAuthority(target).lifecycle;
+    return {
+      ...publication,
+      ...(maintenance ? { enrollPublication: automationStorageRecovery.enrollMaintenance } : {}),
+      operator: {
+        profileId: operator.profileId,
+        issuer: operator.issuer,
+        subject: operator.subject,
+      },
+      assertOwnerCurrent: () => {
+        assertAutomationHostCurrent();
+        actor.assertCurrent();
+      },
+      assertRunStopped: (automationId) => {
+        assertAutomationHostCurrent();
+        if (activeAutomations.has(automationId)) {
+          throw new Error("Protected automation run is still active.");
+        }
+      },
+    };
+  };
+  const reconcileUncertainAutomationStorage = () => {
+    const status = automationStorageRecovery.status();
+    if (!status.pending || status.enrolled) {
+      return;
+    }
+    if (!automationOperator) {
+      process.stderr.write(
+        "Protected automation storage recovery requires an active configured owner.\n",
+      );
+      return;
+    }
+    const owner = automationAuthority(automationOperator);
+    void track(
+      owner
+        .revalidate()
+        .then(() => automationStorageRecovery.reconcile())
+        .then((result) => {
+          if (result.pending) {
+            process.stderr.write(
+              "Protected automation storage is awaiting a native write receipt.\n",
+            );
+          }
+        })
+        .catch(() => {
+          process.stderr.write("Protected automation storage recovery could not be completed.\n");
+        }),
+    );
+  };
+  const recoverOrphanedAutomationRun = (automationId: string): Promise<void> => {
+    const existing = recoveringAutomationRuns.get(automationId);
+    if (existing) {
+      return existing;
+    }
+    const candidate = orphanedAutomationRuns.get(automationId);
+    if (!candidate) {
+      return Promise.resolve();
+    }
+    const recovery = (async () => {
+      const owner = automationOwnerAuthority(candidate.profileId, false);
+      await owner.revalidate();
+      await automationStorageRecovery.waitForIdle(shutdown.signal);
+      const settled = await automationStorageRecovery.reconcile();
+      if (settled.pending || automationStorageRecovery.status().admissionClosed) {
+        throw new Error("Protected automation storage is awaiting recovery.");
+      }
+      const interrupted = await readProtectedAutomationInterruptedRunForOwner(
+        options.stateDir,
+        automationId,
+        owner,
+      );
+      if (interrupted === undefined) {
+        throw new Error("Protected automation recovery lost owner authority.");
+      }
+      if (interrupted?.runId === candidate.runId) {
+        const result = await writeProtectedAutomationLifecycleForOwner(
+          options.stateDir,
+          {
+            kind: "finish",
+            profileId: candidate.profileId,
+            automationId,
+            runId: candidate.runId,
+            now: Date.now(),
+            outcome: { status: "failed", errorCode: "interrupted" },
+          },
+          owner,
+        );
+        if (result.status !== "committed" && result.status !== "unchanged") {
+          throw new Error("Protected automation interruption could not be recorded.");
+        }
+      }
+      if (orphanedAutomationRuns.get(automationId) === candidate) {
+        orphanedAutomationRuns.delete(automationId);
+      }
+    })().finally(() => {
+      recoveringAutomationRuns.delete(automationId);
+    });
+    recoveringAutomationRuns.set(automationId, recovery);
+    return recovery;
+  };
+  const recoverOrphanedAutomationRunInBackground = (
+    automationId: string,
+    profileId: string,
+    runId: string,
+  ) => {
+    orphanedAutomationRuns.set(automationId, { profileId, runId });
+    void track(
+      recoverOrphanedAutomationRun(automationId).catch(() => {
+        process.stderr.write("Protected automation run recovery could not be completed.\n");
+      }),
+    );
+  };
+  const findAutomationMember = async (profileId: string): Promise<AutomationMember | undefined> => {
+    const admissions = await listProtectedAdmissions(options.stateDir);
+    const members = admissions.filter(
+      (entry) =>
+        entry.profileId === profileId &&
+        entry.status === "approved" &&
+        entry.issuer === options.accessIssuer &&
+        entry.subject !== undefined,
+    );
+    const member = members.find((entry) => entry.subject === options.ownerSubject) ?? members[0];
+    return member?.profileId && member.subject
+      ? {
+          id: member.id,
+          profileId: member.profileId,
+          issuer: member.issuer,
+          subject: member.subject,
+          revision: member.revision,
+        }
+      : undefined;
+  };
+  const automationScheduler = createProtectedAutomationScheduler(async (scheduled, due) => {
+    const member = automationMembers.get(scheduled.id);
+    if (!member) {
+      return;
+    }
+    try {
+      await runProtectedAutomation(member, scheduled, "scheduled", due);
+    } catch (error) {
+      if (publicError(error).code !== "member_inactive") {
+        throw error;
+      }
+      const authority = automationOwnerAuthority(member.profileId, false);
+      const refused = await writeProtectedAutomationLifecycleForOwner(
+        options.stateDir,
+        {
+          kind: "refuse",
+          profileId: member.profileId,
+          automationId: scheduled.id,
+          runId: randomUUID(),
+          definitionRevision: Number(scheduled.version),
+          trigger: "scheduled",
+          scheduledAtMs: due,
+          now: Date.now(),
+          errorCode: "member_inactive",
+        },
+        authority,
+      );
+      if (refused.status !== "committed" && refused.status !== "unchanged") {
+        throw new Error("Protected automation inactive-member refusal could not be recorded.", {
+          cause: error,
+        });
+      }
+    }
+  });
+  let automationSchedulerStarted = false;
+  const refreshProtectedAutomation = async (member: AutomationMember, automationId: string) => {
+    const revision = (automationRefreshes.get(automationId) ?? 0) + 1;
+    automationRefreshes.set(automationId, revision);
+    const authority = automationAuthority(member);
+    await authority.revalidate();
+    const automation = await readOwnedProtectedAutomationStorageRecord(
+      options.stateDir,
+      automationId,
+      authority.authority,
+    );
+    if (automationRefreshes.get(automationId) !== revision) {
+      return;
+    }
+    if (!automation?.enabled) {
+      automationMembers.delete(automationId);
+      automationScheduler.remove(automationId);
+      return;
+    }
+    const last = await readProtectedAutomationLastScheduledAttempt(options.stateDir, automationId, {
+      ...authority.authority,
+      revalidate: authority.revalidate,
+    });
+    await authority.revalidate();
+    if (automationRefreshes.get(automationId) !== revision) {
+      return;
+    }
+    if (!last) {
+      throw new ProtectedError(404, "not_found", "Automation not found.");
+    }
+    automationMembers.set(automationId, member);
+    automationScheduler.update({
+      id: automation.id,
+      version: String(automation.definitionRevision),
+      schedule: automation.definition.schedule,
+      updatedAt: automation.updatedAt,
+      ...(last.scheduledAtMs === null ? {} : { lastScheduledAt: last.scheduledAtMs }),
+    });
+  };
+  const retryProtectedAutomationInbox = async (member: AutomationMember, automationId: string) => {
+    const memberAuthority = automationAuthority(member);
+    const history = await listProtectedAutomationLifecycleRuns(options.stateDir, automationId, {
+      ...memberAuthority.authority,
+      revalidate: memberAuthority.revalidate,
+    });
+    if (!history) {
+      return;
+    }
+    const lifecycle = createAutomationPublicationAuthority(memberAuthority).lifecycle;
+    for (const run of history) {
+      if (run.delivery !== "pending") {
+        continue;
+      }
+      try {
+        const delivered = await writeProtectedAutomationLifecycle(
+          options.stateDir,
+          {
+            kind: "deliver",
+            profileId: member.profileId,
+            automationId,
+            runId: run.id,
+            now: Date.now(),
+          },
+          lifecycle,
+        );
+        if (delivered.status !== "committed" && delivered.status !== "unchanged") {
+          throw new Error("Protected automation inbox retry could not be recorded.");
+        }
+      } catch (error) {
+        if (!["quota_exceeded", "storage_full"].includes(publicError(error).code)) {
+          throw error;
+        }
+        process.stderr.write(
+          "Protected automation inbox delivery remains pending because storage is full.\n",
+        );
+        return;
+      }
+    }
+  };
+  async function queueProtectedAutomationRun(
+    member: AutomationMember,
+    scheduled: ProtectedScheduledAutomation,
+    trigger: "scheduled" | "manual",
+    scheduledAtMs: number,
+  ) {
+    await recoverOrphanedAutomationRun(scheduled.id);
+    const memberAuthority = automationAuthority(member);
+    await memberAuthority.revalidate();
+    await retryProtectedAutomationInbox(member, scheduled.id);
+    const automation = await readOwnedProtectedAutomationStorageRecord(
+      options.stateDir,
+      scheduled.id,
+      memberAuthority.authority,
+    );
+    if (!automation?.enabled) {
+      throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
+    }
+    if (String(automation.definitionRevision) !== scheduled.version) {
+      throw new ProtectedError(412, "definition_changed", "Reload the automation before running.");
+    }
+    const publication = createAutomationPublicationAuthority(memberAuthority);
+    const lifecycle = publication.lifecycle;
+    const resultAdmission = publication.result;
+    const runId = randomUUID();
+    const queuedAtMs = Date.now();
+    let queued;
+    try {
+      queued = await writeProtectedAutomationLifecycle(
+        options.stateDir,
+        {
+          kind: "queue",
+          profileId: member.profileId,
+          automationId: automation.id,
+          definitionRevision: automation.definitionRevision,
+          trigger,
+          scheduledAtMs,
+          runId,
+          now: queuedAtMs,
+        },
+        lifecycle,
+      );
+    } catch (error) {
+      recoverOrphanedAutomationRunInBackground(automation.id, member.profileId, runId);
+      throw error;
+    } finally {
+      reconcileUncertainAutomationStorage();
+    }
+    if (queued.status !== "committed") {
+      if (queued.status === "disabled") {
+        throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
+      }
+      if (queued.status === "definition-changed") {
+        throw new ProtectedError(
+          412,
+          "definition_changed",
+          "Reload the automation before running.",
+        );
+      }
+      if (queued.status === "not-provisioned") {
+        throw new ProtectedError(503, "storage_unavailable", "Automation storage is not ready.");
+      }
+      throw new ProtectedError(409, "automation_busy", "This automation cannot start another run.");
+    }
+    if (retiringProfiles.has(member.profileId)) {
+      recoverOrphanedAutomationRunInBackground(automation.id, member.profileId, runId);
+      throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
+    }
+    activeAutomations.set(automation.id, { profileId: member.profileId });
+    const completion = track(
+      (async () => {
+        let started = false;
+        let completedTurn = false;
+        let succeeded = false;
+        try {
+          const runAuthority = automationAuthority(member, {
+            automationId: automation.id,
+            version: automation.definitionRevision,
+          });
+          const binding = await readProtectedAutomationRunChat(options.stateDir, automation.id, {
+            ...memberAuthority.authority,
+            revalidate: memberAuthority.revalidate,
+          });
+          if (!binding) {
+            throw new ProtectedError(404, "not_found", "Automation not found.");
+          }
+          const chatId = binding.runChatId ?? randomUUID();
+          const start = await writeProtectedAutomationLifecycle(
+            options.stateDir,
+            {
+              kind: "start",
+              profileId: member.profileId,
+              automationId: automation.id,
+              runId,
+              chatId,
+              now: Date.now(),
+            },
+            lifecycle,
+          );
+          if (start.status !== "committed") {
+            if (start.status === "disabled" || start.status === "definition-changed") {
+              throw new ProtectedError(
+                409,
+                start.status === "disabled" ? "automation_disabled" : "definition_changed",
+                "This automation changed.",
+              );
+            }
+            throw new ProtectedError(409, "automation_unavailable", "This automation changed.");
+          }
+          started = true;
+          let entry;
+          try {
+            entry = await chats.readEntry(runAuthority.authority, chatId);
+          } catch (error) {
+            if (!(error instanceof ProtectedError && error.status === 404)) {
+              throw error;
+            }
+            if (!admitStorage || creating.has(member.profileId)) {
+              throw new ProtectedError(409, "busy", "Another chat is being created.");
+            }
+            creating.add(member.profileId);
+            let storage;
+            try {
+              await runAuthority.revalidate();
+              storage = await admitStorage(
+                member.profileId,
+                runAuthority.assertCurrent,
+                "create",
+                await runAuthority.storageLimit(runAuthority.assertCurrent),
+              );
+              await chats.create(
+                runAuthority.authority,
+                automation.definition.name,
+                automation.definition.agentId,
+                undefined,
+                { chatId, automationId: automation.id },
+              );
+              storage.recordCreatedChat(
+                chatId,
+                chats.scope(runAuthority.authority, chatId).sessionKey,
+              );
+            } finally {
+              storage?.release();
+              creating.delete(member.profileId);
+            }
+            entry = await chats.readEntry(runAuthority.authority, chatId);
+          }
+          if (entry.protectedAutomationRunId !== automation.id) {
+            throw new ProtectedError(
+              409,
+              "chat_conflict",
+              "This run chat belongs to another task.",
+            );
+          }
+          if (!entry.sessionId) {
+            throw new ProtectedError(409, "session_unavailable", "This run chat has no session.");
+          }
+          if (entry.protectedAgentId !== automation.definition.agentId) {
+            await runAuthority.revalidate();
+            await chats.selectAgent(
+              runAuthority.authority,
+              chatId,
+              String(entry.updatedAt),
+              automation.definition.agentId,
+            );
+          }
+          const turn = await executeProtectedAutomationTurn(member, automation, chatId);
+          if (turn.outcome !== "complete" || !turn.responseId) {
+            throw new ProtectedError(500, turn.errorCode ?? "turn_failed", "The run failed.");
+          }
+          completedTurn = true;
+          await runAuthority.revalidate();
+          const { chat } = await chats.readWithUsage(runAuthority.authority, chatId);
+          const reply = chat.messages.find((message) => message.id === turn.responseId);
+          if (!reply || reply.role !== "assistant" || reply.status !== "complete") {
+            throw new ProtectedError(500, "result_failed", "The completed reply was not found.");
+          }
+          const finished = await commitProtectedAutomationFinishedResult(
+            options.stateDir,
+            {
+              automationId: automation.id,
+              definitionRevision: automation.definitionRevision,
+              centralOwnerProfileId: member.profileId,
+              jobId: automation.id,
+              runAtMs: scheduledAtMs,
+              runId,
+              completedAtMs: Date.now(),
+              automationName: automation.definition.name,
+              privateFinalText: reply.text,
+              transcript: {
+                sessionKey: chats.scope(runAuthority.authority, chatId).sessionKey,
+                sessionId: entry.sessionId,
+              },
+            },
+            resultAdmission,
+          );
+          if (finished.status !== "created" && finished.status !== "duplicate") {
+            throw new ProtectedError(500, "result_failed", "The result could not be saved.");
+          }
+          const completed = await writeProtectedAutomationLifecycle(
+            options.stateDir,
+            {
+              kind: "finish",
+              profileId: member.profileId,
+              automationId: automation.id,
+              runId,
+              now: Date.now(),
+              outcome: { status: "succeeded", resultId: finished.id },
+            },
+            lifecycle,
+          );
+          if (completed.status !== "committed") {
+            throw new ProtectedError(500, "result_failed", "The run result could not be recorded.");
+          }
+          succeeded = true;
+          const delivered = await writeProtectedAutomationLifecycle(
+            options.stateDir,
+            {
+              kind: "deliver",
+              profileId: member.profileId,
+              automationId: automation.id,
+              runId,
+              now: Date.now(),
+            },
+            lifecycle,
+          );
+          if (delivered.status !== "committed" && delivered.status !== "unchanged") {
+            throw new ProtectedError(
+              500,
+              "result_failed",
+              "The inbox entry could not be recorded.",
+            );
+          }
+        } catch (error) {
+          if (succeeded) {
+            process.stderr.write(
+              "Protected automation result was saved but inbox delivery failed.\n",
+            );
+            throw new Error("Protected automation inbox delivery failed.", { cause: error });
+          }
+          const issue = publicError(error);
+          const skipped =
+            issue.code === "member_inactive" ||
+            (!completedTurn &&
+              [
+                "automation_disabled",
+                "definition_changed",
+                "quota_exceeded",
+                "storage_full",
+              ].includes(issue.code));
+          const providerError = [
+            "provider_timeout",
+            "provider_busy",
+            "provider_rejected",
+            "provider_failed",
+            "plan_limit",
+            "model_unavailable",
+            "chat_too_long",
+          ] as const;
+          const providerErrorCode = providerError.find((code) => code === issue.code);
+          const errorCode: ProtectedAutomationRunError = skipped
+            ? issue.code === "member_inactive"
+              ? "member_inactive"
+              : issue.code === "automation_disabled"
+                ? "automation_disabled"
+                : issue.code === "definition_changed"
+                  ? "definition_changed"
+                  : "quota_exceeded"
+            : completedTurn
+              ? "result_failed"
+              : started
+                ? (providerErrorCode ?? "turn_failed")
+                : "interrupted";
+          const command = {
+            kind: "finish" as const,
+            profileId: member.profileId,
+            automationId: automation.id,
+            runId,
+            now: Date.now(),
+            outcome: { status: skipped ? ("skipped" as const) : ("failed" as const), errorCode },
+          };
+          if (errorCode === "member_inactive") {
+            activeAutomations.delete(automation.id);
+          }
+          const finished =
+            errorCode === "member_inactive"
+              ? await writeProtectedAutomationLifecycleForOwner(
+                  options.stateDir,
+                  command,
+                  automationOwnerAuthority(member.profileId, false),
+                )
+              : await writeProtectedAutomationLifecycle(options.stateDir, command, lifecycle);
+          if (finished.status !== "committed" && finished.status !== "unchanged") {
+            throw new Error("Protected automation failure could not be recorded.", {
+              cause: error,
+            });
+          }
+        } finally {
+          activeAutomations.delete(automation.id);
+          reconcileUncertainAutomationStorage();
+        }
+      })(),
+    );
+    const active = activeAutomations.get(automation.id);
+    if (active) {
+      active.completion = completion;
+    }
+    void completion.catch(() => {
+      recoverOrphanedAutomationRunInBackground(automation.id, member.profileId, runId);
+      process.stderr.write("Protected automation could not record its run outcome.\n");
+    });
+    return { runId, completion };
+  }
+  async function runProtectedAutomation(
+    member: AutomationMember,
+    scheduled: ProtectedScheduledAutomation,
+    trigger: "scheduled" | "manual",
+    scheduledAtMs: number,
+  ) {
+    const queued = await queueProtectedAutomationRun(member, scheduled, trigger, scheduledAtMs);
+    await queued.completion;
+  }
   const handle = async (request: Request): Promise<Response> => {
     const startedAt = performance.now();
     const path = new URL(request.url).pathname;
@@ -1137,32 +2752,169 @@ export function createProtectedHttp(options: {
           throw new ProtectedError(403, "owner_required", "Owner access is required.");
         }
         await revalidate();
-        const person = await removeProtectedAdmission(
-          options.stateDir,
-          { id: adminPerson[1]!, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
-          assertCurrent,
-          (subject, profileId, retiredAutomations) => {
-            if (subject) {
-              options.onRemoveSubject?.(subject);
-            }
-            if (profileId) {
-              invalidateProfile(profileId);
-            }
-            admitStorage?.deletedAutomations(retiredAutomations);
-          },
-          () => options.onPolicyChanged?.(),
+        const admission = (await listProtectedAdmissions(options.stateDir)).find(
+          (entry) => entry.id === adminPerson[1] && entry.issuer === options.accessIssuer,
         );
+        await revalidate();
+        if (!admission) {
+          throw new ProtectedError(404, "person_not_found", "Person not found.");
+        }
+        if (admission.subject === options.ownerSubject) {
+          throw new ProtectedError(403, "owner_protected", "The owner cannot be removed.");
+        }
+        if (retiringAdmissions.has(admission.id)) {
+          throw new ProtectedError(409, "busy", "This member is already being removed.");
+        }
+        const targetProfileId = admission.profileId ?? null;
+        if (targetProfileId === profile.id) {
+          throw new ProtectedError(403, "owner_protected", "The owner cannot be removed.");
+        }
+        const operator = await findAutomationMember(profile.id);
+        if (admitStorage && !operator) {
+          throw new ProtectedError(503, "owner_unavailable", "The configured owner is not active.");
+        }
+        if (operator) {
+          automationOperator = operator;
+        }
+        const clearFence = () => {
+          retiringAdmissions.delete(admission.id);
+          if (targetProfileId) {
+            retiringProfiles.delete(targetProfileId);
+          }
+        };
+        retiringAdmissions.add(admission.id);
+        if (targetProfileId) {
+          retiringProfiles.add(targetProfileId);
+          for (const run of runs.values()) {
+            if (run.profileId === targetProfileId) {
+              run.controller.abort();
+            }
+          }
+        }
+        let uncertain = false;
+        let revokeAccess: Promise<unknown> | undefined;
+        let person;
+        try {
+          if (admitStorage) {
+            const deadline = AbortSignal.timeout(8_000);
+            try {
+              await automationStorageRecovery.waitForIdle(deadline);
+              while (
+                [...activeAutomations.values()].some((run) => run.profileId === targetProfileId)
+              ) {
+                const completions = [...activeAutomations.values()]
+                  .filter((run) => run.profileId === targetProfileId && run.completion)
+                  .map((run) => run.completion!);
+                await Promise.race([
+                  Promise.allSettled(completions),
+                  new Promise<never>((_, reject) => {
+                    deadline.addEventListener("abort", () => reject(deadline.reason), {
+                      once: true,
+                    });
+                  }),
+                ]);
+              }
+              await automationStorageRecovery.waitForIdle(deadline);
+            } catch (error) {
+              if (deadline.aborted) {
+                throw new ProtectedError(409, "busy", "The member's automation is still stopping.");
+              }
+              throw error;
+            }
+          }
+          person = await removeProtectedAdmission(
+            options.stateDir,
+            { id: admission.id, issuer: options.accessIssuer, ownerSubject: options.ownerSubject },
+            assertCurrent,
+            (subject, removedProfileId, retiredAutomations) => {
+              if (subject) {
+                options.onRemoveSubject?.(subject);
+              }
+              if (removedProfileId) {
+                invalidateProfile(removedProfileId);
+                for (const [automationId, member] of automationMembers) {
+                  if (member.profileId === removedProfileId) {
+                    automationScheduler.remove(automationId);
+                    automationMembers.delete(automationId);
+                  }
+                }
+                revokeAccess = track(
+                  (async () => {
+                    if (operator && automationSchedulerStarted) {
+                      const owner = automationAuthority(operator);
+                      await owner.revalidate();
+                      await updateCanonicalUserProfileAccess(
+                        { action: "revoke", profileId: removedProfileId },
+                        { env: chats.env, assertCurrent: owner.assertCurrent },
+                      );
+                    } else {
+                      await revalidate();
+                      await updateCanonicalUserProfileAccess(
+                        { action: "revoke", profileId: removedProfileId },
+                        { env: chats.env, assertCurrent },
+                      );
+                    }
+                  })(),
+                );
+                void revokeAccess.catch(() => {
+                  process.stderr.write("Protected member profile access could not be retired.\n");
+                });
+              }
+              admitStorage?.deletedAutomations(retiredAutomations);
+            },
+            () => options.onPolicyChanged?.(),
+            admitStorage
+              ? {
+                  profileId: targetProfileId,
+                  admissionRevision: admission.revision,
+                  revalidate,
+                  assertWritersStopped: (checkedProfileId) => {
+                    assertCurrent();
+                    if (
+                      checkedProfileId &&
+                      (!retiringProfiles.has(checkedProfileId) ||
+                        [...activeAutomations.values()].some(
+                          (run) => run.profileId === checkedProfileId,
+                        ))
+                    ) {
+                      throw new Error("Protected member automation writers have not stopped.");
+                    }
+                  },
+                  enrollPublication: automationStorageRecovery.enrollPublication,
+                  retireStorage: (entries) =>
+                    admitStorage.retiredStoredData(entries.map((removed) => ({ removed }))),
+                  retainUncertainRemovalCommit: (receipt) => {
+                    uncertain = true;
+                    automationStorageRecovery.retainUncertainRemovalCommit({
+                      ...receipt,
+                      settleStorage: () => {
+                        receipt.settleStorage();
+                        clearFence();
+                      },
+                      releaseStorage: () => {
+                        receipt.releaseStorage();
+                        clearFence();
+                      },
+                    });
+                  },
+                }
+              : undefined,
+          );
+        } finally {
+          if (!uncertain) {
+            clearFence();
+          } else {
+            reconcileUncertainAutomationStorage();
+          }
+        }
         if (person === "owner_protected") {
           throw new ProtectedError(403, "owner_protected", "The owner cannot be removed.");
         }
         if (!person) {
           throw new ProtectedError(404, "person_not_found", "Person not found.");
         }
-        if (person.profileId) {
-          await updateCanonicalUserProfileAccess(
-            { action: "revoke", profileId: person.profileId },
-            { env: chats.env, assertCurrent },
-          );
+        if (person.profileId && revokeAccess) {
+          await revokeAccess;
         }
         return json({
           person,
@@ -1211,26 +2963,7 @@ export function createProtectedHttp(options: {
         use: (scope: Awaited<ReturnType<typeof createAuthorizedUserFiles>>) => Promise<T>,
         assert = assertCurrent,
         signal = request.signal,
-      ) =>
-        createAuthorizedUserFiles({
-          ...options,
-          encryption,
-          profileId: profile.id,
-          assertCurrent: assert,
-          signal,
-          maxBytes: options.maxFileBytes,
-        }).then(async (owned) => {
-          try {
-            return await use(owned);
-          } catch (error) {
-            if (error instanceof FsSafeError && error.code === "not-found") {
-              return notFound();
-            }
-            throw error;
-          } finally {
-            owned.dispose();
-          }
-        });
+      ) => withProtectedFiles(profile.id, use, assert, signal);
       const readChat = async (id: string) => {
         const { chat, usage } = await chats.readWithUsage(authority, id);
         if (!supportsAutomationsAuthoring(request)) {
@@ -1633,10 +3366,26 @@ export function createProtectedHttp(options: {
           return notFound();
         }
         await revalidate();
-        const catalog: ProtectedAutomationCatalog | ProtectedAutomationCatalogV1 =
+        const baseCatalog: ProtectedAutomationCatalog | ProtectedAutomationCatalogV1 =
           hasClientCapability(request.headers, "agents-v1")
             ? { ...automationCatalog, agents: agentCatalog.listV1() }
             : automationCatalog;
+        const catalog =
+          automationSchedulerStarted &&
+          !automationStorageRecovery.status().admissionClosed &&
+          hasClientCapability(request.headers, automationRunsCapability)
+            ? {
+                ...baseCatalog,
+                capabilities: {
+                  ...baseCatalog.capabilities,
+                  automations: {
+                    ...baseCatalog.capabilities.automations,
+                    scheduleControl: true,
+                    run: true,
+                  },
+                },
+              }
+            : baseCatalog;
         const chatAvailable =
           supportsAutomationsChat(request) && catalog.capabilities.automations.list;
         return profileJson(
@@ -1685,6 +3434,39 @@ export function createProtectedHttp(options: {
         assertCurrent();
         const result: ProtectedAutomationListResponse = { automations };
         return json(result);
+      }
+      if (hasClientCapability(request.headers, automationRunsCapability) && method === "GET") {
+        if (pathname === "/automations/inbox") {
+          const entries = await listProtectedAutomationOwnerInbox(options.stateDir, {
+            ...authority,
+            revalidate,
+          });
+          return json({
+            entries: entries.map((entry) => Object.assign(entry, { push: "not-started" })),
+          });
+        }
+        const history = /^\/automations\/([^/]+)\/run-history$/u.exec(pathname);
+        if (history) {
+          const entries = await listProtectedAutomationLifecycleRuns(
+            options.stateDir,
+            history[1]!,
+            { ...authority, revalidate },
+          );
+          if (!entries) {
+            return notFound();
+          }
+          return json({ runs: entries });
+        }
+      }
+      if (hasClientCapability(request.headers, automationResultsCapability)) {
+        const result = await handleProtectedAutomationResultsRoute(
+          options.stateDir,
+          { method, pathname },
+          { ...authority, revalidate },
+        );
+        if (result) {
+          return json(result.body, result.status);
+        }
       }
       if (pathname === "/automations" && method === "POST") {
         if (!automationCatalog?.capabilities.automations.create) {
@@ -1841,6 +3623,45 @@ export function createProtectedHttp(options: {
           creating.delete(profile.id);
         }
       }
+      const runNow = /^\/automations\/([^/]+)\/run$/u.exec(pathname);
+      if (runNow && method === "POST") {
+        if (!hasClientCapability(request.headers, automationRunsCapability)) {
+          return notFound();
+        }
+        if (!automationSchedulerStarted || automationStorageRecovery.status().admissionClosed) {
+          throw new ProtectedError(
+            503,
+            "scheduler_unavailable",
+            "Automation scheduling is unavailable. Check protected storage recovery.",
+          );
+        }
+        await revalidate();
+        const automation = await readOwnedProtectedAutomationStorageRecord(
+          options.stateDir,
+          runNow[1]!,
+          authority,
+        );
+        if (!automation) {
+          return notFound();
+        }
+        const member = await findAutomationMember(profile.id);
+        if (!member) {
+          throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
+        }
+        const now = Date.now();
+        const queued = await queueProtectedAutomationRun(
+          member,
+          {
+            id: automation.id,
+            version: String(automation.definitionRevision),
+            schedule: automation.definition.schedule,
+            updatedAt: automation.updatedAt,
+          },
+          "manual",
+          now,
+        );
+        return json({ runId: queued.runId, status: "queued" }, 202);
+      }
       const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
       if (automationMatch && method === "GET") {
         if (!automationCatalog?.capabilities.automations.list) {
@@ -1887,6 +3708,35 @@ export function createProtectedHttp(options: {
           authority,
           {
             revalidate,
+            schedulerAvailable:
+              automationSchedulerStarted &&
+              !automationStorageRecovery.status().admissionClosed &&
+              hasClientCapability(request.headers, automationRunsCapability),
+            provision: async () => {
+              const member = await findAutomationMember(profile.id);
+              if (!member) {
+                throw new ProtectedError(
+                  403,
+                  "member_inactive",
+                  "This member no longer has access.",
+                );
+              }
+              const lifecycle = createAutomationPublicationAuthority(
+                automationAuthority(member),
+              ).lifecycle;
+              const provisioned = await writeProtectedAutomationLifecycle(
+                options.stateDir,
+                { kind: "provision", profileId: profile.id, automationId: automationMatch[1]! },
+                lifecycle,
+              );
+              if (provisioned.status !== "committed" && provisioned.status !== "unchanged") {
+                throw new ProtectedError(
+                  409,
+                  "automation_unavailable",
+                  "This automation cannot be enabled.",
+                );
+              }
+            },
             ...(admitStorage
               ? {
                   admitStorage: async () =>
@@ -1902,6 +3752,18 @@ export function createProtectedHttp(options: {
         );
         switch (saved.status) {
           case "updated": {
+            if (automationSchedulerStarted) {
+              const member = await findAutomationMember(profile.id);
+              if (!member) {
+                automationScheduler.remove(saved.automation.id);
+                throw new ProtectedError(
+                  403,
+                  "member_inactive",
+                  "This member no longer has access.",
+                );
+              }
+              await refreshProtectedAutomation(member, saved.automation.id);
+            }
             const result: ProtectedAutomationResponse = { automation: saved.automation };
             return json(result);
           }
@@ -2579,772 +4441,21 @@ export function createProtectedHttp(options: {
       }
       if (rest === "turns" && method === "POST") {
         requireProfile();
-        const requestBody = await body(request);
-        let data: ProtectedTurnRequest;
-        let authoringInput: ProtectedAuthoringTurnRequest["authoring"] | undefined;
-        if (isProtectedAuthoringTurnRequest(requestBody)) {
-          const { authoring, ...turnRequest } = requestBody;
-          data = turnRequest;
-          authoringInput = authoring;
-        } else if (isProtectedTurnRequest(requestBody)) {
-          data = requestBody;
-        } else {
-          return invalid();
-        }
-        const fixedModel = options.turns.models.find(
-          (candidate) =>
-            candidate.provider === data.provider &&
-            (data.model === undefined || candidate.id === data.model),
-        );
-        const credential = data.credential;
-        if (credential !== undefined && (!isRecord(credential) || data.provider === "sparky")) {
-          return invalid();
-        }
-        const expiresAt = isRecord(credential) ? credential.expiresAt : undefined;
-        if (
-          expiresAt !== undefined &&
-          (typeof expiresAt !== "number" ||
-            !Number.isSafeInteger(expiresAt) ||
-            expiresAt <= Date.now())
-        ) {
-          throw new ProtectedError(
-            401,
-            "provider_credential_expired",
-            "Reconnect or renew this provider first.",
-          );
-        }
-        let copilotModel:
-          | Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number]
-          | undefined;
-        if (data.provider === "github-copilot") {
-          if (!credential) {
-            throw new ProtectedError(
-              401,
-              "provider_credential_required",
-              "Connect this provider first.",
-            );
-          }
-          const models = await fetchProtectedCopilotModels(
-            credential,
-            { signal: request.signal, revalidate },
-            { includeContextSizes: data.contextSize !== undefined },
-          );
-          const requested = data.model ?? fixedModel?.id;
-          copilotModel = models.find(({ model }) => model.id === requested);
-        }
-        const model =
-          copilotModel?.model ??
-          (data.provider === "github-copilot" ? undefined : fixedModel && withThinking(fixedModel));
-        if (!model) {
-          throw new ProtectedError(422, "model_unavailable", "This model is not available.");
-        }
-        if (data.thinking !== undefined && !model.thinking?.levels.includes(data.thinking)) {
-          throw new ProtectedError(
-            422,
-            "thinking_unavailable",
-            "This reasoning level is not available.",
-          );
-        }
-        if (
-          data.contextSize !== undefined &&
-          !copilotModel?.model.contextSizes?.options.includes(data.contextSize)
-        ) {
-          throw new ProtectedError(
-            422,
-            "context_size_unavailable",
-            "This context size is not available.",
-          );
-        }
-        const input: TurnInput = {
-          provider: model.provider,
-          model: model.id,
-          text: text(data.text, 16_000),
-          ...(data.mentions ? { mentions: data.mentions } : {}),
-          thinking: data.thinking ?? model.thinking?.default,
-          ...(data.contextSize === undefined ? {} : { contextSize: data.contextSize }),
-          ...(copilotModel ? { copilotModel } : {}),
-          ...(isRecord(credential)
-            ? {
-                credential: {
-                  accessToken: text(credential.accessToken, 16_000),
-                  expiresAt,
-                },
-              }
-            : {}),
-        };
-        // The server-held binding decides authoring; the body only carries the client-held draft.
-        const admitAuthoringTurn = async (entry: Awaited<ReturnType<typeof chats.readEntry>>) => {
-          if (entry.protectedAuthoringKind !== "automation") {
-            if (authoringInput) {
-              invalid();
-            }
-            return undefined;
-          }
-          if (
-            !authoringInput ||
-            !supportsAutomationsAuthoring(request) ||
-            model.provider !== "sparky" ||
-            data.mentions?.length ||
-            !automationCatalog?.capabilities.automations.create ||
-            !admitStorage
-          ) {
-            throw new ProtectedError(
-              409,
-              "authoring_required",
-              "Update Alcove to continue this automation chat.",
-            );
-          }
-          const automationId = entry.protectedAutomationId;
-          if (automationId === undefined) {
-            if (authoringInput.automationVersion !== undefined) {
-              invalid();
-            }
-            return { input: authoringInput, catalog: automationCatalog, admitStorage };
-          }
-          if (authoringInput.automationVersion === undefined) {
-            throw new ProtectedError(
-              428,
-              "version_required",
-              "Reload the automation before continuing.",
-            );
-          }
-          const saved = await readProtectedAutomationRecord(
-            options.stateDir,
-            { profileId: profile.id, automationId },
-            authority,
-          );
-          if (!saved) {
-            throw new ProtectedError(
-              409,
-              "automation_unavailable",
-              "This automation was deleted. Your unsaved draft was not changed.",
-            );
-          }
-          if (saved.enabled) {
-            throw new ProtectedError(
-              409,
-              "automation_enabled",
-              "Pause this automation before editing it in chat.",
-            );
-          }
-          if (saved.version !== authoringInput.automationVersion) {
-            throw new ProtectedError(
-              412,
-              "version_mismatch",
-              "This automation changed. Reload it before continuing.",
-            );
-          }
-          return { input: authoringInput, catalog: automationCatalog, admitStorage, automationId };
-        };
-        await revalidate();
-        if (runs.has(id) || mutations.has(id)) {
-          throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
-        }
-        // Reserve the chat while its persisted selection and turn storage are admitted.
-        mutations.add(id);
-        const admission = await (async () => {
-          let storage: Awaited<ReturnType<NonNullable<typeof admitStorage>>> | undefined;
-          try {
-            const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
-              env: chats.env,
-            });
-            if (profileAuthority.profileId !== profile.id) {
-              unauthorized();
-            }
-            profileAuthority.assertCurrent();
-            // Storage charges continue after the client disconnects, so they check only the grant.
-            storage = await admitStorage?.(
-              profile.id,
-              assertGrant,
-              "turn",
-              await storageLimit(assertGrant),
-            );
-            if (shutdown.signal.aborted || runs.has(id)) {
-              throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
-            }
-            if (request.signal.aborted) {
-              request.signal.throwIfAborted();
-            }
-            const currentEntry = await chats.readEntry(authority, id);
-            const authoring = await admitAuthoringTurn(currentEntry);
-            const selectedAgentId =
-              currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
-            const selectedAgent = agentCatalog.get(selectedAgentId);
-            if (!selectedAgent) {
-              throw new ProtectedError(
-                422,
-                "agent_unavailable",
-                "This chat's agent is unavailable.",
-              );
-            }
-            const mentionedAgents = (data.mentions ?? []).map((mention) => {
-              const agent = agentCatalog.getSelectable(mention.agentId);
-              if (!agent || agent.id === selectedAgentId) {
-                throw new ProtectedError(
-                  422,
-                  "agent_unavailable",
-                  "One or more mentioned agents are unavailable.",
-                );
-              }
-              return agent;
-            });
-            if (!currentEntry.sessionId) {
-              throw new ProtectedError(
-                409,
-                "session_unavailable",
-                "This chat cannot start a request-scoped agent.",
-              );
-            }
-            await revalidate();
-            profileAuthority.assertCurrent();
-            if (shutdown.signal.aborted || runs.has(id)) {
-              throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
-            }
-            const run: Run = {
-              id: randomUUID(),
-              ...session,
-              controller: new AbortController(),
-              steering: new Map(),
-            };
-            runs.set(id, run);
-            return {
-              run,
-              authoring,
-              selectedAgent,
-              mentionedAgents,
-              storage,
-              profileAuthority,
-              sessionEntry: currentEntry,
-              parentLifecycleRevision: currentEntry.lifecycleRevision ?? null,
-              parentSessionId: currentEntry.sessionId,
-            };
-          } catch (error) {
-            storage?.release();
-            throw error;
-          } finally {
-            mutations.delete(id);
-          }
-        })();
-        const {
-          run,
-          authoring,
-          selectedAgent,
-          mentionedAgents,
-          storage,
-          profileAuthority,
-          sessionEntry,
-          parentLifecycleRevision,
-          parentSessionId,
-        } = admission;
-        const timing = createProtectedTurnTiming(startedAt);
-        timing.mark("admissionMs");
-        // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
-        // detaches from the stream, and the reply still finishes and saves.
-        const signal = AbortSignal.any([
-          shutdown.signal,
-          run.controller.signal,
-          AbortSignal.timeout(protectedTurnTimeoutMs + 5000),
-        ]);
-        const assertRun = () => {
-          assertGrant();
-          profileAuthority.assertCurrent();
-          signal.throwIfAborted();
-          if (runs.get(id) !== run) {
-            unauthorized();
-          }
-        };
-        let validation: Promise<void> | undefined;
-        const checkRun = async () => {
-          assertRun();
-          if (!validation) {
-            const finishTiming = timing.accessValidation();
-            validation = track(checkGrant(assertRun))
-              .catch((error: unknown) => {
-                run.controller.abort();
-                throw error;
-              })
-              .finally(() => {
-                finishTiming();
-                validation = undefined;
-              });
-          }
-          await validation;
-          assertRun();
-        };
-        const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
-        // Assigned when the stream starts; authoring tools run only inside that stream.
-        let publishAuthoring: ((event: ProtectedAuthoringTurnEvent) => Promise<void>) | undefined;
-        const automationChat = authoring
-          ? createProtectedAutomationAuthoringBindings({
-              stateDir: options.stateDir,
-              catalog: authoring.catalog,
-              retainedAgent: (agentId) => agentCatalog.get(agentId),
-              authority: runAuthority,
-              revalidate: checkRun,
-              chatId: id,
-              ...(authoring.automationId === undefined
-                ? {}
-                : { boundAutomationId: authoring.automationId }),
-              sent: authoring.input,
-              admitStorage: async () =>
-                authoring.admitStorage(
-                  profile.id,
-                  assertRun,
-                  "automation",
-                  await storageLimit(assertRun),
-                ),
-              bind: async (automationId) => {
-                await chats.bindAutomation(runAuthority, id, automationId);
-              },
-              publish: async (event) => {
-                if (!publishAuthoring) {
-                  throw new ProtectedError(409, "busy", "This automation chat is not streaming.");
-                }
-                await publishAuthoring(event);
-              },
-            })
-          : supportsAutomationsChat(request) &&
-              model.provider === "sparky" &&
-              automationCatalog?.capabilities.automations.list
-            ? createProtectedAutomationsChatBindings({
-                stateDir: options.stateDir,
-                catalog: automationCatalog,
-                authority: runAuthority,
-                revalidate: checkRun,
-              })
-            : undefined;
-        const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
-        const profileSessionPrefix = chats.scope(runAuthority, "").sessionKey;
-        const ownedChildSessionKeys = new Set<string>();
-        const saveChildResult: ProtectedTurn["saveChildResult"] = async (result) => {
-          await checkRun();
-          const save = () =>
-            chats.saveChildResult(runAuthority, id, {
-              ...result,
-              parentLifecycleRevision,
-            });
-          await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
-          await checkRun();
-        };
-        const sessionAccess = {
-          creatorProfileId: profile.id,
-          assertCurrent: assertRun,
-          revalidate: checkRun,
-          signal,
-          resolve: async ({
-            requesterSessionKey,
-            reference,
-          }: {
-            requesterSessionKey: string;
-            reference: string;
-          }) => {
-            await checkRun();
-            if (
-              requesterSessionKey !== parentSessionKey &&
-              !ownedChildSessionKeys.has(requesterSessionKey)
-            ) {
-              return undefined;
-            }
-            const targetId = reference.startsWith(profileSessionPrefix)
-              ? reference.slice(profileSessionPrefix.length)
-              : reference;
-            try {
-              const entry = await chats.readEntry(runAuthority, targetId);
-              await checkRun();
-              return {
-                sessionKey: chats.scope(runAuthority, targetId).sessionKey,
-                sessionId: entry.sessionId,
-                agentId: chats.agentId,
-              };
-            } catch (error) {
-              if (error instanceof ProtectedError && error.status === 404) {
-                await checkRun();
-                return undefined;
-              }
-              throw error;
-            }
-          },
-        };
-        const liveCheck = setInterval(() => {
-          void checkRun().catch(() => run.controller.abort());
-        }, 5000);
-        liveCheck.unref();
-        let attached = true;
-        const stream = new ReadableStream<Uint8Array>({
-          start(controller) {
-            const encoder = new TextEncoder();
-            const write = (line: string) => {
-              if (attached) {
-                try {
-                  controller.enqueue(encoder.encode(line));
-                  return true;
-                } catch {
-                  attached = false;
-                }
-              }
-              return false;
-            };
-            const send = (event: ProtectedAuthoringTurnEvent) => {
-              // Only a fixed terminal error may cross the boundary after authority is lost.
-              if (event.type !== "error") {
-                assertRun();
-              }
-              const published = write(`${JSON.stringify(event)}\n`);
-              if (
-                published &&
-                event.type !== "start" &&
-                event.type !== "done" &&
-                event.type !== "error"
-              ) {
-                timing.mark("firstClientVisibleOutputMs");
-              }
-            };
-            if (authoring) {
-              publishAuthoring = async (event) => {
-                send(event);
-              };
-            }
-            // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
-            // from closing an idle response; clients skip blank lines.
-            const keepalive = setInterval(() => write("\n"), 15_000);
-            keepalive.unref();
-            const complete = async () => {
-              let outcome: "complete" | "failed" | "interrupted" = "failed";
-              let tokens: number | null = null;
-              let contextBudget: number | undefined;
-              let messageCount: number | null = null;
-              let failed = true;
-              let errorCode: string | null = null;
-              let responseId: string | null = null;
-              let producedFiles: ProtectedProducedFile[] = [];
-              let reasoningSummaryChars = input.thinking === "off" ? 0 : null;
-              const modelRequests: TerminalModelRequestMetadata[] = [];
-              try {
-                assertRun();
-                send({ type: "start", runId: run.id });
-                const before = await chats.read(runAuthority, id);
-                await files(
-                  async (owned) => {
-                    const beforeArtifacts = await listChatArtifactFiles(
-                      owned,
-                      id,
-                      options.maxFileBytes,
-                    );
-                    const storageFiles = storage?.files(owned);
-                    const execute = () =>
-                      options.turns.run({
-                        id,
-                        runId: run.id,
-                        profileId: profile.id,
-                        target: {
-                          ...chats.scope(runAuthority, id),
-                          nativeSessionId: parentSessionId,
-                          lifecycleRevision: parentLifecycleRevision,
-                        },
-                        input,
-                        ...(automationChat ? { automationChat } : {}),
-                        mentionedAgents,
-                        agent: selectedAgent,
-                        ...(authoring ? {} : { routing: agentRouting }),
-                        sessionAccess,
-                        sessionEntry,
-                        files: storageFiles ?? owned,
-                        memoryFiles: storageFiles,
-                        signal,
-                        assertCurrent: assertRun,
-                        revalidate: checkRun,
-                        markTiming: timing.mark,
-                        saveChildResult,
-                        cleanupChildFiles: (sessionId) =>
-                          chats.removeTransientFiles(
-                            {
-                              profileId: profile.id,
-                              assertCurrent: () => profileAuthority.assertCurrent(),
-                            },
-                            sessionId,
-                          ),
-                        chargeChildCreation: () => storage?.chargeChatCreation(),
-                        registerChildSession: (sessionKey) => {
-                          ownedChildSessionKeys.add(sessionKey);
-                          return () => ownedChildSessionKeys.delete(sessionKey);
-                        },
-                        childResult: (result) => {
-                          send({
-                            type: "child-result",
-                            runId: result.runId,
-                            agentId: result.agentId,
-                            text: result.text,
-                          });
-                        },
-                        usage: (value) => {
-                          tokens = value;
-                        },
-                        contextBudget: (value) => {
-                          contextBudget = value;
-                        },
-                        modelRequest: (record) => {
-                          modelRequests.push(record);
-                        },
-                        reasoningLength: (length) => {
-                          if (reasoningSummaryChars !== null) {
-                            const next = reasoningSummaryChars + length;
-                            reasoningSummaryChars = Number.isSafeInteger(next) ? next : null;
-                          } else if (length > 0) {
-                            reasoningSummaryChars = length;
-                          }
-                        },
-                        delta: async (value) => {
-                          send({ type: "delta", text: value });
-                        },
-                        reasoning: async (value) => {
-                          send({ type: "reasoning", text: value });
-                        },
-                        activity: async (item) => {
-                          send({ type: "activity", ...item });
-                        },
-                        sources: async (sources) => {
-                          send({ type: "sources", sources });
-                        },
-                        widget: async (widget) => {
-                          await owned.stat(
-                            `${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`,
-                          );
-                          send({ type: "widget", ...widget });
-                        },
-                        widgetDraft: async (draft) => {
-                          send(draft);
-                        },
-                      });
-                    const result = await (storage
-                      ? withTranscriptWriteBudget(storage.charge, execute)
-                      : execute());
-                    const beforeIds = new Set(beforeArtifacts.map((file) => file.id));
-                    producedFiles = (
-                      await listChatArtifactFiles(owned, id, options.maxFileBytes)
-                    ).filter((file) => !beforeIds.has(file.id));
-                    return result;
-                  },
-                  assertRun,
-                  signal,
-                );
-                storage?.assertResult();
-                let { chat, usage } = await chats.readWithUsage(runAuthority, id);
-                await checkRun();
-                const newMessages = chat.messages.slice(before.messages.length);
-                messageCount = newMessages.length;
-                const latestMessage = newMessages.at(-1);
-                responseId =
-                  latestMessage?.role === "assistant" && latestMessage.status === "complete"
-                    ? latestMessage.id
-                    : null;
-                if (responseId === null) {
-                  producedFiles = [];
-                }
-                if (
-                  !newMessages.some(
-                    (message) => message.role === "user" && message.text === input.text,
-                  ) ||
-                  newMessages.at(-1)?.role !== "assistant" ||
-                  newMessages.at(-1)?.status !== "complete"
-                ) {
-                  throw new ProtectedError(
-                    500,
-                    "save_failed",
-                    "The reply could not be confirmed as saved.",
-                  );
-                }
-                if (
-                  contextBudget !== undefined &&
-                  responseId !== null &&
-                  usage?.provider === input.provider &&
-                  usage.model === input.model
-                ) {
-                  const size = contextBudget;
-                  const completedResponseId = responseId;
-                  const saveBudget = () =>
-                    chats.saveContextBudget(runAuthority, id, {
-                      runId: run.id,
-                      responseId: completedResponseId,
-                      contextSize: size,
-                      lifecycleRevision: parentLifecycleRevision,
-                    });
-                  await (storage
-                    ? withTranscriptWriteBudget(storage.charge, saveBudget)
-                    : saveBudget());
-                  ({ chat, usage } = await chats.readWithUsage(runAuthority, id));
-                  await checkRun();
-                  if (usage?.contextSize !== size) {
-                    throw new ProtectedError(
-                      500,
-                      "save_failed",
-                      "The context budget could not be confirmed as saved.",
-                    );
-                  }
-                }
-                failed = false;
-                if (usage && usage.provider === input.provider && usage.model === input.model) {
-                  send({
-                    type: "usage",
-                    contextTokens: usage.contextTokens,
-                    ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
-                    ...(usage.outputTokens !== undefined
-                      ? { outputTokens: usage.outputTokens }
-                      : {}),
-                    ...(usage.contextSize !== undefined &&
-                    hasClientCapability(request.headers, "model-context-v1")
-                      ? { contextSize: usage.contextSize }
-                      : {}),
-                  });
-                }
-                send({ type: "done", chatVersion: chat.version });
-                outcome = "complete";
-              } catch (error) {
-                outcome = signal.aborted ? "interrupted" : "failed";
-                let failure = error;
-                try {
-                  storage?.assertResult();
-                } catch (capacityError) {
-                  failure = capacityError;
-                }
-                const issue = signal.aborted
-                  ? new ProtectedError(409, "interrupted", "The turn was interrupted.")
-                  : publicError(failure);
-                errorCode = issue.code;
-                send({ type: "error", code: issue.code, message: issue.message });
-              } finally {
-                const timingMetrics = timing.finish(outcome);
-                const telemetryRequests = modelRequests.map((record) => ({
-                  requestId: record.requestId,
-                  provider: record.provider,
-                  model: record.model,
-                  outcome: record.outcome,
-                  usageSource: record.usageSource,
-                  wallDurationMs:
-                    record.wallDurationMs === null ? null : Math.round(record.wallDurationMs),
-                  inputTokens: record.inputTokens,
-                  outputTokens: record.outputTokens,
-                  cacheReadTokens: record.cacheReadTokens,
-                  cacheWriteTokens: record.cacheWriteTokens,
-                  reasoningTokens: record.reasoningTokens,
-                }));
-                const telemetry: ProtectedTurnTelemetryInput = {
-                  id: run.id,
-                  profileId: profile.id,
-                  memberLabel: redactFeedbackText(profile.displayName?.trim() || "User"),
-                  createdAt: Date.now(),
-                  agentId: selectedAgent.id,
-                  status:
-                    outcome === "complete"
-                      ? "complete"
-                      : outcome === "interrupted"
-                        ? "stopped"
-                        : "failed",
-                  chatId: id,
-                  responseId,
-                  errorCode,
-                  reasoningSummaryChars,
-                  admissionMs: timingMetrics.admissionMs,
-                  providerStartMs: timingMetrics.providerRequestStartMs,
-                  firstOutputMs: timingMetrics.firstProviderOutputMs,
-                  firstVisibleMs: timingMetrics.firstClientVisibleOutputMs,
-                  completionMs: timingMetrics.completionMs,
-                  files: producedFiles,
-                  requests: telemetryRequests,
-                  storageOverheadBytes: storageEntryOverheadBytes,
-                };
-                const telemetryBytes =
-                  storageEntryOverheadBytes +
-                  Buffer.byteLength(JSON.stringify(telemetry.files), "utf8") +
-                  Buffer.byteLength(telemetry.memberLabel, "utf8") +
-                  telemetry.id.length +
-                  telemetry.requests.reduce(
-                    (total, record) =>
-                      total +
-                      storageEntryOverheadBytes +
-                      Buffer.byteLength(JSON.stringify(record), "utf8") +
-                      record.requestId.length,
-                    0,
-                  );
-                let recordTelemetry = true;
-                let telemetryReservation:
-                  | ReturnType<NonNullable<typeof storage>["reserveStoredData"]>
-                  | undefined;
-                if (storage) {
-                  try {
-                    telemetryReservation = storage.reserveStoredData(telemetryBytes);
-                  } catch {
-                    recordTelemetry = false;
-                    process.stderr.write(
-                      "Protected telemetry was not recorded because storage capacity was unavailable.\n",
-                    );
-                  }
-                }
-                try {
-                  const storedEntries = await recordProtectedUsage(options.stateDir, {
-                    runId: run.id,
-                    profileId: profile.id,
-                    model: `${input.provider}/${input.model}`,
-                    messages: messageCount,
-                    tokens,
-                    failed,
-                    now: telemetry.createdAt,
-                    ...(recordTelemetry ? { telemetry } : {}),
-                  });
-                  telemetryReservation?.settle({
-                    created: storedEntries.length > 0,
-                    entries: storedEntries,
-                  });
-                } catch {
-                  if (telemetryReservation) {
-                    try {
-                      const expected = new Set([
-                        `run:${run.id}`,
-                        ...telemetryRequests.map((record) => `request:${record.requestId}`),
-                      ]);
-                      const storedEntries = (
-                        await readProtectedFeedbackStorageUsage(
-                          options.stateDir,
-                          storageEntryOverheadBytes,
-                          assertGrant,
-                        )
-                      ).filter((entry) => entry.profileId === profile.id && expected.has(entry.id));
-                      telemetryReservation.settle({
-                        created: storedEntries.some((entry) => entry.id === `run:${run.id}`),
-                        entries: storedEntries,
-                      });
-                    } catch {
-                      process.stderr.write(
-                        "Protected telemetry write outcome is unknown; its storage reservation remains held.\n",
-                      );
-                    }
-                  }
-                  process.stderr.write(
-                    "Protected usage could not be recorded for a completed run.\n",
-                  );
-                }
-                clearInterval(keepalive);
-                storage?.release();
-                clearInterval(liveCheck);
-                runs.delete(id);
-                for (const queued of run.steering.values()) {
-                  queued.abort();
-                }
-                if (attached) {
-                  attached = false;
-                  controller.close();
-                }
-              }
-            };
-            void track(complete());
-          },
-          cancel() {
-            // Stop is an explicit route. A closed connection only detaches the reader.
-            attached = false;
-          },
+        const turn = await startProtectedTurn({
+          request,
+          id,
+          profile,
+          sessionHash: session.sessionHash,
+          authority,
+          assertCurrent,
+          assertGrant,
+          revalidate,
+          checkGrant,
+          storageLimit,
+          files,
+          startedAt,
         });
-        return new Response(stream, {
-          headers: { ...commonHeaders, "content-type": "application/x-ndjson; charset=utf-8" },
-        });
+        return turn.response;
       }
       const control = /^runs\/([^/]+)\/(steer|stop)(?:\/([^/]+))?$/u.exec(rest ?? "");
       const run = runs.get(id);
@@ -3433,11 +4544,146 @@ export function createProtectedHttp(options: {
     fetch(this: void, request: Request) {
       return track(handle(request));
     },
+    async startAutomations(assertHostCurrent: () => void) {
+      if (automationSchedulerStarted || !admitStorage) {
+        return;
+      }
+      assertAutomationHostCurrent = assertHostCurrent;
+      try {
+        const admissions = await listProtectedAdmissions(options.stateDir);
+        const owner = admissions.find(
+          (member) =>
+            member.status === "approved" &&
+            member.issuer === options.accessIssuer &&
+            member.subject === options.ownerSubject &&
+            member.profileId,
+        );
+        if (owner?.profileId && owner.subject) {
+          automationOperator = {
+            id: owner.id,
+            profileId: owner.profileId,
+            issuer: owner.issuer,
+            subject: owner.subject,
+            revision: owner.revision,
+          };
+        }
+        const members = new Map<string, AutomationMember>();
+        for (const member of admissions) {
+          if (
+            member.status !== "approved" ||
+            member.issuer !== options.accessIssuer ||
+            !member.profileId ||
+            !member.subject
+          ) {
+            continue;
+          }
+          if (!members.has(member.profileId) || member.subject === options.ownerSubject) {
+            members.set(member.profileId, {
+              id: member.id,
+              profileId: member.profileId,
+              issuer: member.issuer,
+              subject: member.subject,
+              revision: member.revision,
+            });
+          }
+        }
+        automationStorageRecovery.close();
+        await automationStorageRecovery.reconcile();
+        automationStorageRecovery.assertSettled();
+        const profiles = new Set(
+          admissions.flatMap((member) => (member.profileId ? [member.profileId] : [])),
+        );
+        for (const profileId of profiles) {
+          const member = members.get(profileId);
+          if (!member && !automationOperator) {
+            continue;
+          }
+          const authority = member
+            ? automationAuthority(member)
+            : automationAuthority(automationOperator!);
+          const automations = await listOwnedProtectedAutomationStorageRecords(options.stateDir, {
+            profileId,
+            assertCurrent: authority.assertCurrent,
+          });
+          for (const automation of automations) {
+            if (!automationOperator) {
+              const history = await listProtectedAutomationLifecycleRuns(
+                options.stateDir,
+                automation.id,
+                { ...authority.authority, revalidate: authority.revalidate },
+              );
+              if (history?.some((run) => run.status === "queued" || run.status === "running")) {
+                throw new Error(
+                  "The configured owner is required to recover interrupted automations.",
+                );
+              }
+              continue;
+            }
+            const maintenance = automationOwnerAuthority(profileId, true);
+            const interrupted = await readProtectedAutomationInterruptedRunForOwner(
+              options.stateDir,
+              automation.id,
+              maintenance,
+            );
+            if (interrupted === undefined) {
+              throw new Error("Protected automation recovery lost owner authority.");
+            }
+            if (interrupted) {
+              const result = await writeProtectedAutomationLifecycleForOwner(
+                options.stateDir,
+                {
+                  kind: "finish",
+                  profileId,
+                  automationId: automation.id,
+                  runId: interrupted.runId,
+                  now: Date.now(),
+                  outcome: { status: "failed", errorCode: "interrupted" },
+                },
+                maintenance,
+              );
+              if (result.status !== "committed" && result.status !== "unchanged") {
+                throw new Error("Protected automation interruption could not be recorded.");
+              }
+            }
+          }
+        }
+        automationStorageRecovery.reopen();
+        for (const member of members.values()) {
+          const authority = automationAuthority(member);
+          await authority.revalidate();
+          const automations = await listOwnedProtectedAutomationStorageRecords(
+            options.stateDir,
+            authority.authority,
+          );
+          for (const automation of automations) {
+            await retryProtectedAutomationInbox(member, automation.id);
+            if (automation.enabled) {
+              const publication = createAutomationPublicationAuthority(authority).lifecycle;
+              const provisioned = await writeProtectedAutomationLifecycle(
+                options.stateDir,
+                { kind: "provision", profileId: member.profileId, automationId: automation.id },
+                publication,
+              );
+              if (provisioned.status !== "committed" && provisioned.status !== "unchanged") {
+                throw new Error("Protected automation metadata could not be provisioned.");
+              }
+              await refreshProtectedAutomation(member, automation.id);
+            }
+          }
+        }
+        automationSchedulerStarted = true;
+      } catch (error) {
+        automationSchedulerStarted = false;
+        automationScheduler.beginClose();
+        throw error;
+      }
+    },
     recoverTransient(assertCurrent: () => void) {
       return chats.recoverTransient(assertCurrent);
     },
     storageLimitFor,
     async shutdown() {
+      automationScheduler.beginClose();
       shutdown.abort();
       options.providerRelay?.close();
       for (const run of runs.values()) {
@@ -3447,6 +4693,7 @@ export function createProtectedHttp(options: {
         await Promise.allSettled(pending);
       }
       try {
+        await automationScheduler.stop();
         await options.memberMemory?.close();
       } finally {
         ownedEncryption?.dispose();

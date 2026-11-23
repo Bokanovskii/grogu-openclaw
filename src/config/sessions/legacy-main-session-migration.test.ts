@@ -8,6 +8,11 @@ import {
   readSessionProgressCard,
   writeSessionProgressCard,
 } from "../../session-cards/progress-card-store.js";
+import {
+  AgentDatabaseAdmissionError,
+  createAgentDatabaseInspectionRefusal,
+  recordAgentDatabaseAdmissions,
+} from "../../state/agent-database-admission.js";
 import { withAgentDatabaseMaintenanceLease } from "../../state/openclaw-agent-db-maintenance-lease.js";
 import { ensureOpenClawAgentDatabaseSchema } from "../../state/openclaw-agent-db-schema.js";
 import {
@@ -231,6 +236,60 @@ describe("legacy main session migration", () => {
       probe.close();
     }
   });
+
+  it.each(["main", "ops"] as const)(
+    "refuses retirement when %s agent admission is revoked at the source commit and recovers on rerun",
+    async (revokedAgentId) => {
+      const { fixture, env, source, destination, entry } = await prepareProtectedCrossStore();
+      const locked = (file: string) => {
+        const probe = new DatabaseSync(file, { timeout: 0 });
+        try {
+          probe.exec("BEGIN IMMEDIATE");
+          probe.exec("ROLLBACK");
+          return false;
+        } catch (error) {
+          if (!/locked|busy/i.test(String(error))) {
+            throw error;
+          }
+          return true;
+        } finally {
+          probe.close();
+        }
+      };
+      const refusal = createAgentDatabaseInspectionRefusal({
+        agentId: revokedAgentId,
+        paths: [revokedAgentId === "main" ? source.databasePath : destination.databasePath],
+        reason: "revoked during cleanup",
+      });
+      let revoked = false;
+      const result = await migrateLegacyMainSessionKeys({
+        cfg: fixture.cfg,
+        env,
+        mode: "doctor-fix",
+        beforePersistentApply: () => {
+          // The reclamation worker holds the source write transaction only while awaiting commit authorization.
+          if (!revoked && locked(destination.databasePath) && locked(source.databasePath)) {
+            revoked = true;
+            recordAgentDatabaseAdmissions([refusal], { env });
+          }
+        },
+      }).catch((error: unknown) => error);
+      recordAgentDatabaseAdmissions([], { env });
+      expect(revoked).toBe(true);
+      expect(result).toBeInstanceOf(AgentDatabaseAdmissionError);
+      expect(readClaim(source)?.entry).toMatchObject(entry);
+      expect(locked(destination.databasePath)).toBe(false);
+
+      const recovered = await migrateLegacyMainSessionKeys({
+        cfg: fixture.cfg,
+        env,
+        mode: "doctor-fix",
+      });
+      expect(recovered.complete).toBe(true);
+      expect(readClaim(source)).toBeUndefined();
+      expect(readClaim(destination)?.entry).toMatchObject(entry);
+    },
+  );
 
   it("migrates an in-place alias atomically to the owner key", async () => {
     const storePath = path.join(tempDirs.make("in-place-migration-"), "sessions.sqlite");

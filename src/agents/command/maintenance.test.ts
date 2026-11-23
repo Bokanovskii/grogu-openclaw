@@ -1,6 +1,8 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { createAuthorizedUserFiles } from "../../infra/authorized-user-files.js";
+import { root } from "../../infra/fs-safe.js";
 import {
   agentCommand,
   agentCommandFromGatewayIngress,
@@ -13,6 +15,8 @@ import {
   registerAgentCommandCompactionTestHooks,
   GATEWAY_INGRESS_ARGS,
 } from "../agent-command.compaction.test-support.js";
+import { createRequestModelCredential } from "../request-model-credential.js";
+import { withRequestScopedChildExecution } from "../request-scoped-child-execution.js";
 import { waitForSessionMaintenance } from "../session-maintenance/coordinator.js";
 
 const {
@@ -26,6 +30,82 @@ const {
 registerAgentCommandCompactionTestHooks();
 
 describe("agent command foreground completion", () => {
+  it("does not run unscoped maintenance for an isolated request-owned child", async () => {
+    const sessionId = "isolated-maintenance";
+    const sessionKey = `agent:main:explicit:${sessionId}`;
+    const storePath = requireStorePath();
+    await replaceSessionEntry(
+      { sessionKey, storePath },
+      {
+        sessionId,
+        lifecycleRevision: "isolated-maintenance-generation",
+        updatedAt: Date.now(),
+        totalTokens: 90_000,
+        totalTokensFresh: true,
+      },
+    );
+    const files = await createAuthorizedUserFiles({
+      usersRoot: await root(expectDefined(state.workspaceDir, "workspace")),
+      profileId: "isolated-test",
+      assertCurrent: () => {},
+      maxBytes: 4096,
+    });
+    const credential = createRequestModelCredential({
+      provider: "openai",
+      model: "synthetic",
+      accessToken: "synthetic-test-token",
+      assertCurrent: () => {},
+    });
+    state.runAgentAttemptMock.mockImplementationOnce(async (params) => {
+      params.onSuccessfulAuthProfile?.({});
+      params.onCompactionRequestBudget?.({
+        contextWindow: 32_768,
+        reserveTokens: 8_192,
+        fixedTokens: 9_500,
+        pendingTokens: 512,
+      });
+      return makeCompactionResult({
+        sessionId,
+        text: "isolated answer",
+        runner: "embedded",
+        agentHarnessId: "openclaw",
+      });
+    });
+    try {
+      await withRequestScopedChildExecution(
+        {
+          provider: "openai",
+          model: "synthetic",
+          contextIsolation: "isolated",
+          signal: new AbortController().signal,
+          assertCurrent: () => {},
+          revalidate: async () => {},
+          resolveChild: () => ({
+            contextIsolation: "isolated",
+            requestModelCredential: credential.handle,
+            userFileScope: { files, directory: "chats/isolated", cacheKey: "isolated-test" },
+          }),
+        },
+        async () => {
+          await agentCommandFromGatewayIngress(
+            { message: "continue", sessionId, sessionKey, allowModelOverride: true },
+            ...GATEWAY_INGRESS_ARGS,
+          );
+          await waitForSessionMaintenance(sessionKey);
+        },
+      );
+      expect(state.deliverAgentCommandResultMock).toHaveBeenCalledWith(
+        expect.objectContaining({ payloads: [{ text: "isolated answer" }] }),
+      );
+      expect.soft(state.runSessionPreflightCompactionMock).not.toHaveBeenCalled();
+      expect.soft(state.runMemoryFlushIfNeededMock).not.toHaveBeenCalled();
+      expect.soft(state.runSessionCompactionIfNeededMock).not.toHaveBeenCalled();
+    } finally {
+      credential.close();
+      files.dispose();
+    }
+  });
+
   it.each([
     { abortStage: "none", preserveUserFacingSessionModelState: false },
     { abortStage: "none", preserveUserFacingSessionModelState: true },

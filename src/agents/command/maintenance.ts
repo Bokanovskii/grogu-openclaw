@@ -7,6 +7,7 @@ import {
   prepareAgentCommandExecutionIdentity,
   type AgentCommandAdmissionIngress,
 } from "../agent-command-execution-identity.js";
+import { getRequestScopedChildExecution } from "../request-scoped-child-execution.js";
 import { createSessionMaintenanceFollowup } from "../session-maintenance/run.js";
 import { createCommandBudget } from "./maintenance-budget.js";
 import type { EmbeddedModelSelection } from "./model-selection.js";
@@ -134,6 +135,7 @@ async function runCommandPreflightMaintenance(
     prepared.isNewSession ||
     !sessionEntry ||
     !prepared.sessionKey ||
+    getRequestScopedChildExecution(prepared.runId)?.contextIsolation === "isolated" ||
     prepared.cfg.agents?.defaults?.compaction?.enabled === false
   ) {
     return sessionEntry;

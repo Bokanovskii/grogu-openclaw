@@ -29,6 +29,7 @@ import type { AcceptedCompactionSuccessor } from "../embedded-agent-runner/compa
 import { buildMainSessionRecoverySettlementPatch } from "../main-session-recovery/main-session-recovery-clear.js";
 import { inspectMainSessionRecoveryLifecycleEvent } from "../main-session-recovery/main-session-recovery-lifecycle.js";
 import { persistPendingFinalDeliveryMarker } from "../pending-final-delivery-marker.js";
+import { getRequestScopedChildExecution } from "../request-scoped-child-execution.js";
 import type { AgentRunSessionTarget } from "../run-session-target.types.js";
 import {
   createAgentRunRestartAbortError,
@@ -374,6 +375,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
       !result.meta.aborted &&
       (compactionFact?.count ?? 0) === 0 &&
       !params.preserveUserFacingSessionModelState &&
+      getRequestScopedChildExecution(runId)?.contextIsolation !== "isolated" &&
       params.opts.modelRun !== true &&
       params.opts.promptMode !== "none";
     maintenanceRequest =

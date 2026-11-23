@@ -65,7 +65,13 @@ function createProtectedFixture(stateDir: string) {
 
 type Store = ReturnType<typeof createProtectedFixture>["source"];
 
-function insertSuggestion(store: Store, id: string, text: string, sealedFor = sessionKey) {
+function insertSuggestion(
+  store: Store,
+  id: string,
+  text: string,
+  sealedFor = sessionKey,
+  key = sessionKey,
+) {
   store.write(({ db }) => {
     const row = sealSessionSuggestionFields(db, {
       id,
@@ -76,7 +82,7 @@ function insertSuggestion(store: Store, id: string, text: string, sealedFor = se
     });
     db.prepare(
       "INSERT INTO session_suggestions (id, session_key, author_id, author_label, text, created_at, state) VALUES (?, ?, ?, ?, ?, 1, 'pending')",
-    ).run(row.id, sessionKey, row.author_id, row.author_label, row.text);
+    ).run(row.id, key, row.author_id, row.author_label, row.text);
   });
 }
 
@@ -98,11 +104,11 @@ function rawSuggestions(store: Store) {
   return store.write(({ db }) => db.prepare("SELECT * FROM session_suggestions ORDER BY id").all());
 }
 
-function writeEntry(store: Store, updatedAt: number) {
+function writeEntry(store: Store, updatedAt: number, key = sessionKey) {
   store.write((database) =>
     writeSessionEntry(
       database,
-      sessionKey,
+      key,
       { sessionId: `session-${updatedAt}`, updatedAt },
       { allowStoredAliases: true, previousEntry: null },
     ),
@@ -163,9 +169,12 @@ describe("doctor canonical repair of protected cross-store suggestions", () => {
       const sourceRows = rawSuggestions(source);
       const destinationRows = rawSuggestions(destination);
 
-      await expect(repairCanonicalSessionKeys({ apply: true, cfg, env })).rejects.toThrow(
-        new RegExp(`${detail}.*source data was not deleted`),
-      );
+      // A rerun may select the copied canonical row as winner; the source must still survive.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await expect(repairCanonicalSessionKeys({ apply: true, cfg, env })).rejects.toThrow(
+          new RegExp(`${detail}.*source data was not deleted`),
+        );
+      }
 
       expect(source.loadEntry()?.entry).toMatchObject({ sessionId: "session-10" });
       expect(rawSuggestions(source)).toEqual(sourceRows);
@@ -175,6 +184,28 @@ describe("doctor canonical repair of protected cross-store suggestions", () => {
       } else {
         expect(rawSuggestions(destination)).toEqual(destinationRows);
       }
+    });
+  });
+
+  it("keeps a protected alias whose suggestions the canonical copy does not carry", async () => {
+    await withStateDirEnv("openclaw-doctor-protected-alias-", async ({ stateDir }) => {
+      const { cfg, env, source, destination } = await prepare(stateDir);
+      const aliasKey = "agent:main:MISPLACED";
+      writeEntry(source, 5, aliasKey);
+      insertSuggestion(source, "alias-only", "alias text", aliasKey, aliasKey);
+      const sourceRows = rawSuggestions(source);
+
+      await expect(repairCanonicalSessionKeys({ apply: true, cfg, env })).rejects.toThrow(
+        /missing: alias-only.*source data was not deleted/,
+      );
+
+      expect(rawSuggestions(source)).toEqual(sourceRows);
+      expect(
+        source.write(({ db }) =>
+          db.prepare("SELECT 1 AS kept FROM session_nodes WHERE session_key = ?").get(aliasKey),
+        ),
+      ).toEqual({ kept: 1 });
+      expect(rawSuggestions(destination)).toEqual([]);
     });
   });
 });

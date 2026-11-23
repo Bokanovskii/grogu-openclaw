@@ -371,29 +371,33 @@ async function repairCanonicalSessionGroupsInSingleDatabase(
 }
 
 /**
- * Holds destination custody over a protected cross-store copy so the winner's source rows are
- * removed only after the copy is durable and preserves every authenticated source suggestion.
+ * Holds destination custody while a protected store is retired, so its rows are removed only
+ * when the durable canonical node preserves every authenticated suggestion of every removed key.
+ * A rerun after a refused retirement can select the copied row as winner, so this covers every
+ * retired store and key rather than trusting winner selection.
  */
-function acquireProtectedWinnerRetirement(params: {
+function acquireProtectedStoreRetirement(params: {
+  canonicalKey: string;
   destination: SessionStoreTarget;
   env: NodeJS.ProcessEnv;
-  winner: CanonicalSessionCandidate;
-}): { release(): void; verifySource(source: OpenClawAgentDatabase): void } | undefined {
+  retired: readonly CanonicalSessionCandidate[];
+}): { release(): void; verifyRetired(source: OpenClawAgentDatabase): void } | undefined {
   const writer = openOpenClawAgentDatabase(
     resolveTargetSqliteOptions(params.destination, params.env),
   );
-  const source = openOpenClawAgentDatabase(resolveTargetSqliteOptions(params.winner, params.env));
+  const source = openOpenClawAgentDatabase(
+    resolveTargetSqliteOptions(params.retired[0]!, params.env),
+  );
   if (!hasSqliteStorageValueEncryption(writer.db) && !hasSqliteStorageValueEncryption(source.db)) {
     return undefined;
   }
-  const { canonicalKey, sessionKey } = params.winner;
-  const changed = () =>
-    new Error(`Canonical session changed before source removal: ${canonicalKey}`);
+  const { canonicalKey } = params;
+  const sessionKeys = params.retired.map((candidate) => candidate.sessionKey);
   const custody = acquireLegacySessionDestinationCustody({
     writer,
     canonicalKey,
     durable: true,
-    changed,
+    changed: () => new Error(`Canonical session changed before source removal: ${canonicalKey}`),
   });
   try {
     // The held lock freezes the destination, so this read covers the source removal commit.
@@ -402,16 +406,16 @@ function acquireProtectedWinnerRetirement(params: {
     );
     return {
       release: () => custody.release(),
-      verifySource: (database) => {
+      verifyRetired: (database) => {
         custody.assertHeld();
         const lost = describeLostSuggestions({
           canonicalKey,
           destination,
-          sources: readAuthenticatedSessionSuggestions(database, sessionKey),
+          sources: sessionKeys.flatMap((key) => readAuthenticatedSessionSuggestions(database, key)),
         });
         if (lost) {
           throw new Error(
-            `Cannot remove ${sessionKey} after canonical repair: ${lost}; source data was not deleted.`,
+            `Cannot remove ${sessionKeys.join(", ")} during canonical repair: ${lost}; source data was not deleted.`,
           );
         }
       },
@@ -535,17 +539,19 @@ async function repairCanonicalSessionGroup(
       continue;
     }
     const storeCandidate = storeCandidates[0]!;
-    const retirement =
-      sqlitePath === winner.sqlitePath
-        ? acquireProtectedWinnerRetirement({ destination, env: params.env, winner })
-        : undefined;
+    const retirement = acquireProtectedStoreRetirement({
+      canonicalKey: winner.canonicalKey,
+      destination,
+      env: params.env,
+      retired: storeCandidates,
+    });
     let result: Awaited<ReturnType<typeof applySessionEntryLifecycleMutation>>;
     try {
       result = await applySessionEntryLifecycleMutation({
         agentId: storeCandidate.agentId,
         allowCanonicalRepair: true,
         // Runs in the removal transaction, so the verified source rows are the rows removed.
-        ...(retirement ? { afterUpsertsInTransaction: retirement.verifySource } : {}),
+        ...(retirement ? { afterUpsertsInTransaction: retirement.verifyRetired } : {}),
         removals: storeCandidates.map((candidate) =>
           createCanonicalRepairRemoval(candidate, {
             archiveRemovedTranscript: true,
@@ -559,8 +565,9 @@ async function repairCanonicalSessionGroup(
     } finally {
       retirement?.release();
     }
-    // Only the selected winner is copied. Stale loser data survives solely in its
-    // verified archive, avoiding an ambiguous cross-store merge contract.
+    // Only the selected winner is copied. Stale unprotected loser data survives solely in its
+    // verified archive, avoiding an ambiguous cross-store merge contract; protected stores with
+    // unpreserved suggestions are refused above.
     for (const directory of result.archivedTranscriptDirectories) {
       archivedDirectories.add(directory);
     }

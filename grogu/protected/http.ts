@@ -464,15 +464,21 @@ export function createProtectedHttp(options: {
       }
       const pathname = path.startsWith(`${base}/`) ? path.slice(base.length) : "";
       const method = request.method;
-      if (pathname === "/widget-sandbox" && method === "GET") {
-        const doc = buildSandboxHostDocument({ profile: "protected" }, true, {
-          protectedWidgetStyles: ALCOVE_CONTENT_STYLES,
-        });
-        return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
-      }
-      if (pathname === "/widget-measurement" && method === "GET") {
-        const doc = buildProtectedWidgetMeasurementDocument();
-        return new Response(doc.html, { headers: { ...doc.headers, ...commonHeaders } });
+      if (
+        (pathname === "/widget-sandbox" || pathname === "/widget-measurement") &&
+        method === "GET"
+      ) {
+        const doc =
+          pathname === "/widget-sandbox"
+            ? buildSandboxHostDocument({ profile: "protected" }, true, {
+                protectedWidgetStyles: ALCOVE_CONTENT_STYLES,
+              })
+            : buildProtectedWidgetMeasurementDocument();
+        const headers = new Headers(doc.headers);
+        for (const [name, value] of Object.entries(commonHeaders)) {
+          headers.set(name, value);
+        }
+        return new Response(doc.html, { headers });
       }
       if (path === protectedAccessProofPath && options.answerAccessProof) {
         return await options.answerAccessProof(request);

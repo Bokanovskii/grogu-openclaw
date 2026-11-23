@@ -4,6 +4,8 @@ import { MAX_DATE_TIMESTAMP_MS } from "./schema/cron-shared.js";
 
 const id = Type.String({ minLength: 1, maxLength: 256 });
 const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
+const protectedAutomationIdPattern =
+  "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
 export const ProtectedAgentToolSchema = Type.Union([
@@ -84,6 +86,7 @@ export const ProtectedTurnRequestSchema = node({
   provider: ProtectedProviderSchema,
   credential: Type.Optional(ProtectedCredentialSchema),
   thinking: Type.Optional(ProtectedThinkLevelSchema),
+  contextSize: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 });
 export const ProtectedSourceSchema = node({ title: Type.String(), url: Type.String() });
 export const ProtectedWidgetSchema = node({ id, title: Type.String() });
@@ -116,6 +119,7 @@ export const ProtectedTurnEventSchema = Type.Union([
     contextTokens: Type.Integer({ minimum: 0 }),
     inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
     outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+    contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
   node({
     type: Type.Literal("widget-draft"),
@@ -157,6 +161,12 @@ export const ProtectedChatSummarySchema = node({
   updatedAt: Type.Number(),
   selectedAgentId: Type.Optional(protectedAgentId),
   activeRun: Type.Optional(node({ id })),
+  authoring: Type.Optional(
+    node({
+      kind: Type.Literal("automation"),
+      automationId: Type.Optional(Type.String({ pattern: protectedAutomationIdPattern })),
+    }),
+  ),
 });
 export const ProtectedChatSchema = node({
   ...ProtectedChatSummarySchema.properties,
@@ -169,6 +179,17 @@ export const ProtectedModelSchema = node({
   label: Type.String(),
   vendor: Type.Optional(Type.String()),
   contextWindow: Type.Optional(Type.Integer({ minimum: 1 })),
+  contextSizes: Type.Optional(
+    node({
+      options: Type.Array(Type.Integer({ minimum: 1 }), {
+        minItems: 2,
+        maxItems: 2,
+        uniqueItems: true,
+      }),
+      default: Type.Integer({ minimum: 1 }),
+      longContextSurcharge: Type.Boolean(),
+    }),
+  ),
   thinking: Type.Optional(
     node({
       levels: Type.Array(ProtectedThinkLevelSchema),
@@ -207,7 +228,21 @@ export const ProtectedMeSchema = node({
     admin: Type.Boolean(),
     feedback: Type.Optional(Type.Boolean()),
     telemetry: Type.Optional(Type.Boolean()),
+    memory: Type.Optional(node({ review: Type.Boolean() })),
   }),
+});
+export const ProtectedMemoryNoteSchema = node({
+  id: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }),
+  name: Type.String({ minLength: 1 }),
+  bytes: Type.Integer({ minimum: 0 }),
+  updatedAt: Type.Integer({ minimum: 0 }),
+});
+export const ProtectedMemoryListResponseSchema = node({
+  notes: Type.Array(ProtectedMemoryNoteSchema),
+});
+export const ProtectedMemoryReadResponseSchema = node({
+  note: ProtectedMemoryNoteSchema,
+  text: Type.String(),
 });
 export const ProtectedAutomationCapabilitiesSchema = node({
   catalog: Type.Boolean(),
@@ -224,6 +259,7 @@ export const ProtectedAutomationCapabilitiesSchema = node({
       read: Type.Boolean(),
       proposeCreate: Type.Boolean(),
       proposePatch: Type.Boolean(),
+      authoring: Type.Optional(Type.Boolean()),
     }),
   ),
 });
@@ -239,7 +275,7 @@ export const ProtectedAutomationScheduleSchema = Type.Union([
   }),
 ]);
 export const ProtectedAutomationIdSchema = Type.String({
-  pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+  pattern: protectedAutomationIdPattern,
 });
 export const ProtectedAutomationCronCatalogSchema = node({
   format: Type.Literal("5-field"),
@@ -545,6 +581,7 @@ export const ProtectedChatResponseSchema = node({
       contextTokens: Type.Integer({ minimum: 0 }),
       inputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
       outputTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+      contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
       provider: ProtectedProviderSchema,
       model: id,
     }),
@@ -590,6 +627,9 @@ export type ProtectedMessage = Static<typeof ProtectedMessageSchema>;
 export type ProtectedActivity = Static<typeof ProtectedActivitySchema>;
 export type ProtectedModel = Static<typeof ProtectedModelSchema>;
 export type ProtectedMe = Static<typeof ProtectedMeSchema>;
+export type ProtectedMemoryNote = Static<typeof ProtectedMemoryNoteSchema>;
+export type ProtectedMemoryListResponse = Static<typeof ProtectedMemoryListResponseSchema>;
+export type ProtectedMemoryReadResponse = Static<typeof ProtectedMemoryReadResponseSchema>;
 export type ProtectedAutomationCapabilities = Static<typeof ProtectedAutomationCapabilitiesSchema>;
 export type ProtectedAutomationCatalog = Static<typeof ProtectedAutomationCatalogSchema>;
 export type ProtectedAutomationCatalogV1 = Static<typeof ProtectedAutomationCatalogV1Schema>;

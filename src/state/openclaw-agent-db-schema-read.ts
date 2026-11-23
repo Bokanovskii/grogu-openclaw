@@ -40,11 +40,13 @@ function assertProtectedEncryptionAdmission(
   userVersion: number,
 ): void {
   const encryptionEnabled = hasSqliteStorageValueEncryption(db);
-  const hasMarker = Boolean(
-    db
-      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
-      .get(PROTECTED_ENCRYPTION_TABLE),
-  );
+  const hasMarker =
+    getAdmittedSqliteSchemaFacts(db)?.tables.has(PROTECTED_ENCRYPTION_TABLE) ??
+    Boolean(
+      db
+        .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
+        .get(PROTECTED_ENCRYPTION_TABLE),
+    );
   if (userVersion === PROTECTED_ENCRYPTED_AGENT_SCHEMA_VERSION && !hasMarker) {
     throw new SqliteSchemaMismatchError(
       `Protected agent database ${pathname} has an encrypted schema version but no encryption marker; keep it stopped and repair it with a supporting build.`,

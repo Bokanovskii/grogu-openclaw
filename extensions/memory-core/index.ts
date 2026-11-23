@@ -16,7 +16,8 @@ import {
 import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { configureMemoryCoreDreamingState } from "./src/dreaming-state.js";
 import { registerShortTermPromotionDreaming } from "./src/dreaming.js";
-import { buildMemoryFlushPlan } from "./src/flush-plan.js";
+import { buildMemoryProviderFlushPlan } from "./src/flush-plan.js";
+import { createMemberMemoryTool } from "./src/member-memory-tools.js";
 import {
   buildMemoryPromptSection,
   MEMORY_GET_TOOL_CONTRACT,
@@ -158,6 +159,7 @@ function resolveMemoryToolOptions(
     agentSessionKey: ctx.sessionKey,
     sandboxed: ctx.sandboxed,
     oneShotCliRun: ctx.oneShotCliRun,
+    memoryAudience: ctx.memoryAudience,
     conversationRecall: ctx.conversationRecall,
     activeProjectKeys: ctx.activeProjectKeys,
     ...(host.acquireLocalService ? { acquireLocalService: host.acquireLocalService } : {}),
@@ -294,7 +296,7 @@ export default definePluginEntry({
         });
         return context ? buildMemoryPromptSection(params) : [];
       },
-      flushPlanResolver: buildMemoryFlushPlan,
+      providerFlushPlanResolver: buildMemoryProviderFlushPlan,
       runtime: memoryRuntime,
       publicArtifacts: {
         async listArtifacts(params) {
@@ -308,17 +310,50 @@ export default definePluginEntry({
     for (const contract of [MEMORY_SEARCH_TOOL_CONTRACT, MEMORY_GET_TOOL_CONTRACT]) {
       api.registerTool(
         (ctx) =>
-          createLazyMemoryTool({
-            options: resolveMemoryToolOptions(ctx, host),
-            contract,
-            load: (module, options) =>
-              contract.name === "memory_search"
-                ? module.createMemorySearchTool(options)
-                : module.createMemoryGetTool(options),
-          }),
+          ctx.memoryAudience?.kind === "member-private"
+            ? null
+            : createLazyMemoryTool({
+                options: resolveMemoryToolOptions(ctx, host),
+                contract,
+                load: (module, options) =>
+                  contract.name === "memory_search"
+                    ? module.createMemorySearchTool(options)
+                    : module.createMemoryGetTool(options),
+              }),
+        { names: [contract.name] },
+      );
+      api.registerTool(
+        {
+          contextVersion: 2,
+          create: (ctx) =>
+            ctx.memoryAudience?.kind === "member-private"
+              ? createMemberMemoryTool({
+                  name: contract.name,
+                  binding: ctx.toolRuntimeBindings?.[api.id],
+                  context: ctx,
+                  options: resolveMemoryToolOptions(ctx, host),
+                })
+              : null,
+        },
         { names: [contract.name] },
       );
     }
+
+    api.registerTool(
+      {
+        contextVersion: 2,
+        create: (ctx) =>
+          ctx.memoryAudience?.kind === "member-private"
+            ? createMemberMemoryTool({
+                name: "memory_store",
+                binding: ctx.toolRuntimeBindings?.[api.id],
+                context: ctx,
+                options: resolveMemoryToolOptions(ctx, host),
+              })
+            : null,
+      },
+      { names: ["memory_store"] },
+    );
 
     api.registerTool(
       {
@@ -332,7 +367,7 @@ export default definePluginEntry({
     );
 
     api.on("before_prompt_build", async (event, ctx) => {
-      if (ctx.trigger !== "user") {
+      if (ctx.trigger !== "user" || ctx.memoryAudience?.kind === "member-private") {
         return undefined;
       }
       try {

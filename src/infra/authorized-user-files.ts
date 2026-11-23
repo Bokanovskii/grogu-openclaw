@@ -431,8 +431,10 @@ async function forEachAuthorizedUserFilesOwner(
     assertCurrent: () => void;
     maxBytes: number;
     encryption?: StorageValueEncryption;
+    allowUnrelatedEntries?: boolean;
+    onlyUserDirectory?: string;
   },
-  operation: (owner: AuthorizedUserFilesOwner) => Promise<void>,
+  operation: (owner: AuthorizedUserFilesOwner, userDirectory: string) => Promise<void>,
 ): Promise<void> {
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0) {
     throw new TypeError("User file migration requires a positive byte limit.");
@@ -442,6 +444,12 @@ async function forEachAuthorizedUserFilesOwner(
   options.assertCurrent();
   entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   for (const entry of entries) {
+    if (options.onlyUserDirectory && entry.name !== options.onlyUserDirectory) {
+      continue;
+    }
+    if (options.allowUnrelatedEntries && !/^[a-f0-9]{64}$/u.test(entry.name)) {
+      continue;
+    }
     if (!/^[a-f0-9]{64}$/u.test(entry.name) || !entry.isDirectory || entry.isSymbolicLink) {
       throw new Error(
         "Protected user-file root contains an unexpected entry; inspect it before startup.",
@@ -456,11 +464,78 @@ async function forEachAuthorizedUserFilesOwner(
       encryption: options.encryption,
     });
     try {
-      await operation(owner);
+      await operation(owner, entry.name);
     } finally {
       owner.files.dispose();
     }
   }
+}
+
+export function authorizedUserFilesDirectory(profileId: string): string {
+  return createHash("sha256").update(profileId).digest("hex");
+}
+
+/** Measure ciphertext and directory entries without exposing another member's files. */
+export async function measureAuthorizedUserFileTree(
+  files: AuthorizedUserFiles,
+  directory: string,
+  entryOverhead: number,
+): Promise<number> {
+  let names: string[];
+  try {
+    names = await files.list(directory);
+  } catch (error) {
+    if (error instanceof FsSafeError && error.code === "not-found") {
+      return 0;
+    }
+    throw error;
+  }
+  let bytes = entryOverhead;
+  for (const name of names) {
+    const relative = `${directory}/${name}`;
+    const info = await files.stat(relative);
+    bytes += info.isDirectory
+      ? await measureAuthorizedUserFileTree(files, relative, entryOverhead)
+      : info.storedSize + entryOverhead;
+  }
+  return bytes;
+}
+
+/** Snapshot one named subtree across admitted user directories for global storage accounting. */
+export async function measureAuthorizedUserFileTrees(options: {
+  usersRoot: UserFilesMigrationRoot;
+  assertCurrent: () => void;
+  maxBytes: number;
+  encryption?: StorageValueEncryption;
+  directory: string;
+  entryOverhead: number;
+  profileId?: string;
+}): Promise<Map<string, number>> {
+  relativeName(options.directory);
+  if (!Number.isSafeInteger(options.entryOverhead) || options.entryOverhead < 0) {
+    throw new TypeError("User file measurement requires a valid entry overhead.");
+  }
+  const measured = new Map<string, number>();
+  await forEachAuthorizedUserFilesOwner(
+    {
+      ...options,
+      allowUnrelatedEntries: true,
+      ...(options.profileId !== undefined
+        ? { onlyUserDirectory: authorizedUserFilesDirectory(options.profileId) }
+        : {}),
+    },
+    async (owner, userDirectory) => {
+      const bytes = await measureAuthorizedUserFileTree(
+        owner.files,
+        options.directory,
+        options.entryOverhead,
+      );
+      if (bytes > 0) {
+        measured.set(userDirectory, bytes);
+      }
+    },
+  );
+  return measured;
 }
 
 export async function verifyAuthorizedUserFiles(options: {
@@ -496,7 +571,7 @@ export async function createAuthorizedUserFiles(options: {
   if (!options.profileId || !Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0) {
     throw new TypeError("User file admission requires a profile and a positive byte limit.");
   }
-  const userDirectory = createHash("sha256").update(options.profileId).digest("hex");
+  const userDirectory = authorizedUserFilesDirectory(options.profileId);
   const owner = await createAuthorizedUserFilesOwner({
     ...options,
     userDirectory,

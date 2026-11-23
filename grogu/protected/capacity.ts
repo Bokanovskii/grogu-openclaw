@@ -1,7 +1,10 @@
 import { statfsSync } from "node:fs";
 import type { ProtectedChatStorage } from "@openclaw/gateway-protocol/protected";
 import {
+  authorizedUserFilesDirectory,
   createAuthorizedUserFiles,
+  measureAuthorizedUserFileTree,
+  measureAuthorizedUserFileTrees,
   type AuthorizedUserFiles,
 } from "../../src/infra/authorized-user-files.js";
 import { FsSafeError } from "../../src/infra/fs-safe.js";
@@ -29,9 +32,14 @@ import {
 const MiB = 1024 * 1024;
 const chatBytes = 32 * 1024;
 export const storageEntryOverheadBytes = 4096;
+const memberMemoryDirectory = "member-memory";
 export type StorageLimits = { globalBytes: number; userBytes: number; freeFloorBytes: number };
 export const defaultUserLimitBytes = 512 * MiB;
 export const minimumUserLimitBytes = 16 * MiB;
+
+export type StorageFiles = AuthorizedUserFiles & {
+  updateText(name: string, update: (current: string | undefined) => string): Promise<void>;
+};
 
 export type StorageAdmission = {
   release(): void;
@@ -51,7 +59,7 @@ export type StorageAdmission = {
   // Await admission before the native transaction. Reserve synchronously against its
   // measured ledger; retain the receipt through commit/rollback, including unknown outcomes.
   reserveStoredDataReplacement(change: StoredDataReplacement): StoredDataReplacementReservation;
-  files(files: AuthorizedUserFiles): AuthorizedUserFiles;
+  files(files: AuthorizedUserFiles): StorageFiles;
 };
 
 function freeBytes(directory: string) {
@@ -73,31 +81,9 @@ export function measureStorageLimits(stateDir: string): StorageLimits {
   };
 }
 
-async function fileBytes(files: AuthorizedUserFiles, directory: string): Promise<number> {
-  let names: string[];
-  try {
-    names = await files.list(directory);
-  } catch (error) {
-    if (error instanceof FsSafeError && error.code === "not-found") {
-      return 0;
-    }
-    throw error;
-  }
-  let bytes = storageEntryOverheadBytes;
-  for (const name of names) {
-    const relative = `${directory}/${name}`;
-    const info = await files.stat(relative);
-    bytes += info.isDirectory
-      ? await fileBytes(files, relative)
-      : info.storedSize + storageEntryOverheadBytes;
-  }
-  return bytes;
-}
-
-type StorageMeasurementOptions = Pick<
-  Parameters<typeof createAuthorizedUserFiles>[0],
-  "usersRoot" | "encryption"
-> & {
+type StorageMeasurementOptions = {
+  usersRoot: Parameters<typeof measureAuthorizedUserFileTrees>[0]["usersRoot"];
+  encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   chats: Pick<ProtectedChats, "capacityEntries" | "transcriptBytes">;
   maxFileBytes: number;
   automationUsage?: (
@@ -123,6 +109,7 @@ export async function measureProtectedStorage(
   onAutomationUsage?: (profileId: string, bytes: number) => void,
   onAutomationEntry?: (entry: ProtectedAutomationStorageUsage["entries"][number]) => void,
   onStoredDataEntry?: (entry: StoredDataEntry) => void,
+  onMemoryUsage?: (userDirectory: string, bytes: number) => void,
 ) {
   let globalBytes = 0;
   let personalBytes = 0;
@@ -144,7 +131,11 @@ export async function measureProtectedStorage(
       const bytes =
         chatBytes +
         (await options.chats.transcriptBytes(entry.id, entry.sessionKey)) +
-        (await fileBytes(files, chatFilesDirectory(entry.id)));
+        (await measureAuthorizedUserFileTree(
+          files,
+          chatFilesDirectory(entry.id),
+          storageEntryOverheadBytes,
+        ));
       globalBytes += bytes;
       onEntry?.(entry, bytes);
       if (entry.profileId === profileId) {
@@ -163,6 +154,26 @@ export async function measureProtectedStorage(
       }
     } finally {
       files.dispose();
+    }
+  }
+  assertCurrent();
+  const memberMemory = await measureAuthorizedUserFileTrees({
+    usersRoot: options.usersRoot,
+    assertCurrent,
+    maxBytes: options.maxFileBytes,
+    encryption: options.encryption,
+    directory: memberMemoryDirectory,
+    entryOverhead: storageEntryOverheadBytes,
+    ...(includeOtherProfiles ? {} : { profileId }),
+  });
+  const ownDirectory = authorizedUserFilesDirectory(profileId);
+  for (const [directory, bytes] of memberMemory) {
+    if (includeOtherProfiles || directory === ownDirectory) {
+      globalBytes += bytes;
+      onMemoryUsage?.(directory, bytes);
+    }
+    if (directory === ownDirectory) {
+      personalBytes += bytes;
     }
   }
   assertCurrent();
@@ -221,9 +232,19 @@ export function createStorageAdmission(
     baselineAutomations: Set<string>;
     postMeasurementAutomations: Set<string>;
     retiredAutomations: Set<string>;
+    memoryBytes: Map<string, number>;
+    memoryAccounted: Set<string>;
   };
   const entryKey = (entry: { profileId: string; id: string; sessionKey: string }) =>
     JSON.stringify([entry.profileId, entry.id, entry.sessionKey]);
+  const accountMemory = (account: Ledger, profileId: string) => {
+    if (account.memoryAccounted.has(profileId)) {
+      return;
+    }
+    account.memoryAccounted.add(profileId);
+    const bytes = account.memoryBytes.get(authorizedUserFilesDirectory(profileId)) ?? 0;
+    account.users.set(profileId, (account.users.get(profileId) ?? 0) + bytes);
+  };
   const chatKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
   const automationKey = (profileId: string, id: string) => JSON.stringify([profileId, id]);
   let ledger: Ledger | undefined;
@@ -330,6 +351,7 @@ export function createStorageAdmission(
           const baseline = new Map<string, { profileId: string; id: string; bytes: number }>();
           const baselineAutomations = new Set<string>();
           const storedEntries = new Map<string, StoredDataEntry>();
+          const memoryBytes = new Map<string, number>();
           const { globalBytes } = await measureProtectedStorage(
             options,
             profileId,
@@ -350,6 +372,7 @@ export function createStorageAdmission(
               users.set(entry.profileId, (users.get(entry.profileId) ?? 0) + entry.bytes);
               storedEntries.set(storedDataEntryKey(entry), entry);
             },
+            (directory, bytes) => memoryBytes.set(directory, bytes),
           );
           const account: Ledger = {
             globalBytes,
@@ -359,6 +382,8 @@ export function createStorageAdmission(
             baselineAutomations,
             postMeasurementAutomations: new Set<string>(),
             retiredAutomations: new Set<string>(),
+            memoryBytes,
+            memoryAccounted: new Set<string>(),
             storedEntries,
             retiredStoredEntries: new Map<string, StoredDataEntry | null>(),
           };
@@ -390,6 +415,7 @@ export function createStorageAdmission(
       if (!ledger) {
         await measure();
       } else {
+        accountMemory(ledger, profileId);
         const initial = operation === "create" ? chatBytes : operation === "turn" ? 16 * 1024 : 0;
         if (
           pendingFileWrites === 0 &&
@@ -422,6 +448,7 @@ export function createStorageAdmission(
       if (!account) {
         throw new Error("Alcove storage measurement did not complete");
       }
+      accountMemory(account, profileId);
       const reservation: Reservation = { profileId };
       currentLedger = account;
       currentReservation = reservation;
@@ -564,7 +591,7 @@ export function createStorageAdmission(
             throw failure;
           }
         },
-        files(files: AuthorizedUserFiles): AuthorizedUserFiles {
+        files(files: AuthorizedUserFiles): StorageFiles {
           const checked = (name: string, data: string | Buffer) => {
             if (Buffer.byteLength(data) > options.maxFileBytes) {
               failure = new ProtectedError(
@@ -614,45 +641,33 @@ export function createStorageAdmission(
             }
             return total;
           };
-          const withCharge = async (name: string, bytes: number, write: () => Promise<void>) => {
-            charge(bytes);
-            pendingWrites++;
-            pendingFileWrites++;
+          const chargedWrite = async (name: string, bytes: number, write: () => Promise<void>) => {
+            let before: number;
             try {
-              await withFileLock(async () => {
-                await scanInProgress;
-                let before: number;
-                try {
-                  before = await pathSize(name);
-                } catch (error) {
-                  refund(bytes);
-                  throw error;
-                }
-                const settle = async () => {
-                  const after = await pathSize(name);
-                  refund(bytes - Math.min(bytes, Math.max(0, after - before)));
-                };
-                try {
-                  await write();
-                } catch (error) {
-                  try {
-                    await settle();
-                  } catch (settlementError) {
-                    throw new AggregateError(
-                      [error, settlementError],
-                      "File write and quota settlement both failed.",
-                      { cause: settlementError },
-                    );
-                  }
-                  throw error;
-                }
-                await settle();
-              });
-            } finally {
-              pendingWrites--;
-              pendingFileWrites--;
-              finishReservation();
+              before = await pathSize(name);
+            } catch (error) {
+              refund(bytes);
+              throw error;
             }
+            const settle = async () => {
+              const after = await pathSize(name);
+              refund(bytes - Math.min(bytes, Math.max(0, after - before)));
+            };
+            try {
+              await write();
+            } catch (error) {
+              try {
+                await settle();
+              } catch (settlementError) {
+                throw new AggregateError(
+                  [error, settlementError],
+                  "File write and quota settlement both failed.",
+                  { cause: settlementError },
+                );
+              }
+              throw error;
+            }
+            await settle();
           };
           const withMutation = async (write: () => Promise<void>) => {
             pendingWrites++;
@@ -668,8 +683,18 @@ export function createStorageAdmission(
               finishReservation();
             }
           };
+          const withCharge = async (name: string, bytes: number, write: () => Promise<void>) => {
+            charge(bytes);
+            await withMutation(() => chargedWrite(name, bytes, write));
+          };
           return {
             ...files,
+            assertCurrent() {
+              if (!active) {
+                throw new Error("Storage admission is closed.");
+              }
+              files.assertCurrent();
+            },
             create(name, data) {
               return withCharge(name, checked(name, data), () => files.create(name, data));
             },
@@ -684,6 +709,35 @@ export function createStorageAdmission(
             },
             remove(name) {
               return withMutation(() => files.remove(name));
+            },
+            async updateText(name, update) {
+              if (!active) {
+                throw new Error("Storage admission is closed.");
+              }
+              await withMutation(async () => {
+                if (!active) {
+                  throw new Error("Storage admission is closed.");
+                }
+                files.assertCurrent();
+                let current: string | undefined;
+                try {
+                  current = await files.readText(name);
+                } catch (error) {
+                  if (!(error instanceof FsSafeError && error.code === "not-found")) {
+                    throw error;
+                  }
+                }
+                const next = update(current);
+                const bytes = checked(name, next);
+                charge(bytes);
+                await chargedWrite(name, bytes, () => {
+                  if (!active) {
+                    throw new Error("Storage admission is closed.");
+                  }
+                  files.assertCurrent();
+                  return files.write(name, next);
+                });
+              });
             },
           };
         },

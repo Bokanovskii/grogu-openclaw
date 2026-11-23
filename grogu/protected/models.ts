@@ -71,7 +71,7 @@ export function withThinking(model: ProtectedModel, catalogEntry?: ThinkingCatal
 export async function fetchProtectedCopilotModels(
   credential: { accessToken: string; expiresAt?: number },
   authority: { signal: AbortSignal; revalidate: () => Promise<void> },
-  options?: { includeVendor: boolean },
+  options?: { includeVendor?: boolean; includeContextSizes?: boolean },
 ): Promise<Array<{ model: ProtectedModel; definition: CatalogModel; baseUrl: string }>> {
   if (credential.expiresAt !== undefined && credential.expiresAt <= Date.now()) {
     throw new ProtectedError(
@@ -103,6 +103,9 @@ export async function fetchProtectedCopilotModels(
     await authority.revalidate();
     return catalog.filter(api.isCopilotCatalogModelVisible).map((definition) => {
       const vendor = options?.includeVendor ? api.getCopilotCatalogVendor(definition) : undefined;
+      const contextSizes = options?.includeContextSizes
+        ? api.getCopilotCatalogContextSizes(definition)
+        : undefined;
       return {
         model: withThinking(
           {
@@ -110,6 +113,7 @@ export async function fetchProtectedCopilotModels(
             id: definition.id,
             label: definition.name,
             ...(vendor ? { vendor } : {}),
+            ...(contextSizes ? { contextSizes } : {}),
             ...(definition.contextWindow === undefined
               ? {}
               : { contextWindow: definition.contextWindow }),

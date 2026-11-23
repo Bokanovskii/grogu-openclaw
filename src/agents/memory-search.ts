@@ -79,11 +79,18 @@ function getConfiguredMemoryEmbeddingProvider(providerId: string, cfg: OpenClawC
 }
 
 /** Resolves source and query settings without loading an embedding provider runtime. */
-export function resolveMemorySearchIndexConfig(cfg: OpenClawConfig, agentId: string) {
+export function resolveMemorySearchIndexConfig(
+  cfg: OpenClawConfig,
+  agentId: string,
+  options?: {
+    /** Read sizing metadata for a separately authorized member store, without enabling this index. */
+    includeDisabled?: boolean;
+  },
+) {
   const defaults = cfg.memory?.search;
   const overrides = resolveAgentConfig(cfg, agentId)?.memory?.search;
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
-  if (!enabled) {
+  if (!enabled && !options?.includeDisabled) {
     return null;
   }
   assertSecretOwnerAvailable("capability", runtimeMemorySecretOwnerId(agentId));
@@ -123,6 +130,7 @@ export function resolveMemorySearchIndexConfig(cfg: OpenClawConfig, agentId: str
       },
     },
     experimental: { sessionMemory },
+    chunking: { tokens: 400, overlap: 80 },
     sync: resolveSyncConfig(),
   };
 }
@@ -205,7 +213,6 @@ function produceMemorySearchConfig(cfg: OpenClawConfig, agentId: string) {
           overrides?.store?.vector?.extensionPath ?? defaults?.store?.vector?.extensionPath,
       },
     },
-    chunking: { tokens: 400, overlap: 80 },
     cache: {
       enabled: overrides?.cache?.enabled ?? defaults?.cache?.enabled ?? DEFAULT_CACHE_ENABLED,
       maxEntries: DEFAULT_CACHE_MAX_ENTRIES,

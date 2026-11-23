@@ -419,6 +419,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     toolBindings: params.toolBindings,
     toolRuntimeBindings: params.toolRuntimeBindings,
     assertInvocationCurrent: params.assertInvocationCurrent,
+    beforeCompaction: params.beforeCompaction,
     userFileScope: params.userFileScope,
     chatType: params.chatType,
     agentAccountId: params.agentAccountId,

@@ -19,6 +19,7 @@ type GenerationLease = Awaited<ReturnType<typeof prepareSessionGenerationFacts>>
 type AudienceRecord = {
   parent?: AudienceRecord;
   leases: GenerationLease[];
+  assertOwnerCurrent?: () => void;
   state: "current" | "stale" | "released";
   holders: number;
 };
@@ -127,6 +128,7 @@ function assertRecordCurrent(record: AudienceRecord): void {
     if (current.state === "stale") {
       throw new Error("memory audience is no longer current");
     }
+    current.assertOwnerCurrent?.();
     for (const lease of current.leases) {
       try {
         lease.assertCurrent();
@@ -168,6 +170,52 @@ function mintMemoryAudience(
       releaseRecordLeases(record);
     },
   };
+}
+
+/** Bind a member workspace to a session admitted by its authenticated host owner. */
+export async function mintMemberMemoryAudience(params: {
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision?: string;
+  storePath: string;
+  workspaceKey: string;
+  assertOwnerCurrent: () => void;
+}): Promise<MemoryAudienceGrant> {
+  params.assertOwnerCurrent();
+  if (
+    !params.workspaceKey ||
+    !params.sessionId ||
+    !isAgentSessionKey(params.sessionKey, params.agentId)
+  ) {
+    throw new Error("Member memory audience requires an admitted workspace and session.");
+  }
+  const lease = await leaseSessionGeneration({
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    storePath: params.storePath,
+    entry: { sessionId: params.sessionId, lifecycleRevision: params.lifecycleRevision },
+  });
+  if (!lease) {
+    throw new Error("Member memory session changed while its audience was prepared.");
+  }
+  const record: AudienceRecord = {
+    leases: [lease],
+    assertOwnerCurrent: params.assertOwnerCurrent,
+    state: "current",
+    holders: 0,
+  };
+  try {
+    assertRecordCurrent(record);
+    return mintMemoryAudience(
+      { kind: "member-private", agentId: params.agentId, workspaceKey: params.workspaceKey },
+      params.sessionKey,
+      record,
+    );
+  } catch (error) {
+    releaseRecordLeases(record);
+    throw error;
+  }
 }
 
 type MemoryAudienceResolutionParams = {
@@ -330,6 +378,22 @@ export function assertMemoryAudienceSession(
   if (audienceSessionKeys.get(audience) !== sessionKey) {
     throw new Error("memory audience is bound to a different session");
   }
+}
+
+/** Require a current host-minted descendant, not merely matching audience fields. */
+export function assertMemoryAudienceDelegation(
+  parent: MemoryAudience,
+  delegated: MemoryAudience,
+): void {
+  assertMemoryAudienceCurrent(parent);
+  assertMemoryAudienceCurrent(delegated);
+  const parentRecord = audienceRecords.get(parent)!;
+  for (let record = audienceRecords.get(delegated)?.parent; record; record = record.parent) {
+    if (record === parentRecord) {
+      return;
+    }
+  }
+  throw new Error("memory audience was not delegated from this owner");
 }
 
 /**

@@ -134,6 +134,7 @@ toward it, and the free-space floor applies to everyone. When the shared budget
 is full, members get `413 quota_exceeded` with a message that names the server's
 shared storage, not their own limit. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts. It also counts
+member memory notes, even after their chats are deleted, and counts
 each saved automation definition against its owner profile and the global
 budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
 entry overhead as stored files. The runtime limits growth per operation and
@@ -206,6 +207,23 @@ then restart the listener:
 ```sh
 sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
 ```
+
+### Member memory
+
+Grogu and Travel chats can save and search the signed-in member's memory. Notes
+are shared across that member's chats, not with other members or personal Grogu.
+The service encrypts notes as member-owned files; the running service and its
+administrator can read them. Search uses a temporary in-memory keyword index,
+not a paid embedding service. Existing chats are not backfilled.
+
+Clients opt in with `x-alcove-capabilities: memory-v1`; `/me` then reports
+`capabilities.memory.review`. To review notes, send `x-grogu-profile` with the
+current profile ID to `GET /api/protected/v1/memory`, then read a listed note at
+`GET /api/protected/v1/memory/:id`. List entries contain `id`, `name`, `bytes`,
+and `updatedAt` in epoch milliseconds; reads return `{ note, text }`. Note IDs
+are opaque and change when the service restarts. Refresh the list after a 404.
+An account mismatch returns 403 `profile_mismatch`; an unavailable review owner
+returns 503 `unavailable`.
 
 `PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
 Send the current chat `version` in `If-Match` and a JSON body with `title`.
@@ -332,8 +350,14 @@ levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
 available to that account. Clients can request the optional account-reported
 `vendor` on models with `X-Alcove-Capabilities: model-vendor-v1`; an absent
-vendor is unknown. A model's `contextWindow` is its reported maximum, not a
-separate context-tier selection. The token is used for that request only. Turns may
+vendor is unknown. Clients can request `model-context-v1` to receive
+`contextSizes` for Copilot models with distinct provider-reported input limits.
+The options include a default and a warning when the longer context can cost more
+or cache pricing is unknown. The shorter budget is the default in either case.
+Turns can send a listed `contextSize`. OpenClaw uses it as a local context budget,
+with room reserved for output. It is not a provider mode or a billing guarantee.
+An unavailable size returns `context_size_unavailable`. Omission retains the
+existing budget. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
@@ -341,6 +365,8 @@ An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
+With `model-context-v1`, usage also includes the effective `contextSize` for a
+completed turn that selected one. Older replies can omit it.
 Both include optional `inputTokens` and `outputTokens` for the latest parent
 turn, summed from its saved provider calls. The existing `contextTokens` remains
 the latest call's context size. Unknown counters and adapter-default zeros are

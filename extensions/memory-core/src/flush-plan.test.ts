@@ -1,6 +1,6 @@
 // Memory Core tests cover flush plan plugin behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildMemoryFlushPlan } from "./flush-plan.js";
+import { buildMemoryFlushPlan, buildMemoryProviderFlushPlan } from "./flush-plan.js";
 
 describe("buildMemoryFlushPlan", () => {
   afterEach(() => {
@@ -30,4 +30,18 @@ describe("buildMemoryFlushPlan", () => {
       });
     },
   );
+
+  it("uses the member memory writer instead of a workspace file for a member audience", () => {
+    const plan = buildMemoryProviderFlushPlan({
+      nowMs: Date.UTC(2026, 4, 30, 12),
+      memoryAudience: {
+        kind: "member-private",
+        agentId: "protected",
+        workspaceKey: "member-generation",
+      },
+    });
+    expect(plan).toMatchObject({ persistenceToolNames: ["memory_store"] });
+    expect(plan).not.toHaveProperty("relativePath");
+    expect(plan?.prompt).toContain("memory_store");
+  });
 });

@@ -1,12 +1,16 @@
 import fs from "node:fs/promises";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, assert, expect, it } from "vitest";
 import { admitProtectedPhysicalAgentStorage } from "../../grogu/protected/agent-storage.js";
 import {
   loadExactSessionEntryReadOnly,
   replaceSessionEntrySync,
 } from "../config/sessions/session-accessor.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { withFreshOpenClawAgentDatabaseReadOnly } from "./openclaw-agent-db-readonly-open.js";
+import {
+  hasOpenClawAgentReadOnlySchema,
+  openOpenClawAgentDatabaseReadOnly,
+  withFreshOpenClawAgentDatabaseReadOnly,
+} from "./openclaw-agent-db-readonly-open.js";
 import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabasesForTest,
@@ -136,6 +140,44 @@ it("refuses a plaintext key check even when it contains the expected value", asy
       expect(() => admitProtectedPhysicalAgentStorage(() => undefined)).toThrow(
         /configured storage key/iu,
       );
+    },
+  );
+});
+
+it("refuses a downgraded protected marker on retained and fresh readers", async () => {
+  await withOpenClawTestState(
+    {
+      label: "protected-admission-downgrade",
+      env: { OPENCLAW_PROTECTED_STORAGE_KEY_FILE: undefined },
+    },
+    async (state) => {
+      const keyPath = state.path("storage-key");
+      await fs.writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+      state.envVars.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyPath;
+      state.applyEnv();
+      const options = { agentId: "protected", env: state.env };
+      const pathname = resolveOpenClawAgentSqlitePath(options);
+      runOpenClawAgentWriteTransaction(() => undefined, options);
+      closeOpenClawAgentDatabaseByPath(pathname);
+      const reader = openOpenClawAgentDatabaseReadOnly(options);
+      assert(reader.found);
+      const read = () => hasOpenClawAgentReadOnlySchema(reader.database);
+      try {
+        expect(read()).toBe(true);
+        const { DatabaseSync } = await import("node:sqlite");
+        const writer = new DatabaseSync(pathname);
+        try {
+          writer.exec("PRAGMA user_version = 25");
+        } finally {
+          writer.close();
+        }
+        expect(read).toThrow(/encryption marker without its schema version/iu);
+        expect(() => withFreshOpenClawAgentDatabaseReadOnly(() => "read", options)).toThrow(
+          /encryption marker without its schema version/iu,
+        );
+      } finally {
+        reader.database.close();
+      }
     },
   );
 });

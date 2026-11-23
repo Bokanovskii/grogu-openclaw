@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,9 +18,149 @@ import { withOpenClawAgentDatabaseReadOnly } from "../../src/state/openclaw-agen
 import { withOpenClawStateDatabaseReadOnly } from "../../src/state/openclaw-state-db-readonly.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { createProtectedAgentCatalog } from "./agents.js";
-import { createStorageAdmission, measureProtectedStorage } from "./capacity.js";
+import {
+  createStorageAdmission,
+  measureProtectedStorage,
+  storageEntryOverheadBytes,
+} from "./capacity.js";
 import { createProtectedChats } from "./chats.js";
+import { createMemberMemoryFiles } from "./memory-files.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
+
+void test("retained member memory counts against global and owner storage without chats", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    assertCurrent: () => {},
+    maxBytes: 16_384,
+    encryption,
+  });
+  const ciphertextBytes = files.storedSize(1_000);
+  try {
+    await files.write("member-memory/memory/note.md", "x".repeat(1_000));
+  } finally {
+    files.dispose();
+  }
+  const options = {
+    stateDir,
+    usersRoot,
+    encryption,
+    maxFileBytes: 16_384,
+    limits: { userBytes: 20_000, globalBytes: 100_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  };
+  const firstUsage = await measureProtectedStorage(options, "first", () => {}, true);
+  const secondUsage = await measureProtectedStorage(options, "second", () => {}, true);
+  const secondOnly = await measureProtectedStorage(options, "second", () => {}, false);
+  assert.equal(firstUsage.personalBytes, ciphertextBytes + 3 * storageEntryOverheadBytes);
+  assert.equal(firstUsage.globalBytes, firstUsage.personalBytes);
+  assert.equal(secondUsage.globalBytes, firstUsage.globalBytes);
+  assert.equal(secondUsage.personalBytes, 0);
+  assert.equal(secondOnly.globalBytes, 0);
+
+  const admit = createStorageAdmission(options);
+  const second = await admit("second", () => {}, "stored-data");
+  const first = await admit("first", () => {}, "stored-data");
+  try {
+    assert.throws(() => first.charge(8_000), { code: "quota_exceeded" });
+    second.charge(8_000);
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
+void test("concurrent encrypted memory updates preserve both writes and enforce file limits", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const usersRoot = await root(stateDir);
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  const files = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "first",
+    assertCurrent: () => {},
+    maxBytes: 1024,
+    encryption,
+  });
+  t.after(() => files.dispose());
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot,
+    encryption,
+    maxFileBytes: 1024,
+    limits: { userBytes: 50_000, globalBytes: 100_000, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "stored-data"),
+    admit("first", () => {}, "stored-data"),
+  ]);
+  const otherFiles = await createAuthorizedUserFiles({
+    usersRoot,
+    profileId: "second",
+    assertCurrent: () => {},
+    maxBytes: 1024,
+    encryption,
+  });
+  t.after(() => otherFiles.dispose());
+  const other = await admit("second", () => {}, "stored-data");
+  const name = "member-memory/memory/note.md";
+  try {
+    const firstMemory = createMemberMemoryFiles(first.files(files));
+    const secondMemory = createMemberMemoryFiles(second.files(files));
+    const otherMemory = createMemberMemoryFiles(other.files(otherFiles));
+    await Promise.all([
+      firstMemory.append("memory/note.md", "first\n"),
+      secondMemory.append("memory/note.md", "second\n"),
+    ]);
+    assert.deepEqual(await firstMemory.list("memory"), ["note.md"]);
+    assert.equal(await secondMemory.read("memory/note.md"), "first\nsecond\n");
+    assert.deepEqual(await otherMemory.list("memory"), []);
+    assert.equal(await otherMemory.read("memory/note.md"), undefined);
+    await assert.rejects(firstMemory.read("../chats/private.md"), { code: "invalid-path" });
+    await assert.rejects(firstMemory.append("../chats/private.md", "x"), {
+      code: "invalid-path",
+    });
+    assert.equal(await files.readText(name), "first\nsecond\n");
+    const stored = await readFile(
+      path.join(stateDir, createHash("sha256").update("first").digest("hex"), name),
+    );
+    assert.equal(stored.includes(Buffer.from("first\nsecond\n")), false);
+    await assert.rejects(firstMemory.append("memory/note.md", "x".repeat(1025)), {
+      code: "file_too_large",
+    });
+    assert.equal(await files.readText(name), "first\nsecond\n");
+    first.release();
+    await assert.rejects(firstMemory.read("memory/note.md"), /Storage admission is closed/);
+    await assert.rejects(firstMemory.append("memory/note.md", "x"), /Storage admission is closed/);
+  } finally {
+    first.release();
+    second.release();
+    other.release();
+  }
+});
 
 void test("concurrent members share storage quota without blocking each other", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);

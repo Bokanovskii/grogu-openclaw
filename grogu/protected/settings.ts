@@ -125,18 +125,30 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
       },
     },
     plugins: {
-      allow: ["alcove-automations-chat", "anthropic", "duckduckgo", "github-copilot", "openai"],
+      allow: [
+        "alcove-automations-chat",
+        "anthropic",
+        "duckduckgo",
+        "github-copilot",
+        "memory-core",
+        "openai",
+      ],
       load: {
-        paths: [path.join(serviceRoot, "extensions", "duckduckgo"), automationsChatPluginPath],
+        paths: [
+          path.join(serviceRoot, "extensions", "duckduckgo"),
+          automationsChatPluginPath,
+          path.join(serviceRoot, "extensions", "memory-core"),
+        ],
       },
       entries: {
         "alcove-automations-chat": { enabled: true },
         anthropic: { enabled: true },
         duckduckgo: { enabled: true },
         "github-copilot": { enabled: true },
+        "memory-core": { enabled: true, config: { dreaming: { enabled: false } } },
         openai: { enabled: true },
       },
-      slots: { memory: "none" },
+      slots: { memory: "memory-core" },
     },
     models: {
       mode: "replace",

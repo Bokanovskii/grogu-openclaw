@@ -58,6 +58,23 @@ async function main() {
       "The runtime archive is missing extensions/duckduckgo, which web search needs. Repackage it.",
     );
   }
+  if (
+    !existsSync(path.join(serviceRoot, "extensions", "memory-core", "openclaw.plugin.json")) ||
+    !existsSync(
+      path.join(
+        serviceRoot,
+        "extensions",
+        "memory-core",
+        "src",
+        "memory",
+        "manager-ephemeral.worker.ts",
+      ),
+    )
+  ) {
+    throw new ProtectedStartupError(
+      "The runtime archive is missing Memory Core or its member memory worker. Repackage it.",
+    );
+  }
   resolveProtectedStorageKeyFile();
   await configureProtectedRuntimeWorkers(serviceRoot);
   const { acquireProtectedStateOwner } = await import("./state-owner.js");
@@ -120,6 +137,8 @@ async function main() {
     await import("../../src/agents/embedded-agent-runner/model.static-catalog.js");
   const { createCloudflareAccessVerifier } = await import("./identity.js");
   const { createProtectedHttp } = await import("./http.js");
+  const { createProtectedMemberMemory } = await import("./member-memory.js");
+  const { createProtectedMemoryReview } = await import("./memory-review.js");
   const { closeProtectedServer, createProtectedServer } = await import("./server.js");
   const admissionStore = await import("./admission-store.js");
   const { startProtectedUsageRetention } = await import("./usage-retention.js");
@@ -168,6 +187,7 @@ async function main() {
       );
     }),
   );
+  const memberMemory = createProtectedMemberMemory();
   const app = createProtectedHttp({
     origin,
     stateDir,
@@ -194,10 +214,13 @@ async function main() {
     verifyIdentity,
     answerAccessProof: verifyIdentity.answerProof,
     providerRelay: createProviderRelay(),
+    memberMemory,
+    memoryReview: createProtectedMemoryReview(),
     turns: createCanonicalProtectedTurns({
       config,
       workspaceDir,
       agentDir,
+      memberMemory,
       models,
       resolveSparkyKey: () => resolveSecretRefString(sparkySecret, { config }),
     }),

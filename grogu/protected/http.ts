@@ -20,8 +20,14 @@ import {
   type ProtectedAutomationResponse,
   type ProtectedChatStorage,
   type ProtectedMessage,
-  type ProtectedTurnEvent,
+  type ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
+import {
+  isProtectedAuthoringTurnRequest,
+  type ProtectedAuthoringTurnEvent,
+  type ProtectedAuthoringTurnRequest,
+  type ProtectedAutomationAuthoringResponse,
+} from "@openclaw/gateway-protocol/protected-authoring";
 import { readByteStreamWithLimit } from "@openclaw/media-core/read-byte-stream-with-limit";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { ALCOVE_CONTENT_STYLES } from "../../packages/widget-host/src/styles.js";
@@ -75,13 +81,17 @@ import {
   validFilename,
   validGeneratedFilename,
 } from "./artifacts.js";
-import { createProtectedAutomationsChatBindings } from "./automations-chat.js";
+import {
+  createProtectedAutomationAuthoringBindings,
+  createProtectedAutomationsChatBindings,
+  savesDraft,
+} from "./automations-chat.js";
 import {
   createProtectedAutomationRecord,
   listProtectedAutomationRecords,
-  patchProtectedAutomationRecord,
   readProtectedAutomationRecord,
   readProtectedAutomationStorageUsage,
+  saveProtectedAutomationPatch,
 } from "./automations-store.js";
 import {
   createProtectedAutomationCatalog,
@@ -132,6 +142,8 @@ import {
   resolveProtectedProfile,
   type ProtectedIdentityVerifier,
 } from "./identity.js";
+import type { createProtectedMemberMemory } from "./member-memory.js";
+import type { createProtectedMemoryReview } from "./memory-review.js";
 import { fetchProtectedCopilotModels, withThinking } from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
@@ -152,6 +164,8 @@ const maxBodyBytes = 48_000;
 const directoryPreference = "grogu.protected.directory";
 const loadProtectedPush = createLazyRuntimeModule(() => import("./push.js"));
 const automationsChatCapability = "automations-chat-v1";
+const automationsAuthoringCapability = "automations-authoring-v1";
+const authoringAgentId = "grogu";
 type Run = {
   id: string;
   profileId: string;
@@ -324,6 +338,14 @@ function supportsAutomationsChat(request: Request) {
   return hasClientCapability(request.headers, automationsChatCapability);
 }
 
+/** Authoring events and routes exist only for clients that negotiated both capabilities. */
+function supportsAutomationsAuthoring(request: Request) {
+  return (
+    supportsAutomationsChat(request) &&
+    hasClientCapability(request.headers, automationsAuthoringCapability)
+  );
+}
+
 export function createProtectedHttp(options: {
   origin: string;
   stateDir: string;
@@ -336,11 +358,13 @@ export function createProtectedHttp(options: {
   verifyIdentity: ProtectedIdentityVerifier;
   directory: { issuer: string; allowedSubjects: readonly string[] };
   answerAccessProof?: (request: Request) => Promise<Response>;
-  usersRoot: Parameters<typeof createAuthorizedUserFiles>[0]["usersRoot"];
+  usersRoot: Parameters<typeof measureProtectedStorage>[0]["usersRoot"];
   encryption?: Parameters<typeof createAuthorizedUserFiles>[0]["encryption"];
   turns: ProtectedTurns;
   agentExtensions?: readonly ProtectedAgentExtension[];
   providerRelay?: ReturnType<typeof createProviderRelay>;
+  memberMemory?: ReturnType<typeof createProtectedMemberMemory>;
+  memoryReview?: ReturnType<typeof createProtectedMemoryReview>;
   maxChatsPerUser: number;
   maxFileBytes: number;
   storageLimits?: StorageLimits;
@@ -409,6 +433,9 @@ export function createProtectedHttp(options: {
       if (run.profileId === profileId) {
         run.controller.abort();
       }
+    }
+    if (options.memberMemory) {
+      void track(options.memberMemory.retire(profileId)).catch(() => {});
     }
   };
   let publicSubmissionWindow = 0;
@@ -1174,13 +1201,9 @@ export function createProtectedHttp(options: {
         }
         return json({ queued: true });
       }
-      const requireProfile = () => {
+      const requireProfile = (message = "Reload before using a device credential.") => {
         if (request.headers.get("x-grogu-profile") !== profile.id) {
-          throw new ProtectedError(
-            403,
-            "profile_mismatch",
-            "Reload before using a device credential.",
-          );
+          throw new ProtectedError(403, "profile_mismatch", message);
         }
       };
       const authority = { profileId: profile.id, assertCurrent };
@@ -1210,6 +1233,9 @@ export function createProtectedHttp(options: {
         });
       const readChat = async (id: string) => {
         const { chat, usage } = await chats.readWithUsage(authority, id);
+        if (!supportsAutomationsAuthoring(request)) {
+          delete chat.authoring;
+        }
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(async (owned) => {
             for (const message of chat.messages) {
@@ -1279,8 +1305,44 @@ export function createProtectedHttp(options: {
             openaiConnect: options.providerRelay !== undefined,
             admin: isOwner,
             ...(feedbackCapability ? { feedback: true, telemetry: isOwner } : {}),
+            ...(hasClientCapability(request.headers, "memory-v1")
+              ? { memory: { review: options.memoryReview !== undefined } }
+              : {}),
           },
         });
+      }
+      const memoryReference = pathname.match(/^\/memory\/([A-Za-z0-9_-]{43})$/u);
+      if (method === "GET" && (pathname === "/memory" || memoryReference)) {
+        const requireMemoryProfile = () =>
+          requireProfile("Reload before viewing the current account's memory.");
+        requireMemoryProfile();
+        const memoryReview = options.memoryReview;
+        if (!memoryReview) {
+          throw new ProtectedError(503, "unavailable", "Member memory is not available.");
+        }
+        const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
+          env: chats.env,
+        });
+        if (profileAuthority.profileId !== profile.id) {
+          unauthorized();
+        }
+        const assertMemoryCurrent = () => {
+          assertCurrent();
+          profileAuthority.assertCurrent();
+          requireMemoryProfile();
+        };
+        assertMemoryCurrent();
+        const result = await files(async (owned) => {
+          const review = memoryReview.open(profile.id, owned);
+          if (!memoryReference) {
+            return await review.list();
+          }
+          const note = await review.read(memoryReference[1]!);
+          return note ?? notFound();
+        }, assertMemoryCurrent);
+        await revalidate();
+        assertMemoryCurrent();
+        return json(result);
       }
       if (pathname === "/account" && method === "GET") {
         const profileAuthority = await prepareCurrentUserProfileAliases(profile.id, {
@@ -1590,6 +1652,12 @@ export function createProtectedHttp(options: {
                       read: true,
                       proposeCreate: true,
                       proposePatch: true,
+                      ...(supportsAutomationsAuthoring(request) &&
+                      catalog.capabilities.automations.create &&
+                      admitStorage &&
+                      agentCatalog.get(authoringAgentId)
+                        ? { authoring: true }
+                        : {}),
                     },
                   },
                 },
@@ -1632,27 +1700,145 @@ export function createProtectedHttp(options: {
         if (!admitStorage) {
           return notFound();
         }
-        const storage = await admitStorage(
-          profile.id,
-          assertCurrent,
-          "automation",
-          await storageLimit(assertCurrent),
-        );
+        // A form save from an unsaved authoring chat saves under that chat's key and binds it, so
+        // the chat cannot later create a second record.
+        const authoringChatId = request.headers.get("x-alcove-authoring-chat") ?? undefined;
+        if (authoringChatId !== undefined) {
+          if (!supportsAutomationsAuthoring(request)) {
+            return notFound();
+          }
+          const entry = await chats.readEntry(authority, authoringChatId);
+          if (entry.protectedAuthoringKind !== "automation") {
+            return notFound();
+          }
+          if (entry.protectedAutomationId !== undefined) {
+            throw new ProtectedError(
+              409,
+              "authoring_bound",
+              "This chat already saved its automation. Reload it before saving.",
+            );
+          }
+          if (runs.has(authoringChatId) || mutations.has(authoringChatId)) {
+            throw new ProtectedError(409, "busy", "Wait for the chat to finish before saving.");
+          }
+          mutations.add(authoringChatId);
+        }
+        let storage;
         try {
+          storage = await admitStorage(
+            profile.id,
+            assertCurrent,
+            "automation",
+            await storageLimit(assertCurrent),
+          );
           const automation = await createProtectedAutomationRecord(
             options.stateDir,
-            { profileId: profile.id, definition: validation.draft, now: Date.now() },
+            {
+              profileId: profile.id,
+              definition: validation.draft,
+              now: Date.now(),
+              ...(authoringChatId === undefined ? {} : { automationId: authoringChatId }),
+            },
             authority,
             storage,
           );
           if (!automation) {
             unauthorized();
           }
+          if (authoringChatId !== undefined) {
+            await chats.bindAutomation(authority, authoringChatId, automation.id);
+            if (!savesDraft(automation, validation.draft)) {
+              throw new ProtectedError(
+                412,
+                "version_mismatch",
+                "This chat already saved a different version. Reload it before saving.",
+              );
+            }
+          }
           assertCurrent();
           const result: ProtectedAutomationResponse = { automation };
           return json(result, 201);
         } finally {
-          storage.release();
+          storage?.release();
+          if (authoringChatId !== undefined) {
+            mutations.delete(authoringChatId);
+          }
+        }
+      }
+      const authoringMatch = /^\/automations\/(?:([^/]+)\/)?authoring$/u.exec(pathname);
+      if (authoringMatch && method === "POST") {
+        if (
+          !supportsAutomationsAuthoring(request) ||
+          !automationCatalog?.capabilities.automations.create ||
+          !admitStorage ||
+          !agentCatalog.get(authoringAgentId)
+        ) {
+          return notFound();
+        }
+        const automationId = authoringMatch[1];
+        if (creating.has(profile.id)) {
+          throw new ProtectedError(409, "busy", "Another chat is being created.");
+        }
+        // One creation at a time per member keeps one bound chat per saved automation.
+        creating.add(profile.id);
+        let storage;
+        try {
+          await revalidate();
+          let automation;
+          if (automationId !== undefined) {
+            automation = await readProtectedAutomationRecord(
+              options.stateDir,
+              { profileId: profile.id, automationId },
+              authority,
+            );
+            if (!automation) {
+              return notFound();
+            }
+            if (automation.enabled) {
+              throw new ProtectedError(
+                409,
+                "automation_enabled",
+                "Pause this automation before editing it in chat.",
+              );
+            }
+            const owned = await chats.list(authority);
+            let bound = owned.find((chat) => chat.authoring?.automationId === automationId);
+            // A first save that stopped before binding left its record under the chat's own id.
+            const unbound = owned.find(
+              (chat) => chat.id === automationId && chat.authoring && !chat.authoring.automationId,
+            );
+            if (!bound && unbound) {
+              bound = await chats.bindAutomation(authority, unbound.id, automationId);
+            }
+            if (bound) {
+              const { chat } = await readChat(bound.id);
+              await revalidate();
+              const result: ProtectedAutomationAuthoringResponse = { chat, automation };
+              return json(result);
+            }
+          }
+          storage = await admitStorage(
+            profile.id,
+            assertCurrent,
+            "create",
+            await storageLimit(assertCurrent),
+          );
+          const chat = await chats.create(
+            authority,
+            automation ? text(automation.name, 160) : "New automation",
+            authoringAgentId,
+            { kind: "automation", ...(automationId === undefined ? {} : { automationId }) },
+          );
+          storage.recordCreatedChat(chat.id, chats.scope(authority, chat.id).sessionKey);
+          await revalidate();
+          const result: ProtectedAutomationAuthoringResponse = {
+            chat,
+            ...(automation ? { automation } : {}),
+          };
+          return json(result, 201);
+        } finally {
+          storage?.release();
+          creating.delete(profile.id);
         }
       }
       const automationMatch = /^\/automations\/([^/]+)$/u.exec(pathname);
@@ -1689,109 +1875,54 @@ export function createProtectedHttp(options: {
             "Reload the automation before saving changes.",
           );
         }
-        if (!/^[1-9]\d*$/u.test(version) || !Number.isSafeInteger(Number(version))) {
-          throw new ProtectedError(
-            412,
-            "version_mismatch",
-            "This automation changed. Reload it before saving.",
-          );
-        }
-        await revalidate();
-        const automationId = automationMatch[1]!;
-        const current = await readProtectedAutomationRecord(
+        const saved = await saveProtectedAutomationPatch(
           options.stateDir,
-          { profileId: profile.id, automationId },
+          {
+            automationId: automationMatch[1]!,
+            expectedVersion: version,
+            patch,
+            catalog: automationCatalog,
+            retainedAgent: (agentId) => agentCatalog.get(agentId),
+          },
           authority,
+          {
+            revalidate,
+            ...(admitStorage
+              ? {
+                  admitStorage: async () =>
+                    admitStorage(
+                      profile.id,
+                      assertCurrent,
+                      "automation",
+                      await storageLimit(assertCurrent),
+                    ),
+                }
+              : {}),
+          },
         );
-        if (!current) {
-          return notFound();
-        }
-        if (current.version !== version) {
-          throw new ProtectedError(
-            412,
-            "version_mismatch",
-            "This automation changed. Reload it before saving.",
-          );
-        }
-        if (patch.enabled === true || current.enabled) {
-          throw new ProtectedError(
-            503,
-            "scheduler_unavailable",
-            "Automation scheduling is not available yet. Your changes were not saved.",
-          );
-        }
-        const definition: Record<string, unknown> = { ...current };
-        delete definition.id;
-        delete definition.version;
-        delete definition.enabled;
-        delete definition.state;
-        delete definition.nextCheckAt;
-        for (const [key, value] of Object.entries(patch)) {
-          if (key === "enabled") {
-            continue;
+        switch (saved.status) {
+          case "updated": {
+            const result: ProtectedAutomationResponse = { automation: saved.automation };
+            return json(result);
           }
-          if (value === null) {
-            delete definition[key];
-          } else {
-            definition[key] = value;
-          }
-        }
-        const validation = validateProtectedAutomationDraft(
-          definition,
-          automationCatalog,
-          agentCatalog.get(current.agentId),
-        );
-        if (!validation.valid) {
-          return json(validation, 422);
-        }
-        await revalidate();
-        if (!admitStorage) {
-          return notFound();
-        }
-        const storage = await admitStorage(
-          profile.id,
-          assertCurrent,
-          "automation",
-          await storageLimit(assertCurrent),
-        );
-        try {
-          const updated = await patchProtectedAutomationRecord(
-            options.stateDir,
-            {
-              profileId: profile.id,
-              automationId,
-              expectedRevision: Number(version),
-              definition: validation.draft,
-              now: Date.now(),
-            },
-            authority,
-            storage,
-          );
-          if (updated && "status" in updated) {
-            if (updated.status === "member_inactive") {
-              unauthorized();
-            }
-            if (updated.status === "version_mismatch") {
-              throw new ProtectedError(
-                412,
-                "version_mismatch",
-                "This automation changed. Reload it before saving.",
-              );
-            }
-            if (updated.status === "scheduler_required") {
-              throw new ProtectedError(
-                503,
-                "scheduler_unavailable",
-                "Automation scheduling is not available yet. Your changes were not saved.",
-              );
-            }
+          case "invalid":
+            return json(saved.validation, 422);
+          case "member_inactive":
+            return unauthorized();
+          case "version_mismatch":
+            throw new ProtectedError(
+              412,
+              "version_mismatch",
+              "This automation changed. Reload it before saving.",
+            );
+          case "scheduler_required":
+            throw new ProtectedError(
+              503,
+              "scheduler_unavailable",
+              "Automation scheduling is not available yet. Your changes were not saved.",
+            );
+          default:
             return notFound();
-          }
-          assertCurrent();
-          const result: ProtectedAutomationResponse = { automation: updated };
-          return json(result);
-        } finally {
-          storage.release();
         }
       }
       if (pathname === "/logout" && method === "POST") {
@@ -1831,7 +1962,10 @@ export function createProtectedHttp(options: {
             signal: request.signal,
             revalidate,
           },
-          { includeVendor: hasClientCapability(request.headers, "model-vendor-v1") },
+          {
+            includeVendor: hasClientCapability(request.headers, "model-vendor-v1"),
+            includeContextSizes: hasClientCapability(request.headers, "model-context-v1"),
+          },
         );
         return profileJson({ models: models.map(({ model }) => model) });
       }
@@ -1916,6 +2050,10 @@ export function createProtectedHttp(options: {
         const result = await chats.list(authority);
         await revalidate();
         for (const chat of result) {
+          // Clients that did not negotiate authoring parse chats against strict V1 schemas.
+          if (!supportsAutomationsAuthoring(request)) {
+            delete chat.authoring;
+          }
           const active = runs.get(chat.id);
           if (active?.profileId === profile.id && active.sessionHash === identity.sessionId) {
             chat.activeRun = { id: active.id };
@@ -2090,8 +2228,11 @@ export function createProtectedHttp(options: {
       if (!rest && method === "GET") {
         const { chat, usage } = await readChat(id);
         await revalidate();
+        if (usage && !hasClientCapability(request.headers, "model-context-v1")) {
+          delete usage.contextSize;
+        }
         const active = runs.get(id);
-        return json({
+        return profileJson({
           chat,
           ...(usage ? { usage } : {}),
           ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
@@ -2438,8 +2579,16 @@ export function createProtectedHttp(options: {
       }
       if (rest === "turns" && method === "POST") {
         requireProfile();
-        const data = await body(request);
-        if (!isProtectedTurnRequest(data)) {
+        const requestBody = await body(request);
+        let data: ProtectedTurnRequest;
+        let authoringInput: ProtectedAuthoringTurnRequest["authoring"] | undefined;
+        if (isProtectedAuthoringTurnRequest(requestBody)) {
+          const { authoring, ...turnRequest } = requestBody;
+          data = turnRequest;
+          authoringInput = authoring;
+        } else if (isProtectedTurnRequest(requestBody)) {
+          data = requestBody;
+        } else {
           return invalid();
         }
         const fixedModel = options.turns.models.find(
@@ -2475,10 +2624,11 @@ export function createProtectedHttp(options: {
               "Connect this provider first.",
             );
           }
-          const models = await fetchProtectedCopilotModels(credential, {
-            signal: request.signal,
-            revalidate,
-          });
+          const models = await fetchProtectedCopilotModels(
+            credential,
+            { signal: request.signal, revalidate },
+            { includeContextSizes: data.contextSize !== undefined },
+          );
           const requested = data.model ?? fixedModel?.id;
           copilotModel = models.find(({ model }) => model.id === requested);
         }
@@ -2495,12 +2645,23 @@ export function createProtectedHttp(options: {
             "This reasoning level is not available.",
           );
         }
+        if (
+          data.contextSize !== undefined &&
+          !copilotModel?.model.contextSizes?.options.includes(data.contextSize)
+        ) {
+          throw new ProtectedError(
+            422,
+            "context_size_unavailable",
+            "This context size is not available.",
+          );
+        }
         const input: TurnInput = {
           provider: model.provider,
           model: model.id,
           text: text(data.text, 16_000),
           ...(data.mentions ? { mentions: data.mentions } : {}),
           thinking: data.thinking ?? model.thinking?.default,
+          ...(data.contextSize === undefined ? {} : { contextSize: data.contextSize }),
           ...(copilotModel ? { copilotModel } : {}),
           ...(isRecord(credential)
             ? {
@@ -2510,6 +2671,70 @@ export function createProtectedHttp(options: {
                 },
               }
             : {}),
+        };
+        // The server-held binding decides authoring; the body only carries the client-held draft.
+        const admitAuthoringTurn = async (entry: Awaited<ReturnType<typeof chats.readEntry>>) => {
+          if (entry.protectedAuthoringKind !== "automation") {
+            if (authoringInput) {
+              invalid();
+            }
+            return undefined;
+          }
+          if (
+            !authoringInput ||
+            !supportsAutomationsAuthoring(request) ||
+            model.provider !== "sparky" ||
+            data.mentions?.length ||
+            !automationCatalog?.capabilities.automations.create ||
+            !admitStorage
+          ) {
+            throw new ProtectedError(
+              409,
+              "authoring_required",
+              "Update Alcove to continue this automation chat.",
+            );
+          }
+          const automationId = entry.protectedAutomationId;
+          if (automationId === undefined) {
+            if (authoringInput.automationVersion !== undefined) {
+              invalid();
+            }
+            return { input: authoringInput, catalog: automationCatalog, admitStorage };
+          }
+          if (authoringInput.automationVersion === undefined) {
+            throw new ProtectedError(
+              428,
+              "version_required",
+              "Reload the automation before continuing.",
+            );
+          }
+          const saved = await readProtectedAutomationRecord(
+            options.stateDir,
+            { profileId: profile.id, automationId },
+            authority,
+          );
+          if (!saved) {
+            throw new ProtectedError(
+              409,
+              "automation_unavailable",
+              "This automation was deleted. Your unsaved draft was not changed.",
+            );
+          }
+          if (saved.enabled) {
+            throw new ProtectedError(
+              409,
+              "automation_enabled",
+              "Pause this automation before editing it in chat.",
+            );
+          }
+          if (saved.version !== authoringInput.automationVersion) {
+            throw new ProtectedError(
+              412,
+              "version_mismatch",
+              "This automation changed. Reload it before continuing.",
+            );
+          }
+          return { input: authoringInput, catalog: automationCatalog, admitStorage, automationId };
         };
         await revalidate();
         if (runs.has(id) || mutations.has(id)) {
@@ -2541,6 +2766,7 @@ export function createProtectedHttp(options: {
               request.signal.throwIfAborted();
             }
             const currentEntry = await chats.readEntry(authority, id);
+            const authoring = await admitAuthoringTurn(currentEntry);
             const selectedAgentId =
               currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
             const selectedAgent = agentCatalog.get(selectedAgentId);
@@ -2583,10 +2809,12 @@ export function createProtectedHttp(options: {
             runs.set(id, run);
             return {
               run,
+              authoring,
               selectedAgent,
               mentionedAgents,
               storage,
               profileAuthority,
+              sessionEntry: currentEntry,
               parentLifecycleRevision: currentEntry.lifecycleRevision ?? null,
               parentSessionId: currentEntry.sessionId,
             };
@@ -2599,10 +2827,12 @@ export function createProtectedHttp(options: {
         })();
         const {
           run,
+          authoring,
           selectedAgent,
           mentionedAgents,
           storage,
           profileAuthority,
+          sessionEntry,
           parentLifecycleRevision,
           parentSessionId,
         } = admission;
@@ -2642,10 +2872,40 @@ export function createProtectedHttp(options: {
           assertRun();
         };
         const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
-        const automationChat =
-          supportsAutomationsChat(request) &&
-          model.provider === "sparky" &&
-          automationCatalog?.capabilities.automations.list
+        // Assigned when the stream starts; authoring tools run only inside that stream.
+        let publishAuthoring: ((event: ProtectedAuthoringTurnEvent) => Promise<void>) | undefined;
+        const automationChat = authoring
+          ? createProtectedAutomationAuthoringBindings({
+              stateDir: options.stateDir,
+              catalog: authoring.catalog,
+              retainedAgent: (agentId) => agentCatalog.get(agentId),
+              authority: runAuthority,
+              revalidate: checkRun,
+              chatId: id,
+              ...(authoring.automationId === undefined
+                ? {}
+                : { boundAutomationId: authoring.automationId }),
+              sent: authoring.input,
+              admitStorage: async () =>
+                authoring.admitStorage(
+                  profile.id,
+                  assertRun,
+                  "automation",
+                  await storageLimit(assertRun),
+                ),
+              bind: async (automationId) => {
+                await chats.bindAutomation(runAuthority, id, automationId);
+              },
+              publish: async (event) => {
+                if (!publishAuthoring) {
+                  throw new ProtectedError(409, "busy", "This automation chat is not streaming.");
+                }
+                await publishAuthoring(event);
+              },
+            })
+          : supportsAutomationsChat(request) &&
+              model.provider === "sparky" &&
+              automationCatalog?.capabilities.automations.list
             ? createProtectedAutomationsChatBindings({
                 stateDir: options.stateDir,
                 catalog: automationCatalog,
@@ -2724,7 +2984,7 @@ export function createProtectedHttp(options: {
               }
               return false;
             };
-            const send = (event: ProtectedTurnEvent) => {
+            const send = (event: ProtectedAuthoringTurnEvent) => {
               // Only a fixed terminal error may cross the boundary after authority is lost.
               if (event.type !== "error") {
                 assertRun();
@@ -2739,6 +2999,11 @@ export function createProtectedHttp(options: {
                 timing.mark("firstClientVisibleOutputMs");
               }
             };
+            if (authoring) {
+              publishAuthoring = async (event) => {
+                send(event);
+              };
+            }
             // Silent reasoning can last minutes. A blank NDJSON line keeps the Cloudflare tunnel
             // from closing an idle response; clients skip blank lines.
             const keepalive = setInterval(() => write("\n"), 15_000);
@@ -2746,6 +3011,7 @@ export function createProtectedHttp(options: {
             const complete = async () => {
               let outcome: "complete" | "failed" | "interrupted" = "failed";
               let tokens: number | null = null;
+              let contextBudget: number | undefined;
               let messageCount: number | null = null;
               let failed = true;
               let errorCode: string | null = null;
@@ -2764,6 +3030,7 @@ export function createProtectedHttp(options: {
                       id,
                       options.maxFileBytes,
                     );
+                    const storageFiles = storage?.files(owned);
                     const execute = () =>
                       options.turns.run({
                         id,
@@ -2778,9 +3045,11 @@ export function createProtectedHttp(options: {
                         ...(automationChat ? { automationChat } : {}),
                         mentionedAgents,
                         agent: selectedAgent,
-                        routing: agentRouting,
+                        ...(authoring ? {} : { routing: agentRouting }),
                         sessionAccess,
-                        files: storage?.files(owned) ?? owned,
+                        sessionEntry,
+                        files: storageFiles ?? owned,
+                        memoryFiles: storageFiles,
                         signal,
                         assertCurrent: assertRun,
                         revalidate: checkRun,
@@ -2809,6 +3078,9 @@ export function createProtectedHttp(options: {
                         },
                         usage: (value) => {
                           tokens = value;
+                        },
+                        contextBudget: (value) => {
+                          contextBudget = value;
                         },
                         modelRequest: (record) => {
                           modelRequests.push(record);
@@ -2856,7 +3128,7 @@ export function createProtectedHttp(options: {
                   signal,
                 );
                 storage?.assertResult();
-                const { chat, usage } = await chats.readWithUsage(runAuthority, id);
+                let { chat, usage } = await chats.readWithUsage(runAuthority, id);
                 await checkRun();
                 const newMessages = chat.messages.slice(before.messages.length);
                 messageCount = newMessages.length;
@@ -2881,6 +3153,34 @@ export function createProtectedHttp(options: {
                     "The reply could not be confirmed as saved.",
                   );
                 }
+                if (
+                  contextBudget !== undefined &&
+                  responseId !== null &&
+                  usage?.provider === input.provider &&
+                  usage.model === input.model
+                ) {
+                  const size = contextBudget;
+                  const completedResponseId = responseId;
+                  const saveBudget = () =>
+                    chats.saveContextBudget(runAuthority, id, {
+                      runId: run.id,
+                      responseId: completedResponseId,
+                      contextSize: size,
+                      lifecycleRevision: parentLifecycleRevision,
+                    });
+                  await (storage
+                    ? withTranscriptWriteBudget(storage.charge, saveBudget)
+                    : saveBudget());
+                  ({ chat, usage } = await chats.readWithUsage(runAuthority, id));
+                  await checkRun();
+                  if (usage?.contextSize !== size) {
+                    throw new ProtectedError(
+                      500,
+                      "save_failed",
+                      "The context budget could not be confirmed as saved.",
+                    );
+                  }
+                }
                 failed = false;
                 if (usage && usage.provider === input.provider && usage.model === input.model) {
                   send({
@@ -2889,6 +3189,10 @@ export function createProtectedHttp(options: {
                     ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
                     ...(usage.outputTokens !== undefined
                       ? { outputTokens: usage.outputTokens }
+                      : {}),
+                    ...(usage.contextSize !== undefined &&
+                    hasClientCapability(request.headers, "model-context-v1")
+                      ? { contextSize: usage.contextSize }
                       : {}),
                   });
                 }
@@ -3142,7 +3446,11 @@ export function createProtectedHttp(options: {
       while (pending.size) {
         await Promise.allSettled(pending);
       }
-      ownedEncryption?.dispose();
+      try {
+        await options.memberMemory?.close();
+      } finally {
+        ownedEncryption?.dispose();
+      }
     },
     async revokeProfile(profileId: string) {
       invalidateProfile(profileId);

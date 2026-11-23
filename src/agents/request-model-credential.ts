@@ -3,7 +3,10 @@ import { createRequestSecretSentinel } from "../secrets/sentinel.js";
 import type { ResolvedProviderAuth } from "./model-auth-runtime-shared.js";
 
 const brand = Symbol("requestModelCredential");
-export type RequestModelCredential = Readonly<{ [brand]: true }>;
+// Declarations must reference this interface by name; an aliased object type can expand to the private brand.
+export interface RequestModelCredential {
+  readonly [brand]: true;
+}
 type Credential = {
   provider: string;
   model: string;
@@ -26,7 +29,7 @@ export function createRequestModelCredential(input: Credential) {
     releaseRedaction();
     throw error;
   }
-  const handle: RequestModelCredential = Object.freeze({ [brand]: true });
+  const handle: RequestModelCredential = Object.freeze({ [brand]: true as const });
   credentials.set(handle, { ...input, sentinel: requestSentinel.sentinel });
   return {
     handle,

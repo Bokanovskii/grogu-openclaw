@@ -1,5 +1,6 @@
 import { executeSqliteQuerySync, sqliteStringSet } from "../../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
+import { captureAgentDatabaseAdmission } from "../../state/agent-database-admission.js";
 import {
   isOpenClawAgentDatabasePathCurrent,
   readOpenClawAgentDatabaseIdentity,
@@ -460,10 +461,18 @@ async function deleteCopiedClaims(params: {
     if (!destination || !claimUnchanged(destination, params.receipt)) {
       throw changed();
     }
+    // Admission decisions are in-memory facts, so the commit edge stays SQLite-free.
+    const admissions = [
+      ...new Set([
+        params.destination.databaseAgentId,
+        ...sources.map((claim) => claim.store.databaseAgentId),
+      ]),
+    ].map((agentId) => captureAgentDatabaseAdmission(agentId, { env: params.env }));
     const assertCopied = () => {
       params.beforePersistentApply?.();
       assertCurrent();
       held.assertHeld();
+      admissions.forEach((assertAdmitted) => assertAdmitted());
     };
     assertCopied();
     for (const claim of sources) {

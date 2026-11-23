@@ -2819,6 +2819,11 @@ CREATE TABLE IF NOT EXISTS protected_feedback_reports (
   CHECK ((status = 'open' AND reviewed_at IS NULL) OR (status = 'reviewed' AND reviewed_at IS NOT NULL))
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS protected_report_chat_evidence (
+  report_id TEXT NOT NULL PRIMARY KEY REFERENCES protected_feedback_reports(id) ON DELETE CASCADE,
+  reference TEXT
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS protected_response_feedback (
   profile_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,

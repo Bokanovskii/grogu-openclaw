@@ -6,6 +6,7 @@ import type {
   ProtectedFeedbackStatus,
   ProtectedProducedFile,
   ProtectedReportRecord,
+  ProtectedReportChatReference,
   ProtectedReportSummary,
   ProtectedTelemetryRun,
   ProtectedStoredDataEntry,
@@ -80,6 +81,7 @@ export function submitProtectedFeedbackReport(
     description: string;
     now: number;
     storageOverheadBytes: number;
+    chatReference?: ProtectedReportChatReference;
   },
 ) {
   return executeOpenClawStateWorker(captureProtectedStateWorkerContext(stateDir), {

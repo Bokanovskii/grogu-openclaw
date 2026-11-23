@@ -3935,6 +3935,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     assert.ok(!bytes.includes("Synthetic widget"));
   }
   const feedbackHeaders = { "X-Alcove-Capabilities": "feedback-v1" };
+  const reportChatHeaders = {
+    "X-Alcove-Capabilities": "profile-v1,feedback-v1,report-chat-v1",
+  };
   const feedbackMe = await reopened("/me", { headers: feedbackHeaders });
   assert.equal(feedbackMe.status, 200);
   assert.deepEqual((await feedbackMe.json()).capabilities, {
@@ -3978,6 +3981,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     category: "other",
     description: "password: synthetic-report-secret-123456",
     includeEvidence: true,
+    includeChat: true,
   };
   const pushSubscription = await reopened("/admin/push/subscribe", {
     method: "POST",
@@ -3989,21 +3993,21 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.equal(pushSubscription.status, 200, await pushSubscription.clone().text());
   const submittedReport = await reopened(reportRoute, {
     method: "POST",
-    headers: feedbackHeaders,
+    headers: reportChatHeaders,
     body: JSON.stringify(reportBody),
   });
   assert.equal(submittedReport.status, 201, await submittedReport.clone().text());
   const reportResult = await submittedReport.json();
   const replayedReport = await reopened(reportRoute, {
     method: "POST",
-    headers: feedbackHeaders,
+    headers: reportChatHeaders,
     body: JSON.stringify(reportBody),
   });
   assert.equal(replayedReport.status, 200);
   assert.deepEqual(await replayedReport.json(), reportResult);
   const duplicateReport = await reopened(reportRoute, {
     method: "POST",
-    headers: feedbackHeaders,
+    headers: reportChatHeaders,
     body: JSON.stringify({ ...reportBody, submissionId: randomUUID() }),
   });
   assert.equal(duplicateReport.status, 409);
@@ -4049,6 +4053,38 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     JSON.stringify(reportDetail),
     /Private generated artifact content|Scoped widget body/u,
   );
+  assert.equal("chatReference" in reportDetail.report, false);
+  assert.equal("chatIncluded" in reportDetail.report, false);
+  const reportChatRoute = `/admin/reports/${reportResult.report.id}/chat`;
+  assert.equal((await reopened(reportChatRoute, { headers: feedbackHeaders })).status, 404);
+  const reportChatMe = await (await reopened("/me", { headers: reportChatHeaders })).json();
+  assert.equal(Value.Check(ProtectedMeSchema, reportChatMe), true);
+  const reportChatResponse = await reopened(reportChatRoute, { headers: reportChatHeaders });
+  assert.equal(reportChatResponse.status, 200, await reportChatResponse.clone().text());
+  const reportedChat = (await reportChatResponse.json()).chat;
+  assert.equal(reportedChat.state, "available");
+  assert.equal(reportedChat.nextCursor, null);
+  assert.ok(
+    reportedChat.items.some(
+      (item: { kind: string; text?: string; reported: boolean }) =>
+        item.kind === "message" && item.reported && item.text?.includes("Reply briefly"),
+    ),
+  );
+  assert.ok(
+    reportedChat.items.some(
+      (item: { kind: string; name?: string }) =>
+        item.kind === "tool" && item.name === "show_widget",
+    ),
+  );
+  assert.ok(
+    reportedChat.items.some(
+      (item: { kind: string; fileId?: string; readable?: boolean }) =>
+        item.kind === "file" &&
+        item.fileId === `generated~${chat.id}~${generatedFileName}` &&
+        item.readable === false,
+    ),
+  );
+  assert.doesNotMatch(JSON.stringify(reportedChat), /synthetic-request-only-key/u);
   const reviewResponse = await reopened(`/admin/reports/${reportResult.report.id}`, {
     method: "PATCH",
     headers: feedbackHeaders,
@@ -4135,7 +4171,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     verifyIdentity: identityFor(memberSubject, "synthetic-member-session"),
   });
   t.after(() => ordinaryApp.shutdown());
-  const ordinaryHeaders = new Headers(feedbackHeaders);
+  const ordinaryHeaders = new Headers(reportChatHeaders);
   ordinaryHeaders.set("origin", origin);
   ordinaryHeaders.set("content-type", "application/json");
   const memberMeResponse = await ordinaryApp.fetch(
@@ -4146,6 +4182,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const ordinaryAdminRoutes = [
     { path: "/admin/reports?status=all", method: "GET" },
     { path: `/admin/reports/${reportResult.report.id}`, method: "GET" },
+    { path: reportChatRoute, method: "GET" },
     {
       path: `/admin/reports/${reportResult.report.id}`,
       method: "PATCH",
@@ -4211,12 +4248,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     (message: { role: string }) => message.role === "assistant",
   );
   assert.ok(memberResponse);
+  const legacyMemberReportHeaders = new Headers(ordinaryHeaders);
+  legacyMemberReportHeaders.set("X-Alcove-Capabilities", "feedback-v1");
   const memberReportResponse = await ordinaryApp.fetch(
     new Request(
       `${origin}/api/protected/v1/chats/${memberChat.id}/responses/${memberResponse.id}/reports`,
       {
         method: "POST",
-        headers: ordinaryHeaders,
+        headers: legacyMemberReportHeaders,
         body: JSON.stringify({
           submissionId: randomUUID(),
           category: "other",
@@ -4238,6 +4277,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
   ).json();
   assert.equal(memberReportBeforeRemoval.report.evidence.state, "available");
+  assert.deepEqual(
+    await (
+      await reopened(`/admin/reports/${memberReport.id}/chat`, {
+        headers: reportChatHeaders,
+      })
+    ).json(),
+    { chat: { state: "unavailable", reason: "not_included" } },
+  );
   assert.equal(
     memberReportBeforeRemoval.report.evidence.prompt,
     "Synthetic member report evidence.",
@@ -4250,6 +4297,14 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     await reopened(`/admin/reports/${memberReport.id}`, { headers: feedbackHeaders })
   ).json();
   assert.equal(memberReportAfterRemoval.report.evidence.state, "member_removed");
+  assert.deepEqual(
+    await (
+      await reopened(`/admin/reports/${memberReport.id}/chat`, {
+        headers: reportChatHeaders,
+      })
+    ).json(),
+    { chat: { state: "member_removed" } },
+  );
   assert.equal("prompt" in memberReportAfterRemoval.report.evidence, false);
   const firstMentionedRequest = seen.length;
   const mentionedTurn = await reopened(`/chats/${chat.id}/turns`, {
@@ -4276,6 +4331,12 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     "the native child result is streamed with its protected agent attribution",
   );
   const mentionedRead = await (await reopened(`/chats/${chat.id}`)).json();
+  const reportAfterLaterTurn = await (
+    await reopened(reportChatRoute, { headers: reportChatHeaders })
+  ).json();
+  assert.equal(reportAfterLaterTurn.chat.state, "available");
+  assert.equal(reportAfterLaterTurn.chat.capturedAt, reportedChat.capturedAt);
+  assert.doesNotMatch(JSON.stringify(reportAfterLaterTurn), /Create an artifact\./u);
   assert.ok(
     mentionedRead.chat.messages.some(
       (message: { agentId?: string; text?: string }) =>
@@ -4421,7 +4482,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.equal(deleted.status, 204);
   const retriedDeletedReport = await reopened(reportRoute, {
     method: "POST",
-    headers: feedbackHeaders,
+    headers: reportChatHeaders,
     body: JSON.stringify(reportBody),
   });
   assert.equal(retriedDeletedReport.status, 200);
@@ -4430,6 +4491,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     headers: feedbackHeaders,
   });
   assert.equal((await deletedReport.json()).report.evidence.state, "deleted");
+  assert.deepEqual(await (await reopened(reportChatRoute, { headers: reportChatHeaders })).json(), {
+    chat: { state: "deleted" },
+  });
   assert.equal(
     (
       await reopened(`/chats/${chat.id}/feedback`, {

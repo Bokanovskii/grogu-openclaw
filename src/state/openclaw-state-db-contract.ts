@@ -42,6 +42,7 @@ export const FIRST_USE_STATE_TABLES = [
   "protected_feedback_requests",
   "protected_feedback_reports",
   "protected_response_feedback",
+  "protected_report_chat_evidence",
   "protected_automations",
   "protected_automation_members",
   "protected_automation_job_bindings",

@@ -14,6 +14,11 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import {
+  clearReportChatReferences,
+  openReportChatReference,
+  reportChatReferenceContext,
+} from "./protected-feedback-chat.js";
+import {
   ensureProtectedFeedbackSchema,
   protectedFeedbackRetentionMs,
   toRun,
@@ -24,6 +29,7 @@ import {
   type ProtectedFeedbackValue,
   type ProtectedProducedFile,
   type ProtectedReportRecord,
+  type ProtectedReportChatReference,
   type ProtectedStoredDataEntry,
 } from "./protected-feedback.js";
 
@@ -231,6 +237,7 @@ export function submitProtectedFeedbackReport(
     description: string;
     now: number;
     storageOverheadBytes: number;
+    chatReference?: ProtectedReportChatReference;
   },
 ):
   | {
@@ -324,6 +331,21 @@ export function submitProtectedFeedbackReport(
           reviewed_at: null,
         }),
       );
+      const storedReference = input.chatReference
+        ? sealSqliteStorageText(
+            db,
+            JSON.stringify(input.chatReference),
+            reportChatReferenceContext(reportId),
+          )
+        : undefined;
+      if (storedReference !== undefined) {
+        executeSqliteQuerySync(
+          db,
+          queries
+            .insertInto("protected_report_chat_evidence")
+            .values({ report_id: reportId, reference: storedReference }),
+        );
+      }
       const priorFeedback = executeSqliteQuerySync(
         db,
         queries
@@ -365,6 +387,15 @@ export function submitProtectedFeedbackReport(
               Buffer.byteLength(input.category, "utf8") +
               160,
           },
+          ...(storedReference !== undefined
+            ? [
+                {
+                  id: `report-chat:${reportId}`,
+                  profileId: input.profileId,
+                  bytes: input.storageOverheadBytes + Buffer.byteLength(storedReference) + 64,
+                },
+              ]
+            : []),
           ...(!priorFeedback
             ? [
                 {
@@ -487,7 +518,24 @@ export function readProtectedFeedbackReport(
     database.db,
     reportSelect(getNodeSqliteKysely<FeedbackDatabase>(database.db)).where("r.id", "=", id),
   ).rows[0];
-  return row ? reportRecord(database.db, { ...row, display_name: row.display_name }) : undefined;
+  if (!row) {
+    return undefined;
+  }
+  const reference = executeSqliteQuerySync(
+    database.db,
+    getNodeSqliteKysely<FeedbackDatabase>(database.db)
+      .selectFrom("protected_report_chat_evidence")
+      .select("reference")
+      .where("report_id", "=", id),
+  ).rows[0];
+  return {
+    ...reportRecord(database.db, { ...row, display_name: row.display_name }),
+    chatIncluded: reference !== undefined,
+    chatReference:
+      row.evidence_state === "available" && reference?.reference
+        ? openReportChatReference(database.db, id, reference.reference)
+        : null,
+  };
 }
 
 export function setProtectedFeedbackReportStatus(
@@ -537,6 +585,7 @@ export function removeProtectedChatFeedbackEvidence(
   runOpenClawStateWriteTransaction(
     ({ db }) => {
       const queries = getNodeSqliteKysely<FeedbackDatabase>(db);
+      clearReportChatReferences(db, input);
       executeSqliteQuerySync(
         db,
         queries
@@ -572,6 +621,7 @@ export function removeProtectedMemberFeedbackRows(db: DatabaseSync, profileId: s
     return;
   }
   const queries = getNodeSqliteKysely<FeedbackDatabase>(db);
+  clearReportChatReferences(db, { profileId });
   executeSqliteQuerySync(
     db,
     queries.deleteFrom("protected_response_feedback").where("profile_id", "=", profileId),

@@ -84,6 +84,10 @@ export type FeedbackDatabase = {
     report_id: string | null;
     updated_at: number;
   };
+  protected_report_chat_evidence: {
+    report_id: string;
+    reference: string | null;
+  };
 };
 
 const ensureSchema = createOpenClawStateSchemaEnsurer({
@@ -92,6 +96,7 @@ const ensureSchema = createOpenClawStateSchemaEnsurer({
     "protected_feedback_requests",
     "protected_feedback_reports",
     "protected_response_feedback",
+    "protected_report_chat_evidence",
   ],
   indexes: [
     "idx_protected_feedback_runs_created",
@@ -130,6 +135,14 @@ export type ProtectedProducedFile = {
   name: string;
   size: number;
   origin: "produced";
+};
+
+export type ProtectedReportChatReference = {
+  title: string;
+  eventCount: number;
+  digest: string;
+  capturedAt: number;
+  files: ProtectedProducedFile[];
 };
 
 export type ProtectedTurnTelemetryInput = {
@@ -182,6 +195,8 @@ export type ProtectedReportRecord = ProtectedReportSummary & {
   runId: string | null;
   metrics: ProtectedTelemetryRun | null;
   files: ProtectedProducedFile[];
+  chatIncluded?: boolean;
+  chatReference?: ProtectedReportChatReference | null;
 };
 
 export type ProtectedTelemetryRun = {

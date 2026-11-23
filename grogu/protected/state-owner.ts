@@ -13,10 +13,35 @@ export async function acquireProtectedStateOwner(stateDir: string) {
   const databasePath = resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir });
   try {
     // The native default carries ownerId, processNamespace and startTime for stale-owner detection.
-    return acquireGatewayStateOwner({
+    const owner = acquireGatewayStateOwner({
       databasePath,
       payload: { ...defaultPayload(databasePath), role: "exclusive-service" },
     });
+    let retained = 0;
+    return {
+      ...owner,
+      databasePath,
+      /** Unsettled protected work keeps the native owner; only process exit ends it. */
+      retain(): () => void {
+        retained += 1;
+        let held = true;
+        return () => {
+          if (held) {
+            held = false;
+            retained -= 1;
+          }
+        };
+      },
+      release(): void {
+        if (retained > 0) {
+          process.stderr.write(
+            `Protected state owner kept for ${retained} unsettled operation(s); restart recovery settles them.\n`,
+          );
+          return;
+        }
+        owner.release();
+      },
+    };
   } catch (error) {
     if (error instanceof GatewayStateOwnerContentionError) {
       return undefined;

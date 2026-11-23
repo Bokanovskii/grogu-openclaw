@@ -148,8 +148,13 @@ export type ProtectedTurn = {
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
 };
 
-const automationsAuthoringInstructions =
-  "This chat edits one automation draft that the member sees beside the conversation. Read it with automation_draft_read before changing it. automation_draft_update replaces the unsaved draft in the member's form; it is not saved or scheduled. Call automation_draft_save only when the member explicitly asks to save, and never after updating the draft in the same turn. Saving always keeps the automation paused; you cannot turn it on.";
+const automationsAuthoringInstructions = [
+  "This chat builds one automation with the member. After every successful automation_draft_update the app shows a card of the draft (name, what it checks, when it notifies, schedule, model, status and what changed), so keep replies to one to three short sentences of plain Markdown and do not list or restate the draft's fields.",
+  "Read the draft with automation_draft_read before changing it. Call automation_draft_update with the complete revised draft before describing any change. Only say the draft changed when automation_draft_update returned draft_updated in this turn; if it returned invalid, say what needs fixing instead.",
+  'Replace every [bracketed] placeholder with the member\'s real details; when a detail is missing, ask for it instead of guessing. If the draft is still the blank draft (name "New automation", instructions "[What should Grogu check?]"), propose a complete draft from the member\'s first message.',
+  "When the member names a time, prefer a calendar schedule from the catalog: 5-field cron M H * * D with no leading zeros (D is * for daily, 1-5 for weekdays or 6 for Saturday) in the catalog time zone.",
+  "Call automation_draft_save only when the member explicitly asks to save, never after updating the draft in the same turn, and never while any [bracketed] placeholder remains. A saved automation stays paused; never promise that it will run on its schedule, and you cannot turn it on.",
+].join(" ");
 const automationsChatInstructions =
   "Automation tools can only read this member's private automations or prepare suggestions. Every proposal returns writeApplied:false and has not been saved or scheduled. Never claim that a proposal changed or enabled an automation.";
 

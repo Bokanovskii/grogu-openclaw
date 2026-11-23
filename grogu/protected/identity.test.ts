@@ -38,20 +38,27 @@ const forwardValid =
       ? answer(new Request(proof.url, { headers: { "cf-access-jwt-assertion": serviceToken() } }))
       : Promise.resolve(new Response("Forbidden", { status: 403 }));
 
-function verifier(configured: string | undefined, edge: Edge = forwardValid({ secret })) {
+function verifier(
+  configured: string | undefined,
+  edge: Edge = forwardValid({ secret }),
+  now: () => number = () => Date.now(),
+) {
   const proofs: Headers[] = [];
+  let identityFetches = 0;
   const verify = createCloudflareAccessVerifier({
     issuer,
     audience,
     origin,
     isAllowed: ({ subject }) => subject === human,
     testClientId: configured,
+    now,
     fetchImpl: (async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === `${issuer}/cdn-cgi/access/certs`) {
         return Response.json({ keys: [jwk] });
       }
       if (url === `${issuer}/cdn-cgi/access/get-identity`) {
+        identityFetches++;
         return Response.json({ user_uuid: human });
       }
       assert.equal(new URL(url).origin + new URL(url).pathname, origin + protectedAccessProofPath);
@@ -61,7 +68,7 @@ function verifier(configured: string | undefined, edge: Edge = forwardValid({ se
       return edge(new Request(url, { headers }), verify.answerProof);
     }) as typeof fetch,
   });
-  return Object.assign(verify, { proofs });
+  return Object.assign(verify, { proofs, identityFetchCount: () => identityFetches });
 }
 
 const serviceRequest = (
@@ -78,11 +85,14 @@ const serviceRequest = (
   });
 
 void test("the test client proves its credential through a fresh Access request", async () => {
+  let now = Date.now();
   const current = { secret };
-  const verify = verifier(testClientId, forwardValid(current));
+  const verify = verifier(testClientId, forwardValid(current), () => now);
   const first = await verify(serviceRequest(serviceToken()));
   assert.equal(first.subject, `service-token:${testClientId}`);
   assert.equal(first.kind, "development");
+  await first.revalidate();
+  assert.equal(verify.proofs.length, 1);
   const [proof] = verify.proofs;
   assert.equal(proof?.get("cookie"), null);
   assert.equal(proof?.get("cf-access-jwt-assertion"), null);
@@ -90,23 +100,21 @@ void test("the test client proves its credential through a fresh Access request"
 
   // Each request carries a new assertion, but the run and logout session stays stable.
   const second = await verify(
-    serviceRequest(
-      token({ sub: "", common_name: testClientId, exp: Math.floor(Date.now() / 1000) + 5 }),
-    ),
+    serviceRequest(token({ sub: "", common_name: testClientId, exp: Math.floor(now / 1000) + 5 })),
   );
   assert.equal(second.sessionId, first.sessionId);
   assert.equal(second.expiresAt, first.expiresAt);
-  const realNow = Date.now;
-  Date.now = () => realNow() + 10_000;
-  try {
-    assert.throws(() => second.assertCurrent(), { status: 401 });
-  } finally {
-    Date.now = realNow;
-  }
+  now += 10_000;
+  assert.throws(() => second.assertCurrent(), { status: 401 });
   assert.doesNotMatch(first.sessionId, new RegExp(secret));
 
   current.secret = "r".repeat(64);
+  now += 5 * 60_000 - 10_000;
+  const proofCount = verify.proofs.length;
   await assert.rejects(first.revalidate(), { status: 401 });
+  assert.equal(verify.proofs.length, proofCount + 1);
+  await assert.rejects(first.revalidate(), { status: 401 });
+  assert.equal(verify.proofs.length, proofCount + 2);
   const rotated = await verify(
     serviceRequest(serviceToken(), { id: testClientId, secret: current.secret }),
   );
@@ -187,6 +195,115 @@ void test("human identities keep cookie and identity-lookup behavior", async () 
   assert.equal(verify.proofs.length, 0);
 });
 
+void test("human identities reuse successful remote revalidation for five minutes", async () => {
+  let now = Date.now();
+  const verify = verifier(testClientId, undefined, () => now);
+  const identity = await verify(
+    new Request(`${origin}/me`, {
+      headers: { cookie: `CF_Authorization=${token({ sub: human })}` },
+    }),
+  );
+  assert.equal(verify.identityFetchCount(), 1);
+  await identity.revalidate();
+  assert.equal(verify.identityFetchCount(), 1);
+  const anotherIdentity = await verify(
+    new Request(`${origin}/me`, {
+      headers: {
+        cookie: `CF_Authorization=${token({ sub: human, exp: Math.floor(now / 1000) + 3600 })}`,
+      },
+    }),
+  );
+  assert.equal(verify.identityFetchCount(), 2);
+  await identity.revalidate();
+  await anotherIdentity.revalidate();
+  assert.equal(verify.identityFetchCount(), 2);
+  now += 5 * 60_000 - 1;
+  await identity.revalidate();
+  assert.equal(verify.identityFetchCount(), 2);
+  now++;
+  await identity.revalidate();
+  assert.equal(verify.identityFetchCount(), 3);
+});
+
+void test("failed and thrown remote revalidations are never reused", async () => {
+  let now = Date.now();
+  let identityFetches = 0;
+  let remoteFailure: "throw" | "wrong-identity" | undefined;
+  const verify = createCloudflareAccessVerifier({
+    issuer,
+    audience,
+    isAllowed: () => true,
+    now: () => now,
+    fetchImpl: (async (input: string | URL) => {
+      const url = String(input);
+      if (url === `${issuer}/cdn-cgi/access/certs`) {
+        return Response.json({ keys: [jwk] });
+      }
+      identityFetches++;
+      if (remoteFailure === "throw") {
+        remoteFailure = undefined;
+        throw new Error("synthetic Access outage");
+      }
+      if (remoteFailure === "wrong-identity") {
+        remoteFailure = undefined;
+        return Response.json({ user_uuid: "another-member" });
+      }
+      return Response.json({ user_uuid: human });
+    }) as typeof fetch,
+  });
+  const identity = await verify(
+    new Request(`${origin}/me`, {
+      headers: { cookie: `CF_Authorization=${token({ sub: human })}` },
+    }),
+  );
+  now += 5 * 60_000;
+  remoteFailure = "throw";
+  await assert.rejects(identity.revalidate(), /synthetic Access outage/u);
+  remoteFailure = "wrong-identity";
+  await assert.rejects(identity.revalidate(), { status: 401 });
+  await identity.revalidate();
+  assert.equal(identityFetches, 4);
+});
+
+void test("token expiry and local membership revocation remain immediate in the cache window", async () => {
+  let now = Date.now();
+  const expiresAt = Math.floor(now / 1000) + 5;
+  const verify = verifier(testClientId, undefined, () => now);
+  const expiring = await verify(
+    new Request(`${origin}/me`, {
+      headers: { cookie: `CF_Authorization=${token({ sub: human, exp: expiresAt })}` },
+    }),
+  );
+  now += 5_000;
+  await assert.rejects(expiring.revalidate(), { status: 401 });
+  assert.equal(verify.identityFetchCount(), 1);
+
+  let allowed = true;
+  let identityFetches = 0;
+  const locallyRevocable = createCloudflareAccessVerifier({
+    issuer,
+    audience,
+    isAllowed: () => allowed,
+    fetchImpl: (async (input: string | URL) => {
+      const url = String(input);
+      if (url === `${issuer}/cdn-cgi/access/certs`) {
+        return Response.json({ keys: [jwk] });
+      }
+      identityFetches++;
+      return Response.json({ user_uuid: human });
+    }) as typeof fetch,
+  });
+  const admitted = await locallyRevocable(
+    new Request(`${origin}/me`, {
+      headers: { cookie: `CF_Authorization=${token({ sub: human })}` },
+    }),
+  );
+  await admitted.revalidate();
+  allowed = false;
+  await assert.rejects(admitted.revalidate(), { status: 401 });
+  assert.equal(identityFetches, 1);
+});
+
 void test("accepts only the exact configured single-string audience", async () => {
   const verify = verifier(testClientId);
   const claims = { sub: "", common_name: testClientId };
@@ -235,6 +352,7 @@ void test("other service tokens and unconfigured test clients are denied", async
 
 void test("verified email binds new admission and is cached only while admission remains current", async () => {
   const subject = "11111111-1111-1111-1111-111111111111";
+  const now = Date.now();
   let allowed = false;
   let approved = true;
   let bindings = 0;
@@ -242,6 +360,7 @@ void test("verified email binds new admission and is cached only while admission
     issuer,
     audience,
     isAllowed: () => allowed,
+    now: () => now,
     bindVerifiedIdentity: async (_identity, assertCurrent) => {
       assertCurrent();
       bindings++;
@@ -269,5 +388,5 @@ void test("verified email binds new admission and is cached only while admission
   approved = false;
   allowed = false;
   await assert.rejects(identity.revalidate(), { status: 401 });
-  assert.equal(bindings, 3);
+  assert.equal(bindings, 2);
 });

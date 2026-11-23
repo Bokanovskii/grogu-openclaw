@@ -69,7 +69,10 @@ import {
   type ProtectedAgentExtension,
 } from "./agents.js";
 import { ALCOVE_BROWSER_TOOL_NAMES } from "./alcove-browser/contract.js";
-import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
+import {
+  listProtectedAutomationLifecycleRuns,
+  readProtectedAutomationLifecycleStorageUsage,
+} from "./automation-lifecycle-store.js";
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import type { ProtectedBrowserBroker } from "./browser/broker.js";
@@ -411,6 +414,7 @@ void test("Protected turns load skills on request and retain credentials during 
       whenToNotify: "After each briefing.",
       agentId: "grogu",
       model: { provider: "sparky", id: "synthetic" },
+      contextAccess: "member",
       schedule: {
         kind: "cron",
         expr: `${cronMinute} ${cronHour} * * *`,
@@ -436,18 +440,8 @@ void test("Protected turns load skills on request and retain credentials during 
     method: "POST",
     body: JSON.stringify(isolatedDraft),
   });
-  assert.equal(isolatedResponse.status, 503, await isolatedResponse.clone().text());
-  assert.equal((await isolatedResponse.json()).error.code, "automation_isolation_unavailable");
-  const seededIsolated = await createProtectedAutomationWithAdmission(
-    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
-    { profileId: user.id, definition: isolatedDraft, now: Date.now() },
-    { profileId: user.id, assertCurrent() {} },
-  );
-  assert.equal(seededIsolated.status, "created");
-  if (seededIsolated.status !== "created") {
-    assert.fail("Could not seed the isolated automation.");
-  }
-  const isolatedId = seededIsolated.automation.id;
+  assert.equal(isolatedResponse.status, 201, await isolatedResponse.clone().text());
+  const isolatedId = (await isolatedResponse.json()).automation.id;
   const isolatedView = await automationCall(`/automations/${isolatedId}`);
   assert.equal(isolatedView.status, 200, await isolatedView.clone().text());
   const isolatedAutomation = (await isolatedView.json()).automation;
@@ -455,13 +449,6 @@ void test("Protected turns load skills on request and retain credentials during 
   const legacyView = await call(`/automations/${isolatedId}`);
   assert.equal(legacyView.status, 200);
   assert.equal("contextAccess" in (await legacyView.json()).automation, false);
-  const beforeIsolatedRun = requests.length;
-  const isolatedRun = await automationCall(`/automations/${isolatedAutomation.id}/run`, {
-    method: "POST",
-  });
-  assert.equal(isolatedRun.status, 503);
-  assert.equal((await isolatedRun.json()).error.code, "automation_isolation_unavailable");
-  assert.equal(requests.length, beforeIsolatedRun);
   const waitForDelivery = async (trigger: "scheduled" | "manual", excluded: string[] = []) => {
     for await (const event of watch(stateDir, { recursive: true })) {
       void event;
@@ -1330,9 +1317,13 @@ void test("in-turn compaction flushes member memory before summarizing", async (
   await exerciseMemberMemoryBoundary(t, "threshold");
 });
 
+void test("isolated automation requests exclude member context", async (t) => {
+  await exerciseMemberMemoryBoundary(t, "automation-isolation");
+});
+
 async function exerciseMemberMemoryBoundary(
   t: TestContext,
-  scenario: "cross-chat" | "overflow-failure" | "threshold",
+  scenario: "cross-chat" | "overflow-failure" | "threshold" | "automation-isolation",
 ) {
   const stateRoot = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
@@ -1448,36 +1439,87 @@ async function exerciseMemberMemoryBoundary(
                   query: command.includes("forbidden") ? "forbidden workspace" : "lighthouse",
                 }),
               };
+      const isolatedProbe = command.includes("Synthetic isolation probe");
+      const childRoute =
+        command.includes("Synthetic child isolation probe") &&
+        messages.some(
+          (message) =>
+            message.role === "system" &&
+            JSON.stringify(message.content).includes("## Current agent: Grogu (grogu)"),
+        ) &&
+        last?.role !== "tool";
+      const forbiddenTools = [
+        "memory_search",
+        "memory_get",
+        "memory_store",
+        "sessions_list",
+        "sessions_search",
+        "sessions_history",
+        "sessions_send",
+        "session_status",
+        "intent",
+      ];
       const delta = isSummary
         ? { role: "assistant", content: "Synthetic conversation summary." }
-        : last?.role === "tool"
-          ? { role: "assistant", content: isFlush ? "NO_REPLY" : JSON.stringify(last.content) }
-          : {
+        : childRoute
+          ? {
               role: "assistant",
               tool_calls: [
-                { index: 0, id: "memory-call", type: "function", function: tool },
-                ...(command.includes("Remember and inspect my automations")
-                  ? [
-                      {
-                        index: 1,
-                        id: "automation-call",
-                        type: "function",
-                        function: { name: "automations_list", arguments: "{}" },
-                      },
-                    ]
-                  : []),
-                ...(command.includes("Recall in authoring")
-                  ? [
-                      {
-                        index: 1,
-                        id: "authoring-call",
-                        type: "function",
-                        function: { name: "automation_draft_read", arguments: "{}" },
-                      },
-                    ]
-                  : []),
+                {
+                  index: 0,
+                  id: "route-isolation-child",
+                  type: "function",
+                  function: {
+                    name: "route_to_agent",
+                    arguments: JSON.stringify({
+                      agentId: "travel",
+                      brief: "Synthetic isolation probe child",
+                    }),
+                  },
+                },
               ],
-            };
+            }
+          : isolatedProbe && last?.role !== "tool"
+            ? {
+                role: "assistant",
+                tool_calls: forbiddenTools.map((name, index) => ({
+                  index,
+                  id: `isolation-call-${index}`,
+                  type: "function",
+                  function: {
+                    name,
+                    arguments: name === "memory_search" ? '{"query":"lighthouse"}' : "{}",
+                  },
+                })),
+              }
+            : last?.role === "tool"
+              ? { role: "assistant", content: isFlush ? "NO_REPLY" : JSON.stringify(last.content) }
+              : {
+                  role: "assistant",
+                  tool_calls: [
+                    { index: 0, id: "memory-call", type: "function", function: tool },
+                    ...(command.includes("Remember and inspect my automations")
+                      ? [
+                          {
+                            index: 1,
+                            id: "automation-call",
+                            type: "function",
+                            function: { name: "automations_list", arguments: "{}" },
+                          },
+                        ]
+                      : []),
+                    ...(command.includes("Recall in authoring")
+                      ? [
+                          {
+                            index: 1,
+                            id: "authoring-call",
+                            type: "function",
+                            function: { name: "automation_draft_read", arguments: "{}" },
+                          },
+                        ]
+                      : []),
+                  ],
+                };
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(
         `data: ${JSON.stringify({
@@ -1551,6 +1593,9 @@ async function exerciseMemberMemoryBoundary(
   t.after(() => encryption.dispose());
   const origin = "https://family.example";
   const expiresAt = Date.now() + 300_000;
+  await prepareProtectedSharedState(stateDir, () => {});
+  await addProtectedSubject(stateDir, { issuer: "https://synthetic.example", subject: "alice" });
+  await addProtectedSubject(stateDir, { issuer: "https://synthetic.example", subject: "bob" });
   const memory = createProtectedMemberMemory();
   const { publishConfiguredModelRuntimeSnapshots } =
     await import("../../src/gateway/server-startup-model-runtime.js");
@@ -1638,6 +1683,178 @@ async function exerciseMemberMemoryBoundary(
     return events;
   };
   const aliceGrogu = await chat("alice", "grogu");
+  if (scenario === "automation-isolation") {
+    await turn(
+      "alice",
+      alice.id,
+      aliceGrogu,
+      "Remember my lighthouse preference. Synthetic other chat history sentinel.",
+    );
+    const files = await createAuthorizedUserFiles({
+      usersRoot: await root(usersDir),
+      profileId: alice.id,
+      assertCurrent() {},
+      maxBytes: 64_000,
+      encryption,
+    });
+    t.after(() => files.dispose());
+    await files.create(`chats/${aliceGrogu}/sentinel.txt`, "Synthetic other chat file sentinel.");
+    const now = Math.floor(Date.now() / 60_000) * 60_000;
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+    await app.startAutomations(() => {});
+    const headers = {
+      "x-grogu-profile": alice.id,
+      "x-alcove-capabilities": "automations-context-v1, automation-runs-v1, automation-results-v1",
+    };
+    const automationCall = (route: string, init?: RequestInit) =>
+      call("alice", route, { ...init, headers: { ...headers, ...init?.headers } });
+    const createAutomation = async (
+      instructions: string,
+      contextAccess: "isolated" | "member" = "isolated",
+    ) => {
+      const response = await automationCall("/automations", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Synthetic isolated automation",
+          instructions,
+          whenToNotify: "After each run.",
+          agentId: "grogu",
+          model: { provider: "sparky", id: "synthetic" },
+          contextAccess,
+          schedule: { kind: "every", everyMs: 60_000 },
+        }),
+      });
+      assert.equal(response.status, 201, await response.clone().text());
+      return (await response.json()).automation;
+    };
+    const watchAbort = new AbortController();
+    t.after(() => watchAbort.abort());
+    const waitForDelivery = async (id: string, trigger: "manual" | "scheduled") => {
+      for await (const event of watch(path.join(stateDir, "state"), {
+        signal: watchAbort.signal,
+      })) {
+        void event;
+        const runs = await listProtectedAutomationLifecycleRuns(stateDir, id, {
+          profileId: alice.id,
+          assertCurrent() {},
+          async revalidate() {},
+        });
+        assert.ok(runs);
+        const failed = runs.find(
+          (entry: { trigger: string; status: string }) =>
+            entry.trigger === trigger && ["failed", "skipped"].includes(entry.status),
+        );
+        assert.equal(failed, undefined, JSON.stringify(failed));
+        const run = runs.find(
+          (entry: { trigger: string; delivery: string }) =>
+            entry.trigger === trigger && entry.delivery === "delivered",
+        );
+        if (run) {
+          return run;
+        }
+      }
+      throw new Error("Automation storage watcher stopped before delivery.");
+    };
+    const runNow = async (id: string) => {
+      const delivery = waitForDelivery(id, "manual");
+      void delivery.catch(() => {});
+      const response = await automationCall(`/automations/${id}/run`, { method: "POST" });
+      assert.equal(response.status, 202, await response.clone().text());
+      return await delivery;
+    };
+    const checkRequest = (request: (typeof requests)[number]) => {
+      const names = request.tools?.map((tool) => tool.function.name) ?? [];
+      assert.ok(
+        names.every(
+          (name) =>
+            !name.startsWith("memory_") &&
+            !name.startsWith("sessions_") &&
+            name !== "session_status" &&
+            name !== "intent",
+        ),
+      );
+      const serialized = JSON.stringify(request.messages);
+      assert.doesNotMatch(serialized, /Synthetic blue lighthouse preference/u);
+      assert.doesNotMatch(serialized, /Synthetic other chat (history|file) sentinel/u);
+      const leaked = request.messages.find((message) =>
+        JSON.stringify(message.content).includes("Synthetic forbidden workspace memory"),
+      );
+      const content = JSON.stringify(leaked?.content);
+      const offset = content?.indexOf("Synthetic forbidden workspace memory") ?? -1;
+      assert.ok(
+        !leaked,
+        `workspace memory appeared in a ${leaked?.role} message for ${JSON.stringify(
+          request.messages.findLast((message) => message.role === "user")?.content,
+        )}: ${content?.slice(Math.max(0, offset - 150), offset + 100)}`,
+      );
+      assert.doesNotMatch(serialized, new RegExp(aliceGrogu, "u"));
+      assert.equal(
+        serialized.split("Memory and other chats are unavailable in isolated automations.").length -
+          1,
+        1,
+      );
+    };
+    const checkIsolatedRequests = (start: number) => {
+      const captured = requests.slice(start);
+      assert.ok(captured.length >= 2, "the provider must receive tool results");
+      for (const request of captured) {
+        checkRequest(request);
+      }
+      const messages = captured.at(-1)?.messages ?? [];
+      const currentTurn = messages.slice(
+        messages.findLastIndex((message) => message.role === "user") + 1,
+      );
+      const results = currentTurn.filter((message) => message.role === "tool");
+      assert.equal(results.length, 9);
+      for (const result of results) {
+        assert.match(JSON.stringify(result.content), /unavailable in isolated automations/u);
+      }
+    };
+    const member = await createAutomation("Synthetic member baseline", "member");
+    const memberStart = requests.length;
+    await runNow(member.id);
+    const memberRequests = requests.slice(memberStart);
+    assert.ok(memberRequests[0]?.tools?.some((tool) => tool.function.name === "memory_search"));
+    assert.ok(memberRequests[0]?.tools?.some((tool) => tool.function.name === "sessions_list"));
+    assert.match(JSON.stringify(memberRequests), /Synthetic blue lighthouse preference/u);
+
+    const isolated = await createAutomation("Synthetic isolation probe");
+    const manualStart = requests.length;
+    await runNow(isolated.id);
+    checkIsolatedRequests(manualStart);
+    const enabled = await automationCall(`/automations/${isolated.id}`, {
+      method: "PATCH",
+      headers: { "if-match": isolated.version },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(enabled.status, 200, await enabled.clone().text());
+    const delivery = waitForDelivery(isolated.id, "scheduled");
+    const scheduledStart = requests.length;
+    t.mock.timers.tick(60_000);
+    await delivery;
+    checkIsolatedRequests(scheduledStart);
+
+    t.mock.timers.reset();
+    const child = await createAutomation("Synthetic child isolation probe");
+    const childStart = requests.length;
+    await runNow(child.id);
+    const childRequests = requests.slice(childStart);
+    const childContinuation = childRequests.find(
+      (request) =>
+        JSON.stringify(request.messages).includes("## Current agent: Travel (travel)") &&
+        request.messages.some((message) => message.role === "tool"),
+    );
+    assert.ok(childContinuation, "a real specialist child must return tool results");
+    for (const request of childRequests) {
+      checkRequest(request);
+    }
+    const results = childContinuation.messages.filter((message) => message.role === "tool");
+    assert.equal(results.length, 9);
+    for (const result of results) {
+      assert.match(JSON.stringify(result.content), /unavailable in isolated automations/u);
+    }
+    return;
+  }
   if (scenario === "overflow-failure") {
     await turn("alice", alice.id, aliceGrogu, "Remember my lighthouse preference");
     const beforeFailedOverflow = requests.length;
@@ -6926,7 +7143,7 @@ void test("automation authoring chats hold a server binding and save only the se
     agentExtensions: [protectedResearchAgent],
     maxChatsPerUser: 10,
     maxFileBytes: 64_000,
-    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    storageLimits: { globalBytes: 2_000_000, userBytes: 1_000_000, freeFloorBytes: 1 },
     turns: {
       models: [
         {
@@ -6988,6 +7205,7 @@ void test("automation authoring chats hold a server binding and save only the se
     agentId: "travel",
     model: { provider: "sparky" as const, id: "synthetic-sparky" },
     thinking: "low" as const,
+    contextAccess: "member" as const,
     schedule: { kind: "every" as const, everyMs: 60_000 },
   };
   const turn = async (
@@ -7046,13 +7264,6 @@ void test("automation authoring chats hold a server binding and save only the se
   const { chat } = await created.json();
   assert.deepEqual(chat.authoring, { kind: "automation" });
   assert.equal(chat.selectedAgentId, "grogu");
-  assert.deepEqual(await listAutomations(), []);
-  const isolatedAuthoring = await turn("alice", chat.id, "Save", {
-    draft: { ...draft, contextAccess: "isolated" },
-    draftRevision: "1",
-  });
-  assert.equal(isolatedAuthoring.status, 503);
-  assert.equal(isolatedAuthoring.code, "automation_isolation_unavailable");
   assert.deepEqual(await listAutomations(), []);
   const agentSwitch = await call("alice", `/chats/${chat.id}/agent`, {
     method: "PATCH",
@@ -7274,4 +7485,25 @@ void test("automation authoring chats hold a server binding and save only the se
   const rebound = await formSave("alice", formChat.id);
   assert.equal(rebound.status, 409);
   assert.equal((await rebound.json()).error.code, "authoring_bound");
+
+  const defaultChatResponse = await call("alice", "/automations/authoring", { method: "POST" });
+  assert.equal(defaultChatResponse.status, 201, await defaultChatResponse.clone().text());
+  const defaultChat = (await defaultChatResponse.json()).chat;
+  const defaultSave = await turn(
+    "alice",
+    defaultChat.id,
+    "Please save 1",
+    { draft: { ...draft, contextAccess: undefined }, draftRevision: "1" },
+    `${negotiated}, automations-context-v1`,
+  );
+  const [defaultEvent] = ofType(defaultSave.events, "automation-saved");
+  assert.ok(defaultEvent);
+  assert.equal(defaultEvent.automation.contextAccess, "isolated");
+  const savedDefault = await call(
+    "alice",
+    `/automations/${defaultChat.id}`,
+    {},
+    `${negotiated}, automations-context-v1`,
+  );
+  assert.equal((await savedDefault.json()).automation.contextAccess, "isolated");
 });

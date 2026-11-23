@@ -918,13 +918,6 @@ export function createProtectedHttp(options: {
         if (authoringInput.automationVersion !== undefined) {
           invalid();
         }
-        if (authoringInput.draft.contextAccess === "isolated") {
-          throw new ProtectedError(
-            503,
-            "automation_isolation_unavailable",
-            "Isolated automation execution is unavailable until its memory boundary is ready.",
-          );
-        }
         return { input: authoringInput, catalog: automationCatalog, admitStorage };
       }
       if (authoringInput.automationVersion === undefined) {
@@ -1983,13 +1976,6 @@ export function createProtectedHttp(options: {
     }
     if (String(automation.definitionRevision) !== scheduled.version) {
       throw new ProtectedError(412, "definition_changed", "Reload the automation before running.");
-    }
-    if (automation.definition.contextAccess === "isolated") {
-      throw new ProtectedError(
-        503,
-        "automation_isolation_unavailable",
-        "Isolated automation execution is unavailable until its memory boundary is ready.",
-      );
     }
     await recoverOrphanedAutomationRun(scheduled.id);
     await retryProtectedAutomationInbox(member, scheduled.id);
@@ -3955,7 +3941,7 @@ export function createProtectedHttp(options: {
                   automations: {
                     ...catalog.capabilities.automations,
                     ...(hasClientCapability(request.headers, automationContextCapability)
-                      ? { contextAccess: false }
+                      ? { contextAccess: true }
                       : {}),
                     ...(chatAvailable
                       ? {
@@ -4054,13 +4040,10 @@ export function createProtectedHttp(options: {
         if (!validation.valid) {
           return json(validation, 422);
         }
-        if (validation.draft.contextAccess === "isolated") {
-          throw new ProtectedError(
-            503,
-            "automation_isolation_unavailable",
-            "Isolated automation execution is unavailable until its memory boundary is ready.",
-          );
-        }
+        const definition = {
+          ...validation.draft,
+          contextAccess: validation.draft.contextAccess ?? ("isolated" as const),
+        };
         await revalidate();
         if (!admitStorage) {
           return notFound();
@@ -4100,7 +4083,7 @@ export function createProtectedHttp(options: {
             options.stateDir,
             {
               profileId: profile.id,
-              definition: validation.draft,
+              definition,
               now: Date.now(),
               ...(authoringChatId === undefined ? {} : { automationId: authoringChatId }),
             },
@@ -4112,7 +4095,7 @@ export function createProtectedHttp(options: {
           }
           if (authoringChatId !== undefined) {
             await chats.bindAutomation(authority, authoringChatId, automation.id);
-            if (!savesDraft(automation, validation.draft)) {
+            if (!savesDraft(automation, definition)) {
               throw new ProtectedError(
                 412,
                 "version_mismatch",

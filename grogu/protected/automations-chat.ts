@@ -354,7 +354,11 @@ export function createProtectedAutomationAuthoringBindings(input: {
               errors: validation.errors,
             };
           }
-          const created = await create(validation.draft);
+          const definition = {
+            ...validation.draft,
+            contextAccess: validation.draft.contextAccess ?? ("isolated" as const),
+          };
+          const created = await create(definition);
           if (!created) {
             return refuse("unavailable");
           }
@@ -362,7 +366,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
           await input.bind(automation.id);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
-          if (!savesDraft(created, validation.draft)) {
+          if (!savesDraft(created, definition)) {
             return refuse("version_mismatch", automation.version);
           }
         } else {

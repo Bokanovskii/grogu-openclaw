@@ -763,13 +763,6 @@ export function createCanonicalProtectedTurns(options: {
   return {
     models: options.models,
     async run(turn: ProtectedTurn) {
-      if (turn.automationContextAccess === "isolated") {
-        throw new ProtectedError(
-          503,
-          "automation_isolation_unavailable",
-          "Isolated automation execution is unavailable until its memory boundary is ready.",
-        );
-      }
       const { provider, model } = turn.input;
       const accessToken =
         provider === "sparky"

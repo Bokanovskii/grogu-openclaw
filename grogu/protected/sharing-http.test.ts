@@ -615,6 +615,43 @@ void test("chat links grant live read-only access until revoked", async (t) => {
   assert.deepEqual(countRows(), [1, 1]);
 });
 
+void test("new automation definitions default to isolated access", async (t) => {
+  const { call, ok } = await createSharingFixture(t);
+  const catalog = await ok(
+    await call("owner", "/automations/catalog", {}, "automations-context-v1"),
+  );
+  assert.equal(catalog.capabilities.automations.contextAccess, true);
+  const draft = {
+    name: "Synthetic isolated digest",
+    instructions: "Summarize synthetic material.",
+    whenToNotify: "Only when useful.",
+    agentId: catalog.defaultAgentId,
+    model: { provider: "sparky", id: "synthetic" },
+    schedule: { kind: "every", everyMs: 60_000 },
+  };
+  for (const contextAccess of [undefined, "isolated"] as const) {
+    await t.test(contextAccess ?? "omitted", async () => {
+      const { automation } = await ok(
+        await call(
+          "owner",
+          "/automations",
+          {
+            method: "POST",
+            body: { ...draft, ...(contextAccess ? { contextAccess } : {}) },
+          },
+          "automations-context-v1",
+        ),
+        201,
+      );
+      assert.equal(automation.contextAccess, "isolated");
+      const saved = await ok(
+        await call("owner", `/automations/${automation.id}`, {}, "automations-context-v1"),
+      );
+      assert.equal(saved.automation.contextAccess, "isolated");
+    });
+  }
+});
+
 void test("legacy public automation data remains private at the HTTP boundary", async (t) => {
   const { stateDir, databasePath, chats, call, ok, errorCode, id } = await createSharingFixture(t);
   const capabilities =

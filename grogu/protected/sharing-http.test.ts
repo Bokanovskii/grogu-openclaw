@@ -43,6 +43,7 @@ import { createProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import { readProtectedFeedbackStorageUsage } from "./feedback-store.js";
 import { createProtectedHttp } from "./http.js";
+import { createProtectedServer } from "./server.js";
 import {
   canMemberReadAutomation,
   canMemberReadAutomationRun,
@@ -577,6 +578,7 @@ void test("chat links grant live read-only access until revoked", async (t) => {
 
 void test("published automations are followed read-only until unpublished", async (t) => {
   const {
+    app,
     stateDir,
     storageLimits,
     globalUsage,
@@ -654,6 +656,57 @@ void test("published automations are followed read-only until unpublished", asyn
   const { publication: _, ...legacyRecord } = published.automation;
   assert.deepEqual((await ok(await call("owner", item))).automation, legacyRecord);
   assert.deepEqual((await ok(await call("owner", "/automations"))).automations, [legacyRecord]);
+
+  const server = createProtectedServer("https://alcove.example", app.fetch);
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const followUrl = `http://127.0.0.1:${address.port}/api/protected/v1${item}/follow`;
+  const followHeaders = {
+    origin: "https://alcove.example",
+    "x-test-subject": subjects.recipient,
+    "x-grogu-profile": id("recipient"),
+    "X-Alcove-Capabilities": publicV1,
+  };
+  try {
+    for (const [contentType, body, subscribed] of [
+      [undefined, undefined, false],
+      ["application/json", undefined, false],
+      ["application/json", "{}", false],
+      ["application/json", '{"subscribed":true}', true],
+      ["application/json", '{"subscribed":false}', false],
+    ] as const) {
+      const response = await fetch(followUrl, {
+        method: "PUT",
+        headers: { ...followHeaders, ...(contentType ? { "content-type": contentType } : {}) },
+        body,
+      });
+      assert.equal((await ok(response)).automation.subscribed, subscribed);
+      await ok(await fetch(followUrl, { method: "DELETE", headers: followHeaders }), 204);
+    }
+    for (const [contentType, body, status] of [
+      [undefined, "not json", 400],
+      ["application/json", "not json", 400],
+      ["application/json", " ".repeat(48_001), 413],
+    ] as const) {
+      const response = await fetch(followUrl, {
+        method: "PUT",
+        headers: { ...followHeaders, ...(contentType ? { "content-type": contentType } : {}) },
+        body,
+      });
+      assert.equal(response.status, status);
+      assert.equal(
+        await errorCode(response),
+        status === 413 ? "request_too_large" : "invalid_request",
+      );
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 
   const listed = await ok(await pub("recipient", "/automations/public"));
   assert.ok(Value.Check(ProtectedPublicAutomationsResponseSchema, listed));

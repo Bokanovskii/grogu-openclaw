@@ -367,6 +367,25 @@ while the parent or any side chat has a run. Negotiating clients get 200
 `{deletedSideChats: [ids]}`; others keep 204. Deleting a side chat deletes only
 that chat.
 
+`POST /chats/:sideId/side/return` is the only way a side chat reaches its
+parent ("Send to main chat"). It requires `side-chats-v1` and `x-grogu-profile`,
+and a body of `{requestId, messageIds: [1-3 ids], note?: up to 500 characters}`.
+Each id must be a finished assistant reply of that side chat. The runtime makes
+no model call: it appends one assistant message to the parent, with the optional
+note first and the replies copied in transcript order. The copied replies are
+capped at 12,000 characters and end with a marker when shortened (see
+`side-return.ts`). The reply returns `{parent: {id, version}, message}`. The
+message carries `sideNote: {chatId, title}` and lists the side chat's widgets
+without `replaces`, since the widgets stay in the side chat. They are read
+through `GET /chats/:sideChatId/widgets/:id` and disappear if the side chat is
+deleted. The parent model sees the copied text on its next turn. A replayed
+`requestId` returns the original message; from another side chat it returns 409
+`request_conflict`. A chat that is not a side chat returns 422
+`side_unavailable`, an unfinished or foreign message id returns 422
+`invalid_message`, and a running or changing parent returns 409 `busy`. Clients
+without the capability, and recipients of a shared chat, read the message as
+plain parent text without `sideNote` or its widgets.
+
 ### Public automations
 
 Automation definitions can record `contextAccess` as `isolated` or `member`.

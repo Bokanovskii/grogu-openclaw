@@ -10,6 +10,7 @@ import {
   isProtectedAccountName,
   isProtectedDirectorySettings,
   isProtectedRenew,
+  isProtectedReturnSideChat,
   isProtectedSteer,
   isProtectedTurnRequest,
   type ProtectedAgentCatalogDto,
@@ -20,11 +21,13 @@ import {
   type ProtectedAutomationListResponse,
   type ProtectedAutomationRecord,
   type ProtectedAutomationResponse,
+  type ProtectedChat,
   type ProtectedChatStorage,
   type ProtectedChatSummary,
   type ProtectedCreateSideChatResponse,
   type ProtectedDeleteChatResponse,
   type ProtectedMessage,
+  type ProtectedReturnSideChatResponse,
   type ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
 import {
@@ -437,6 +440,16 @@ function supportsAutomationsAuthoring(request: Request) {
 /** Side chats are listed and linked to their parents only for clients that negotiated them. */
 function supportsSideChats(request: Request) {
   return hasClientCapability(request.headers, sideChatsCapability);
+}
+
+/** A returned side reply names its side chat and its widgets live there; only the owner's side-chats-v1 clients can follow it. */
+function withoutSideNotes(chat: ProtectedChat) {
+  for (const message of chat.messages) {
+    if (message.sideNote) {
+      delete message.sideNote;
+      delete message.widgets;
+    }
+  }
 }
 
 export function createProtectedHttp(options: {
@@ -1264,8 +1277,11 @@ export function createProtectedHttp(options: {
             assertRun();
             send({ type: "start", runId: run.id });
             const before = await chats.read(runAuthority, id);
+            // Returned side replies point at another chat's widgets; they never join this chat's chain.
             const widgetChain = createWidgetChain(
-              before.messages.flatMap((message) => message.widgets ?? []),
+              before.messages.flatMap((message) =>
+                message.sideNote ? [] : (message.widgets ?? []),
+              ),
             );
             await files(
               async (owned) => {
@@ -3266,6 +3282,9 @@ export function createProtectedHttp(options: {
         if (!supportsSideChats(request)) {
           delete chat.side;
         }
+        if (!supportsSideChats(request) || owner.profileId !== authority.profileId) {
+          withoutSideNotes(chat);
+        }
         if (chat.messages.some((message) => message.widgets?.length)) {
           await files(
             async (owned) => {
@@ -3274,7 +3293,7 @@ export function createProtectedHttp(options: {
                 for (const widget of message.widgets ?? []) {
                   try {
                     const stat = await owned.stat(
-                      `${chatWidgetsDirectory(id)}/${widget.id}/manifest.json`,
+                      `${chatWidgetsDirectory(message.sideNote?.chatId ?? id)}/${widget.id}/manifest.json`,
                     );
                     if (stat.isFile) {
                       widgets.push(widget);
@@ -5559,6 +5578,40 @@ export function createProtectedHttp(options: {
           storage?.release();
           mutations.delete(parentId);
           creating.delete(profile.id);
+        }
+      }
+      if (rest === "side/return" && method === "POST") {
+        if (!supportsSideChats(request)) {
+          return notFound();
+        }
+        requireProfile();
+        const data = await body(request);
+        if (!isProtectedReturnSideChat(data)) {
+          return invalid();
+        }
+        const parentId = chatEntry.protectedSideParentId;
+        if (!parentId) {
+          throw new ProtectedError(422, "side_unavailable", "This chat is not a side chat.");
+        }
+        // Nothing is appended to a chat that is replying or changing.
+        if (runs.has(parentId) || mutations.has(parentId) || mutations.has(id)) {
+          throw new ProtectedError(409, "busy", "The main chat is busy. Try again in a moment.");
+        }
+        mutations.add(parentId);
+        mutations.add(id);
+        try {
+          await revalidate();
+          const sent = await chats.returnSide(authority, id, {
+            requestId: data.requestId,
+            messageIds: data.messageIds,
+            ...(data.note === undefined ? {} : { note: data.note }),
+          });
+          await revalidate();
+          const response: ProtectedReturnSideChatResponse = sent;
+          return json(response);
+        } finally {
+          mutations.delete(parentId);
+          mutations.delete(id);
         }
       }
       if (rest === "turns" && method === "POST") {

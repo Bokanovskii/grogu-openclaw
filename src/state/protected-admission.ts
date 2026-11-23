@@ -21,6 +21,7 @@ import {
 } from "./protected-automation-lifecycle-cleanup.js";
 import type { ProtectedAutomationStorageUsage } from "./protected-automations.js";
 import { removeProtectedMemberFeedbackRows } from "./protected-feedback-reports.js";
+import { removeProtectedMemberSharingRows } from "./protected-sharing.js";
 
 export type ProtectedAccessRequest = {
   id: string;
@@ -577,6 +578,7 @@ export function removeProtectedAdmission(
       );
       if (profileId) {
         removeProtectedMemberFeedbackRows(db, profileId);
+        removeProtectedMemberSharingRows(db, profileId);
       }
       let retiredAutomations: ProtectedAutomationStorageUsage["entries"] = [];
       if (profileId && getAdmittedSqliteSchemaFacts(db)?.tables.has("protected_automations")) {

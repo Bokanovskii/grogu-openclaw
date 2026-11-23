@@ -165,7 +165,7 @@ describe("candidate update admission", () => {
     const statePath = openOpenClawStateDatabase({ env: process.env }).path;
     const agent = openOpenClawAgentDatabase({ agentId: "main", env: process.env });
     const agentPath = agent.path;
-    expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+    expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(28);
     closeOpenClawAgentDatabasesForTest();
     closeOpenClawStateDatabaseForTest();
 

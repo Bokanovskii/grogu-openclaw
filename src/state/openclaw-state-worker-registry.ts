@@ -52,6 +52,7 @@ import type { AgentDatabaseRegistryWorkerOperations } from "./openclaw-agent-db-
 import type { ProtectedAutomationLifecycleWorkerOperations } from "./protected-automation-lifecycle.worker.js";
 import type { ProtectedAutomationResultWorkerOperations } from "./protected-automation-results.worker.js";
 import type { ProtectedAutomationWorkerOperations } from "./protected-automations.worker.js";
+import type { ProtectedSharingWorkerOperations } from "./protected-sharing.worker.js";
 import type { RepositoryWorkspaceWorkerOperations } from "./session-repository-workspaces.worker-contract.js";
 import type { UserProfileWorkerOperations } from "./user-profiles.worker.js";
 import type { WorkerOperations, WorkerWriteOperationContext } from "./worker-operation-registry.js";
@@ -112,6 +113,7 @@ export type RegisteredStateWorkerOperations = WorkerOperations<typeof gatewayBoo
   ProtectedAutomationWorkerOperations &
   ProtectedAutomationLifecycleWorkerOperations &
   ProtectedAutomationResultWorkerOperations &
+  ProtectedSharingWorkerOperations &
   UserProfileWorkerOperations;
 
 export const stateWorkerRegistry = createWorkerOperationRegistry<
@@ -169,6 +171,8 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<
     import("./protected-automation-lifecycle.worker.js").then(
       (m) => m.protectedAutomationLifecycleOperations,
     ),
+  protectedSharing: () =>
+    import("./protected-sharing.worker.js").then((m) => m.protectedSharingOperations),
   agentDatabaseRegistry: () =>
     import("./openclaw-agent-db-registry.worker.js").then((m) => m.agentDatabaseRegistryOperations),
   authProfiles: () =>

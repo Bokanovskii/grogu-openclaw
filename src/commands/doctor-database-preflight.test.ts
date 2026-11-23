@@ -34,7 +34,7 @@ it("admits supported protected stores during update Doctor and refuses a newer a
         const statePath = openOpenClawStateDatabase({ env }).path;
         const agent = openOpenClawAgentDatabase({ agentId: "main", env });
         const agentPath = agent.path;
-        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(26);
+        expect(agent.db.prepare("PRAGMA user_version").get()?.user_version).toBe(28);
         await closeOpenClawAgentDatabasesAsync();
         await closeStateDatabaseForTest();
 
@@ -74,7 +74,7 @@ it("admits supported protected stores during update Doctor and refuses a newer a
         {
           using writer = new DatabaseSync(agentPath);
           writer.exec("UPDATE schema_meta SET agent_id = 'main' WHERE meta_key = 'primary'");
-          writer.exec("PRAGMA user_version = 27");
+          writer.exec("PRAGMA user_version = 29");
         }
         await expect(
           guardUpdateDoctorSchemaUpgrade({ preserveSourceArtifacts: true }),

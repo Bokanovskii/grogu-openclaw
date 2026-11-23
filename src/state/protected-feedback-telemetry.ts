@@ -25,6 +25,7 @@ export function readProtectedFeedbackStoredData(
   if (!tableExists(db, "protected_feedback_runs")) {
     return [];
   }
+  ensureProtectedFeedbackSchema(database);
   const records = [
     ...executeSqliteQuerySync(
       db,
@@ -94,6 +95,21 @@ export function readProtectedFeedbackStoredData(
         ]),
     ).rows.map((row) => ({
       id: `report:${row.id}`,
+      profileId: row.profile_id,
+      bytes: overheadBytes + row.bytes,
+    })),
+    ...executeSqliteQuerySync(
+      db,
+      getNodeSqliteKysely<FeedbackDatabase>(db)
+        .selectFrom("protected_report_chat_evidence as c")
+        .innerJoin("protected_feedback_reports as r", "r.id", "c.report_id")
+        .select([
+          "c.report_id",
+          "r.profile_id",
+          sql<number>`coalesce(length(CAST(c.reference AS BLOB)), 0) + 64`.as("bytes"),
+        ]),
+    ).rows.map((row) => ({
+      id: `report-chat:${row.report_id}`,
       profileId: row.profile_id,
       bytes: overheadBytes + row.bytes,
     })),

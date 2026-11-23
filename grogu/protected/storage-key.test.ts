@@ -129,7 +129,7 @@ void test("the predecessor maintenance environment provisions and migrates witho
   const databasePath = resolveOpenClawAgentSqlitePath({ agentId: "protected", env });
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 26);
+    assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 28);
     const encryptedEntry = database
       .prepare(
         `SELECT encrypted_entry_json FROM ${PROTECTED_SESSION_ENTRY_TABLE} WHERE session_key = ?`,

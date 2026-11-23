@@ -226,6 +226,21 @@ adds feedback and owner-only telemetry capabilities only for that opt-in.
 Existing clients retain their original `/me` shape. All `/admin/reports` and
 `/admin/telemetry` routes revalidate configured-owner authority server-side.
 
+Full-chat reports additionally require `report-chat-v1` in that capability
+header and explicit `includeChat:true` alongside `includeEvidence:true`.
+`GET /admin/reports/<id>/chat?cursor=<opaque>` returns up to 128 items per page;
+continue with `nextCursor` until it is `null`. The existing report-detail shape
+does not change. `capturedAt` identifies server capture time; an encrypted
+reference pins the exact transcript prefix and file metadata, excluding later
+additions. A rewritten or unavailable prefix returns `not_retained`, never a
+live-chat fallback. Reports without this consent return `not_included`.
+Tool inputs/results and compaction summaries are included, but secrets, private
+reasoning and replay fields are excluded. `redactions:null` means the exact
+redaction count is unavailable. Files are produced-file metadata only with
+`readable:false`; this does not add uploads or owner downloads. References count
+toward storage quotas and clear on chat/member deletion; consent remains until
+the report's existing 90-day expiry.
+
 ## Commands
 
 Run from a checkout with the toolchain in `toolchain.json`:
@@ -441,6 +456,23 @@ plugin captures while native code needs them, and reclaim free SQLite pages
 incrementally. Terminal non-cron task records expire after seven days only when
 delivery and lifecycle owners no longer reference them. These policies do not
 delete durable research topics or sources.
+
+Older protected Alcove runtimes also left unreadable `web_fetch` spill files in
+members' chat storage. Stop the protected listener before updating its runtime,
+then run the fixed maintenance command below before restarting it. It deletes
+only UUID-named `web-fetch-<uuid>.log` files under each chat's `web-fetch/`
+directory, removes that directory only when empty, and leaves chat transcripts
+and other files untouched. The artifact library discovers current files, so
+removed spills no longer appear there; no manifest needs updating. Use
+`--dry-run` to list the exact stored paths without changing them.
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run cleanup-web-fetch-spills
+```
+
+The existing maintenance helper dispatches into the updated runtime tree, so it
+needs no separate helper installation or schema migration. The cleanup makes
+no backup and adds no scheduler.
 
 After large logical deletions, offline Doctor compaction can repack SQLite files.
 The deployment owner stops the Gateway and runs

@@ -99,21 +99,21 @@ it("checks authenticated protected formats after activation without widening per
         path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
       );
       try {
-        agent.exec("PRAGMA user_version = 27");
+        agent.exec("PRAGMA user_version = 29");
       } finally {
         agent.close();
       }
       expect((await inspect()).result).toMatchObject({
         status: "error",
         reason: "openclaw doctor",
-        steps: [expect.objectContaining({ stderrTail: expect.stringContaining("found 27") })],
+        steps: [expect.objectContaining({ stderrTail: expect.stringContaining("found 29") })],
       });
       const malformed = new DatabaseSync(
         path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
       );
       try {
         malformed.exec(
-          "PRAGMA user_version = 26; UPDATE schema_meta SET schema_version = 25 WHERE meta_key = 'primary'",
+          "PRAGMA user_version = 28; UPDATE schema_meta SET schema_version = 25 WHERE meta_key = 'primary'",
         );
       } finally {
         malformed.close();

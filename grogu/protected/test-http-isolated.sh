@@ -25,5 +25,6 @@ exec_command=(
   grogu/protected/capacity.test.ts
   grogu/protected/automations-store.test.ts
   grogu/protected/revocation-http.test.ts
+  grogu/protected/sharing-http.test.ts
 )
 /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))' "${exec_command[@]}"

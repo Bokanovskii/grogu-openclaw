@@ -136,7 +136,8 @@ async function main() {
   const { withThinking } = await import("./models.js");
   const { resolveBundledProviderStaticCatalogModel } =
     await import("../../src/agents/embedded-agent-runner/model.static-catalog.js");
-  const { createCloudflareAccessVerifier } = await import("./identity.js");
+  const { createCloudflareAccessVerifier, protectedTestClientSubject } =
+    await import("./identity.js");
   const { createProtectedHttp } = await import("./http.js");
   const { createProtectedMemberMemory } = await import("./member-memory.js");
   const { createProtectedMemoryReview } = await import("./memory-review.js");
@@ -148,6 +149,19 @@ async function main() {
     subjects: allowedSubjects,
     issuer: accessIssuer,
   });
+  // Membership features (automations, storage limits, run admission) read admission rows; the test
+  // client bypasses Access policy but still needs one. An owner removal stays in force.
+  if (
+    settings.testClientId &&
+    (await admissionStore.addProtectedSubject(stateDir, {
+      issuer: accessIssuer,
+      subject: protectedTestClientSubject(settings.testClientId),
+    })) === "removed"
+  ) {
+    process.stderr.write(
+      "Protected test client was removed by the owner; configure a new client ID to test again.\n",
+    );
+  }
   const admissions = await admissionStore.listProtectedAdmissions(stateDir);
   const allowed = new Set(
     admissions

@@ -2819,6 +2819,11 @@ CREATE TABLE IF NOT EXISTS protected_feedback_reports (
   CHECK ((status = 'open' AND reviewed_at IS NULL) OR (status = 'reviewed' AND reviewed_at IS NOT NULL))
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS protected_report_chat_evidence (
+  report_id TEXT NOT NULL PRIMARY KEY REFERENCES protected_feedback_reports(id) ON DELETE CASCADE,
+  reference TEXT
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS protected_response_feedback (
   profile_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
@@ -2972,6 +2977,34 @@ CREATE TABLE IF NOT EXISTS protected_automation_owner_inbox (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_protected_automation_owner_inbox_recipient
   ON protected_automation_owner_inbox(profile_id, sequence DESC);
+
+-- Live read-only chat links. Chats live in agent databases, so readers also verify the chat.
+CREATE TABLE IF NOT EXISTS protected_chat_shares (
+  owner_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  chat_id TEXT NOT NULL CHECK (
+    length(chat_id) = 36 AND substr(chat_id, 9, 1) = '-' AND substr(chat_id, 14, 1) = '-'
+    AND substr(chat_id, 19, 1) = '-' AND substr(chat_id, 24, 1) = '-'
+    AND chat_id NOT GLOB '*[^0-9a-f-]*' AND substr(chat_id, 15, 1) = '4'
+    AND substr(chat_id, 20, 1) IN ('8', '9', 'a', 'b')
+  ),
+  share_id TEXT NOT NULL UNIQUE CHECK (
+    length(share_id) = 43 AND share_id NOT GLOB '*[^A-Za-z0-9_-]*'
+  ),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  PRIMARY KEY (owner_profile_id, chat_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS protected_chat_share_grants (
+  owner_profile_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  recipient_profile_id TEXT NOT NULL REFERENCES user_profiles(id),
+  granted_at INTEGER NOT NULL CHECK (granted_at >= 0),
+  PRIMARY KEY (owner_profile_id, chat_id, recipient_profile_id),
+  FOREIGN KEY (owner_profile_id, chat_id)
+    REFERENCES protected_chat_shares(owner_profile_id, chat_id),
+  CHECK (recipient_profile_id <> owner_profile_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_protected_chat_share_grants_recipient
+  ON protected_chat_share_grants(recipient_profile_id, granted_at DESC);
 
 CREATE TABLE IF NOT EXISTS outbound_media_provenance (
   realpath TEXT NOT NULL PRIMARY KEY,

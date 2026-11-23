@@ -65,9 +65,11 @@ import {
   protectedResearchAgent,
   type ProtectedAgentExtension,
 } from "./agents.js";
+import { ALCOVE_BROWSER_TOOL_NAMES } from "./alcove-browser/contract.js";
 import { readProtectedAutomationLifecycleStorageUsage } from "./automation-lifecycle-store.js";
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
+import type { ProtectedBrowserBroker } from "./browser/broker.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import type { ProtectedIdentityVerifier } from "./identity.js";
@@ -241,6 +243,27 @@ void test("Protected turns load skills on request and retain credentials during 
   });
   const origin = "https://family.example";
   const expiresAt = Date.now() + 3_600_000;
+  const browserSessions = { opened: 0, open: 0 };
+  const browser: ProtectedBrowserBroker = {
+    openSession() {
+      browserSessions.opened += 1;
+      browserSessions.open += 1;
+      const unused = async () => ({ status: "unavailable" as const, reason: "synthetic" });
+      return {
+        bindings: {
+          browser: "fresh",
+          open: unused,
+          snapshot: unused,
+          followLink: unused,
+          back: unused,
+        },
+        async close() {
+          browserSessions.open -= 1;
+        },
+      };
+    },
+    async shutdown() {},
+  };
   const { publishConfiguredModelRuntimeSnapshots } =
     await import("../../src/gateway/server-startup-model-runtime.js");
   await publishConfiguredModelRuntimeSnapshots({ cfg: config, workspaceDir });
@@ -274,11 +297,13 @@ void test("Protected turns load skills on request and retain credentials during 
       config,
       workspaceDir,
       agentDir,
+      browser,
       models: [withThinking({ provider: "sparky", id: "synthetic", label: "Synthetic" })],
       resolveSparkyKey: async () => "synthetic-request-only-key",
     }),
   } satisfies Parameters<typeof createProtectedHttp>[0];
   let app = createProtectedHttp(appOptions);
+  t.after(() => assert.equal(browserSessions.open, 0, "every browser session closes"));
   let server = createProtectedServer(origin, app.fetch);
   let url = await listen(server);
   t.after(() => closeProtectedServer(server, app, stateDir));
@@ -330,7 +355,12 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.ok(toolNames);
   assert.ok(toolNames.includes("skills_read"));
   assert.ok(!toolNames.includes("create_artifact"));
-  const allowedTools = new Set<string>(["route_to_agent", ...protectedAgentTools]);
+  assert.ok(ALCOVE_BROWSER_TOOL_NAMES.every((name) => toolNames.includes(name)));
+  const allowedTools = new Set<string>([
+    "route_to_agent",
+    ...protectedAgentTools,
+    ...ALCOVE_BROWSER_TOOL_NAMES,
+  ]);
   assert.ok(toolNames.every((name) => allowedTools.has(name)));
 
   const overflowStart = requests.length;
@@ -507,6 +537,7 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
   const scheduledDelivery = waitForDelivery("scheduled");
   const automationRequestStart = requests.length;
+  const browsersBeforeAutomation = browserSessions.opened;
   t.mock.timers.tick(60_000);
   const scheduledRun = await scheduledDelivery;
   assert.equal(scheduledRun.status, "succeeded");
@@ -517,6 +548,15 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.match(JSON.stringify(automationRequest?.messages), /Summarize synthetic public news/u);
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_search"));
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_fetch"));
+  // Automation runs never receive a browser, even for an interactive member's definition.
+  assert.ok(
+    requests
+      .slice(automationRequestStart)
+      .every(
+        (request) => !request.tools?.some((tool) => tool.function.name.startsWith("browser_")),
+      ),
+  );
+  assert.equal(browserSessions.opened, browsersBeforeAutomation);
   const paused = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": (await resumed.clone().json()).automation.version },

@@ -3,7 +3,10 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { queryObjects } from "node:v8";
 import { Value } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAuthorizedUserFiles } from "../../infra/authorized-user-files.js";
+import { root } from "../../infra/fs-safe.js";
 import { wrapExternalContent, wrapWebContent } from "../../security/external-content.js";
+import { createGroguRuntimeFixture } from "../grogu-runtime.test-support.js";
 import { compactToolOutputHint } from "../tool-schema-hints.js";
 
 const { fetchWithWebToolsNetworkGuardMock, resolveWebFetchDefinitionMock } = vi.hoisted(() => ({
@@ -358,6 +361,56 @@ describe("web_fetch output contract", () => {
     expect(second.text).toContain("OpenClaw-Test-UA-B");
     expect(second.cached).toBeUndefined();
     expect(fetchWithWebToolsNetworkGuardMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps member-scoped truncated output inline and partitions its cache", async () => {
+    const fixture = createGroguRuntimeFixture();
+    let revoked = false;
+    try {
+      const files = await createAuthorizedUserFiles({
+        usersRoot: await root(fixture.directory),
+        profileId: "alice",
+        assertCurrent() {
+          if (revoked) {
+            throw new Error("revoked");
+          }
+        },
+        maxBytes: 4096,
+      });
+      fetchWithWebToolsNetworkGuardMock.mockImplementation(async () => ({
+        response: new Response("web fetch content ".repeat(400), {
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }),
+        finalUrl: "https://example.com/member-inline",
+        release: async () => {},
+      }));
+      const execute = async (cacheKey: string) =>
+        requireDetails(
+          (await createWebFetchTool({
+            config: { tools: { web: { fetch: { cacheTtlMinutes: 5, maxChars: 500 } } } },
+            sandboxed: false,
+            userFileScope: { files, directory: "chats/chat", cacheKey },
+          })?.execute?.("call", { url: "https://example.com/member-inline" })) ?? {},
+        );
+
+      const details = await execute("alice/chat/run");
+      expectContract(details);
+      expect(details).toMatchObject({ truncated: true });
+      expect(details).not.toHaveProperty("spill");
+      expect(details.text).not.toContain("Full output");
+      expect(details.text).toContain("The rest was not saved.");
+      expect(String(details.text).length).toBeLessThanOrEqual(500);
+      await expect(files.list("chats")).rejects.toMatchObject({ code: "not-found" });
+
+      expect(await execute("alice/chat/run")).toMatchObject({ cached: true });
+      expect(await execute("bob/chat/run")).not.toHaveProperty("cached");
+      expect(fetchWithWebToolsNetworkGuardMock).toHaveBeenCalledTimes(2);
+
+      revoked = true;
+      await expect(execute("alice/chat/run")).rejects.toThrow("revoked");
+    } finally {
+      fixture.cleanup();
+    }
   });
 
   it("spills truncated fetched text to a private temp file", async () => {

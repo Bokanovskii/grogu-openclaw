@@ -47,8 +47,14 @@ export function createPluginToolFactoryContext(params: {
     continuation?.assertCurrent();
     assertMemoryAudienceCurrent?.();
   };
+  const runtimeBindings = context.toolRuntimeBindings;
+  const toolRuntimeBindings =
+    runtimeBindings && Object.hasOwn(runtimeBindings, entry.pluginId)
+      ? { [entry.pluginId]: runtimeBindings[entry.pluginId] }
+      : undefined;
   return {
     ...context,
+    toolRuntimeBindings,
     ...(continuation
       ? {
           requesterSenderId: continuation.senderId,

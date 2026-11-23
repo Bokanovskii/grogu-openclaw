@@ -125,9 +125,14 @@ state or configuration. The profile/session stores are OpenClaw's canonical
 stores inside this isolated state directory.
 
 Initialization measures free space on the state volume. It reserves a 512 MiB
-free-space floor and takes at most one-sixteenth of the remaining space, capped
-at 256 MiB, for the Alcove budget. Each profile is limited to one-quarter of
-that budget. The runtime counts canonical chat/transcript bytes and files in
+free-space floor and takes one-sixteenth of the remaining space as the shared
+member budget (`globalBytes`). The default member limit (`userBytes`) is
+512 MiB, or the shared budget if that is smaller. The owner can set a different
+limit for one member; see "Member storage limits" below. The owner has no member
+limit and is not stopped by the shared budget, but the owner's data still counts
+toward it, and the free-space floor applies to everyone. When the shared budget
+is full, members get `413 quota_exceeded` with a message that names the server's
+shared storage, not their own limit. The runtime counts canonical chat/transcript bytes and files in
 each chat's directory, including widgets and fetched artifacts. It also counts
 each saved automation definition against its owner profile and the global
 budget. Automation storage uses its stored ciphertext bytes and the same 4 KiB
@@ -168,10 +173,39 @@ ownership again. File responses are downloads, not HTML pages.
 estimated size, largest first. Each estimate uses the same transcript, file,
 and overhead charges as the quota. `usedBytes` also counts saved automation
 definitions and transient child work. Neither is listed as a chat. `limitBytes`
-is the member's configured limit, not the host's free disk space. To delete a
+is the member's effective limit, not the host's free disk space. It is `null`
+for the owner, who has no limit. To delete a
 reviewed chat, send its `version` in `If-Match` to the existing
 `DELETE /api/protected/v1/chats/:id` route. Read storage again after deletion to
 show the new total.
+
+### Member storage limits
+
+The owner reads a member's limit with
+`GET /api/protected/v1/admin/people/:id/storage-limit`, where `:id` is the
+person ID from `/admin/people`. The response has `usedBytes` (`null` before the
+member's first sign-in), the effective `limitBytes` (`null` when `exempt`),
+`defaultLimitBytes`, `customLimitBytes` (`null` for the default), `exempt`
+(`true` for the owner), `minLimitBytes` (16 MiB), `maxLimitBytes` (the shared
+budget), and an opaque `version`.
+
+To set a limit, send `PUT` with the current `version` in `If-Match` and the JSON
+body `{ "limitBytes": N }`. To restore the default, send `DELETE` with
+`If-Match`. Both return the new state. The server checks the owner's live grant
+again just before the write. Errors: `428 version_required`,
+`409 version_conflict` (reload and retry), `409 limit_exempt` (the owner),
+`400 invalid_limit` (the message names the allowed range), and
+`404 person_not_found`. The value is stored in the shared state database and is
+deleted when the person is removed. A limit below current use deletes nothing;
+it stops further growth with `413 quota_exceeded`.
+
+Existing installs keep the limits that `init` measured. To apply the current
+policy (512 MiB default, no 256 MiB shared cap), run the following command and
+then restart the listener:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
+```
 
 `PATCH /api/protected/v1/chats/:id/title` renames the signed-in member's chat.
 Send the current chat `version` in `If-Match` and a JSON body with `title`.
@@ -296,7 +330,10 @@ or configuration from personal Grogu.
 `GET /api/protected/v1/me` lists the fixed models and their supported reasoning
 levels. A signed-in profile can send its Copilot access token to
 `POST /api/protected/v1/providers/github-copilot/models` to list the chat models
-available to that account. The token is used for that request only. Turns may
+available to that account. Clients can request the optional account-reported
+`vendor` on models with `X-Alcove-Capabilities: model-vendor-v1`; an absent
+vendor is unknown. A model's `contextWindow` is its reported maximum, not a
+separate context-tier selection. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.

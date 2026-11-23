@@ -72,6 +72,46 @@ void test("concurrent members share storage quota without blocking each other", 
   }
 });
 
+void test("per-member limits override the default and the owner is exempt", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot: await root(stateDir),
+    maxFileBytes: 1024,
+    limits: { userBytes: 32_768, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const raised = await admit("member", () => {}, "turn", 49_152);
+  const owner = await admit("owner", () => {}, "turn", null);
+  try {
+    raised.charge(32_768);
+    assert.throws(() => raised.charge(1), { code: "quota_exceeded" });
+    // The owner passes both the member default and the shared budget.
+    owner.charge(8_192);
+    owner.charge(8_192);
+    await assert.rejects(
+      admit("other", () => {}, "turn", 32_768),
+      (error: Error) => {
+        assert.equal((error as { code?: string }).code, "quota_exceeded");
+        assert.match(error.message, /shared storage/u);
+        return true;
+      },
+    );
+  } finally {
+    raised.release();
+    owner.release();
+  }
+});
+
 void test("deleted chats free quota while another member is still running", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });

@@ -5,6 +5,8 @@ import {
   type ProtectedAutomationCatalog,
   type ProtectedAutomationDraft,
   type ProtectedAutomationDraftValidation,
+  type ProtectedAutomationPatchRequest,
+  type ProtectedAutomationRecord,
   type ProtectedModel,
 } from "../../packages/gateway-protocol/src/protected.js";
 import { MAX_DATE_TIMESTAMP_MS } from "../../packages/gateway-protocol/src/schema/cron-shared.js";
@@ -206,6 +208,29 @@ export function validateProtectedAutomationDraft(
     valid: true,
     draft: resolvedDraft,
   };
+}
+
+export function applyProtectedAutomationPatch(
+  current: ProtectedAutomationRecord,
+  patch: ProtectedAutomationPatchRequest,
+): Record<string, unknown> {
+  const definition: Record<string, unknown> = { ...current };
+  delete definition.id;
+  delete definition.version;
+  delete definition.enabled;
+  delete definition.state;
+  delete definition.nextCheckAt;
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === "enabled") {
+      continue;
+    }
+    if (value === null) {
+      delete definition[key];
+    } else {
+      definition[key] = value;
+    }
+  }
+  return definition;
 }
 
 function validateSchedule(

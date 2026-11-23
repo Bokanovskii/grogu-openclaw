@@ -58,6 +58,11 @@ import {
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
 import { readWidgetDraftMetadata, WIDGET_DRAFT_MAX_CHARS } from "../../src/shared/widget-draft.js";
 import type { ProtectedAgentDefinition } from "./agents.js";
+import {
+  AUTOMATIONS_CHAT_PLUGIN_ID,
+  AUTOMATIONS_CHAT_TOOL_NAMES,
+  type AutomationsChatBindings,
+} from "./automations-chat/contract.js";
 import { chatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
@@ -86,6 +91,7 @@ export type ProtectedTurn = {
     lifecycleRevision: string | null;
   };
   input: TurnInput;
+  automationChat?: AutomationsChatBindings;
   mentionedAgents: readonly Readonly<ProtectedAgentDefinition>[];
   agent: Readonly<ProtectedAgentDefinition>;
   /** The chat agent may hand the request to one other selectable agent. */
@@ -120,6 +126,9 @@ export type ProtectedTurn = {
   widget: (widget: Widget) => Promise<void>;
   widgetDraft: (draft: Extract<ProtectedTurnEvent, { type: "widget-draft" }>) => Promise<void>;
 };
+
+const automationsChatInstructions =
+  "Automation tools can only read this member's private automations or prepare suggestions. Every proposal returns writeApplied:false and has not been saved or scheduled. Never claim that a proposal changed or enabled an automation.";
 
 async function runMentionedAgent(
   config: OpenClawConfig,
@@ -612,6 +621,10 @@ export function createCanonicalProtectedTurns(options: {
           assertCurrent: turn.assertCurrent,
         });
         credential = requestCredential;
+        const allowedTools = [
+          ...turn.agent.tools,
+          ...(turn.automationChat ? AUTOMATIONS_CHAT_TOOL_NAMES : []),
+        ];
         const result = await withProtectedGatewayAuthority(config, turn, () =>
           withoutModelRequestTelemetry(
             () =>
@@ -632,7 +645,9 @@ export function createCanonicalProtectedTurns(options: {
                   agentDir: options.agentDir,
                   prompt: turn.input.text,
                   transcriptPrompt: turn.input.text,
-                  extraSystemPrompt: turn.agent.systemPrompt,
+                  extraSystemPrompt: turn.automationChat
+                    ? `${turn.agent.systemPrompt}\n\n${automationsChatInstructions}`
+                    : turn.agent.systemPrompt,
                   skillsSnapshot: turn.agent.skillsSnapshot,
                   trigger: "user",
                   provider,
@@ -652,9 +667,24 @@ export function createCanonicalProtectedTurns(options: {
                   disableToolSearch: true,
                   disableTrajectory: true,
                   codeModeOverride: false,
-                  toolsAllow: [...turn.agent.tools, turn.routing.tool.function.name],
-                  toolExecutionAllow: turn.agent.tools,
+                  toolsAllow: [...allowedTools, turn.routing.tool.function.name],
+                  toolExecutionAllow: allowedTools,
                   clientTools: [turn.routing.tool],
+                  ...(turn.automationChat
+                    ? {
+                        runtimePluginToolGrant: {
+                          pluginId: AUTOMATIONS_CHAT_PLUGIN_ID,
+                          toolNames: AUTOMATIONS_CHAT_TOOL_NAMES,
+                        },
+                      }
+                    : {}),
+                  ...(turn.automationChat
+                    ? {
+                        toolRuntimeBindings: {
+                          [AUTOMATIONS_CHAT_PLUGIN_ID]: turn.automationChat,
+                        },
+                      }
+                    : {}),
                   clientCaps: ["inline-widgets"],
                   userFileScope: {
                     files: turn.files,

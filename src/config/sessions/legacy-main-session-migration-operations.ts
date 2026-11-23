@@ -1,5 +1,6 @@
 import { executeSqliteQuerySync, sqliteStringSet } from "../../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
+import { captureAgentDatabaseAdmission } from "../../state/agent-database-admission.js";
 import {
   isOpenClawAgentDatabasePathCurrent,
   readOpenClawAgentDatabaseIdentity,
@@ -23,6 +24,7 @@ import {
   claimsMatch,
   generationsMatch,
   readClaim,
+  verifyCopiedSuggestions,
 } from "./legacy-main-session-migration-claims.js";
 import {
   acquireLegacySessionDestinationCustody,
@@ -402,7 +404,7 @@ async function deleteCopiedClaims(params: {
   destination: PhysicalStore;
   env: NodeJS.ProcessEnv;
   receipt: SessionClaim;
-}): Promise<SessionClaim | undefined> {
+}): Promise<string | undefined> {
   const sources = params.aliases.filter(
     (claim) => !samePhysicalStore(claim.store, params.destination),
   );
@@ -460,15 +462,27 @@ async function deleteCopiedClaims(params: {
     if (!destination || !claimUnchanged(destination, params.receipt)) {
       throw changed();
     }
+    const lostSuggestions = verifyCopiedSuggestions(params, destinationReader, sources, changed);
+    if (lostSuggestions) {
+      return lostSuggestions;
+    }
+    // Admission decisions are in-memory facts, so the commit edge stays SQLite-free.
+    const admissions = [
+      ...new Set([
+        params.destination.databaseAgentId,
+        ...sources.map((claim) => claim.store.databaseAgentId),
+      ]),
+    ].map((agentId) => captureAgentDatabaseAdmission(agentId, { env: params.env }));
     const assertCopied = () => {
       params.beforePersistentApply?.();
       assertCurrent();
       held.assertHeld();
+      admissions.forEach((assertAdmitted) => assertAdmitted());
     };
     assertCopied();
     for (const claim of sources) {
       if (!(await deleteExpectedClaim(claim, assertCopied))) {
-        return claim;
+        return `source changed before expected-entry cleanup: ${claim.store.path}#${claim.key}`;
       }
     }
     return undefined;
@@ -606,13 +620,9 @@ export async function processIdenticalClaims(params: {
 
   // The destination commit precedes source cleanup, and protected copies are checkpointed first,
   // including on a retry. Every retry sees the original claim, an identical canonical claim, or both.
-  const changedSource = await deleteCopiedClaims({ ...params, receipt: canonical });
-  if (changedSource) {
-    return {
-      kind: "divergent-canonical",
-      canonicalKey: params.canonicalKey,
-      detail: `source changed before expected-entry cleanup: ${changedSource.store.path}#${changedSource.key}`,
-    };
+  const retained = await deleteCopiedClaims({ ...params, receipt: canonical });
+  if (retained) {
+    return { kind: "divergent-canonical", canonicalKey: params.canonicalKey, detail: retained };
   }
   return completedOutcome();
 }

@@ -11,13 +11,19 @@ opaque-iframe MessageChannel transport. The server must serve the fork's
 or less restrictive sandbox. Retained HTML is loaded through this current
 policy on every open, never directly as a document URL.
 
-Only bounded resize, display errors, theme, and composer text are supported.
+Only bounded resize, viewport top state, display errors, theme, and composer text are supported.
 `onPrompt` inserts text for review; it must not send a chat or perform actions.
 No RPC, files, credentials, account state, or host execution crosses this bridge.
 `draft: true` disables scripts in the untrusted inner frame.
 The optional `onReady` callback fires once when the matching content has loaded.
 Keep the visible frame until its replacement calls `onReady`. A frame's native
 `load` event only means that the sandbox shell loaded, not its widget resource.
+
+Pass `onScrollTopChange(atTop)` to follow the saved document's own viewport.
+It reports a boolean when that viewport leaves or returns to the top. The
+containing page and lists inside the artifact have separate scroll positions.
+Start each viewer at the top. Drafts and older runtime shells do not send the
+signal, so keep an accessible way to exit without it.
 
 Supply `themeTokens` on mount and call `host.setTheme(mode, tokens)` on every
 theme change. Each call replaces the full snapshot. Omitted values fall back

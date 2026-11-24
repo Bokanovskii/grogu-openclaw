@@ -5,7 +5,12 @@ import {
   COMMAND_PALETTE_SHORTCUT,
   createKeyboardShortcutMatcher,
 } from "../shared/keyboard-shortcuts.js";
-import { WIDGET_THEME_MESSAGE_TYPE, WIDGET_THEME_TOKENS } from "../shared/widget-theme.js";
+import {
+  LEGACY_WIDGET_CARD_RULE,
+  WIDGET_CARD_RULE,
+  WIDGET_THEME_MESSAGE_TYPE,
+  WIDGET_THEME_TOKENS,
+} from "../shared/widget-theme.js";
 import { buildSandboxWidgetScrollBridgeHtml } from "./sandbox-widget-scroll-bridge.js";
 
 export type SandboxHostCsp = {
@@ -415,6 +420,19 @@ function buildSandboxHostProxyHtml(
       throw new Error("sandbox descendant browsing contexts are disabled");
     }
     const doctypeEnd = resolveLeadingDoctypeEnd(html);
+    // Older Canvas documents baked the generic card fill into the generated
+    // head. Upgrade only that base rule at display time, never widget markup.
+    if (${Boolean(protectedProfile && options?.protectedWidgetStyles)} && html.startsWith('\\n<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer">', doctypeEnd)) {
+      const style = html.indexOf("<style>:root{color-scheme:light dark;");
+      const headEnd = html.indexOf("</head>");
+      if (style !== -1 && html.indexOf("</style>", style) === headEnd - "</style>".length) {
+        const legacy = ${JSON.stringify(LEGACY_WIDGET_CARD_RULE)};
+        const card = html.indexOf(legacy, style);
+        if (card !== -1 && card < headEnd) {
+          html = html.slice(0, card) + ${JSON.stringify(WIDGET_CARD_RULE)} + html.slice(card + legacy.length);
+        }
+      }
+    }
     let themeStyle = "";
     if (${protectedProfile} && hostTheme) {
       const style = document.createElement("span").style;

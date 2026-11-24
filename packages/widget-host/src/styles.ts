@@ -4,6 +4,7 @@
  * corresponding tokens in grogu-protected/src/tokens.css.
  */
 export const ALCOVE_CONTENT_STYLES = `
+:root { --openclaw-card-surface: transparent; }
 :root:has(.alcove) { color-scheme: light dark; }
 .alcove {
   --alcove-ground: light-dark(oklch(98.4% 0.004 150), oklch(19% 0.013 178));

@@ -4030,11 +4030,25 @@ void test("Family directory lists admitted people and isolates the development i
 });
 
 void test("Family canonical turns save sources, widgets, and offline replies, then drain on shutdown", async (t) => {
-  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  await exerciseCanonicalTurns(t, "conversation");
+});
+
+void test("Family final widgets complete with or without a closing note", async (t) => {
+  await exerciseCanonicalTurns(t, "final-widgets");
+});
+
+async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" | "final-widgets") {
+  const stateRoot = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
-    stateDir && path.relative(path.resolve(".artifacts"), stateDir).startsWith("protected-proof-"),
+    stateRoot &&
+      path.relative(path.resolve(".artifacts"), stateRoot).startsWith("protected-proof-"),
     "Set an isolated OPENCLAW_STATE_DIR under .artifacts/protected-proof-*.",
   );
+  const stateDir = path.join(stateRoot, scenario);
+  process.env.OPENCLAW_STATE_DIR = stateDir;
+  t.after(() => {
+    process.env.OPENCLAW_STATE_DIR = stateRoot;
+  });
   protectedTestStateDirs.add(stateDir);
   const usersDir = path.join(stateDir, "users");
   const workspaceDir = path.join(stateDir, "workspace");
@@ -4042,6 +4056,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   await Promise.all(
     [usersDir, workspaceDir, agentDir].map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })),
   );
+  await prepareProtectedSharedState(stateDir, () => {});
   const seen: Array<{
     auth: string | undefined;
     body: {
@@ -4080,6 +4095,8 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   const failedRoutePrompt = "Hand this unsuccessful request to travel.";
   const failedRouteBrief = "Simulate a specialist provider failure.";
   const selfRoutePrompt = "Hand this request back to yourself.";
+  const closingWidgetPrompt = "Rebuild the dashboard here with a closing note.";
+  const closingNote = "Allow an extra hour for the tram on Sunday.";
   const rejectedKeyPrompt = "Use a revoked service key";
   const suffix = randomUUID();
   const rawGithubToken = `gho_family_${suffix}`;
@@ -4335,13 +4352,17 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
         offlineProvider.resolve();
         await offlineRelease.promise;
       }
-      const finalWidgetTurn = JSON.stringify(body.messages).includes(
-        "Finish this answer with only a widget.",
-      );
+      const closingWidgetTurn = JSON.stringify(body.messages).includes(closingWidgetPrompt);
+      const finalWidgetTurn =
+        closingWidgetTurn ||
+        JSON.stringify(body.messages).includes("Finish this answer with only a widget.");
       const widgetArguments = JSON.stringify({
-        title: "Synthetic widget",
-        widget_code: "<p>Scoped widget body</p>",
+        title: closingWidgetTurn ? "Lisbon in two days" : "Synthetic widget",
+        widget_code: closingWidgetTurn
+          ? '<section class="card"><h2>Day 1 · Alfama</h2><p>Walk from the cathedral to the riverside.</p><h2>Day 2 · Belém</h2><p>Visit the gardens, then take the tram back.</p></section>'
+          : "<p>Scoped widget body</p>",
         ...(finalWidgetTurn ? { final: true } : {}),
+        ...(closingWidgetTurn ? { closing_text: closingNote } : {}),
       });
       const researchTurn = JSON.stringify(body.messages).includes(
         "Use concise, evidence-based summaries.",
@@ -4490,6 +4511,9 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
               ]
             : (cleanupTurn || finalWidgetTurn || routedTravelTurn) && !hasToolResponse
               ? [
+                  ...(closingWidgetTurn
+                    ? [[{ role: "assistant", content: "Rebuilding the dashboard here." }, null]]
+                    : []),
                   [
                     {
                       role: "assistant",
@@ -4802,6 +4826,69 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
   assert.equal(me.status, 200, await me.clone().text());
   const meBody = await me.json();
   const { user, models: fixedModels } = meBody;
+  if (scenario === "final-widgets") {
+    for (const withNote of [false, true]) {
+      const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+      const route = `/chats/${chat.id}`;
+      const post = (text: string) =>
+        call(`${route}/turns`, {
+          method: "POST",
+          body: JSON.stringify({ provider: "sparky", text }),
+          headers: { "x-grogu-profile": user.id },
+        });
+      const beforeRequests = seen.length;
+      const stream = await (
+        await post(withNote ? closingWidgetPrompt : "Finish this answer with only a widget.")
+      ).text();
+      const events = stream
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(
+        events
+          .filter((event) => ["widget", "delta", "usage", "error", "done"].includes(event.type))
+          .map((event) => (event.type === "delta" ? event.text.trim() : event.type)),
+        withNote
+          ? ["Rebuilding the dashboard here.", "widget", closingNote, "usage", "done"]
+          : ["widget", "usage", "done"],
+      );
+      assert.equal(seen.length - beforeRequests, 1, "a final widget needs no follow-up model call");
+      const saved = await (await call(route)).json();
+      assert.deepEqual(
+        saved.chat.messages
+          .slice(1)
+          .map((message: { text: string; status: string; widgets?: unknown[] }) => [
+            message.text,
+            message.status,
+            message.widgets?.length ?? 0,
+          ]),
+        withNote
+          ? [
+              ["Rebuilding the dashboard here.", "complete", 1],
+              [closingNote, "complete", 0],
+            ]
+          : [["", "complete", 1]],
+      );
+      assert.match(await (await post("Continue after the widget.")).text(), /"type":"done"/);
+      const history = seen[beforeRequests + 1]?.body.messages;
+      assert.ok(history);
+      assert.equal(
+        history.some(
+          (message) =>
+            isRecord(message) && message.role === "assistant" && message.content === closingNote,
+        ),
+        false,
+      );
+      const current = await (await call(route)).json();
+      assert.equal(
+        (await call(route, { method: "DELETE", headers: { "if-match": current.chat.version } }))
+          .status,
+        204,
+      );
+    }
+    fixtureCompleted = true;
+    return;
+  }
   await t.test("offers provider-backed context sizes only to capable clients", async () => {
     const listing = (capability?: string) =>
       call("/providers/github-copilot/models", {
@@ -5572,51 +5659,6 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
       "the child receives the shared tool surface without routing or cross-chat sends",
     );
   }
-  const { chat: finalWidgetChat } = await (
-    await reopened("/chats", { method: "POST", body: "{}" })
-  ).json();
-  const finalWidgetRoute = `/chats/${finalWidgetChat.id}`;
-  const beforeFinalWidget = seen.length;
-  const finalWidgetResponse = await reopened(`${finalWidgetRoute}/turns`, {
-    method: "POST",
-    body: JSON.stringify({
-      provider: "sparky",
-      text: "Finish this answer with only a widget.",
-    }),
-    headers: { "x-grogu-profile": user.id },
-  });
-  const finalWidgetStream = await finalWidgetResponse.text();
-  assert.match(finalWidgetStream, /"type":"widget"/);
-  assert.match(finalWidgetStream, /"type":"done"/, finalWidgetStream);
-  assert.doesNotMatch(finalWidgetStream, /"type":"error"/);
-  assert.match(finalWidgetStream, /"type":"usage"/);
-  assert.equal(seen.length - beforeFinalWidget, 1, "a final widget needs no follow-up model call");
-  const finalWidgetSaved = await (await reopened(finalWidgetRoute)).json();
-  assert.equal(finalWidgetSaved.chat.messages.length, 2);
-  assert.equal(finalWidgetSaved.chat.messages.at(-1).status, "complete");
-  assert.equal(finalWidgetSaved.chat.messages.at(-1).widgets.length, 1);
-  assert.equal(
-    finalWidgetSaved.chat.messages.filter(
-      (message: { status?: string }) => message.status === "failed",
-    ).length,
-    0,
-  );
-  const finalWidgetFollowup = await reopened(`${finalWidgetRoute}/turns`, {
-    method: "POST",
-    body: JSON.stringify({ provider: "sparky", text: "Continue after the widget." }),
-    headers: { "x-grogu-profile": user.id },
-  });
-  assert.match(await finalWidgetFollowup.text(), /"type":"done"/);
-  const finalWidgetUpdated = await (await reopened(finalWidgetRoute)).json();
-  assert.equal(
-    (
-      await reopened(finalWidgetRoute, {
-        method: "DELETE",
-        headers: { "if-match": finalWidgetUpdated.chat.version },
-      })
-    ).status,
-    204,
-  );
   const profileFiles = await createAuthorizedUserFiles({
     usersRoot: await root(usersDir),
     profileId: user.id,
@@ -6693,7 +6735,7 @@ void test("Family canonical turns save sources, widgets, and offline replies, th
     }
   }
   fixtureCompleted = true;
-});
+}
 
 void test("Family rate limits separate busy Sparky from personal plan limits", () => {
   const limited = (provider: string) =>

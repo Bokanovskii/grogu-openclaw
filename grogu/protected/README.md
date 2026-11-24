@@ -154,8 +154,10 @@ An answer can finish with a widget and no closing text. When the native agent
 confirms successful terminal tool execution, Alcove saves a completion receipt
 in the canonical transcript. The receipt completes the existing reply after
 reload and does not become another chat bubble or provider message. An ordinary
-tool call or saved widget alone does not prove completion. Tool-only turns
-without that receipt retain their recorded status.
+tool call or saved widget alone does not prove completion. If the final widget
+provides a closing note, Alcove saves the note in its completion receipt and
+delivers it once after the widget, without another model request. Tool-only
+turns without a receipt retain their recorded status.
 
 A model's explicit completion or a qualified terminal receipt also completes
 earlier visible tool-call fragments in the same user turn. A child result or

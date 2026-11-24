@@ -674,6 +674,18 @@ time the turn waited behind other storage admissions, which share one queue, and
 `storageScanMs` is the time it spent measuring stored data (zero when it reused
 another admission's measurement); both fall between the `aliasesPrepared` and
 `storageAdmitted` steps. They are present only when storage limits are configured.
+`modelRequests` counts the turn's finished model requests (the turn itself plus
+any specialist it started), and the other `model` fields add them up:
+`modelWallMs`; `modelFirstOutputMs`, the time from request start to the first text,
+reasoning, or tool output; `modelFirstTextMs`, the time to the first text, so the gap
+between the two is time spent on reasoning or tool calls before any text; and the token
+counts `modelInputTokens`, `modelOutputTokens`, `modelCacheReadTokens`, and
+`modelReasoningTokens`. A total is absent when no request measured it, and requests that
+run side by side overlap, so a total can exceed the turn's wall time. When a member-memory
+flush makes a model request of its own, these fields do not include it. `toolCalls` and
+`toolMs` count the tool calls that finished, from their start to their result, across the turn
+and its specialists; calls that run in parallel overlap. `searchMs` and `fetchMs` are the
+parts spent in web search and web fetch. Tool names, arguments, and results are not recorded.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not

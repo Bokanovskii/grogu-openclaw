@@ -1396,6 +1396,7 @@ export function createProtectedHttp(options: {
                     revalidate: checkRun,
                     markTiming: timing.mark,
                     markStep: timing.at,
+                    toolTiming: timing.tool,
                     saveChildResult,
                     cleanupChildFiles: (sessionId) =>
                       chats.removeTransientFiles(
@@ -1604,6 +1605,7 @@ export function createProtectedHttp(options: {
             errorCode = issue.code;
             send({ type: "error", code: issue.code, message: issue.message });
           } finally {
+            timing.modelRequests(modelRequests);
             const timingMetrics = timing.finish(outcome);
             const telemetryRequests = modelRequests.map((record) => ({
               requestId: record.requestId,

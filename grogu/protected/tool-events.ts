@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 
@@ -45,6 +46,35 @@ export function projectActivity(
           ? (["widget", "Creating a widget"] as const)
           : (["tool", toolLabels[name] ?? "Using a tool"] as const);
   return { id, kind, label, status };
+}
+
+/**
+ * Times each tool call of one run, from its start event to its result event. Create one per run:
+ * tool call ids are only unique within a run.
+ */
+export function createToolTimer(
+  record: (kind: ProtectedActivity["kind"], durationMs: number) => void,
+  now: () => number = () => performance.now(),
+) {
+  const running = new Map<string, { kind: ProtectedActivity["kind"]; startedAt: number }>();
+  return (event: Record<string, unknown>) => {
+    if (event.phase !== "start" && event.phase !== "result") {
+      return;
+    }
+    const activity = projectActivity(event.name, event.toolCallId, "running");
+    if (!activity) {
+      return;
+    }
+    if (event.phase === "start") {
+      running.set(activity.id, { kind: activity.kind, startedAt: now() });
+      return;
+    }
+    const call = running.get(activity.id);
+    if (call) {
+      running.delete(activity.id);
+      record(call.kind, now() - call.startedAt);
+    }
+  };
 }
 
 // Web tools frame untrusted titles for the model; show members only the framed text.

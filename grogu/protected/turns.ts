@@ -85,7 +85,13 @@ import { ProtectedError, providerTimeout } from "./errors.js";
 import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { fetchProtectedCopilotModels } from "./models.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
-import { projectActivity, projectToolResult, type Source, type Widget } from "./tool-events.js";
+import {
+  createToolTimer,
+  projectActivity,
+  projectToolResult,
+  type Source,
+  type Widget,
+} from "./tool-events.js";
 import type { ProtectedTurnMark } from "./turn-timing.js";
 
 export type { ProtectedModel };
@@ -150,6 +156,8 @@ export type ProtectedTurn = {
   revalidate: () => Promise<void>;
   markTiming: (phase: "providerRequestStartMs" | "firstProviderOutputMs") => void;
   markStep: (step: ProtectedTurnMark) => void;
+  /** Reports one finished tool call of the turn or of a specialist it started. */
+  toolTiming: (kind: ProtectedActivity["kind"], durationMs: number) => void;
   saveChildResult: (result: {
     runId: string;
     agentId: string;
@@ -426,6 +434,7 @@ async function runMentionedAgent(
               throw error;
             }
             const childChatIds = new Set([child.sessionId]);
+            const observeTool = createToolTimer(turn.toolTiming);
             const widgetChatIds = new Set([turn.id, child.sessionId]);
             children.set(child.runId, {
               ...child,
@@ -461,6 +470,7 @@ async function runMentionedAgent(
                 if (stream !== "tool") {
                   return;
                 }
+                observeTool(data);
                 const draft = widgetDraftEvent(data, draftBytes);
                 if (draft) {
                   queueUpdate(async () => {
@@ -833,8 +843,10 @@ export function createCanonicalProtectedTurns(options: {
       let updateError: unknown;
       let lastReasoning = "";
       const draftBytes = new Map<string, number>();
+      const observeTool = createToolTimer(turn.toolTiming);
       const unsubscribe = onAgentEventForRun(turn.runId, ({ stream, data }) => {
         if (stream === "tool" && (data.phase === "start" || data.phase === "result")) {
+          observeTool(data);
           const activity = projectActivity(
             data.name,
             data.toolCallId,

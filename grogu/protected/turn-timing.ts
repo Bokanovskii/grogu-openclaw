@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
 type Phase =
   | "admissionMs"
   | "providerRequestStartMs"
@@ -43,9 +44,36 @@ export const protectedTurnMarks = [
 ] as const;
 export type ProtectedTurnMark = (typeof protectedTurnMarks)[number];
 
-/** Counts and durations a turn may report about the load it ran under. */
-export const protectedTurnNotes = ["activeTurns", "storageQueueMs", "storageScanMs"] as const;
+/** Counts and durations a turn may report about the load it ran under and the work it did. */
+export const protectedTurnNotes = [
+  "activeTurns",
+  "storageQueueMs",
+  "storageScanMs",
+  "modelRequests",
+  "modelWallMs",
+  "modelFirstOutputMs",
+  "modelFirstTextMs",
+  "modelInputTokens",
+  "modelOutputTokens",
+  "modelCacheReadTokens",
+  "modelReasoningTokens",
+  "toolCalls",
+  "toolMs",
+  "searchMs",
+  "fetchMs",
+] as const;
 export type ProtectedTurnNote = (typeof protectedTurnNotes)[number];
+
+/** The numbers a terminal model request reports; a field is null when it was not measured. */
+export type ModelRequestFacts = {
+  wallDurationMs: number | null;
+  timeToFirstOutputMs: number | null;
+  timeToFirstTextMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  reasoningTokens: number | null;
+};
 
 /** Optional numbers on the timing line, in output order. */
 export const protectedTurnExtras = ["turnOrdinal", "finishedAtSec", ...protectedTurnNotes] as const;
@@ -68,6 +96,9 @@ export function createProtectedTurnTiming(startedAt: number) {
   let admittedAt: number | undefined;
   let accessChecks = 0;
   let accessValidationMs = 0;
+  let toolCalls = 0;
+  let toolMs = 0;
+  const toolMsByKind: Partial<Record<ProtectedActivity["kind"], number>> = {};
   return {
     mark: (phase: Phase) => {
       const now = performance.now();
@@ -87,6 +118,42 @@ export function createProtectedTurnTiming(startedAt: number) {
     note: (name: ProtectedTurnNote, value: number) => {
       notes[name] = Math.round(value);
     },
+    /** One finished tool call. Parallel calls overlap, so their durations add up past wall time. */
+    tool: (kind: ProtectedActivity["kind"], durationMs: number) => {
+      toolCalls++;
+      toolMs += durationMs;
+      toolMsByKind[kind] = (toolMsByKind[kind] ?? 0) + durationMs;
+    },
+    /** Totals across the turn's model requests, which overlap when specialists run side by side. */
+    modelRequests: (requests: readonly ModelRequestFacts[]) => {
+      if (requests.length === 0) {
+        return;
+      }
+      notes.modelRequests = requests.length;
+      // A total is left out when no request measured it, so a missing value is never read as zero.
+      const total = (
+        name: ProtectedTurnNote,
+        pick: (request: ModelRequestFacts) => number | null,
+      ) => {
+        let sum: number | undefined;
+        for (const request of requests) {
+          const value = pick(request);
+          if (value !== null) {
+            sum = (sum ?? 0) + value;
+          }
+        }
+        if (sum !== undefined) {
+          notes[name] = Math.round(sum);
+        }
+      };
+      total("modelWallMs", (request) => request.wallDurationMs);
+      total("modelFirstOutputMs", (request) => request.timeToFirstOutputMs);
+      total("modelFirstTextMs", (request) => request.timeToFirstTextMs);
+      total("modelInputTokens", (request) => request.inputTokens);
+      total("modelOutputTokens", (request) => request.outputTokens);
+      total("modelCacheReadTokens", (request) => request.cacheReadTokens);
+      total("modelReasoningTokens", (request) => request.reasoningTokens);
+    },
     accessValidation() {
       const checkingAt = performance.now();
       accessChecks++;
@@ -100,6 +167,16 @@ export function createProtectedTurnTiming(startedAt: number) {
         completionMs: Math.round(performance.now() - (admittedAt ?? startedAt)),
       };
       notes.finishedAtSec = Math.round(Date.now() / 1000);
+      if (toolCalls > 0) {
+        notes.toolCalls = toolCalls;
+        notes.toolMs = Math.round(toolMs);
+        if (toolMsByKind.search !== undefined) {
+          notes.searchMs = Math.round(toolMsByKind.search);
+        }
+        if (toolMsByKind.fetch !== undefined) {
+          notes.fetchMs = Math.round(toolMsByKind.fetch);
+        }
+      }
       console.info(
         "[protected-turn-timing]",
         JSON.stringify({

@@ -193,6 +193,80 @@ void test("protected automation records are private, bound to revisions, and sur
     }),
     undefined,
   );
+  const sharingRef = {
+    profileId: otherProfileId,
+    automationId: created.automation.id,
+    storageOverheadBytes: 0,
+  };
+  assert.ok(
+    await executeOpenClawStateWorker(context(), {
+      type: "protectedSharing.publishAutomation",
+      input: { ...sharingRef, profileId: ownerProfileId, now: 1 },
+    }),
+  );
+  assert.equal(
+    (
+      await executeOpenClawStateWorker(context(), {
+        type: "protectedAutomations.read",
+        input: { profileId: ownerProfileId, automationId: created.automation.id },
+      })
+    )?.id,
+    created.automation.id,
+  );
+  for (const following of [false, true]) {
+    if (following) {
+      assert.ok(
+        await executeOpenClawStateWorker(context(), {
+          type: "protectedSharing.followAutomation",
+          input: { ...sharingRef, now: 2 },
+        }),
+      );
+    }
+    assert.deepEqual(
+      await executeOpenClawStateWorker(context(), {
+        type: "protectedAutomations.list",
+        input: { profileId: otherProfileId },
+      }),
+      [],
+    );
+    assert.equal(
+      await executeOpenClawStateWorker(context(), {
+        type: "protectedAutomations.read",
+        input: sharingRef,
+      }),
+      undefined,
+    );
+  }
+  await executeOpenClawStateWorker(context(), {
+    type: "protectedSharing.unfollowAutomation",
+    input: sharingRef,
+  });
+  assert.equal(
+    await executeOpenClawStateWorker(context(), {
+      type: "protectedAutomations.read",
+      input: sharingRef,
+    }),
+    undefined,
+  );
+  assert.ok(
+    await executeOpenClawStateWorker(context(), {
+      type: "protectedSharing.followAutomation",
+      input: { ...sharingRef, now: 3 },
+    }),
+  );
+  assert.ok(
+    await executeOpenClawStateWorker(context(), {
+      type: "protectedSharing.unpublishAutomation",
+      input: { ...sharingRef, profileId: ownerProfileId },
+    }),
+  );
+  assert.equal(
+    await executeOpenClawStateWorker(context(), {
+      type: "protectedAutomations.read",
+      input: sharingRef,
+    }),
+    undefined,
+  );
   assert.deepEqual(
     await createProtectedAutomationWithAdmission(
       context(),

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import { sql, type Generated, type Selectable } from "kysely";
+import type { Generated, Selectable } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import {
   deferSqliteWorkerCommitReceipt,
@@ -20,21 +20,26 @@ import type {
   ProtectedAutomationLifecycleCommand,
   ProtectedAutomationLifecycleAccess,
   ProtectedAutomationLifecycleReceipt,
-  ProtectedAutomationLifecycleRun,
   ProtectedAutomationLifecycleWrite,
   ProtectedAutomationRunError,
   ProtectedAutomationRunStatus,
 } from "./protected-automation-lifecycle.types.js";
+import {
+  protectedAutomationCheckColumns,
+  resolveFinishedAutomationCheck,
+  type ProtectedAutomationCheckColumns,
+} from "./protected-automation-pacing.js";
 import {
   admitResults,
   type ProtectedAutomationResultDatabase,
 } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { readProtectedAutomationSharingStorageUsage } from "./protected-automation-sharing.js";
+import { storedDefinitionCharge } from "./protected-automation-storage-codec.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
 export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase & {
-  protected_automation_run_chats: {
+  protected_automation_run_chats: ProtectedAutomationCheckColumns & {
     automation_id: string;
     profile_id: string;
     chat_id: string | null;
@@ -75,6 +80,7 @@ type RunRow = Selectable<
 
 const ensureSchema = createOpenClawStateSchemaEnsurer({
   table: "protected_automation_run_chats",
+  migrateExistingTables: ["protected_automation_run_chats"],
   additionalTables: ["protected_automation_run_lifecycle", "protected_automation_owner_inbox"],
   indexes: [
     "idx_protected_automation_lifecycle_history",
@@ -123,25 +129,6 @@ export function chatRow(database: OpenClawStateDatabase, automationId: string) {
       .selectAll()
       .where("automation_id", "=", automationId),
   ).rows[0];
-}
-export function dto(row: RunRow, chatId: string | null): ProtectedAutomationLifecycleRun {
-  return {
-    id: row.id,
-    automationId: row.automation_id,
-    profileId: row.profile_id,
-    definitionRevision: row.definition_revision,
-    trigger: row.trigger,
-    scheduledAtMs: row.scheduled_at_ms,
-    queuedAtMs: row.queued_at_ms,
-    status: row.status,
-    runChatId: chatId,
-    startedAtMs: row.started_at_ms,
-    finishedAtMs: row.finished_at_ms,
-    errorCode: row.error_code,
-    resultId: row.result_id,
-    delivery:
-      row.status === "succeeded" ? (row.delivered_at_ms === null ? "pending" : "delivered") : null,
-  };
 }
 
 export type PrepareProtectedAutomationLifecycleOutcome =
@@ -303,8 +290,7 @@ export function prepareProtectedAutomationLifecycle(
           .select([
             "id",
             "central_owner_profile_id as profileId",
-            /* kysely-allow-raw: SQLite BLOB length counts stored UTF-8 bytes. */
-            sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+            storedDefinitionCharge.as("definitionBytes"),
           ])
           .where("id", "=", command.automationId)
           .where("central_owner_profile_id", "=", command.profileId),
@@ -432,6 +418,25 @@ export function prepareProtectedAutomationLifecycle(
       if (outcome.status === "succeeded" && row.status !== "running") {
         return { status: "conflict" };
       }
+      if (
+        row.trigger === "scheduled" &&
+        automation.enabled &&
+        row.definition_revision === automation.definitionRevision &&
+        (outcome.status === "succeeded" ||
+          !["automation_disabled", "definition_changed", "member_inactive"].includes(
+            outcome.errorCode,
+          ))
+      ) {
+        const check = resolveFinishedAutomationCheck(
+          automation.definition,
+          row.definition_revision,
+          command,
+          chat,
+        );
+        if (check) {
+          write.check = check;
+        }
+      }
     } else {
       if (
         row.status !== "succeeded" ||
@@ -512,7 +517,7 @@ export function commitProtectedAutomationLifecycle(
         write,
       };
       deferSqliteWorkerCommitReceipt(db, receipt);
-      return { status: "committed" as const };
+      return { status: "committed" as const, ...(write.check ? { check: write.check } : {}) };
     },
     { path: database.path },
     { operationLabel: "protected.automationLifecycle.commit" },
@@ -649,6 +654,16 @@ function applyWrite(database: OpenClawStateDatabase, write: ProtectedAutomationL
         .where("id", "=", command.runId),
     );
   } else if (command.kind === "finish") {
+    if (write.check) {
+      executeSqliteQuerySync(
+        db,
+        k
+          .updateTable("protected_automation_run_chats")
+          .set(protectedAutomationCheckColumns(write.check))
+          .where("automation_id", "=", command.automationId)
+          .where("profile_id", "=", command.profileId),
+      );
+    }
     executeSqliteQuerySync(
       db,
       k

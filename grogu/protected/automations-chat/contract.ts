@@ -25,6 +25,21 @@ export const AUTOMATIONS_AUTHORING_TOOL_NAMES = [
   "automation_draft_update",
   "automation_draft_save",
 ] as const;
+export const NEXT_CHECK_TOOL_NAME = "next_check";
+
+export const NextCheckParametersSchema = node({
+  in: Type.String({ minLength: 1, maxLength: 100, description: 'Relative delay, e.g. "15m".' }),
+});
+export function isNextCheckParameters(
+  value: unknown,
+): value is Static<typeof NextCheckParametersSchema> {
+  return Value.Check(NextCheckParametersSchema, value);
+}
+
+export type NextCheckBindings = {
+  parseDurationMs: (duration: string) => number;
+  proposeNextCheck: (delayMs: number) => void;
+};
 
 export const AutomationsChatListParametersSchema = node({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),

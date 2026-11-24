@@ -7,7 +7,6 @@ import {
 } from "../infra/sqlite-schema-facts.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
 import { readProtectedAutomationPublication } from "./protected-automation-sharing.js";
-import { readStoredDefinition } from "./protected-automation-storage-codec.js";
 import {
   parseProtectedAutomationDefinition,
   type ProtectedAutomationDatabase,
@@ -48,6 +47,8 @@ export function listProtectedPublicAutomations(
           "automation.id",
           "automation.central_owner_profile_id",
           "automation.definition_json",
+          "automation.pacing_min_ms",
+          "automation.pacing_max_ms",
           "automation.enabled",
           "member.role as member_role",
         ])
@@ -66,7 +67,7 @@ export function listProtectedPublicAutomations(
         if (!publication) {
           return [];
         }
-        const definition = parseProtectedAutomationDefinition(readStoredDefinition(db, row));
+        const definition = parseProtectedAutomationDefinition(db, row);
         if (definition.contextAccess !== "isolated") {
           return [];
         }

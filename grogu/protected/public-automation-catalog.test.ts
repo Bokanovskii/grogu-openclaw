@@ -67,7 +67,11 @@ void test("public catalog projects only current isolated publications for active
     }
     return result.automation.id;
   };
-  const isolated = await create({ ...draft, contextAccess: "isolated" });
+  const isolated = await create({
+    ...draft,
+    contextAccess: "isolated",
+    pacing: { minMs: 60_000, maxMs: 120_000 },
+  });
   await create({ ...draft, contextAccess: "isolated", name: "Unpublished" });
   const legacy = await create(draft);
   const memberContext = await create({ ...draft, contextAccess: "member" });

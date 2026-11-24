@@ -18,7 +18,10 @@ import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.js"
 import { applyPreparedRuntimeAuthToModel } from "../provider-request-config.js";
 import { protectPreparedProviderRuntimeAuth } from "../provider-runtime-auth-protection.js";
 import { unwrapSecretSentinelsForProviderEgress } from "../provider-secret-egress.js";
-import { resolveRequestModelCredential } from "../request-model-credential.js";
+import {
+  resolveRequestModelConfig,
+  resolveRequestModelCredential,
+} from "../request-model-credential.js";
 import { materializePreparedRuntimeModel } from "../runtime-plan/materialize-model.js";
 import {
   resolvePreparedRuntimeAuthAttempts,
@@ -152,7 +155,7 @@ export async function prepareDirectCompactionAttempt(
     modelId,
     requestedRouteResolution: params.requestedRouteResolution,
     agentDir,
-    config: params.config,
+    config: resolveRequestModelConfig(params, provider, modelId),
     workspaceDir: resolvedWorkspace,
     ...initialModelAuth,
     preparedModelRuntime,

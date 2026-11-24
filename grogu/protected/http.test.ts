@@ -26,7 +26,11 @@ import {
 } from "@openclaw/gateway-protocol/protected";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { Value } from "typebox/value";
-import type { ProtectedAuthoringTurnEvent } from "../../packages/gateway-protocol/src/protected-authoring.js";
+import {
+  ProtectedDraftRecoveryCatalogSchema,
+  ProtectedDraftRecoveryChatSchema,
+  type ProtectedAuthoringTurnEvent,
+} from "../../packages/gateway-protocol/src/protected-authoring.js";
 import {
   ProtectedAutomationInboxResponseSchema,
   ProtectedAutomationLifecycleListResponseSchema,
@@ -7211,7 +7215,10 @@ void test("automation authoring chats hold a server binding and save only the se
   const origin = "https://authoring.example";
   const expiresAt = Date.now() + 120_000;
   const routed: boolean[] = [];
-  const app = createProtectedHttp({
+  const away = Promise.withResolvers<void>();
+  const writeReply = Promise.withResolvers<void>();
+  const replyWritten = Promise.withResolvers<void>();
+  const options: Parameters<typeof createProtectedHttp>[0] = {
     origin,
     stateDir,
     accessIssuer: "https://identity.example",
@@ -7226,7 +7233,7 @@ void test("automation authoring chats hold a server binding and save only the se
         issuer: "https://identity.example",
         subject,
         kind: "human" as const,
-        sessionId: subject,
+        sessionId: request.headers.get("x-synthetic-session") ?? subject,
         expiresAt,
         assertCurrent() {},
         async revalidate() {},
@@ -7235,7 +7242,7 @@ void test("automation authoring chats hold a server binding and save only the se
     agentExtensions: [protectedResearchAgent],
     maxChatsPerUser: 10,
     maxFileBytes: 64_000,
-    storageLimits: { globalBytes: 400_000, userBytes: 200_000, freeFloorBytes: 1 },
+    storageLimits: { globalBytes: 800_000, userBytes: 400_000, freeFloorBytes: 1 },
     turns: {
       models: [
         {
@@ -7250,6 +7257,10 @@ void test("automation authoring chats hold a server binding and save only the se
         const tools = turn.automationChat;
         if (tools && "authoring" in tools) {
           const current = await tools.read();
+          if (turn.input.text === "update while away") {
+            away.resolve();
+            await writeReply.promise;
+          }
           // One model message may carry parallel tool calls; the bindings must order them.
           await Promise.all([
             turn.input.text.includes("update")
@@ -7260,14 +7271,42 @@ void test("automation authoring chats hold a server binding and save only the se
               : undefined,
           ]);
         }
-        await turn.delta("Done.");
+        const text = turn.input.text.includes("update") ? "I revised your draft." : "Done.";
+        await turn.delta(text);
+        await appendTranscriptMessages(
+          { ...turn.target, sessionId: turn.id },
+          {
+            messages: [
+              { message: { role: "user", content: turn.input.text, timestamp: Date.now() } },
+              {
+                message: {
+                  role: "assistant",
+                  content: [{ type: "text", text }],
+                  api: "openai-completions",
+                  provider: "sparky",
+                  model: "synthetic-sparky",
+                  usage: makeZeroUsageSnapshot(),
+                  stopReason: "stop",
+                  timestamp: Date.now(),
+                },
+              },
+            ],
+          },
+        );
+        if (turn.input.text === "update while away") {
+          replyWritten.resolve();
+        }
       },
       async steer() {
         assert.fail("Authoring proof does not steer an agent.");
       },
     },
+  };
+  let app = createProtectedHttp(options);
+  t.after(async () => {
+    writeReply.resolve();
+    await app.shutdown();
   });
-  t.after(() => app.shutdown());
   const negotiated = "automations-chat-v1, automations-authoring-v1";
   const call = (subject: string, route: string, init?: RequestInit, capabilities = negotiated) =>
     app.fetch(
@@ -7554,20 +7593,29 @@ void test("automation authoring chats hold a server binding and save only the se
   const formChat = (
     await (await call("alice", "/automations/authoring", { method: "POST" })).json()
   ).chat;
-  const formSave = (subject: string, chatId: string, capabilities = negotiated) =>
+  const recovery = `${negotiated}, automations-draft-recovery-v1`;
+  const formSave = (subject: string, chatId: string, capabilities = negotiated, sent = draft) =>
     call(
       subject,
       "/automations",
       {
         method: "POST",
         headers: { "x-alcove-authoring-chat": chatId },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(sent),
       },
       capabilities,
     );
   assert.equal((await formSave("alice", formChat.id, "automations-chat-v1")).status, 404);
   assert.equal((await formSave("bob", formChat.id)).status, 404);
-  const formBound = await formSave("alice", formChat.id);
+  const seeded = await turn(
+    "alice",
+    formChat.id,
+    "Resume",
+    { draft, draftRevision: "1" },
+    recovery,
+  );
+  assert.equal(seeded.events.at(-1)?.type, "done");
+  const formBound = await formSave("alice", formChat.id, recovery);
   assert.equal(formBound.status, 201);
   const formBoundAutomation = (await formBound.json()).automation;
   assert.equal(formBoundAutomation.id, formChat.id);
@@ -7583,4 +7631,142 @@ void test("automation authoring chats hold a server binding and save only the se
   const rebound = await formSave("alice", formChat.id);
   assert.equal(rebound.status, 409);
   assert.equal((await rebound.json()).error.code, "authoring_bound");
+
+  const recoveryCatalog = await (await call("alice", "/automations/catalog", {}, recovery)).json();
+  assert.ok(Value.Check(ProtectedDraftRecoveryCatalogSchema, recoveryCatalog));
+  assert.equal(catalog.capabilities.automations.chat.draftRecovery, undefined);
+  assert.equal(
+    (
+      await call(
+        "alice",
+        "/automations/authoring",
+        {
+          method: "POST",
+          headers: { "x-grogu-profile": profiles.bob! },
+          body: JSON.stringify({ draft }),
+        },
+        recovery,
+      )
+    ).status,
+    403,
+  );
+  const createDraft = await call("alice", "/automations/authoring", {
+    method: "POST",
+    headers: { "x-alcove-capabilities": recovery, "x-grogu-profile": profiles.alice! },
+    body: JSON.stringify({ draft }),
+  });
+  assert.equal(createDraft.status, 201, await createDraft.clone().text());
+  const { chat: draftChat } = await createDraft.json();
+  const route = `/chats/${draftChat.id}`;
+  const read = async () =>
+    (
+      await call(
+        "alice",
+        route,
+        { headers: { "x-synthetic-session": "signed-in-again" } },
+        recovery,
+      )
+    ).json();
+  assert.deepEqual((await read()).authoringDraft, { draft, draftRevision: "1" });
+  assert.equal((await read()).authoringBusy, false);
+  const listed = (await (await call("alice", "/chats", {}, recovery)).json()).chats;
+  assert.equal(listed.find((item: { id: string }) => item.id === draftChat.id)?.title, draft.name);
+  const legacy = await (await call("alice", route)).json();
+  assert.equal("authoringDraft" in legacy || "authoringBusy" in legacy, false);
+  assert.equal((await call("bob", route, {}, recovery)).status, 404);
+  const edited = { ...draft, instructions: "Summarize public library updates." };
+  const checkpoint = (subject: string, baseDraftRevision: string, profileId = profiles[subject]!) =>
+    call(
+      subject,
+      `${route}/authoring-draft`,
+      {
+        method: "PUT",
+        headers: { "x-grogu-profile": profileId },
+        body: JSON.stringify({ baseDraftRevision, draft: edited }),
+      },
+      recovery,
+    );
+  assert.equal((await checkpoint("bob", "1")).status, 404);
+  assert.equal((await checkpoint("alice", "1", profiles.bob)).status, 403);
+  assert.deepEqual(await (await checkpoint("alice", "1")).json(), {
+    draft: edited,
+    draftRevision: "2",
+  });
+  assert.equal((await checkpoint("alice", "1")).status, 412);
+  assert.equal(
+    (await turn("alice", draftChat.id, "stale", { draft, draftRevision: "2" }, recovery)).code,
+    "draft_mismatch",
+  );
+  const disconnected = new AbortController();
+  const pending = await call(
+    "alice",
+    `${route}/turns`,
+    {
+      method: "POST",
+      signal: disconnected.signal,
+      headers: { "x-grogu-profile": profiles.alice! },
+      body: JSON.stringify({
+        provider: "sparky",
+        text: "update while away",
+        authoring: { draft: edited, draftRevision: "2" },
+      }),
+    },
+    recovery,
+  );
+  assert.equal(pending.status, 200);
+  await away.promise;
+  disconnected.abort();
+  await pending.body!.cancel();
+  const during = await read();
+  assert.equal(during.authoringBusy, true);
+  assert.equal(during.activeRun, undefined);
+  assert.equal((await checkpoint("alice", "2")).status, 409);
+  writeReply.resolve();
+  await replyWritten.promise;
+  // A reconnected client polls the owner route instead of subscribing to the lost stream.
+  let settled = await read();
+  while (settled.authoringBusy) {
+    settled = await read();
+  }
+  assert.equal(settled.chat.messages.at(-1)?.status, "complete");
+  // Reconstruct the HTTP service over the same isolated SQLite state, not a client cache.
+  await app.shutdown();
+  app = createProtectedHttp(options);
+  const recovered = await read();
+  assert.ok(Value.Check(ProtectedDraftRecoveryChatSchema, recovered));
+  const snapshot = { draft: { ...edited, name: "Revised by chat" }, draftRevision: "3" };
+  assert.equal(recovered.authoringBusy, false);
+  assert.deepEqual(recovered.authoringDraft, snapshot);
+  assert.equal(recovered.chat.messages.at(-1)?.text, "I revised your draft.");
+  assert.equal(
+    (await listAutomations()).some(({ id }) => id === draftChat.id),
+    false,
+  );
+  assert.equal((await formSave("alice", draftChat.id, recovery)).status, 412);
+  const continued = await turn("alice", draftChat.id, "continue and update", snapshot, recovery);
+  assert.equal(ofType(continued.events, "automation-draft-update")[0]?.draftRevision, "4");
+  assert.equal(continued.events.at(-1)?.type, "done");
+
+  // A first save can commit an older definition before it binds the chat.
+  const earlier = await createProtectedAutomationWithAdmission(
+    captureOpenClawStateWorkerContext({ env: { OPENCLAW_STATE_DIR: stateDir } }),
+    { profileId: profiles.alice!, definition: draft, now: Date.now(), automationId: draftChat.id },
+    { profileId: profiles.alice!, assertCurrent() {} },
+  );
+  assert.equal(earlier.status, "created");
+  const latest = { ...snapshot, draftRevision: "4" };
+  const saveConflict = await turn("alice", draftChat.id, "Please save 4", latest, recovery);
+  assert.equal(
+    ofType(saveConflict.events, "automation-save-refused")[0]?.reason,
+    "version_mismatch",
+  );
+  assert.equal((await formSave("alice", draftChat.id, recovery, latest.draft)).status, 412);
+  assert.equal(
+    (await call("alice", `/automations/${draftChat.id}/authoring`, { method: "POST" }, recovery))
+      .status,
+    412,
+  );
+  const afterConflict = await read();
+  assert.deepEqual(afterConflict.chat.authoring, { kind: "automation" });
+  assert.deepEqual(afterConflict.authoringDraft, latest);
 });

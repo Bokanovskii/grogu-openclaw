@@ -538,6 +538,29 @@ automation turns the Research Topics tool. Automation IDs are canonical
 lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines
 the accepted form.
 
+Unsaved automation chats appear in the member's `GET /chats` list with
+`authoring.kind: "automation"` and no `authoring.automationId`. Clients that send
+`automations-chat-v1, automations-authoring-v1, automations-draft-recovery-v1`
+can use draft recovery when the catalog returns `capabilities.automations.chat.draftRecovery: true`.
+
+Send `{draft}` to `POST /automations/authoring` to create the chat and its first
+draft together. `GET /chats/:id` returns `authoringDraft: {draft, draftRevision}`
+and `authoringBusy` for an unsaved authoring chat. Reopen the chat and poll this
+route while `authoringBusy` is true. The reply and any draft update finish on
+the server if the client disconnects. The existing `activeRun` still belongs
+only to the sign-in session that started the turn.
+
+To keep form edits without saving an automation, send `{baseDraftRevision, draft}`
+to `PUT /chats/:id/authoring-draft`. Creation and checkpoint writes require
+`X-Grogu-Profile` for the signed-in member. Use the returned `{draft, draftRevision}` for
+the next turn. A chat from an older client can lack a checkpoint. Use `null` as
+its first base revision, or start the first recovery turn with revision `"1"`.
+A running turn returns `409 busy` for edits. A stale draft returns
+`412 draft_mismatch`; reread before applying edits. An explicit save binds the
+chat to the saved automation. If an interrupted save left a different saved
+definition, the server keeps the newer draft in Chats and reports the conflict.
+Older clients receive no new response fields.
+
 The fixed calendar draft-validation contract uses schedules of
 `{ kind: "cron", expr, tz }`. The currently designed choices map to
 `m h * * *` (daily), `m h * * 1-5` (weekdays), and `m h * * 6` (Saturday), in

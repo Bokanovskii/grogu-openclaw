@@ -7,6 +7,10 @@ import type {
   ProtectedMessage,
   ProtectedChatResponse,
 } from "@openclaw/gateway-protocol/protected";
+import {
+  isProtectedAuthoringDraft,
+  type ProtectedAuthoringDraft,
+} from "@openclaw/gateway-protocol/protected-authoring";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
@@ -48,6 +52,7 @@ import {
 } from "../../src/shared/transcript-only-openclaw-assistant.js";
 import { PROTECTED_STORAGE_KEY_FILE_ENV } from "../../src/storage/sqlite-encryption.js";
 import { legacyDefaultProtectedAgentId, type ProtectedAgentCatalog } from "./agents.js";
+import { AUTOMATIONS_CHAT_PLUGIN_ID } from "./automations-chat/contract.js";
 import { removeChatFilesDirectory } from "./chat-files.js";
 import { ProtectedError, publicError } from "./errors.js";
 import { composeSideReturnText } from "./side-return.js";
@@ -78,6 +83,42 @@ function transcriptText(content: unknown): string {
           .map((block) => (typeof block.text === "string" ? block.text : ""))
           .join("\n")
       : "";
+}
+
+export function readAuthoringDraft(entry: SessionEntry): ProtectedAuthoringDraft | undefined {
+  const value = entry.pluginExtensions?.[AUTOMATIONS_CHAT_PLUGIN_ID]?.draft;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isProtectedAuthoringDraft(value)) {
+    throw new ProtectedError(500, "invalid_draft", "The stored automation draft cannot be read.");
+  }
+  return value;
+}
+
+function draftBytes(snapshot: ProtectedAuthoringDraft | undefined) {
+  return snapshot ? Buffer.byteLength(JSON.stringify(snapshot)) : 0;
+}
+
+function draftExtension(
+  extensions: SessionEntry["pluginExtensions"],
+  draft?: ProtectedAuthoringDraft,
+) {
+  const state = { ...extensions?.[AUTOMATIONS_CHAT_PLUGIN_ID] };
+  if (draft) {
+    state.draft = draft;
+  } else {
+    delete state.draft;
+  }
+  return { ...extensions, [AUTOMATIONS_CHAT_PLUGIN_ID]: state };
+}
+
+export function draftMismatch() {
+  return new ProtectedError(
+    412,
+    "draft_mismatch",
+    "The draft changed. Reopen it before continuing.",
+  );
 }
 
 function sideOf(entry: SessionEntry) {
@@ -217,7 +258,10 @@ export function createProtectedChats(options: {
     id: string,
     version: string,
     patch: Partial<
-      Pick<SessionEntry, "displayName" | "protectedAgentId" | "protectedAutomationId">
+      Pick<
+        SessionEntry,
+        "displayName" | "protectedAgentId" | "protectedAutomationId" | "pluginExtensions"
+      >
     >,
     conflict: ProtectedError,
   ): Promise<ProtectedChatSummary> => {
@@ -297,6 +341,7 @@ export function createProtectedChats(options: {
       updatedAt: number;
       transient: boolean;
       title?: string;
+      authoringDraftBytes?: number;
     }>(({ sessionKey, entry }) => {
       const internal: InternalSessionEntry = entry;
       if (internal.transientLifetime !== undefined) {
@@ -344,6 +389,9 @@ export function createProtectedChats(options: {
           updatedAt: entry.updatedAt,
           transient: false,
           title: entry.displayName,
+          ...(entry.protectedAuthoringKind
+            ? { authoringDraftBytes: draftBytes(readAuthoringDraft(entry)) }
+            : {}),
         },
       ];
     });
@@ -663,7 +711,7 @@ export function createProtectedChats(options: {
   };
   const readWithUsage = async (authority: ProtectedChatAuthority, id: string) => {
     const { entry, events } = await readTranscriptSource(authority, id);
-    return projectTranscriptSource(entry, events);
+    return { ...projectTranscriptSource(entry, events), entry };
   };
   return {
     env,
@@ -837,7 +885,7 @@ export function createProtectedChats(options: {
       authority: ProtectedChatAuthority,
       title = "New chat",
       selectedAgentId = options.agentCatalog.defaultAgentId,
-      authoring?: { kind: "automation"; automationId?: string },
+      authoring?: { kind: "automation"; automationId?: string; snapshot?: ProtectedAuthoringDraft },
       automationRun?: { chatId: string; automationId: string },
     ): Promise<ProtectedChat> {
       authority.assertCurrent();
@@ -875,6 +923,11 @@ export function createProtectedChats(options: {
               ...(authoring
                 ? {
                     protectedAuthoringKind: authoring.kind,
+                    ...(authoring.snapshot
+                      ? {
+                          pluginExtensions: draftExtension(undefined, authoring.snapshot),
+                        }
+                      : {}),
                     ...(authoring.automationId
                       ? { protectedAutomationId: authoring.automationId }
                       : {}),
@@ -1123,11 +1176,47 @@ export function createProtectedChats(options: {
         ),
       );
     },
+    async checkpointDraft(
+      authority: ProtectedChatAuthority,
+      id: string,
+      baseDraftRevision: string | null,
+      draft: ProtectedAuthoringDraft["draft"],
+      charge: (bytes: number) => void,
+    ): Promise<ProtectedAuthoringDraft> {
+      const current = await readEntry(authority, id);
+      if (current.protectedAuthoringKind !== "automation" || current.protectedAutomationId) {
+        return missing();
+      }
+      const previous = readAuthoringDraft(current);
+      if ((previous?.draftRevision ?? null) !== baseDraftRevision) {
+        throw draftMismatch();
+      }
+      const draftRevision = String(BigInt(baseDraftRevision ?? "0") + 1n);
+      if (draftRevision.length > 16) {
+        throw new ProtectedError(409, "revision_limit", "This draft reached its revision limit.");
+      }
+      const snapshot = { draft, draftRevision };
+      charge(Math.max(0, draftBytes(snapshot) - draftBytes(previous)));
+      await updateMetadata(
+        authority,
+        id,
+        String(current.updatedAt),
+        {
+          ...(current.displayName === (previous?.draft.name ?? "New automation")
+            ? { displayName: draft.name }
+            : {}),
+          pluginExtensions: draftExtension(current.pluginExtensions, snapshot),
+        },
+        draftMismatch(),
+      );
+      return snapshot;
+    },
     /** Binds an unsaved authoring chat to its first saved automation; idempotent, never rebinds. */
     async bindAutomation(
       authority: ProtectedChatAuthority,
       id: string,
       automationId: string,
+      savedDraftMatches: (draft: ProtectedAuthoringDraft["draft"]) => boolean,
     ): Promise<ProtectedChatSummary> {
       // A running turn may advance the entry between the read and the guarded write.
       for (let attempt = 0; ; attempt++) {
@@ -1135,12 +1224,20 @@ export function createProtectedChats(options: {
         if (current.protectedAutomationId === automationId) {
           return summary(current);
         }
+        const snapshot = readAuthoringDraft(current);
+        if (snapshot && !savedDraftMatches(snapshot.draft)) {
+          // A keyed create can find an earlier save. Do not consume a newer checkpoint.
+          return summary(current);
+        }
         try {
           return await updateMetadata(
             authority,
             id,
             String(current.updatedAt),
-            { protectedAutomationId: automationId },
+            {
+              protectedAutomationId: automationId,
+              ...(snapshot ? { pluginExtensions: draftExtension(current.pluginExtensions) } : {}),
+            },
             new ProtectedError(
               409,
               "version_conflict",

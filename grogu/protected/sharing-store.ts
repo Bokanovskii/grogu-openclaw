@@ -145,20 +145,3 @@ export function canMemberReadAutomationRun(
     member.assertCurrent,
   );
 }
-
-/**
- * The current delivery audience: the active owner, then active followers who opted in. Call it
- * immediately before each delivery.
- */
-export function listAutomationRecipients(
-  stateDir: string,
-  automationId: string,
-  assertCurrent: () => void,
-): Promise<{ ownerProfileId: string; recipients: string[] } | undefined> {
-  return runProtectedSharing(
-    stateDir,
-    "protectedSharing.automationRecipients",
-    { automationId },
-    assertCurrent,
-  );
-}

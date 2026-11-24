@@ -669,7 +669,11 @@ start at which the request first reached each step, in the order it reached them
 The gap between two steps is what the later one cost; a step that did not happen
 is absent. `turnOrdinal` counts admitted turns since the listener started,
 `activeTurns` counts the turns running when this one was admitted (including
-itself), and `finishedAtSec` is the Unix time it finished.
+itself), and `finishedAtSec` is the Unix time it finished. `storageQueueMs` is the
+time the turn waited behind other storage admissions, which share one queue, and
+`storageScanMs` is the time it spent measuring stored data (zero when it reused
+another admission's measurement); both fall between the `aliasesPrepared` and
+`storageAdmitted` steps. They are present only when storage limits are configured.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not

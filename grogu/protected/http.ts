@@ -1029,6 +1029,10 @@ export function createProtectedHttp(options: {
           "turn",
           await storageLimit(assertGrant),
         );
+        if (storage) {
+          timing.note("storageQueueMs", storage.queueMs);
+          timing.note("storageScanMs", storage.scanMs);
+        }
         timing.at("storageAdmitted");
         if (shutdown.signal.aborted || runs.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");

@@ -243,6 +243,39 @@ void test("concurrent members share storage quota without blocking each other", 
   }
 });
 
+void test("storage admission reports how long it queued and measured", async (t) => {
+  const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot: await root(stateDir),
+    maxFileBytes: 1024,
+    limits: { userBytes: 49_152, globalBytes: 65_536, freeFloorBytes: 1 },
+    chats: {
+      async capacityEntries() {
+        return [];
+      },
+      async transcriptBytes() {
+        return 0;
+      },
+    },
+  });
+  const [first, second] = await Promise.all([
+    admit("first", () => {}, "turn"),
+    admit("second", () => {}, "turn"),
+  ]);
+  try {
+    assert.ok(first.scanMs > 0);
+    // The second admission waited for the first to finish measuring, then reused its ledger.
+    assert.ok(second.queueMs >= first.scanMs);
+    assert.equal(second.scanMs, 0);
+  } finally {
+    first.release();
+    second.release();
+  }
+});
+
 void test("per-member limits override the default and the owner is exempt", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });

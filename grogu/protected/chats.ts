@@ -34,7 +34,10 @@ import {
 } from "../../src/config/sessions/session-entry-read-runtime.js";
 import { readTranscriptStatsAsync } from "../../src/config/sessions/session-transcript-stats.js";
 import { readSessionTransientLifetime } from "../../src/config/sessions/session-transient-lifetime.js";
-import { recoverTransientSessionEntries } from "../../src/config/sessions/session-transient-recovery.js";
+import {
+  inspectTransientSessionEntries,
+  recoverTransientSessionEntries,
+} from "../../src/config/sessions/session-transient-recovery.js";
 import {
   appendExactAssistantMessageToSessionTranscript,
   type SessionTranscriptAssistantMessage,
@@ -203,6 +206,26 @@ export function createProtectedChats(options: {
     "openclaw-agent.sqlite",
   );
   const prefix = (profileId: string) => `agent:${agentId}:family:${profileId}:`;
+  const ownsTransient: Parameters<typeof recoverTransientSessionEntries>[0]["owns"] = ({
+    sessionKey,
+    entry,
+    lifetime,
+    parent,
+  }) => {
+    // Spawn stamps the admitted parent's profile onto the child in the creation commit.
+    return (
+      /^[a-zA-Z0-9_-]{1,128}$/u.test(lifetime.profileId) &&
+      validId(lifetime.parentSessionId) &&
+      validId(entry.sessionId) &&
+      lifetime.parentSessionKey === `${prefix(lifetime.profileId)}${lifetime.parentSessionId}` &&
+      sessionKey.startsWith(`agent:${agentId}:subagent:`) &&
+      (!parent ||
+        (parent.createdVia === "plugin" &&
+          sessionCreatorProfileId(parent.createdActor) === lifetime.profileId)) &&
+      ((parent !== undefined && entry.createdActor === undefined) ||
+        sessionCreatorProfileId(entry.createdActor) === lifetime.profileId)
+    );
+  };
   const scope = (authority: ProtectedChatAuthority, id: string) => ({
     agentId,
     env,
@@ -843,6 +866,19 @@ export function createProtectedChats(options: {
         throw new ProtectedError(500, "save_failed", "The agent result could not be saved.");
       }
     },
+    inspectTransient(
+      assertCurrent: () => void,
+      inspectRegistry: Parameters<typeof inspectTransientSessionEntries>[0]["inspectRegistry"],
+    ) {
+      return inspectTransientSessionEntries({
+        agentId,
+        env,
+        storePath,
+        assertCurrent,
+        owns: ownsTransient,
+        inspectRegistry,
+      });
+    },
     recoverTransient(assertCurrent: () => void) {
       return recoverTransientSessionEntries({
         agentId,
@@ -866,22 +902,7 @@ export function createProtectedChats(options: {
           }),
         beforeDelete: ({ sessionId, lifetime, assertCurrent: assertRecoveryCurrent }) =>
           removeFiles(lifetime.profileId, sessionId, assertRecoveryCurrent),
-        owns: ({ sessionKey, entry, lifetime, parent }) => {
-          // Spawn stamps the admitted parent's profile onto the child in the creation commit.
-          return (
-            /^[a-zA-Z0-9_-]{1,128}$/u.test(lifetime.profileId) &&
-            validId(lifetime.parentSessionId) &&
-            validId(entry.sessionId) &&
-            lifetime.parentSessionKey ===
-              `${prefix(lifetime.profileId)}${lifetime.parentSessionId}` &&
-            sessionKey.startsWith(`agent:${agentId}:subagent:`) &&
-            (!parent ||
-              (parent.createdVia === "plugin" &&
-                sessionCreatorProfileId(parent.createdActor) === lifetime.profileId)) &&
-            ((parent !== undefined && entry.createdActor === undefined) ||
-              sessionCreatorProfileId(entry.createdActor) === lifetime.profileId)
-          );
-        },
+        owns: ownsTransient,
       });
     },
     async transcriptBytes(sessionId: string, sessionKey: string) {

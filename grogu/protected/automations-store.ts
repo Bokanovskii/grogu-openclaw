@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type {
-  ProtectedAutomationCatalog,
-  ProtectedAutomationDraft,
-  ProtectedAutomationDraftValidation,
-  ProtectedAutomationPatchRequest,
-  ProtectedAutomationRecord,
+import {
+  protectedAutomationPacingLimits,
+  type ProtectedAutomationCatalog,
+  type ProtectedAutomationDraft,
+  type ProtectedAutomationDraftValidation,
+  type ProtectedAutomationPatchRequest,
+  type ProtectedAutomationRecord,
 } from "../../packages/gateway-protocol/src/protected.js";
 import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
 import type { SqliteWorkerOperationAdmission } from "../../src/infra/sqlite-worker-operation-admission.js";
@@ -39,7 +40,10 @@ function assertCurrent(
   authority.assertCurrent();
 }
 
-export type StoredAutomationRecord = Omit<ProtectedAutomationRecord, "nextCheckAt">;
+export type StoredAutomationRecord = Omit<
+  ProtectedAutomationRecord,
+  "nextCheckAt" | "nextCheckReason"
+>;
 
 export type ProtectedAutomationCreationSafety = {
   hasRunHistory(automationId: string): Promise<boolean>;
@@ -412,9 +416,35 @@ export async function saveProtectedAutomationPatch(
   if (input.patch.enabled === true && !deps.schedulerAvailable) {
     return { status: "scheduler_required" };
   }
+  if (
+    !input.catalog.schedule.pacing &&
+    ("pacing" in input.patch || (current.pacing && input.patch.schedule))
+  ) {
+    return {
+      status: "invalid",
+      validation: {
+        valid: false,
+        errors: [
+          {
+            field: "pacing",
+            code: "unsupported_schedule",
+            message: "Update Alcove before changing a model-chosen schedule.",
+          },
+        ],
+      },
+    };
+  }
+  // A legacy client can still pause a paced job or edit its name without seeing or changing the bounds.
+  const catalog =
+    current.pacing && !input.catalog.schedule.pacing
+      ? {
+          ...input.catalog,
+          schedule: { ...input.catalog.schedule, pacing: protectedAutomationPacingLimits },
+        }
+      : input.catalog;
   const validation = validateProtectedAutomationDraft(
     applyProtectedAutomationPatch(current, input.patch),
-    input.catalog,
+    catalog,
     input.retainedAgent(current.agentId),
   );
   if (!validation.valid) {

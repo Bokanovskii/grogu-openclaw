@@ -124,6 +124,7 @@ void test("Protected turns load skills on request and retain credentials during 
   }> = [];
   let overflow = false;
   let blockedAutomation: { entered: () => void; wait: Promise<void> } | undefined;
+  let proposedNextCheck = false;
   const previousAmbientKey = process.env.SPARKY_API_KEY;
   process.env.SPARKY_API_KEY = "synthetic-ambient-key";
   t.after(() => {
@@ -165,19 +166,30 @@ void test("Protected turns load skills on request and retain credentials during 
         !summary &&
         messages.includes("Make a travel dashboard") &&
         !body.messages.some((message: { role: string }) => message.role === "tool");
-      const delta = readSkill
-        ? {
-            role: "assistant",
-            tool_calls: [
-              {
-                index: 0,
-                id: "skill-call",
-                type: "function",
-                function: { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
-              },
-            ],
-          }
-        : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
+      const proposeCheck =
+        !proposedNextCheck &&
+        body.tools?.some(
+          (tool: { function: { name: string } }) => tool.function.name === "next_check",
+        );
+      if (proposeCheck) {
+        proposedNextCheck = true;
+      }
+      const delta =
+        readSkill || proposeCheck
+          ? {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: proposeCheck ? "check-call" : "skill-call",
+                  type: "function",
+                  function: proposeCheck
+                    ? { name: "next_check", arguments: '{"in":"4m"}' }
+                    : { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
+                },
+              ],
+            }
+          : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(
         `data: ${JSON.stringify({
@@ -194,7 +206,13 @@ void test("Protected turns load skills on request and retain credentials during 
           object: "chat.completion.chunk",
           created: 1,
           model: "synthetic",
-          choices: [{ index: 0, delta: {}, finish_reason: readSkill ? "tool_calls" : "stop" }],
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: readSkill || proposeCheck ? "tool_calls" : "stop",
+            },
+          ],
         })}\n\n`,
       );
       response.end("data: [DONE]\n\n");
@@ -392,12 +410,18 @@ void test("Protected turns load skills on request and retain credentials during 
   const scheduleNow = Math.floor(Date.now() / 60_000) * 60_000;
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: scheduleNow });
   await app.startAutomations(() => {});
-  const capabilities = "automation-runs-v1, automation-results-v1, automations-context-v1";
+  const capabilities =
+    "automation-runs-v1, automation-results-v1, automations-context-v1, automations-pacing-v1";
   const automationCall = (route: string, init?: RequestInit) =>
     call(route, {
       ...init,
       headers: { "x-alcove-capabilities": capabilities, ...init?.headers },
     });
+  assert.equal((await (await call("/automations/catalog")).json()).schedule.pacing, undefined);
+  assert.deepEqual((await (await automationCall("/automations/catalog")).json()).schedule.pacing, {
+    minimumMs: 60_000,
+    maximumMs: 2_592_000_000,
+  });
   const nextMinute = new Date(scheduleNow + 60_000);
   const cronParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
@@ -569,14 +593,31 @@ void test("Protected turns load skills on request and retain credentials during 
   );
   const read = (await (await automationCall(`/automations/${automation.id}`)).json()).automation;
   assert.equal(read.nextCheckAt, expectedNextCheck);
+  const pacing = { minMs: 60_000, maxMs: 180_000 };
+  assert.equal(proposedNextCheck, false);
   const calendarPaused = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": enabledRecord.version },
-    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 } }),
+    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 }, pacing }),
   });
   assert.equal(calendarPaused.status, 200, await calendarPaused.clone().text());
   const pausedRecord = (await calendarPaused.json()).automation;
   assert.equal(pausedRecord.nextCheckAt, null);
+  assert.deepEqual(pausedRecord.pacing, pacing);
+  assert.equal(pausedRecord.nextCheckReason, undefined);
+  const legacyPaced = (await (await call(`/automations/${automation.id}`)).json()).automation;
+  assert.deepEqual(legacyPaced.schedule, { kind: "every", everyMs: 60_000 });
+  assert.equal(legacyPaced.pacing, undefined);
+  assert.equal(
+    (
+      await call(`/automations/${automation.id}`, {
+        method: "PATCH",
+        headers: { "if-match": pausedRecord.version },
+        body: JSON.stringify({ schedule: legacyPaced.schedule }),
+      })
+    ).status,
+    422,
+  );
   const isolatedEnabled = await automationCall(`/automations/${isolatedId}`, {
     method: "PATCH",
     headers: { "if-match": isolatedAutomation.version },
@@ -591,6 +632,7 @@ void test("Protected turns load skills on request and retain credentials during 
   });
   assert.equal(resumed.status, 200, await resumed.clone().text());
   assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
+  assert.equal((await resumed.clone().json()).automation.nextCheckReason, "fallback");
   const scheduledDelivery = waitForDelivery("scheduled");
   const automationRequestStart = requests.length;
   const browsersBeforeAutomation = browserSessions.opened;
@@ -645,12 +687,29 @@ void test("Protected turns load skills on request and retain credentials during 
       ),
   );
   assert.equal(browserSessions.opened, browsersBeforeAutomation);
+  const accepted = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(accepted.nextCheckReason, "model");
+  assert.equal(accepted.nextCheckAt, new Date(scheduleNow + 60_000 + pacing.maxMs).toISOString());
+  await close(server);
+  await app.shutdown();
+  t.mock.timers.tick(60_000);
+  app = createProtectedHttp(appOptions);
+  server = createProtectedServer(origin, app.fetch);
+  url = await listen(server);
+  await app.startAutomations(() => {});
+  t.mock.timers.tick(0);
+  const restored = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(restored.nextCheckAt, accepted.nextCheckAt);
+  assert.equal(restored.nextCheckReason, "model");
   const paused = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": (await resumed.clone().json()).automation.version },
-    body: JSON.stringify({ enabled: false }),
+    body: JSON.stringify({ enabled: false, pacing: null }),
   });
   assert.equal(paused.status, 200, await paused.clone().text());
+  assert.equal((await paused.clone().json()).automation.pacing, undefined);
   const originalPost = Worker.prototype.postMessage;
   const originalEmit = Worker.prototype.emit;
   const heldQueue = Promise.withResolvers<{ worker: Worker; runId: string }>();
@@ -7593,7 +7652,8 @@ void test("automation authoring chats hold a server binding and save only the se
   const formChat = (
     await (await call("alice", "/automations/authoring", { method: "POST" })).json()
   ).chat;
-  const recovery = `${negotiated}, automations-draft-recovery-v1`;
+  await app.startAutomations(() => {});
+  const recovery = `${negotiated}, automations-draft-recovery-v1, automations-pacing-v1`;
   const formSave = (subject: string, chatId: string, capabilities = negotiated, sent = draft) =>
     call(
       subject,
@@ -7674,7 +7734,11 @@ void test("automation authoring chats hold a server binding and save only the se
   const legacy = await (await call("alice", route)).json();
   assert.equal("authoringDraft" in legacy || "authoringBusy" in legacy, false);
   assert.equal((await call("bob", route, {}, recovery)).status, 404);
-  const edited = { ...draft, instructions: "Summarize public library updates." };
+  const edited = {
+    ...draft,
+    instructions: "Summarize public library updates.",
+    pacing: { minMs: 60_000, maxMs: 300_000 },
+  };
   const checkpoint = (subject: string, baseDraftRevision: string, profileId = profiles[subject]!) =>
     call(
       subject,
@@ -7693,6 +7757,19 @@ void test("automation authoring chats hold a server binding and save only the se
     draftRevision: "2",
   });
   assert.equal((await checkpoint("alice", "1")).status, 412);
+  const legacyRecovery = `${negotiated}, automations-draft-recovery-v1`;
+  const legacyOverwrite = await call(
+    "alice",
+    `${route}/authoring-draft`,
+    {
+      method: "PUT",
+      headers: { "x-grogu-profile": profiles.alice! },
+      body: JSON.stringify({ baseDraftRevision: "2", draft }),
+    },
+    legacyRecovery,
+  );
+  assert.equal(legacyOverwrite.status, 409);
+  assert.equal((await legacyOverwrite.json()).error.code, "pacing_unavailable");
   assert.equal(
     (await turn("alice", draftChat.id, "stale", { draft, draftRevision: "2" }, recovery)).code,
     "draft_mismatch",
@@ -7732,6 +7809,7 @@ void test("automation authoring chats hold a server binding and save only the se
   // Reconstruct the HTTP service over the same isolated SQLite state, not a client cache.
   await app.shutdown();
   app = createProtectedHttp(options);
+  await app.startAutomations(() => {});
   const recovered = await read();
   assert.ok(Value.Check(ProtectedDraftRecoveryChatSchema, recovered));
   const snapshot = { draft: { ...edited, name: "Revised by chat" }, draftRevision: "3" };

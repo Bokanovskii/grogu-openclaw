@@ -2866,7 +2866,9 @@ CREATE TABLE IF NOT EXISTS protected_automations (
   publication_revision INTEGER NOT NULL DEFAULT 0 CHECK (publication_revision >= 0),
   enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  pacing_min_ms INTEGER,
+  pacing_max_ms INTEGER
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_protected_automations_owner
   ON protected_automations(central_owner_profile_id, updated_at);
@@ -2926,7 +2928,11 @@ CREATE TABLE IF NOT EXISTS protected_automation_run_chats (
   chat_id TEXT CHECK (chat_id IS NULL OR length(CAST(chat_id AS BLOB)) BETWEEN 1 AND 128),
   last_scheduled_at_ms INTEGER CHECK (last_scheduled_at_ms IS NULL OR last_scheduled_at_ms >= 0),
   reserved_run_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_run_bytes >= 0),
-  charged_bytes INTEGER NOT NULL CHECK (charged_bytes > 0)
+  charged_bytes INTEGER NOT NULL CHECK (charged_bytes > 0),
+  pacing_revision INTEGER,
+  pacing_next_at_ms INTEGER,
+  pacing_reason INTEGER,
+  pacing_failures INTEGER
 ) STRICT;
 CREATE TABLE IF NOT EXISTS protected_automation_run_lifecycle (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -3,7 +3,6 @@ import { hasCanonicalCronDeliveryMode } from "../store/delivery-codec.js";
 import type { CronJob, CronRunStatus } from "../types.js";
 import {
   computeJobPreviousRunAtOrBeforeMs,
-  DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
   hasActiveCronRun,
   hasScheduledNextRunAtMs,
   HEARTBEAT_SKIP_DISABLED,
@@ -190,7 +189,7 @@ function isErrorBackoffPending(
   if (job.schedule.kind === "at" || lastRunStatus !== "error") {
     return false;
   }
-  const backoffUntilMs = resolveJobErrorBackoffUntilMs(job, DEFAULT_ERROR_BACKOFF_SCHEDULE_MS);
+  const backoffUntilMs = resolveJobErrorBackoffUntilMs(job);
   return backoffUntilMs !== undefined && nowMs < backoffUntilMs;
 }
 

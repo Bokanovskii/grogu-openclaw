@@ -1,6 +1,6 @@
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { resolveCronJobEffectiveAgentId } from "../cron/agent-id.js";
-import { errorBackoffMs } from "../cron/service/jobs-scheduling.js";
+import { errorBackoffMs } from "../cron/error-backoff.js";
 import { CronStreamSourceRetirementError, cronStreamScheduleKey } from "../cron/stream-schedule.js";
 import type { CronJob, CronJobState } from "../cron/types.js";
 import { formatErrorMessage } from "../infra/errors.js";

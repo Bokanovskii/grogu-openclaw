@@ -77,7 +77,7 @@ type WithoutOwner<Command> = Command extends unknown
 
 async function fixture(
   t: { after(fn: () => Promise<void>): void },
-  contextAccess?: ProtectedAutomationDraft["contextAccess"],
+  options: Pick<ProtectedAutomationDraft, "contextAccess" | "pacing"> = {},
 ) {
   const home = path.resolve(".artifacts", `automation-lifecycle-${randomUUID()}`);
   const stateDir = path.join(home, "state");
@@ -128,7 +128,7 @@ async function fixture(
     model: { provider: "sparky", id: "00000000-0000-4000-8000-000000000001" },
     thinking: "low",
     schedule: { kind: "every", everyMs: 60_000 },
-    ...(contextAccess === undefined ? {} : { contextAccess }),
+    ...options,
   };
   const context = captureProtectedStateWorkerContext(stateDir);
   const mutationAuthority = { profileId: ownerId, assertCurrent: () => {}, admitStorage: () => {} };
@@ -268,7 +268,7 @@ function authority(profileId: string) {
 }
 
 void test("isolated automation results require a matching active run", async (t) => {
-  const f = await fixture(t, "isolated");
+  const f = await fixture(t, { contextAccess: "isolated" });
   const owner = authority(f.ownerId);
   const runId = randomUUID();
   const chatId = randomUUID();
@@ -371,7 +371,7 @@ void test("isolated automation results require a matching active run", async (t)
 });
 
 void test("isolated automation edits wait until the active run settles", async (t) => {
-  const f = await fixture(t, "isolated");
+  const f = await fixture(t, { contextAccess: "isolated" });
   const owner = authority(f.ownerId);
   const runId = randomUUID();
   const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
@@ -618,6 +618,81 @@ void test("isolated creation waits for deletion before checking orphaned run cha
   releaseRemoval.resolve();
   assert.deepEqual(await removal, { status: "committed" });
   await assert.rejects(creation, { code: "automation_history_conflict" });
+});
+
+void test("restores scheduled failure backoff and ignores manual or replaced runs", async (t) => {
+  const f = await fixture(t, { pacing: { minMs: 60_000, maxMs: 360_000 } });
+  const owner = authority(f.ownerId);
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  const cursor = async () =>
+    (await readProtectedAutomationLastScheduledAttempt(f.stateDir, f.automationId, owner.admission))
+      ?.check;
+  const queue = async (trigger: "scheduled" | "manual", now: number) => {
+    const runId = randomUUID();
+    assert.equal(
+      (
+        await write({
+          kind: "queue",
+          runId,
+          definitionRevision: f.revision,
+          trigger,
+          scheduledAtMs: now,
+          now,
+        })
+      ).status,
+      "committed",
+    );
+    return runId;
+  };
+  const fail = async (runId: string, now: number) =>
+    assert.equal(
+      (
+        await write({
+          kind: "finish",
+          runId,
+          now,
+          outcome: { status: "failed", errorCode: "provider_busy" },
+        })
+      ).status,
+      "committed",
+    );
+  await write({ kind: "provision" });
+  for (const at of [10, 60_011, 120_012]) {
+    await fail(await queue("scheduled", at), at + 1);
+  }
+  const expected = {
+    version: String(f.revision),
+    atMs: 420_013,
+    reason: "backoff",
+    consecutiveFailures: 3,
+  };
+  await closeOpenClawStateDatabaseByPathAsync(
+    resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: f.stateDir }),
+  );
+  assert.deepEqual(await cursor(), expected);
+  await fail(await queue("manual", 130_000), 130_001);
+  assert.deepEqual(await cursor(), expected);
+  const stale = await queue("scheduled", expected.atMs);
+  const paused = await patchProtectedAutomationWithAdmission(
+    captureProtectedStateWorkerContext(f.stateDir),
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      expectedRevision: f.revision,
+      definition: f.definition,
+      enabled: false,
+      now: expected.atMs + 1,
+    },
+    { profileId: f.ownerId, assertCurrent() {}, admitStorage() {} },
+  );
+  assert.equal(paused.status, "updated");
+  await fail(stale, expected.atMs + 2);
+  assert.deepEqual(await cursor(), expected);
 });
 
 void test("paused automations allow manual lifecycle runs but refuse scheduled runs", async (t) => {

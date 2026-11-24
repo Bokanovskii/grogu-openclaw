@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
@@ -401,6 +402,31 @@ async function main() {
     process.stdout.write("Alcove owner subject updated. Restart the listener.\n");
     return;
   }
+  if (action === "enable-fresh-browser" && arg === undefined && rest.length === 0) {
+    // Download first: a failed install must leave protected.json unchanged.
+    const cli = fileURLToPath(
+      new URL("../../node_modules/playwright-core/cli.js", import.meta.url),
+    );
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(process.execPath, [cli, "install", "chromium"], {
+        stdio: ["ignore", "ignore", "inherit"],
+      });
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    if (code !== 0) {
+      throw new MaintenanceRefused(
+        "Chromium download failed; protected.json is unchanged. Check network access and retry.",
+      );
+    }
+    await updateSettings((settings) =>
+      settings.browser === "fresh" ? undefined : { ...settings, browser: "fresh" },
+    );
+    process.stdout.write(
+      "Chromium is installed and the fresh browser is enabled. Restart the listener.\n",
+    );
+    return;
+  }
   if (action === "refresh-storage-limits" && arg === undefined && rest.length === 0) {
     const storageLimits = measureStorageLimits(stateDir);
     await updateSettings((settings) => ({ ...settings, storageLimits }));
@@ -499,7 +525,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log, release-check.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, enable-fresh-browser, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log, release-check.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

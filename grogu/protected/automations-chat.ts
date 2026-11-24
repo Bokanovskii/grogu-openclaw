@@ -158,7 +158,7 @@ export function createProtectedAutomationsChatBindings(input: {
 }
 
 /**
- * One authoring turn over a client-held draft. Draft updates stay unsaved; only an explicit save of
+ * One authoring turn over the submitted draft. Draft updates do not create an automation; only an explicit save of
  * exactly the revision sent this turn writes a paused record. An unsaved chat's record id is its
  * chat id, so a retried first save finds the same record instead of creating another.
  */
@@ -173,7 +173,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
   boundAutomationId?: string;
   sent: { draft: ProtectedAutomationDraft; draftRevision: string; automationVersion?: string };
   admitStorage: AdmitStorage;
-  bind: (automationId: string) => Promise<void>;
+  bind: (automation: StoredAutomationRecord) => Promise<boolean>;
   publish: (event: AuthoringEvent) => Promise<void>;
 }): AutomationsAuthoringBindings {
   // The agent runtime may run one message's tool calls in parallel; serialize them so the
@@ -359,10 +359,9 @@ export function createProtectedAutomationAuthoringBindings(input: {
             return refuse("unavailable");
           }
           automation = input.present(created);
-          await input.bind(automation.id);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
-          if (!savesDraft(created, validation.draft)) {
+          if (!(await input.bind(created)) || !savesDraft(created, validation.draft)) {
             return refuse("version_mismatch", automation.version);
           }
         } else {

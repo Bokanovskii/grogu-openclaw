@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
+import { isDeepStrictEqual } from "node:util";
 import {
   isProtectedAgentSelection,
   isProtectedAutomationPatchRequest,
@@ -31,7 +32,10 @@ import {
   type ProtectedTurnRequest,
 } from "@openclaw/gateway-protocol/protected";
 import {
+  isProtectedAuthoringCheckpoint,
+  isProtectedAuthoringCreate,
   isProtectedAuthoringTurnRequest,
+  type ProtectedAuthoringDraft,
   type ProtectedAuthoringTurnEvent,
   type ProtectedAuthoringTurnRequest,
   type ProtectedAutomationAuthoringResponse,
@@ -157,7 +161,12 @@ import {
   chatWidgetsDirectory,
   removeChatFilesDirectory,
 } from "./chat-files.js";
-import { createProtectedChats } from "./chats.js";
+import {
+  createProtectedChats,
+  draftMismatch,
+  readAuthoringDraft,
+  type ProtectedChatAuthority,
+} from "./chats.js";
 import { clientCapabilitiesVary, hasClientCapability } from "./client-capabilities.js";
 import { ProtectedError, publicError } from "./errors.js";
 import {
@@ -437,6 +446,13 @@ function supportsAutomationsAuthoring(request: Request) {
   );
 }
 
+function supportsDraftRecovery(request: Request) {
+  return (
+    supportsAutomationsAuthoring(request) &&
+    hasClientCapability(request.headers, "automations-draft-recovery-v1")
+  );
+}
+
 /** Side chats are listed and linked to their parents only for clients that negotiated them. */
 function supportsSideChats(request: Request) {
   return hasClientCapability(request.headers, sideChatsCapability);
@@ -538,6 +554,18 @@ export function createProtectedHttp(options: {
     calendarDraftValidationAvailable: true,
     persistenceAvailable: Boolean(admitStorage),
   });
+  const bindSavedAutomation = (
+    authority: ProtectedChatAuthority,
+    chatId: string,
+    automation: StoredAutomationRecord,
+  ) =>
+    chats.bindAutomation(authority, chatId, automation.id, (draft) => {
+      const validated =
+        automationCatalog && validateProtectedAutomationDraft(draft, automationCatalog);
+      return (
+        !automation.enabled && validated?.valid === true && savesDraft(automation, validated.draft)
+      );
+    });
   const runs = new Map<string, Run>();
   const pending = new Set<Promise<unknown>>();
   const revokedSessions = new Set<string>();
@@ -904,7 +932,7 @@ export function createProtectedHttp(options: {
           }
         : {}),
     };
-    // The server-held binding decides authoring; the body only carries the client-held draft.
+    // Only the server-held binding admits authoring tools.
     const admitAuthoringTurn = async (entry: Awaited<ReturnType<typeof chats.readEntry>>) => {
       if (entry.protectedAuthoringKind !== "automation") {
         if (authoringInput) {
@@ -1035,6 +1063,27 @@ export function createProtectedHttp(options: {
         }
         await revalidate();
         profileAuthority.assertCurrent();
+        const stored =
+          authoring && !authoring.automationId ? readAuthoringDraft(currentEntry) : undefined;
+        const durableDraft =
+          authoring &&
+          !authoring.automationId &&
+          (supportsDraftRecovery(request) || stored !== undefined);
+        if (authoring && durableDraft) {
+          const { draft, draftRevision } = authoring.input;
+          if (stored) {
+            if (stored.draftRevision !== draftRevision || !isDeepStrictEqual(stored.draft, draft)) {
+              throw draftMismatch();
+            }
+          } else {
+            if (draftRevision !== "1" || !storage) {
+              throw draftMismatch();
+            }
+            await chats.checkpointDraft(authority, id, null, draft, storage.charge);
+            await revalidate();
+            profileAuthority.assertCurrent();
+          }
+        }
         if (shutdown.signal.aborted || runs.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
         }
@@ -1049,6 +1098,7 @@ export function createProtectedHttp(options: {
         return {
           run,
           authoring,
+          durableDraft,
           browserEligible,
           selectedAgent,
           mentionedAgents,
@@ -1068,6 +1118,7 @@ export function createProtectedHttp(options: {
     const {
       run,
       authoring,
+      durableDraft,
       browserEligible,
       selectedAgent,
       mentionedAgents,
@@ -1115,6 +1166,7 @@ export function createProtectedHttp(options: {
     const runAuthority = { profileId: profile.id, assertCurrent: assertRun };
     // Assigned when the stream starts; authoring tools run only inside that stream.
     let publishAuthoring: ((event: ProtectedAuthoringTurnEvent) => Promise<void>) | undefined;
+    let checkpointUpdates = durableDraft;
     const automationChat = authoring
       ? createProtectedAutomationAuthoringBindings({
           stateDir: options.stateDir,
@@ -1139,8 +1191,13 @@ export function createProtectedHttp(options: {
               "automation",
               await storageLimit(assertRun),
             ),
-          bind: async (automationId) => {
-            await chats.bindAutomation(runAuthority, id, automationId);
+          bind: async (automation) => {
+            const chat = await bindSavedAutomation(runAuthority, id, automation);
+            const bound = chat.authoring?.automationId === automation.id;
+            if (bound) {
+              checkpointUpdates = false;
+            }
+            return bound;
           },
           publish: async (event) => {
             if (!publishAuthoring) {
@@ -1255,6 +1312,16 @@ export function createProtectedHttp(options: {
         };
         if (authoring) {
           publishAuthoring = async (event) => {
+            if (checkpointUpdates && event.type === "automation-draft-update" && storage) {
+              await checkRun();
+              await chats.checkpointDraft(
+                runAuthority,
+                id,
+                event.baseDraftRevision,
+                event.draft,
+                storage.charge,
+              );
+            }
             send(event);
           };
         }
@@ -3267,7 +3334,7 @@ export function createProtectedHttp(options: {
         return supportsSideChats(request) ? owned : owned.filter((chat) => !chat.side);
       };
       const readChat = async (id: string, owner = authority) => {
-        const { chat, usage } = await chats.readWithUsage(owner, id);
+        const { chat, usage, entry } = await chats.readWithUsage(owner, id);
         if (!hasClientCapability(request.headers, "specialist-stream-v1")) {
           for (const message of chat.messages) {
             delete message.runId;
@@ -3314,7 +3381,7 @@ export function createProtectedHttp(options: {
             owner.profileId,
           );
         }
-        return { chat, usage };
+        return { chat, usage, entry };
       };
       const fileResponse = (
         chatId: string,
@@ -3990,7 +4057,12 @@ export function createProtectedHttp(options: {
                             catalog.capabilities.automations.create &&
                             admitStorage &&
                             agentCatalog.get(authoringAgentId)
-                              ? { authoring: true }
+                              ? {
+                                  authoring: true,
+                                  ...(supportsDraftRecovery(request)
+                                    ? { draftRecovery: true }
+                                    : {}),
+                                }
                               : {}),
                           },
                         }
@@ -4112,6 +4184,17 @@ export function createProtectedHttp(options: {
         }
         let storage;
         try {
+          if (authoringChatId !== undefined) {
+            const latest = await chats.readEntry(authority, authoringChatId);
+            const stored = readAuthoringDraft(latest);
+            if (
+              latest.protectedAutomationId ||
+              ((stored || supportsDraftRecovery(request)) &&
+                !isDeepStrictEqual(stored?.draft, draft))
+            ) {
+              throw draftMismatch();
+            }
+          }
           storage = await admitStorage(
             profile.id,
             assertCurrent,
@@ -4133,8 +4216,8 @@ export function createProtectedHttp(options: {
             unauthorized();
           }
           if (authoringChatId !== undefined) {
-            await chats.bindAutomation(authority, authoringChatId, automation.id);
-            if (!savesDraft(automation, validation.draft)) {
+            const chat = await bindSavedAutomation(authority, authoringChatId, automation);
+            if (!chat.authoring?.automationId || !savesDraft(automation, validation.draft)) {
               throw new ProtectedError(
                 412,
                 "version_mismatch",
@@ -4164,6 +4247,15 @@ export function createProtectedHttp(options: {
           return notFound();
         }
         const automationId = authoringMatch[1];
+        let snapshot: ProtectedAuthoringDraft | undefined;
+        if (automationId === undefined && supportsDraftRecovery(request)) {
+          requireProfile("Reload your account before creating an automation draft.");
+          const input = await body(request);
+          if (!isProtectedAuthoringCreate(input)) {
+            return invalid();
+          }
+          snapshot = { draft: input.draft, draftRevision: "1" };
+        }
         if (creating.has(profile.id)) {
           throw new ProtectedError(409, "busy", "Another chat is being created.");
         }
@@ -4196,7 +4288,14 @@ export function createProtectedHttp(options: {
               (chat) => chat.id === automationId && chat.authoring && !chat.authoring.automationId,
             );
             if (!bound && unbound) {
-              bound = await chats.bindAutomation(authority, unbound.id, automationId);
+              bound = await bindSavedAutomation(authority, unbound.id, automation);
+              if (!bound.authoring?.automationId) {
+                throw new ProtectedError(
+                  412,
+                  "version_mismatch",
+                  "The saved automation differs from your unsaved draft. Reopen the draft in Chats.",
+                );
+              }
             }
             if (bound) {
               const { chat } = await readChat(bound.id);
@@ -4217,11 +4316,18 @@ export function createProtectedHttp(options: {
             "create",
             await storageLimit(assertCurrent),
           );
+          if (snapshot) {
+            storage.charge(Buffer.byteLength(JSON.stringify(snapshot)));
+          }
           const chat = await chats.create(
             authority,
-            automation ? text(automation.name, 160) : "New automation",
+            automation ? text(automation.name, 160) : (snapshot?.draft.name ?? "New automation"),
             authoringAgentId,
-            { kind: "automation", ...(automationId === undefined ? {} : { automationId }) },
+            {
+              kind: "automation",
+              ...(automationId === undefined ? {} : { automationId }),
+              snapshot,
+            },
           );
           storage.recordCreatedChat(chat.id, chats.scope(authority, chat.id).sessionKey);
           await revalidate();
@@ -5050,6 +5156,51 @@ export function createProtectedHttp(options: {
         throw error;
       }
       await revalidate();
+      if (rest === "authoring-draft" && method === "PUT") {
+        if (
+          !supportsDraftRecovery(request) ||
+          !admitStorage ||
+          chatEntry.protectedAuthoringKind !== "automation" ||
+          chatEntry.protectedAutomationId
+        ) {
+          return notFound();
+        }
+        requireProfile("Reload your account before editing this draft.");
+        const input = await body(request);
+        if (!isProtectedAuthoringCheckpoint(input)) {
+          return invalid();
+        }
+        if (runs.has(id) || mutations.has(id)) {
+          throw new ProtectedError(
+            409,
+            "busy",
+            "Wait for the chat to finish before editing the draft.",
+          );
+        }
+        mutations.add(id);
+        let storage;
+        try {
+          await revalidate();
+          storage = await admitStorage(
+            profile.id,
+            assertCurrent,
+            "stored-data",
+            await storageLimit(assertCurrent),
+          );
+          const result = await chats.checkpointDraft(
+            authority,
+            id,
+            input.baseDraftRevision,
+            input.draft,
+            storage.charge,
+          );
+          await revalidate();
+          return json(result);
+        } finally {
+          storage?.release();
+          mutations.delete(id);
+        }
+      }
       if (
         (rest === "turns" && method === "POST") ||
         (/^runs\/[^/]+\/(?:steer|stop)$/u.test(rest ?? "") && method === "POST") ||
@@ -5058,7 +5209,9 @@ export function createProtectedHttp(options: {
         assertRunChatWritable(chatEntry);
       }
       if (!rest && method === "GET") {
-        const { chat, usage } = await readChat(id);
+        // If a run finishes during the read, keep the client polling for its final transcript.
+        const wasBusy = runs.has(id) || mutations.has(id);
+        const { chat, usage, entry } = await readChat(id);
         await revalidate();
         if (usage && !hasClientCapability(request.headers, "model-context-v1")) {
           delete usage.contextSize;
@@ -5067,6 +5220,12 @@ export function createProtectedHttp(options: {
         return profileJson({
           chat,
           ...(usage ? { usage } : {}),
+          ...(supportsDraftRecovery(request) && chat.authoring && !chat.authoring.automationId
+            ? {
+                authoringDraft: readAuthoringDraft(entry),
+                authoringBusy: wasBusy || active !== undefined || mutations.has(id),
+              }
+            : {}),
           ...(active?.profileId === profile.id && active.sessionHash === identity.sessionId
             ? { activeRun: { id: active.id } }
             : {}),

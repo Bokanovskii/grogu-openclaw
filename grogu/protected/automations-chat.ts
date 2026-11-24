@@ -17,6 +17,7 @@ import {
   listProtectedAutomationRecords,
   readProtectedAutomationRecord,
   saveProtectedAutomationPatch,
+  type ProtectedAutomationCreationSafety,
   type StoredAutomationRecord,
 } from "./automations-store.js";
 import { applyProtectedAutomationPatch, validateProtectedAutomationDraft } from "./automations.js";
@@ -173,6 +174,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
   boundAutomationId?: string;
   sent: { draft: ProtectedAutomationDraft; draftRevision: string; automationVersion?: string };
   admitStorage: AdmitStorage;
+  creationSafety: ProtectedAutomationCreationSafety;
   bind: (automation: StoredAutomationRecord) => Promise<boolean>;
   publish: (event: AuthoringEvent) => Promise<void>;
 }): AutomationsAuthoringBindings {
@@ -241,6 +243,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
         },
         input.authority,
         storage,
+        input.creationSafety,
       );
     } finally {
       storage.release();
@@ -260,6 +263,22 @@ export function createProtectedAutomationAuthoringBindings(input: {
     async update(params) {
       return runCurrent(async () => {
         if (
+          params.draft.pacing !== undefined &&
+          !isDeepStrictEqual(params.draft.pacing, draft.pacing)
+        ) {
+          return {
+            status: "invalid" as const,
+            writeApplied: false as const,
+            errors: [
+              {
+                field: "pacing",
+                code: "invalid_value",
+                message: "Only the member can change the next-check bounds.",
+              },
+            ],
+          };
+        }
+        if (
           params.draft.contextAccess !== undefined &&
           params.draft.contextAccess !== draft.contextAccess
         ) {
@@ -276,9 +295,11 @@ export function createProtectedAutomationAuthoringBindings(input: {
           };
         }
         const validation = validate(
-          draft.contextAccess === undefined
-            ? params.draft
-            : { ...params.draft, contextAccess: draft.contextAccess },
+          {
+            ...params.draft,
+            ...(draft.contextAccess ? { contextAccess: draft.contextAccess } : {}),
+            ...(draft.pacing ? { pacing: draft.pacing } : {}),
+          },
           await readSaved(),
         );
         if (!validation.valid) {
@@ -383,6 +404,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
                 model: sentDraft.model,
                 thinking: sentDraft.thinking ?? null,
                 schedule: sentDraft.schedule,
+                ...(input.catalog.schedule.pacing ? { pacing: sentDraft.pacing ?? null } : {}),
               },
               catalog: input.catalog,
               retainedAgent: input.retainedAgent,
@@ -406,6 +428,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
             case "not_found":
               return refuse("not_found");
             case "scheduler_required":
+            case "automation_busy":
               return refuse("automation_active");
             default:
               return refuse("unavailable");

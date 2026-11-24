@@ -2,7 +2,6 @@ import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-con
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import {
-  DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
   hasActiveCronRun,
   isJobEnabled,
   recomputeJobNextRunAtMs,
@@ -76,9 +75,7 @@ export function planCronStartupInWorker(
               continue;
             }
             const backoffUntilMs =
-              job.schedule.kind === "cron"
-                ? resolveJobErrorBackoffUntilMs(job, DEFAULT_ERROR_BACKOFF_SCHEDULE_MS)
-                : undefined;
+              job.schedule.kind === "cron" ? resolveJobErrorBackoffUntilMs(job) : undefined;
             if (
               backoffUntilMs !== undefined &&
               preparation.nowMs < backoffUntilMs &&

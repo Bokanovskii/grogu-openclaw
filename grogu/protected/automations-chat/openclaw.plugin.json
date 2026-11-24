@@ -15,7 +15,11 @@
       "automations_propose_patch",
       "automation_draft_read",
       "automation_draft_update",
-      "automation_draft_save"
+      "automation_draft_save",
+      "next_check"
     ]
+  },
+  "toolMetadata": {
+    "next_check": { "optional": true }
   }
 }

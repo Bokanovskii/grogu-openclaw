@@ -263,6 +263,7 @@ export function selectCopilotStarterModel(
 }
 
 export const COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS = 10_000;
+const COPILOT_CATALOG_API_VERSION = "2026-06-01";
 const COPILOT_ROUTER_ID_PREFIX = "accounts/";
 type CopilotCatalogModel = Omit<ModelDefinitionConfig, "input"> & {
   api: NonNullable<ModelDefinitionConfig["api"]>;
@@ -441,6 +442,7 @@ export async function fetchCopilotModelCatalog(
         headers: {
           Accept: "application/json",
           ...buildCopilotRuntimeHeaders({ headers: params.headers }),
+          "X-Github-Api-Version": COPILOT_CATALOG_API_VERSION,
           Authorization: `Bearer ${params.copilotApiToken}`,
         },
       },

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
+import { waitForDiagnosticEventsDrained } from "../../src/infra/diagnostic-events.js";
+import { trackWorkerRequest } from "../../src/infra/worker-request-diagnostics.js";
+import { processLoadNotes } from "./process-load.js";
 import { createProtectedTurnTiming, type ModelRequestFacts } from "./turn-timing.js";
 
 function finishedRecord(
@@ -70,4 +73,30 @@ void test("a turn with no model request or tool call reports neither", (t) => {
     Object.keys(record).filter((key) => /^(model|tool|search|fetch)/u.test(key)),
     [],
   );
+});
+
+void test("a turn counts the worker requests the process finished while it ran", async (t) => {
+  const lines: unknown[] = [];
+  t.mock.method(console, "info", (...args: unknown[]) => {
+    lines.push(args[1]);
+  });
+  const timing = createProtectedTurnTiming(performance.now());
+  for (const [kind, requestClass] of [
+    ["sqlite_writer", "execute"],
+    ["stateRead", "userProfiles"],
+  ] as const) {
+    const tracked = trackWorkerRequest(kind, requestClass);
+    tracked.started();
+    tracked.completed();
+  }
+  // Diagnostic events reach listeners on a later tick.
+  await waitForDiagnosticEventsDrained();
+  timing.finish("complete");
+  const record = JSON.parse(String(lines[0])) as Record<string, unknown>;
+  assert.equal(record.sqliteWrites, 1);
+  assert.equal(record.workerTasks, 1);
+  assert.equal(record.transcriptTasks, 0);
+  for (const name of processLoadNotes) {
+    assert.ok(Number.isInteger(record[name]) && Number(record[name]) >= 0, name);
+  }
 });

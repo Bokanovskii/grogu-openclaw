@@ -34,6 +34,7 @@ import { runMemoryFlushIfNeeded } from "../../src/auto-reply/reply/agent-runner-
 import type { FollowupRun } from "../../src/auto-reply/reply/queue.js";
 import { readCanvasDocumentHtmlSource } from "../../src/canvas/documents.js";
 import { createDefaultDeps } from "../../src/cli/deps.js";
+import { parseDurationMs } from "../../src/cli/parse-duration.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
 import { readSessionEntryReadOnlyInWorker } from "../../src/config/sessions/session-entry-read-runtime.js";
 import {
@@ -75,8 +76,10 @@ import {
   AUTOMATIONS_AUTHORING_TOOL_NAMES,
   AUTOMATIONS_CHAT_PLUGIN_ID,
   AUTOMATIONS_CHAT_TOOL_NAMES,
+  NEXT_CHECK_TOOL_NAME,
   type AutomationsAuthoringBindings,
   type AutomationsChatBindings,
+  type NextCheckBindings,
 } from "./automations-chat/contract.js";
 import type { ProtectedBrowserBroker, ProtectedBrowserSession } from "./browser/broker.js";
 import type { StorageFiles } from "./capacity.js";
@@ -134,6 +137,8 @@ export type ProtectedTurn = {
   };
   input: TurnInput;
   automationChat?: AutomationsChatBindings | AutomationsAuthoringBindings;
+  /** Server-bound to this scheduled adaptive run; only successful settlement can use its proposal. */
+  proposeNextCheck?: (delayMs: number) => void;
   /**
    * Server-derived: set only for interactive member turns. Automation runs, automation-run chats,
    * shared views and delegated children never receive a browser.
@@ -261,7 +266,6 @@ async function runMentionedAgent(
   agent: Readonly<ProtectedAgentDefinition>,
   credential: ReturnType<typeof createRequestModelCredential>,
   recordUsage: (usage: NormalizedUsage | undefined) => void,
-  recordModelRequest: (record: TerminalModelRequestMetadata) => void,
   memberMemory: ProtectedMemberMemoryLease | undefined,
   task = turn.input.text,
 ) {
@@ -336,6 +340,7 @@ async function runMentionedAgent(
           recordUsage(usage);
         },
         requestModelCredential: credential.handle,
+        ...(turn.input.thinking === undefined ? {} : { thinkLevel: turn.input.thinking }),
         memoryAudience: child.memoryGrant?.audience,
         ...(turn.automationContextAccess === "isolated"
           ? { contextIsolation: "isolated" as const }
@@ -522,6 +527,7 @@ async function runMentionedAgent(
               }),
             });
             spawnedRunId = child.runId;
+            turn.markStep("childDispatchReady");
             turn.childEvent({ type: "child-start", runId: child.runId, agentId: agent.id });
           },
           beforeChildDeleteCleanup: async (child) => {
@@ -598,7 +604,8 @@ async function runMentionedAgent(
             child?.memoryGrant?.release();
             settle(outcome);
           },
-          requesterThinkingLevel: turn.input.provider === "sparky" ? "ultra" : undefined,
+          requesterModel: { provider: scope.provider, model: scope.model },
+          requesterThinkingLevel: turn.input.thinking,
         },
       ),
     );
@@ -807,28 +814,7 @@ export function createCanonicalProtectedTurns(options: {
           "Connect this provider first.",
         );
       }
-      const config = turn.input.copilotModel
-        ? {
-            ...options.config,
-            models: {
-              ...options.config.models,
-              providers: {
-                ...options.config.models?.providers,
-                "github-copilot": {
-                  baseUrl: turn.input.copilotModel.baseUrl,
-                  models: [
-                    turn.input.contextSize === undefined
-                      ? turn.input.copilotModel.definition
-                      : {
-                          ...turn.input.copilotModel.definition,
-                          contextTokens: turn.input.contextSize,
-                        },
-                  ],
-                },
-              },
-            },
-          }
-        : options.config;
+      const { config } = options;
       const admission = prepareAgentRunAdmission({
         cfg: config,
         operationalRunInstance: createOperationalRunInstanceRef(turn.runId),
@@ -922,22 +908,43 @@ export function createCanonicalProtectedTurns(options: {
         }
         turn.usage(tokenTotal);
       };
-      const recordModelRequest = turn.modelRequest;
       try {
+        const accountModel = turn.input.copilotModel
+          ? {
+              baseUrl: turn.input.copilotModel.baseUrl,
+              definition:
+                turn.input.contextSize === undefined
+                  ? turn.input.copilotModel.definition
+                  : {
+                      ...turn.input.copilotModel.definition,
+                      contextTokens: turn.input.contextSize,
+                    },
+            }
+          : undefined;
         const requestCredential = createRequestModelCredential({
           provider,
           model,
+          accountModel,
           accessToken,
           expiresAt: turn.input.credential?.expiresAt,
           assertCurrent: turn.assertCurrent,
         });
         credential = requestCredential;
         const authoring = turn.automationChat && "authoring" in turn.automationChat;
-        const automationToolNames = turn.automationChat
-          ? authoring
-            ? AUTOMATIONS_AUTHORING_TOOL_NAMES
-            : AUTOMATIONS_CHAT_TOOL_NAMES
-          : [];
+        const automationTools = turn.automationChat
+          ? {
+              bindings: turn.automationChat,
+              names: authoring ? AUTOMATIONS_AUTHORING_TOOL_NAMES : AUTOMATIONS_CHAT_TOOL_NAMES,
+            }
+          : turn.proposeNextCheck
+            ? {
+                bindings: {
+                  parseDurationMs,
+                  proposeNextCheck: turn.proposeNextCheck,
+                } satisfies NextCheckBindings,
+                names: [NEXT_CHECK_TOOL_NAME],
+              }
+            : undefined;
         browserSession =
           turn.browserAccess === "fresh" && !authoring && options.browser
             ? options.browser.openSession({ signal: turn.signal })
@@ -946,7 +953,7 @@ export function createCanonicalProtectedTurns(options: {
           ...(authoring
             ? turnAgentTools(turn, turn.agent).filter((tool) => !tool.startsWith("sessions_"))
             : turnAgentTools(turn, turn.agent)),
-          ...automationToolNames,
+          ...(automationTools?.names ?? []),
           ...(options.memberMemory && turn.automationContextAccess !== "isolated"
             ? memberMemoryToolNames
             : []),
@@ -1008,6 +1015,9 @@ export function createCanonicalProtectedTurns(options: {
               config,
               provider,
               model,
+              ...(accountModel
+                ? { thinkingCatalog: [{ ...accountModel.definition, provider }] }
+                : {}),
               modelSelectionLocked: true,
               timeoutMs: protectedTurnTimeoutMs,
               blockReplyBreak: "text_end",
@@ -1145,7 +1155,9 @@ export function createCanonicalProtectedTurns(options: {
                     ? { contextIsolation: "isolated" as const }
                     : {}),
                   beforeCompaction,
-                  ...(memberMemory ? { assertInvocationCurrent: turn.assertCurrent } : {}),
+                  ...(memberMemory || turn.proposeNextCheck
+                    ? { assertInvocationCurrent: turn.assertCurrent }
+                    : {}),
                   onExecutionPhase: ({ phase }) => {
                     if (phase === "model_call_started") {
                       turn.markTiming("providerRequestStartMs");
@@ -1166,19 +1178,19 @@ export function createCanonicalProtectedTurns(options: {
                     : allowedTools,
                   toolExecutionAllow: allowedTools,
                   clientTools: turn.routing ? [turn.routing.tool] : [],
-                  ...(turn.automationChat
+                  ...(automationTools
                     ? {
                         runtimePluginToolGrant: {
                           pluginId: AUTOMATIONS_CHAT_PLUGIN_ID,
-                          toolNames: automationToolNames,
+                          toolNames: automationTools.names,
                         },
                       }
                     : {}),
-                  ...(turn.automationChat || memberMemory || browserSession
+                  ...(automationTools || memberMemory || browserSession
                     ? {
                         toolRuntimeBindings: {
-                          ...(turn.automationChat
-                            ? { [AUTOMATIONS_CHAT_PLUGIN_ID]: turn.automationChat }
+                          ...(automationTools
+                            ? { [AUTOMATIONS_CHAT_PLUGIN_ID]: automationTools.bindings }
                             : {}),
                           ...(memberMemory ? { "memory-core": memberMemory.binding } : {}),
                           ...(browserSession
@@ -1306,7 +1318,6 @@ export function createCanonicalProtectedTurns(options: {
                     agent,
                     requestCredential,
                     recordUsage,
-                    recordModelRequest,
                     memberMemory,
                   );
                 }
@@ -1318,14 +1329,13 @@ export function createCanonicalProtectedTurns(options: {
                     route.agent,
                     requestCredential,
                     recordUsage,
-                    recordModelRequest,
                     memberMemory,
                     route.task,
                   );
                 }
               }),
-            undefined,
-            recordModelRequest,
+            () => turn.markStep("childProviderOutput"),
+            turn.modelRequest,
           );
           turn.markStep("childrenFinished");
         }

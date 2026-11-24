@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   isProtectedAgentSelection,
   isProtectedAutomationPatchRequest,
+  protectedAutomationPacingLimits,
   isProtectedCreateChat,
   isProtectedCreateSideChat,
   isProtectedAccountIcon,
@@ -64,6 +65,7 @@ import { FsSafeError } from "../../src/infra/fs-safe.js";
 import { redactSensitiveText } from "../../src/logging/redact.js";
 import { createLazyRuntimeModule } from "../../src/shared/lazy-runtime.js";
 import type { ProtectedAutomationRunError } from "../../src/state/protected-automation-lifecycle.types.js";
+import type { ProtectedAutomationCheckDecision } from "../../src/state/protected-automation-pacing.js";
 import type { ProtectedAutomationResultAdmission } from "../../src/state/protected-automation-results.types.js";
 import { protectedFeedbackRetentionMs } from "../../src/state/protected-feedback.js";
 import type { ProtectedSharingWorkerOperations } from "../../src/state/protected-sharing.worker.js";
@@ -232,6 +234,7 @@ const automationsAuthoringCapability = "automations-authoring-v1";
 const automationResultsCapability = "automation-results-v1";
 const automationRunsCapability = "automation-runs-v1";
 const automationContextCapability = "automations-context-v1";
+const automationPacingCapability = "automations-pacing-v1";
 const sideChatsCapability = "side-chats-v1";
 
 function assertRunChatWritable(
@@ -548,20 +551,41 @@ export function createProtectedHttp(options: {
     assertCurrent();
     return custom ?? options.storageLimits.userBytes;
   };
-  const automationCatalog = createProtectedAutomationCatalog({
+  const baseAutomationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,
     calendarDraftValidationAvailable: true,
     persistenceAvailable: Boolean(admitStorage),
   });
+  const pacingCatalog = baseAutomationCatalog && {
+    ...baseAutomationCatalog,
+    schedule: { ...baseAutomationCatalog.schedule, pacing: protectedAutomationPacingLimits },
+  };
+  const catalogFor = (request: Request) =>
+    hasClientCapability(request.headers, automationPacingCapability) &&
+    automationSchedulerStarted &&
+    !automationStorageRecovery.status().admissionClosed
+      ? pacingCatalog
+      : baseAutomationCatalog;
+  const assertDraftPacingAvailable = (
+    catalog: ProtectedAutomationCatalog | undefined,
+    draft: { pacing?: unknown } | undefined,
+  ) => {
+    if (draft?.pacing && !catalog?.schedule.pacing) {
+      throw new ProtectedError(
+        409,
+        "pacing_unavailable",
+        "Update Alcove before editing a model-chosen schedule.",
+      );
+    }
+  };
   const bindSavedAutomation = (
     authority: ProtectedChatAuthority,
     chatId: string,
     automation: StoredAutomationRecord,
   ) =>
     chats.bindAutomation(authority, chatId, automation.id, (draft) => {
-      const validated =
-        automationCatalog && validateProtectedAutomationDraft(draft, automationCatalog);
+      const validated = pacingCatalog && validateProtectedAutomationDraft(draft, pacingCatalog);
       return (
         !automation.enabled && validated?.valid === true && savesDraft(automation, validated.draft)
       );
@@ -748,6 +772,15 @@ export function createProtectedHttp(options: {
     shutdown.signal.throwIfAborted();
     assertAutomationHostCurrent();
   });
+  const automationCreationSafety = (authority: {
+    profileId: string;
+    assertCurrent: () => void;
+  }) => ({
+    hasRunHistory: (automationId: string) => chats.hasAutomationRunHistory(authority, automationId),
+    enrollPublication: automationStorageRecovery.enrollPublication,
+    retainUncertainCreateCommit: automationStorageRecovery.retainUncertainCreateCommit,
+    reconcile: () => reconcileUncertainAutomationStorage(),
+  });
   const createAutomationPublicationAuthority = (
     member: ReturnType<typeof automationAuthority>,
   ): {
@@ -828,6 +861,7 @@ export function createProtectedHttp(options: {
     textLimit?: number;
     automationId?: string;
     automationContextAccess?: "isolated" | "member";
+    proposeNextCheck?: (delayMs: number) => void;
   }): Promise<{ response: Response; completion: Promise<ProtectedTurnCompletion> }> => {
     const {
       request,
@@ -841,8 +875,10 @@ export function createProtectedHttp(options: {
       storageLimit,
       files,
       timing,
+      proposeNextCheck,
       textLimit = 16_000,
     } = context;
+    const automationCatalog = catalogFor(request);
     const requestBody = await body(request);
     timing.at("bodyParsed");
     let data: ProtectedTurnRequest;
@@ -956,6 +992,7 @@ export function createProtectedHttp(options: {
         );
       }
       const automationId = entry.protectedAutomationId;
+      assertDraftPacingAvailable(automationCatalog, authoringInput.draft);
       if (automationId === undefined) {
         if (authoringInput.automationVersion !== undefined) {
           invalid();
@@ -995,6 +1032,7 @@ export function createProtectedHttp(options: {
           "Pause this automation before editing it in chat.",
         );
       }
+      assertDraftPacingAvailable(automationCatalog, saved);
       if (saved.version !== authoringInput.automationVersion) {
         throw new ProtectedError(
           412,
@@ -1184,11 +1222,7 @@ export function createProtectedHttp(options: {
           retainedAgent: (agentId) => agentCatalog.get(agentId),
           authority: runAuthority,
           revalidate: checkRun,
-          present: (automation) =>
-            presentAutomation(
-              automation,
-              hasClientCapability(request.headers, automationContextCapability),
-            ),
+          present: (automation) => presentAutomation(automation, request),
           chatId: id,
           ...(authoring.automationId === undefined
             ? {}
@@ -1201,6 +1235,7 @@ export function createProtectedHttp(options: {
               "automation",
               await storageLimit(assertRun),
             ),
+          creationSafety: automationCreationSafety(runAuthority),
           bind: async (automation) => {
             const chat = await bindSavedAutomation(runAuthority, id, automation);
             const bound = chat.authoring?.automationId === automation.id;
@@ -1224,11 +1259,7 @@ export function createProtectedHttp(options: {
             catalog: automationCatalog,
             authority: runAuthority,
             revalidate: checkRun,
-            present: (automation) =>
-              presentAutomation(
-                automation,
-                hasClientCapability(request.headers, automationContextCapability),
-              ),
+            present: (automation) => presentAutomation(automation, request),
           })
         : undefined;
     const parentSessionKey = chats.scope(runAuthority, id).sessionKey;
@@ -1311,6 +1342,9 @@ export function createProtectedHttp(options: {
             assertRun();
           }
           const published = write(`${JSON.stringify(event)}\n`);
+          if (published && event.type === "child-delta" && event.text) {
+            timing.at("childTextEnqueued");
+          }
           if (
             published &&
             event.type !== "start" &&
@@ -1376,6 +1410,14 @@ export function createProtectedHttp(options: {
                     runId: run.id,
                     profileId: profile.id,
                     automationContextAccess: context.automationContextAccess,
+                    ...(proposeNextCheck
+                      ? {
+                          proposeNextCheck: (delayMs: number) => {
+                            assertRun();
+                            proposeNextCheck(delayMs);
+                          },
+                        }
+                      : {}),
                     target: {
                       ...chats.scope(runAuthority, id),
                       nativeSessionId: parentSessionId,
@@ -1759,6 +1801,11 @@ export function createProtectedHttp(options: {
       definition.instructions,
       `Notification intent: ${definition.whenToNotify}`,
       ...(definition.doneWhen ? [`Completion intent: ${definition.doneWhen}`] : []),
+      ...(trigger === "scheduled" && definition.pacing && definition.schedule.kind === "every"
+        ? [
+            `Choose when to check again with next_check. The member allows delays from ${definition.pacing.minMs} to ${definition.pacing.maxMs} ms after completion. Without a proposal, the next check is in ${definition.schedule.everyMs} ms.`,
+          ]
+        : []),
     ].join("\n\n");
     const request = new Request(`${options.origin}${base}/chats/${chatId}/turns`, {
       method: "POST",
@@ -1770,6 +1817,7 @@ export function createProtectedHttp(options: {
         ...(definition.thinking ? { thinking: definition.thinking } : {}),
       }),
     });
+    let proposedDelayMs: number | undefined;
     const turn = await startProtectedTurn({
       request,
       id: chatId,
@@ -1778,14 +1826,28 @@ export function createProtectedHttp(options: {
       textLimit: 32_000,
       automationId: automation.id,
       automationContextAccess: definition.contextAccess ?? "member",
+      ...(trigger === "scheduled" && definition.pacing
+        ? {
+            proposeNextCheck: (delayMs: number) => {
+              proposedDelayMs = delayMs;
+            },
+          }
+        : {}),
     });
     await turn.response.body?.cancel();
-    return await turn.completion;
+    const result = await turn.completion;
+    return {
+      ...result,
+      proposedDelayMs: result.outcome === "complete" ? proposedDelayMs : undefined,
+    };
   };
   type AutomationMember = Parameters<typeof automationAuthority>[0];
   const automationMembers = new Map<string, AutomationMember>();
   const automationRefreshes = new Map<string, number>();
-  const activeAutomations = new Map<string, { profileId: string; completion?: Promise<void> }>();
+  const activeAutomations = new Map<
+    string,
+    { profileId: string; completion?: Promise<ProtectedAutomationCheckDecision | undefined> }
+  >();
   const orphanedAutomationRuns = new Map<string, { profileId: string; runId: string }>();
   const recoveringAutomationRuns = new Map<string, Promise<void>>();
   let automationOperator: AutomationMember | undefined;
@@ -1943,10 +2005,11 @@ export function createProtectedHttp(options: {
   const automationScheduler = createProtectedAutomationScheduler(async (scheduled, due) => {
     const member = automationMembers.get(scheduled.id);
     if (!member) {
-      return;
+      return undefined;
     }
     try {
-      await runProtectedAutomation(member, scheduled, "scheduled", due);
+      const queued = await queueProtectedAutomationRun(member, scheduled, "scheduled", due);
+      return await queued.completion;
     } catch (error) {
       if (publicError(error).code !== "member_inactive") {
         throw error;
@@ -1972,22 +2035,29 @@ export function createProtectedHttp(options: {
           cause: error,
         });
       }
+      return undefined;
     }
   });
   let automationSchedulerStarted = false;
   const presentAutomation = (
     automation: StoredAutomationRecord,
-    includeContext = false,
+    request: Request,
   ): ProtectedAutomationRecord => {
-    const atMs =
+    const next =
       automation.enabled && automationSchedulerStarted
-        ? automationScheduler.nextCheckAtMs(automation.id, automation.version)
+        ? automationScheduler.nextCheck(automation.id, automation.version)
         : null;
-    const { contextAccess, ...record } = automation;
+    const { contextAccess, pacing, ...record } = automation;
+    const includePacing = hasClientCapability(request.headers, automationPacingCapability);
     return {
       ...record,
-      ...(includeContext ? { contextAccess: contextAccess ?? "member" } : {}),
-      nextCheckAt: atMs === null ? null : new Date(atMs).toISOString(),
+      ...(hasClientCapability(request.headers, automationContextCapability)
+        ? { contextAccess: contextAccess ?? "member" }
+        : {}),
+      ...(includePacing && pacing
+        ? { pacing, ...(next?.reason ? { nextCheckReason: next.reason } : {}) }
+        : {}),
+      nextCheckAt: next ? new Date(next.atMs).toISOString() : null,
     };
   };
   const refreshProtectedAutomation = async (member: AutomationMember, automationId: string) => {
@@ -2020,13 +2090,18 @@ export function createProtectedHttp(options: {
       throw new ProtectedError(404, "not_found", "Automation not found.");
     }
     automationMembers.set(automationId, member);
-    automationScheduler.update({
-      id: automation.id,
-      version: String(automation.definitionRevision),
-      schedule: automation.definition.schedule,
-      updatedAt: automation.updatedAt,
-      ...(last.scheduledAtMs === null ? {} : { lastScheduledAt: last.scheduledAtMs }),
-    });
+    automationScheduler.update(
+      {
+        id: automation.id,
+        version: String(automation.definitionRevision),
+        ...(automation.definition.pacing && automation.definition.schedule.kind === "every"
+          ? { pacing: automation.definition.pacing, schedule: automation.definition.schedule }
+          : { schedule: automation.definition.schedule }),
+        updatedAt: automation.updatedAt,
+        ...(last.scheduledAtMs === null ? {} : { lastScheduledAt: last.scheduledAtMs }),
+      },
+      last.check,
+    );
   };
   const retryProtectedAutomationInbox = async (member: AutomationMember, automationId: string) => {
     const memberAuthority = automationAuthority(member);
@@ -2159,6 +2234,7 @@ export function createProtectedHttp(options: {
         let started = false;
         let completedTurn = false;
         let succeeded = false;
+        let committedCheck: ProtectedAutomationCheckDecision | undefined;
         try {
           const runAuthority = automationAuthority(member, {
             automationId: automation.id,
@@ -2293,7 +2369,11 @@ export function createProtectedHttp(options: {
               automationId: automation.id,
               runId,
               now: Date.now(),
-              outcome: { status: "succeeded", resultId: finished.id },
+              outcome: {
+                status: "succeeded",
+                resultId: finished.id,
+                proposedDelayMs: turn.proposedDelayMs,
+              },
             },
             lifecycle,
           );
@@ -2301,6 +2381,7 @@ export function createProtectedHttp(options: {
             throw new ProtectedError(500, "result_failed", "The run result could not be recorded.");
           }
           succeeded = true;
+          committedCheck = completed.check;
           const delivered = await writeProtectedAutomationLifecycle(
             options.stateDir,
             {
@@ -2319,11 +2400,16 @@ export function createProtectedHttp(options: {
               "The inbox entry could not be recorded.",
             );
           }
+          return completed.check;
         } catch (error) {
           if (succeeded) {
             process.stderr.write(
               "Protected automation result was saved but inbox delivery failed.\n",
             );
+            // Delivery retries separately; do not replace an already committed deadline.
+            if (committedCheck) {
+              return committedCheck;
+            }
             throw new Error("Protected automation inbox delivery failed.", { cause: error });
           }
           const issue = publicError(error);
@@ -2383,6 +2469,7 @@ export function createProtectedHttp(options: {
               cause: error,
             });
           }
+          return finished.status === "committed" ? finished.check : undefined;
         } finally {
           activeAutomations.delete(automation.id);
           reconcileUncertainAutomationStorage();
@@ -2399,16 +2486,8 @@ export function createProtectedHttp(options: {
     });
     return { runId, completion };
   }
-  async function runProtectedAutomation(
-    member: AutomationMember,
-    scheduled: ProtectedScheduledAutomation,
-    trigger: "scheduled" | "manual",
-    scheduledAtMs: number,
-  ) {
-    const queued = await queueProtectedAutomationRun(member, scheduled, trigger, scheduledAtMs);
-    await queued.completion;
-  }
   const handle = async (request: Request): Promise<Response> => {
+    const automationCatalog = catalogFor(request);
     const timing = createProtectedTurnTiming(performance.now());
     const path = new URL(request.url).pathname;
     try {
@@ -3980,12 +4059,7 @@ export function createProtectedHttp(options: {
         automations: StoredAutomationRecord[],
       ): Promise<ProtectedAutomationRecord[]> => {
         if (!automationsPublicCapability) {
-          return automations.map((automation) =>
-            presentAutomation(
-              automation,
-              hasClientCapability(request.headers, automationContextCapability),
-            ),
-          );
+          return automations.map((automation) => presentAutomation(automation, request));
         }
         const published = new Map(
           (await sharing("protectedSharing.automationPublications", { profileId: profile.id })).map(
@@ -3993,10 +4067,7 @@ export function createProtectedHttp(options: {
           ),
         );
         return automations.map((automation) => ({
-          ...presentAutomation(
-            automation,
-            hasClientCapability(request.headers, automationContextCapability),
-          ),
+          ...presentAutomation(automation, request),
           publication: published.get(automation.id) ?? null,
         }));
       };
@@ -4232,6 +4303,7 @@ export function createProtectedHttp(options: {
             },
             authority,
             storage,
+            automationCreationSafety(authority),
           );
           if (!automation) {
             unauthorized();
@@ -4275,6 +4347,7 @@ export function createProtectedHttp(options: {
           if (!isProtectedAuthoringCreate(input)) {
             return invalid();
           }
+          assertDraftPacingAvailable(automationCatalog, input.draft);
           snapshot = { draft: input.draft, draftRevision: "1" };
         }
         if (creating.has(profile.id)) {
@@ -4323,10 +4396,7 @@ export function createProtectedHttp(options: {
               await revalidate();
               const result: ProtectedAutomationAuthoringResponse = {
                 chat,
-                automation: presentAutomation(
-                  automation,
-                  hasClientCapability(request.headers, automationContextCapability),
-                ),
+                automation: presentAutomation(automation, request),
               };
               return json(result);
             }
@@ -4356,10 +4426,7 @@ export function createProtectedHttp(options: {
             chat,
             ...(automation
               ? {
-                  automation: presentAutomation(
-                    automation,
-                    hasClientCapability(request.headers, automationContextCapability),
-                  ),
+                  automation: presentAutomation(automation, request),
                 }
               : {}),
           };
@@ -4715,6 +4782,12 @@ export function createProtectedHttp(options: {
               412,
               "version_mismatch",
               "This automation changed. Reload it before saving.",
+            );
+          case "automation_busy":
+            throw new ProtectedError(
+              409,
+              "automation_busy",
+              "This automation is running. Try again after its run finishes.",
             );
           case "scheduler_required":
             throw new ProtectedError(
@@ -5193,6 +5266,8 @@ export function createProtectedHttp(options: {
         if (!isProtectedAuthoringCheckpoint(input)) {
           return invalid();
         }
+        assertDraftPacingAvailable(automationCatalog, input.draft);
+        assertDraftPacingAvailable(automationCatalog, readAuthoringDraft(chatEntry)?.draft);
         if (runs.has(id) || mutations.has(id)) {
           throw new ProtectedError(
             409,
@@ -5240,12 +5315,26 @@ export function createProtectedHttp(options: {
           delete usage.contextSize;
         }
         const active = runs.get(id);
+        const recoveredDraft =
+          supportsDraftRecovery(request) && chat.authoring && !chat.authoring.automationId
+            ? readAuthoringDraft(entry)
+            : undefined;
+        if (
+          recoveredDraft?.draft.pacing &&
+          !hasClientCapability(request.headers, automationPacingCapability)
+        ) {
+          throw new ProtectedError(
+            409,
+            "pacing_unavailable",
+            "Update Alcove to recover this model-chosen schedule.",
+          );
+        }
         return profileJson({
           chat,
           ...(usage ? { usage } : {}),
           ...(supportsDraftRecovery(request) && chat.authoring && !chat.authoring.automationId
             ? {
-                authoringDraft: readAuthoringDraft(entry),
+                authoringDraft: recoveredDraft,
                 authoringBusy: wasBusy || active !== undefined || mutations.has(id),
               }
             : {}),

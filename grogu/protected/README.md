@@ -471,6 +471,28 @@ reduces storage can free budget. Enabling also reserves bounded run-metadata
 capacity. A quota refusal returns `413 quota_exceeded` before the state worker
 writes.
 
+Clients that negotiate `automations-pacing-v1` can offer model-chosen checks when
+`catalog.schedule.pacing` is present. The owner sets `pacing: { minMs, maxMs }`
+beside an interval `schedule`. Both limits and the fallback interval are whole
+milliseconds. The minimum is one minute and the maximum is 30 days. The fallback
+must fit between the limits. Omit `pacing` on PATCH to keep the bounds, or send
+`pacing: null` to return to a fixed schedule. A calendar schedule cannot use pacing.
+
+Only a scheduled run can propose its next delay. The scheduler clamps the delay
+to the owner's bounds after the run succeeds. A missing proposal uses the
+fallback interval. Failures use the longer of the fallback and native retry
+backoff, within the same bounds. Restart restores the accepted time for the
+current revision. Run now does not change it. A negotiated owner record returns
+`nextCheckReason` (`model`, `fallback`, or `backoff`) alongside an armed `nextCheckAt`.
+Run history, results, and public records do not expose pacing decisions.
+
+Upgrade adds nullable integers to the existing definition and run-chat rows.
+Existing automations remain fixed, without a backfill. Retention does not change.
+For a deliberate rollback, clear pacing on saved automations and unfinished
+authoring drafts first. Use the fixed-schedule rollback build that recognizes
+the six nullable columns. Unmodified 2b10 refuses to open the migrated database,
+even when all six columns are empty. Do not remove columns or edit state by hand.
+
 Clients that send `X-Alcove-Capabilities: automation-delete-v1` receive
 `capabilities.automations.delete: true` when deletion is available.
 `DELETE /api/protected/v1/automations/:id` requires the current version in
@@ -679,6 +701,10 @@ time the turn waited behind other storage admissions, which share one queue, and
 `storageScanMs` is the time it spent measuring stored data (zero when it reused
 another admission's measurement); both fall between the `aliasesPrepared` and
 `storageAdmitted` steps. They are present only when storage limits are configured.
+For specialist handoffs, `childDispatchReady` marks the first child ready to
+start. `childProviderOutput` marks its first observed model output (text,
+reasoning, or tool input), and `childTextEnqueued` marks the first child text the
+server sends to an attached stream. It does not confirm receipt by the browser.
 `modelRequests` counts the turn's finished model requests (the turn itself plus
 any specialist it started), and the other `model` fields add them up:
 `modelWallMs`; `modelFirstOutputMs`, the time from request start to the first text,
@@ -691,6 +717,21 @@ flush makes a model request of its own, these fields do not include it. `toolCal
 `toolMs` count the tool calls that finished, from their start to their result, across the turn
 and its specialists; calls that run in parallel overlap. `searchMs` and `fetchMs` are the
 parts spent in web search and web fetch. Tool names, arguments, and results are not recorded.
+`loopBusyMs` is the time the server's main thread spent running code during the turn, and
+`loopMaxStallMs` is the longest delay of a 50 ms timer on it (delays under 100 ms count as
+zero, and a stall that began before the turn counts from the turn's start). `sqliteWrites`,
+`sqliteWriteQueueMs`, and `sqliteWriteMs` count the SQLite writes that finished, the time they
+waited for the writer, and the time they took, including each write's wait for the main thread
+to admit it, so a long write next to a long stall points at a busy main thread. `transcriptTasks`,
+`transcriptQueueMs`, and `transcriptMs` give the same three totals for the transcript worker,
+and `workerTasks`, `workerQueueMs`, and `workerMs` for every other worker (for example state
+reads, read-only snapshots, and memory). These eleven fields cover the whole server, not only
+the turn: they include other members' work in the same period, and requests that overlap add
+up, so a total can exceed the turn's wall time. A request's wait counts for the turn in which it
+starts and its count and time for the turn in which it finishes; events reach the totals a moment
+after the request ends, so the last request before a turn finishes can count toward the next turn.
+The worker totals come from the server's diagnostic events, so they stay at zero when the server
+config sets `diagnostics.enabled` to `false`.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not
@@ -925,7 +966,9 @@ and the original parent session generation.
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
-provider credential, file boundary, and deadline. Child work is not detached:
+provider credential, file boundary, and deadline. A Copilot specialist uses the
+model and endpoint from the member's account, not the service's default model.
+Child work is not detached:
 child transcript and file bytes count against the initiating profile while
 present. These temporary children do not count as retained chats or change
 the reported last retained chat activity. The turn saves each completed result as an assistant message with its

@@ -2,8 +2,10 @@
 import type { DatabaseSync } from "node:sqlite";
 import { executeWithCachedStatement } from "../infra/kysely-sync-cache-state.js";
 import { sqlitePrimaryResultCode } from "../infra/sqlite-error-diagnostics.js";
+import { parseSqliteTableDefinition } from "../infra/sqlite-schema-contract-assembly.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { SqliteSchemaMismatchError } from "../infra/sqlite-schema-issues.js";
+import { CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS } from "./openclaw-state-db-additive-columns.js";
 
 export function tableHasColumn(db: DatabaseSync, tableName: string, columnName: string): boolean {
   return readTableColumns(db, tableName).has(columnName);
@@ -69,6 +71,41 @@ export function ensureColumn(db: DatabaseSync, tableName: string, columnSql: str
   // State migrations are additive here; destructive or shape-changing repairs belong in doctor.
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnSql};`);
   return true;
+}
+
+/** Feature tables remain dormant until their owner creates them. */
+export function missingFirstUseStateColumns(db: DatabaseSync, tables: readonly string[]) {
+  const selected = CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS.filter(({ tableName }) =>
+    tables.includes(tableName),
+  );
+  if (!selected.length) {
+    return selected;
+  }
+  const missing: typeof selected = [];
+  const catalog = getAdmittedSqliteSchemaFacts(db);
+  for (const table of new Set(selected.map((column) => column.tableName))) {
+    const ddl = catalog?.tableSql.get(table);
+    if (catalog && !ddl) {
+      continue;
+    }
+    const columns = ddl
+      ? parseSqliteTableDefinition(ddl, table).columns
+      : readTableColumns(db, table);
+    if (columns.size) {
+      missing.push(
+        ...selected.filter(
+          ({ tableName, columnName }) => tableName === table && !columns.has(columnName),
+        ),
+      );
+    }
+  }
+  return missing;
+}
+
+export function ensureFirstUseStateColumns(db: DatabaseSync, tables: readonly string[]): void {
+  for (const { tableName, columnName, dataType } of missingFirstUseStateColumns(db, tables)) {
+    ensureColumn(db, tableName, `${columnName} ${dataType}`);
+  }
 }
 
 /** Missing runtime tables are empty only before state grows beyond checkpoint bootstrap. */

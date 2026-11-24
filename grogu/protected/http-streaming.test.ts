@@ -10,6 +10,7 @@ import { root } from "../../src/infra/fs-safe.js";
 import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
+import { processLoadNotes } from "./process-load.js";
 import { prepareProtectedSharedState } from "./state-worker-context.js";
 import type { ProtectedTurn } from "./turns.js";
 
@@ -241,15 +242,18 @@ void test("protected chunks publish without remote access work and stop at local
       "toolCalls",
       "toolMs",
       "fetchMs",
+      ...processLoadNotes,
       "marks",
     ].toSorted(),
   );
   assert.equal(timing.outcome, "complete");
   assert.ok(Number.isInteger(timing.turnOrdinal) && Number(timing.turnOrdinal) >= 1);
   assert.equal(timing.activeTurns, 1);
-  for (const note of ["storageQueueMs", "storageScanMs"]) {
+  for (const note of ["storageQueueMs", "storageScanMs", ...processLoadNotes]) {
     assert.ok(Number.isInteger(timing[note]) && Number(timing[note]) >= 0);
   }
+  // Admission and the saved reply write to SQLite through the process's writer.
+  assert.ok(Number(timing.sqliteWrites) >= 1);
   // Model requests and tool calls report totals; a tool kind that never ran has no total.
   assert.deepEqual(
     [

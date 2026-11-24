@@ -151,7 +151,9 @@ function ensureSchema(database: OpenClawStateDatabase): void {
   ensureAutomationSchema({ database, path: database.path });
 }
 
-function parseDefinition(definitionJson: string): ProtectedAutomationDraft {
+export function parseProtectedAutomationDefinition(
+  definitionJson: string,
+): ProtectedAutomationDraft {
   let definition: unknown;
   try {
     definition = JSON.parse(definitionJson);
@@ -176,7 +178,7 @@ function toStorageRecord(db: DatabaseSync, row: AutomationRow): ProtectedAutomat
     creatorProfileId: row.creator_profile_id,
     centralOwnerProfileId: row.central_owner_profile_id,
     provider: row.provider,
-    definition: parseDefinition(readStoredDefinition(db, row)),
+    definition: parseProtectedAutomationDefinition(readStoredDefinition(db, row)),
     definitionRevision: row.definition_revision,
     visibility: row.visibility,
     publicationRevision: row.publication_revision,

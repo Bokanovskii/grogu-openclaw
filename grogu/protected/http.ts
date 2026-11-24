@@ -207,7 +207,6 @@ import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
 import {
   authorizeProtectedChatRead,
   projectProtectedChatShare,
-  projectProtectedPublicAutomation,
   runProtectedSharing,
 } from "./sharing-store.js";
 import type { StoredDataEntry } from "./storage-entry-quota.js";
@@ -4001,16 +4000,16 @@ export function createProtectedHttp(options: {
         }));
       };
       const readPublicAutomation = async (automationId: string) => {
+        await revalidate();
         const [automation] = await sharing("protectedSharing.publicAutomations", {
           profileId: profile.id,
           automationId,
         });
-        await revalidate();
         if (!automation) {
           return notFound();
         }
         const result: ProtectedPublicAutomationResponse = {
-          automation: projectProtectedPublicAutomation(automation),
+          automation,
         };
         return json(result);
       };
@@ -4410,12 +4409,12 @@ export function createProtectedHttp(options: {
       }
       if (pathname === "/automations/public" && method === "GET" && automationsPublicCapability) {
         requirePublicAutomations();
+        await revalidate();
         const automations = await sharing("protectedSharing.publicAutomations", {
           profileId: profile.id,
         });
-        await revalidate();
         const result: ProtectedPublicAutomationsResponse = {
-          automations: automations.map(projectProtectedPublicAutomation),
+          automations,
         };
         return json(result);
       }

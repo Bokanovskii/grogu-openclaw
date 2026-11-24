@@ -69,6 +69,17 @@ function validId(id: string) {
   return /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(id);
 }
 
+function transcriptText(content: unknown): string {
+  return typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+          .filter((block) => isRecord(block) && block.type === "text")
+          .map((block) => (typeof block.text === "string" ? block.text : ""))
+          .join("\n")
+      : "";
+}
+
 function sideOf(entry: SessionEntry) {
   return entry.protectedSideParentId && entry.protectedSideForkedAt
     ? {
@@ -395,7 +406,8 @@ export function createProtectedChats(options: {
         event.message.api === OPENCLAW_TRANSCRIPT_ARTIFACT_API &&
         event.message.provider === OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER &&
         event.message.model === OPENCLAW_DELIVERY_MIRROR_MODEL &&
-        event.message.protectedTerminalCompletion === "tool-batch";
+        (event.message.protectedTerminalCompletion === "tool-batch" ||
+          event.message.protectedTerminalCompletion === "source-reply");
       const completedReply =
         terminalReceipt && replyMessage?.stopReason === "toolUse" ? reply : undefined;
       if (terminalReceipt && !completedReply) {
@@ -427,15 +439,7 @@ export function createProtectedChats(options: {
       if (message.role !== "user" && message.role !== "assistant") {
         continue;
       }
-      const content =
-        typeof message.content === "string"
-          ? message.content
-          : Array.isArray(message.content)
-            ? message.content
-                .filter((block) => isRecord(block) && block.type === "text")
-                .map((block) => (typeof block.text === "string" ? block.text : ""))
-                .join("\n")
-            : "";
+      const content = transcriptText(message.content);
       const provider = typeof message.provider === "string" ? message.provider : undefined;
       const sideReturn = sideReturnOf(message);
       if (sideReturn) {
@@ -628,6 +632,17 @@ export function createProtectedChats(options: {
         }
         reply = projected;
         replyMessage = message;
+        if (completedReply && event.message.protectedTerminalCompletion === "source-reply") {
+          // The widget stays with the model's preamble; the host delivered the note after it.
+          reply = {
+            id: typeof event.id === "string" ? event.id : `${id}:${messages.length}`,
+            role: "assistant",
+            text: transcriptText(event.message.content),
+            status: "complete",
+          };
+          messages.push(reply);
+          replyMessage = event.message;
+        }
       }
     }
     const visible = messages.filter(

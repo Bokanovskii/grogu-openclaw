@@ -1197,7 +1197,11 @@ export function createCanonicalProtectedTurns(options: {
         if (result.meta.timeoutPhase !== undefined) {
           throw providerTimeout();
         }
-        if (result.payloads?.some((payload) => payload.isError) || result.meta.aborted) {
+        if (
+          result.payloads?.some((payload) => payload.isError) ||
+          result.meta.aborted ||
+          result.meta.error
+        ) {
           throw new ProtectedError(502, "provider_failed", "The model did not complete the reply.");
         }
         const effectiveBudget = result.meta.agentMeta?.contextTokens;
@@ -1211,20 +1215,28 @@ export function createCanonicalProtectedTurns(options: {
         ) {
           turn.contextBudget(effectiveBudget);
         }
-        if (result.meta.intentionalTerminalCompletion === "tool-batch") {
-          // Only the native owner can confirm that a settled tool batch ended the reply.
+        // A final widget with a note asks its host to deliver the reply, rather than
+        // setting the note-less tool-batch marker. The widget itself proves neither.
+        const closingText = result.messagingToolSourceReplyPayloads
+          ?.filter(
+            (reply) => reply.toolAuthored && reply.sourceReplyFinal && !reply.transcriptOwner,
+          )
+          .map((reply) => reply.text?.trim())
+          .filter(Boolean)
+          .join("\n\n");
+        if (closingText || result.meta.intentionalTerminalCompletion === "tool-batch") {
           const message = {
             role: "assistant",
-            content: [],
+            content: closingText ? [{ type: "text", text: closingText }] : [],
             api: OPENCLAW_TRANSCRIPT_ARTIFACT_API,
             provider: OPENCLAW_TRANSCRIPT_ARTIFACT_PROVIDER,
             model: OPENCLAW_DELIVERY_MIRROR_MODEL,
             usage: makeZeroUsageSnapshot(),
             stopReason: "stop",
             timestamp: Date.now(),
-            protectedTerminalCompletion: "tool-batch",
+            protectedTerminalCompletion: closingText ? "source-reply" : "tool-batch",
           } satisfies SessionTranscriptAssistantMessage & {
-            protectedTerminalCompletion: "tool-batch";
+            protectedTerminalCompletion: "source-reply" | "tool-batch";
           };
           const saved = await appendExactAssistantMessageToSessionTranscript({
             ...turn.target,
@@ -1241,6 +1253,9 @@ export function createCanonicalProtectedTurns(options: {
               "save_failed",
               "The reply completion could not be saved.",
             );
+          }
+          if (closingText) {
+            await turn.delta(`\n\n${closingText}`);
           }
         }
         const route = readRoute(turn, result.meta.pendingToolCalls);

@@ -30,6 +30,7 @@ import {
 import type { AgentSession } from "../../sessions/index.js";
 import { makeAgentAssistantMessage } from "../../test-helpers/agent-message-fixtures.js";
 import * as toolSearch from "../../tool-search.js";
+import { withHostSessionAccess } from "../../tools/scoped-session-access.js";
 import {
   clearEmbeddedSessionPromptStates,
   getEmbeddedSessionPromptState,
@@ -114,7 +115,10 @@ const attempt = {
   workspaceDir: "/workspace",
 } as unknown as EmbeddedRunAttemptParams;
 
-function createInput(options?: { activationError?: Error }) {
+function createInput(options?: {
+  activationError?: Error;
+  deferredDirectoryToolsCallable?: boolean;
+}) {
   const events: string[] = [];
   const settingsManager = { id: "settings" };
   const resourceLoader = {
@@ -203,7 +207,7 @@ function createInput(options?: { activationError?: Error }) {
       agentDir: "/agent",
       clientToolPreparation: {
         codeModeControlsEnabledForRun: true,
-        deferredDirectoryToolsCallable: false,
+        deferredDirectoryToolsCallable: options?.deferredDirectoryToolsCallable ?? false,
       } as never,
       effectiveCwd: "/workspace",
       effectiveWorkspace: "/workspace",
@@ -291,24 +295,72 @@ describe("prepareEmbeddedAttemptAgentSession", () => {
     fixture.input.attempt = { ...fixture.input.attempt, contextIsolation: "isolated" };
     const beforeToolCall = vi.fn(async () => undefined);
     fixture.activeSession.agent.beforeToolCall = beforeToolCall;
-    await prepareEmbeddedAttemptAgentSession(fixture.input);
-    const resolveDeferredTool = hoisted.createAgentSession.mock.calls[0]![0].resolveDeferredTool;
-    const guard = fixture.activeSession.agent.beforeToolCall!;
-    for (const name of [
-      "memory_search",
-      "sessions",
-      "sessions_history",
-      "session_status",
-      "intent",
-    ]) {
-      expect(() => resolveDeferredTool({ toolCall: { name } })).toThrow(/unavailable/);
-      expect(await guard({ toolCall: { name } } as never, undefined)).toMatchObject({
-        block: true,
-      });
-    }
-    expect(beforeToolCall).not.toHaveBeenCalled();
-    await guard({ toolCall: { name: "web_search" } } as never, undefined);
+    const genericHostScope = {
+      assertCurrent: () => {},
+      revalidate: async () => {},
+      creatorProfileId: "profile-1",
+      resolve: async () => undefined,
+    };
+
+    await withHostSessionAccess(genericHostScope, async () => {
+      await prepareEmbeddedAttemptAgentSession(fixture.input);
+      const resolveDeferredTool = hoisted.createAgentSession.mock.calls[0]![0].resolveDeferredTool;
+      const guard = fixture.activeSession.agent.beforeToolCall!;
+      for (const name of [
+        "memory_search",
+        "sessions",
+        "sessions_list",
+        "sessions_history",
+        "sessions_send",
+        "session_status",
+        "intent",
+      ]) {
+        expect(() => resolveDeferredTool({ toolCall: { name } })).toThrow(/unavailable/);
+        expect(await guard({ toolCall: { name } } as never, undefined)).toMatchObject({
+          block: true,
+        });
+      }
+      expect(beforeToolCall).not.toHaveBeenCalled();
+      await guard({ toolCall: { name: "web_search" } } as never, undefined);
+    });
     expect(beforeToolCall).toHaveBeenCalledOnce();
+  });
+
+  it("passes only authorized session reads through isolated run admission", async () => {
+    const fixture = createInput({ deferredDirectoryToolsCallable: true });
+    fixture.input.attempt = { ...fixture.input.attempt, contextIsolation: "isolated" };
+    const beforeToolCall = vi.fn(async () => undefined);
+    fixture.activeSession.agent.beforeToolCall = beforeToolCall;
+    const hostScope = {
+      assertCurrent: () => {},
+      revalidate: async () => {},
+      creatorProfileId: "profile-1",
+      isolatedAutomationRunReads: true as const,
+      resolve: async () => undefined,
+    };
+
+    await withHostSessionAccess(hostScope, async () => {
+      await prepareEmbeddedAttemptAgentSession(fixture.input);
+      const resolveDeferredTool = hoisted.createAgentSession.mock.calls[0]![0].resolveDeferredTool;
+      const guard = fixture.activeSession.agent.beforeToolCall!;
+      expect(resolveDeferredTool).toBeDefined();
+      for (const name of ["sessions_list", "sessions_history"]) {
+        expect(resolveDeferredTool?.({ toolCall: { name } })).toBeUndefined();
+        expect(await guard({ toolCall: { name } } as never, undefined)).toBeUndefined();
+      }
+      for (const name of ["sessions_send", "sessions_spawn", "sessions_search", "memory_search"]) {
+        expect(() => resolveDeferredTool?.({ toolCall: { name } })).toThrow(/unavailable/);
+        expect(await guard({ toolCall: { name } } as never, undefined)).toMatchObject({
+          block: true,
+        });
+      }
+    });
+
+    expect(beforeToolCall).toHaveBeenCalledTimes(2);
+    expect(hoisted.resolveToolSearchCatalogTool.mock.calls.map(([, name]) => name)).toEqual([
+      "sessions_list",
+      "sessions_history",
+    ]);
   });
 
   it("keeps effective workspace rules in automatic compaction when the process and sandbox cwd differ", async () => {

@@ -23,6 +23,12 @@ type Database = ProtectedAutomationDatabase & {
     automation_id: string;
     central_owner_profile_id: string;
   };
+  protected_automation_owner_inbox: {
+    run_id: string;
+    automation_id: string;
+    profile_id: string;
+    charged_bytes: number;
+  };
 };
 
 export type ProtectedAutomationReadAccess = {
@@ -157,6 +163,34 @@ function activeFollowers(db: DatabaseSync, automationId: string, subscribedOnly 
   return rows.map((row) => row.profile_id).filter((profileId) => isActiveMember(db, profileId));
 }
 
+/**
+ * Deletes inbox receipts a revoked follower can no longer read, so they stay gone if the member
+ * follows again. Returns their ledger entries; each recipient owns and pays for its own receipts.
+ */
+function deleteFollowerReceipts(
+  db: DatabaseSync,
+  automationId: string,
+  scope: { profileId: string } | { exceptProfileId: string },
+): ProtectedStoredDataEntry[] {
+  if (!tableExists(db, "protected_automation_owner_inbox")) {
+    return [];
+  }
+  const query = queries(db)
+    .deleteFrom("protected_automation_owner_inbox")
+    .where("automation_id", "=", automationId);
+  return executeSqliteQuerySync(
+    db,
+    ("profileId" in scope
+      ? query.where("profile_id", "=", scope.profileId)
+      : query.where("profile_id", "!=", scope.exceptProfileId)
+    ).returning(["run_id", "profile_id", "charged_bytes"]),
+  ).rows.map((row) => ({
+    id: `protected-automation-inbox:${row.run_id}`,
+    profileId: row.profile_id,
+    bytes: row.charged_bytes,
+  }));
+}
+
 /** Opts in at `subscribedAt` (keeping an earlier opt-in), or opts out when it is undefined. */
 function setSubscription(db: DatabaseSync, follow: FollowRef, subscribedAt?: number) {
   executeSqliteQuerySync(
@@ -218,6 +252,7 @@ function deletePublication(
   );
   return [
     ...follows.map((row) => followEntry(automationId, row.profile_id, row.added_at, bytes)),
+    ...deleteFollowerReceipts(db, automationId, { exceptProfileId: ownerProfileId }),
     ...(publication
       ? [publicationEntry(automationId, ownerProfileId, publication.published_at, bytes)]
       : []),
@@ -350,7 +385,7 @@ export function unfollowProtectedAutomation(
   }
   return write(database, "protected.automationSharing.unfollow", (db) => {
     setSubscription(db, input);
-    return executeSqliteQuerySync(
+    const follows = executeSqliteQuerySync(
       db,
       queries(db)
         .deleteFrom("protected_automation_members")
@@ -361,6 +396,13 @@ export function unfollowProtectedAutomation(
     ).rows.map((row) =>
       followEntry(input.automationId, input.profileId, row.added_at, input.storageOverheadBytes),
     );
+    // Only a follower's own receipts go; an owner has no follow row and keeps theirs.
+    return follows.length
+      ? [
+          ...follows,
+          ...deleteFollowerReceipts(db, input.automationId, { profileId: input.profileId }),
+        ]
+      : follows;
   });
 }
 
@@ -464,17 +506,33 @@ export function readProtectedAutomationRunAccess(
   return run ? access : undefined;
 }
 
-/** Automation results remain private; followers are not delivery recipients. */
-export function listProtectedAutomationRecipients(
+/**
+ * Followers who opted in to notifications, in subscription order, while the automation is
+ * published by an active owner. Read under the delivery write lock to fix the audience.
+ */
+export function listProtectedAutomationInboxRecipients(
+  db: DatabaseSync,
+  automationId: string,
+): string[] {
+  return activeOwner(db, automationId) && publishedAt(db, automationId) !== undefined
+    ? activeFollowers(db, automationId, true)
+    : [];
+}
+
+/** The owner of a published automation the caller currently follows, for reading inbox receipts. */
+export function readProtectedAutomationFollowerGrant(
   database: OpenClawStateDatabase,
-  input: { automationId: string },
-): { ownerProfileId: string; recipients: string[] } | undefined {
+  input: FollowRef,
+): { ownerProfileId: string } | undefined {
   const db = database.db;
   const ownerProfileId = activeOwner(db, input.automationId);
-  if (!ownerProfileId) {
-    return undefined;
-  }
-  return { ownerProfileId, recipients: [ownerProfileId] };
+  return ownerProfileId &&
+    ownerProfileId !== input.profileId &&
+    publishedAt(db, input.automationId) !== undefined &&
+    isActiveMember(db, input.profileId) &&
+    followRole(db, input.automationId, input.profileId)?.role === "follower"
+    ? { ownerProfileId }
+    : undefined;
 }
 
 /**

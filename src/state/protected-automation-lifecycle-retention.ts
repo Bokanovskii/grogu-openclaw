@@ -1,10 +1,81 @@
+import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
+import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
 import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
 import type { ProtectedAutomationLifecycleWrite } from "./protected-automation-lifecycle.types.js";
-import type { ProtectedAutomationDatabase } from "./protected-automations.js";
+import { listProtectedAutomationInboxRecipients } from "./protected-automation-sharing.js";
+import {
+  readProtectedAutomation,
+  type ProtectedAutomationDatabase,
+} from "./protected-automations.js";
+
+export function isolatedAutomationHasActiveRun(
+  db: DatabaseSync,
+  automationId: string,
+  definition: ProtectedAutomationDraft,
+): boolean {
+  if (definition.contextAccess !== "isolated") {
+    return false;
+  }
+  const tables = getAdmittedSqliteSchemaFacts(db)?.tables;
+  if (!tables) {
+    throw new Error("Protected automation edits require admitted schema facts.");
+  }
+  if (!tables.has("protected_automation_run_lifecycle")) {
+    return false;
+  }
+  const lifecycle = getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase>(db);
+  return Boolean(
+    executeSqliteQuerySync(
+      db,
+      lifecycle
+        .selectFrom("protected_automation_run_lifecycle")
+        .select("id")
+        .where("automation_id", "=", automationId)
+        .where("status", "in", ["queued", "running"])
+        .limit(1),
+    ).rows[0],
+  );
+}
+
+export function assertIsolatedAutomationCreation(
+  db: DatabaseSync,
+  automationId: string,
+  definition: ProtectedAutomationDraft,
+): void {
+  if (definition.contextAccess !== "isolated") {
+    return;
+  }
+  const tables = getAdmittedSqliteSchemaFacts(db)?.tables;
+  if (!tables) {
+    throw new Error("Protected automation creation requires admitted schema facts.");
+  }
+  const history = getNodeSqliteKysely<
+    ProtectedAutomationDatabase & ProtectedAutomationLifecycleDatabase
+  >(db);
+  for (const table of [
+    "protected_automation_run_chats",
+    "protected_automation_run_lifecycle",
+    "protected_automation_runs",
+  ] as const) {
+    if (
+      tables.has(table) &&
+      executeSqliteQuerySync(
+        db,
+        history
+          .selectFrom(table)
+          .select("automation_id")
+          .where("automation_id", "=", automationId)
+          .limit(1),
+      ).rows.length
+    ) {
+      throw new Error("Cannot create an isolated automation over retained run history.");
+    }
+  }
+}
 
 /** A new queue slot also retires legacy result-only history before another result can publish. */
 export function prepareProtectedAutomationLifecycleRetirements(
@@ -92,22 +163,32 @@ export function prepareProtectedAutomationLifecycleRetirements(
       bytes: row.charged_bytes,
     });
   }
+  // An automation's retained history owns every recipient's receipt for it; each recipient also
+  // owns the quota-eviction candidates in their own inbox.
+  const evicted = new Set(write.pruneInbox.map((pruned) => pruned.profileId));
   const inbox = executeSqliteQuerySync(
     database.db,
     k
       .selectFrom("protected_automation_owner_inbox")
       .selectAll()
-      .where("profile_id", "=", command.profileId)
+      .where((eb) =>
+        eb.or([
+          eb("automation_id", "=", command.automationId),
+          eb("profile_id", "in", [command.profileId, ...evicted]),
+        ]),
+      )
       .orderBy("sequence"),
   ).rows.filter(
     (row) =>
       ((command.kind === "delete" || command.kind === "remove") &&
         row.automation_id === command.automationId) ||
-      write.pruneInboxRunIds.includes(row.run_id) ||
+      write.pruneInbox.some(
+        (pruned) => pruned.profileId === row.profile_id && pruned.runId === row.run_id,
+      ) ||
       write.pruneResultIds.includes(row.result_id) ||
       (row.automation_id === command.automationId && write.pruneRunIds.includes(row.run_id)),
   );
-  write.pruneInboxRunIds = inbox.map((row) => row.run_id);
+  write.pruneInbox = inbox.map((row) => ({ profileId: row.profile_id, runId: row.run_id }));
   for (const row of inbox) {
     write.retired.push({
       id: `protected-automation-inbox:${row.run_id}`,
@@ -215,4 +296,48 @@ export function protectedAutomationResultLifecycleCurrent(
         .limit(1),
     ).rows[0],
   );
+}
+
+/**
+ * The owner's receipt first, then each opted-in follower's own, read under the write lock.
+ * Followers are only told of runs proven isolated: the run executed under the automation's current
+ * isolated revision, so a receipt never points at a legacy private result.
+ */
+export function prepareProtectedAutomationInboxReceipts(
+  database: OpenClawStateDatabase,
+  write: ProtectedAutomationLifecycleWrite,
+  row: { id: string },
+  currentRevision: boolean,
+) {
+  const { command } = write;
+  if (command.kind !== "deliver") {
+    return;
+  }
+  const followers =
+    currentRevision &&
+    readProtectedAutomation(database, command)?.definition.contextAccess === "isolated"
+      ? listProtectedAutomationInboxRecipients(database.db, command.automationId)
+      : [];
+  const k = getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase>(database.db);
+  for (const profileId of [
+    command.profileId,
+    ...followers.filter((recipient) => !command.skipRecipients?.includes(recipient)),
+  ]) {
+    const inbox = executeSqliteQuerySync(
+      database.db,
+      k
+        .selectFrom("protected_automation_owner_inbox")
+        .selectAll()
+        .where("profile_id", "=", profileId)
+        .orderBy("sequence", "desc"),
+    ).rows;
+    write.pruneInbox.push(
+      ...inbox.slice(199).map((retained) => ({ profileId, runId: retained.run_id })),
+    );
+    write.entries.push({
+      id: `protected-automation-inbox:${row.id}`,
+      profileId,
+      bytes: write.entryOverheadBytes + 640,
+    });
+  }
 }

@@ -1,7 +1,6 @@
 import {
   followProtectedAutomation,
   listProtectedAutomationPublications,
-  listProtectedAutomationRecipients,
   publishProtectedAutomation,
   readProtectedAutomationAccess,
   readProtectedAutomationRunAccess,
@@ -81,10 +80,6 @@ export const protectedSharingOperations = {
     input: Parameters<typeof readProtectedAutomationRunAccess>[1],
     { open },
   ) => readProtectedAutomationRunAccess(open(), input),
-  "protectedSharing.automationRecipients": (
-    input: Parameters<typeof listProtectedAutomationRecipients>[1],
-    { open },
-  ) => listProtectedAutomationRecipients(open(), input),
   // One ledger view for every sharing entry, so HTTP write recovery finds chat and automation ids.
   "protectedSharing.storageUsage": (overheadBytes: number, { open }) => {
     const database = open();

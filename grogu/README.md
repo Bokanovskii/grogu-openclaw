@@ -89,6 +89,16 @@ Do not kill Gateway or child processes, and do not edit the SQLite databases to
 clear work. The native shutdown owns checkpoints, aborts and run settlement. Do
 not repeat a forced restart while one is in progress.
 
+## Isolated automation creation
+
+Isolated automation execution remains unavailable with HTTP 503, and publication
+remains off. Creation hardening rejects retained lifecycle, result, and run-chat
+history before reusing an identity. Its agent-store inventory reads all session
+entry summaries, so the scan is O(session entry count). No large-store latency
+or memory bound is measured. An empty scan is not sufficient until late run-chat
+and transcript writers are revoked and settled before deletion and recreation.
+Those write fences remain prerequisites for enabling isolated execution.
+
 ## Thinking defaults
 
 Grogu's Sparky utility completions inherit the agent, model and global thinking

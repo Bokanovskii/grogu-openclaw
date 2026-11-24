@@ -119,6 +119,8 @@ export function createProtectedAutomationStorageRecoveryOwner(assertOwnerCurrent
       retain(handle),
     retainUncertainRemovalCommit: (handle: ProtectedAutomationRetirementUncertainCommit) =>
       retain(handle),
+    retainUncertainCreateCommit: (handle: ProtectedAutomationRetirementUncertainCommit) =>
+      retain(handle),
     reconcile() {
       if (!reconciling) {
         reconciling = reconcile().finally(() => {

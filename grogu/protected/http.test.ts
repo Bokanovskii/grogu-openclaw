@@ -124,6 +124,7 @@ void test("Protected turns load skills on request and retain credentials during 
   }> = [];
   let overflow = false;
   let blockedAutomation: { entered: () => void; wait: Promise<void> } | undefined;
+  let proposedNextCheck = false;
   const previousAmbientKey = process.env.SPARKY_API_KEY;
   process.env.SPARKY_API_KEY = "synthetic-ambient-key";
   t.after(() => {
@@ -165,19 +166,30 @@ void test("Protected turns load skills on request and retain credentials during 
         !summary &&
         messages.includes("Make a travel dashboard") &&
         !body.messages.some((message: { role: string }) => message.role === "tool");
-      const delta = readSkill
-        ? {
-            role: "assistant",
-            tool_calls: [
-              {
-                index: 0,
-                id: "skill-call",
-                type: "function",
-                function: { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
-              },
-            ],
-          }
-        : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
+      const proposeCheck =
+        !proposedNextCheck &&
+        body.tools?.some(
+          (tool: { function: { name: string } }) => tool.function.name === "next_check",
+        );
+      if (proposeCheck) {
+        proposedNextCheck = true;
+      }
+      const delta =
+        readSkill || proposeCheck
+          ? {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: proposeCheck ? "check-call" : "skill-call",
+                  type: "function",
+                  function: proposeCheck
+                    ? { name: "next_check", arguments: '{"in":"4m"}' }
+                    : { name: "skills_read", arguments: '{"name":"Travel dashboard"}' },
+                },
+              ],
+            }
+          : { role: "assistant", content: summary ? "Synthetic summary." : "Synthetic answer." };
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(
         `data: ${JSON.stringify({
@@ -194,7 +206,13 @@ void test("Protected turns load skills on request and retain credentials during 
           object: "chat.completion.chunk",
           created: 1,
           model: "synthetic",
-          choices: [{ index: 0, delta: {}, finish_reason: readSkill ? "tool_calls" : "stop" }],
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: readSkill || proposeCheck ? "tool_calls" : "stop",
+            },
+          ],
         })}\n\n`,
       );
       response.end("data: [DONE]\n\n");
@@ -392,12 +410,18 @@ void test("Protected turns load skills on request and retain credentials during 
   const scheduleNow = Math.floor(Date.now() / 60_000) * 60_000;
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: scheduleNow });
   await app.startAutomations(() => {});
-  const capabilities = "automation-runs-v1, automation-results-v1, automations-context-v1";
+  const capabilities =
+    "automation-runs-v1, automation-results-v1, automations-context-v1, automations-pacing-v1";
   const automationCall = (route: string, init?: RequestInit) =>
     call(route, {
       ...init,
       headers: { "x-alcove-capabilities": capabilities, ...init?.headers },
     });
+  assert.equal((await (await call("/automations/catalog")).json()).schedule.pacing, undefined);
+  assert.deepEqual((await (await automationCall("/automations/catalog")).json()).schedule.pacing, {
+    minimumMs: 60_000,
+    maximumMs: 2_592_000_000,
+  });
   const nextMinute = new Date(scheduleNow + 60_000);
   const cronParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
@@ -569,14 +593,31 @@ void test("Protected turns load skills on request and retain credentials during 
   );
   const read = (await (await automationCall(`/automations/${automation.id}`)).json()).automation;
   assert.equal(read.nextCheckAt, expectedNextCheck);
+  const pacing = { minMs: 60_000, maxMs: 180_000 };
+  assert.equal(proposedNextCheck, false);
   const calendarPaused = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": enabledRecord.version },
-    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 } }),
+    body: JSON.stringify({ enabled: false, schedule: { kind: "every", everyMs: 60_000 }, pacing }),
   });
   assert.equal(calendarPaused.status, 200, await calendarPaused.clone().text());
   const pausedRecord = (await calendarPaused.json()).automation;
   assert.equal(pausedRecord.nextCheckAt, null);
+  assert.deepEqual(pausedRecord.pacing, pacing);
+  assert.equal(pausedRecord.nextCheckReason, undefined);
+  const legacyPaced = (await (await call(`/automations/${automation.id}`)).json()).automation;
+  assert.deepEqual(legacyPaced.schedule, { kind: "every", everyMs: 60_000 });
+  assert.equal(legacyPaced.pacing, undefined);
+  assert.equal(
+    (
+      await call(`/automations/${automation.id}`, {
+        method: "PATCH",
+        headers: { "if-match": pausedRecord.version },
+        body: JSON.stringify({ schedule: legacyPaced.schedule }),
+      })
+    ).status,
+    422,
+  );
   const isolatedEnabled = await automationCall(`/automations/${isolatedId}`, {
     method: "PATCH",
     headers: { "if-match": isolatedAutomation.version },
@@ -591,6 +632,7 @@ void test("Protected turns load skills on request and retain credentials during 
   });
   assert.equal(resumed.status, 200, await resumed.clone().text());
   assert.equal((await resumed.clone().json()).automation.nextCheckAt, expectedNextCheck);
+  assert.equal((await resumed.clone().json()).automation.nextCheckReason, "fallback");
   const scheduledDelivery = waitForDelivery("scheduled");
   const automationRequestStart = requests.length;
   const browsersBeforeAutomation = browserSessions.opened;
@@ -645,12 +687,29 @@ void test("Protected turns load skills on request and retain credentials during 
       ),
   );
   assert.equal(browserSessions.opened, browsersBeforeAutomation);
+  const accepted = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(accepted.nextCheckReason, "model");
+  assert.equal(accepted.nextCheckAt, new Date(scheduleNow + 60_000 + pacing.maxMs).toISOString());
+  await close(server);
+  await app.shutdown();
+  t.mock.timers.tick(60_000);
+  app = createProtectedHttp(appOptions);
+  server = createProtectedServer(origin, app.fetch);
+  url = await listen(server);
+  await app.startAutomations(() => {});
+  t.mock.timers.tick(0);
+  const restored = (await (await automationCall(`/automations/${automation.id}`)).json())
+    .automation;
+  assert.equal(restored.nextCheckAt, accepted.nextCheckAt);
+  assert.equal(restored.nextCheckReason, "model");
   const paused = await automationCall(`/automations/${automation.id}`, {
     method: "PATCH",
     headers: { "if-match": (await resumed.clone().json()).automation.version },
-    body: JSON.stringify({ enabled: false }),
+    body: JSON.stringify({ enabled: false, pacing: null }),
   });
   assert.equal(paused.status, 200, await paused.clone().text());
+  assert.equal((await paused.clone().json()).automation.pacing, undefined);
   const originalPost = Worker.prototype.postMessage;
   const originalEmit = Worker.prototype.emit;
   const heldQueue = Promise.withResolvers<{ worker: Worker; runId: string }>();
@@ -4037,7 +4096,18 @@ void test("Family final widgets complete with or without a closing note", async 
   await exerciseCanonicalTurns(t, "final-widgets");
 });
 
-async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" | "final-widgets") {
+void test("Family Copilot specialist completes with the selected account model", async (t) => {
+  await exerciseCanonicalTurns(t, "copilot-specialist");
+});
+
+void test("Family specialist streams before completion and saves its result after disconnect", async (t) => {
+  await exerciseCanonicalTurns(t, "detached-specialist");
+});
+
+async function exerciseCanonicalTurns(
+  t: TestContext,
+  scenario: "conversation" | "final-widgets" | "copilot-specialist" | "detached-specialist",
+) {
   const stateRoot = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
     stateRoot &&
@@ -4092,6 +4162,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   const sourceUrl = "https://example.com/family-source";
   const routePrompt = "Hand this trip to the right agent.";
   const routeBrief = "Plan a relaxed weekend in Lisbon for two adults.";
+  const routePreview = { role: "assistant", content: "First stop: Lisbon." };
   const failedRoutePrompt = "Hand this unsuccessful request to travel.";
   const failedRouteBrief = "Simulate a specialist provider failure.";
   const selfRoutePrompt = "Hand this request back to yourself.";
@@ -4143,6 +4214,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     input?: unknown;
     reasoning?: { effort?: string; summary?: string };
   }> = [];
+  const accountModel = scenario === "copilot-specialist" ? "gpt-5-account-fixture" : "gpt-5.4";
   let copilotOverflow = false;
   let copilotSummary: string | undefined;
   let foreignAutomationId = "";
@@ -4195,7 +4267,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                   capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
                 },
                 {
-                  id: "gpt-5.4",
+                  id: accountModel,
                   name: "Second model",
                   object: "model",
                   vendor: " OpenAI ",
@@ -4213,7 +4285,12 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                   capabilities: {
                     type: "chat",
                     limits: { max_context_window_tokens: 1_000_000 },
-                    supports: { reasoning_effort: ["low", "high"] },
+                    supports: {
+                      reasoning_effort:
+                        scenario === "copilot-specialist"
+                          ? ["low", "high", "xhigh"]
+                          : ["low", "high"],
+                    },
                   },
                 },
                 {
@@ -4385,10 +4462,6 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       const hasToolResponse = body.messages.some(
         (message: { role?: string }) => message.role === "tool",
       );
-      if (routedTravelTurn && hasToolResponse) {
-        response.flushHeaders();
-        await routedChildRelease.promise;
-      }
       const sessionListTurn = JSON.stringify(body.messages).includes(
         "Inspect my permitted sessions.",
       );
@@ -4633,13 +4706,16 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                         [{}, "tool_calls"],
                       ]
                     : [
+                        ...(routedTravelTurn && hasToolResponse ? [[routePreview, null]] : []),
                         [
                           {
                             role: "assistant",
                             content:
                               automationChatTurn && hasToolResponse
                                 ? "Proposed only; nothing was saved."
-                                : "Committed synthetic answer.",
+                                : routedTravelTurn
+                                  ? " Take the tram."
+                                  : "Committed synthetic answer.",
                           },
                           null,
                         ],
@@ -4655,6 +4731,10 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
             choices: [{ index: 0, delta, finish_reason }],
           })}\n\n`,
         );
+        if (delta === routePreview) {
+          // Hold the remaining answer until the HTTP client receives Travel's first words.
+          await routedChildRelease.promise;
+        }
       }
       response.write(
         `data: ${JSON.stringify({
@@ -4772,7 +4852,13 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   const generatedFileHtml = "<p>Private generated artifact content.</p>";
   const runWithGeneratedArtifact = options.turns.run.bind(options.turns);
   options.turns.run = async (turn) => {
-    await runWithGeneratedArtifact(turn);
+    try {
+      await runWithGeneratedArtifact(turn);
+    } finally {
+      if (scenario === "detached-specialist" && turn.input.text === routePrompt) {
+        offlineSettled.resolve();
+      }
+    }
     if (turn.input.text === "Reply briefly") {
       await turn.files.write(`chats/${turn.id}/artifacts/${generatedFileName}`, generatedFileHtml);
     }
@@ -4826,6 +4912,93 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   assert.equal(me.status, 200, await me.clone().text());
   const meBody = await me.json();
   const { user, models: fixedModels } = meBody;
+  const readTravelPreview = async (response: Response) => {
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let body = "";
+    while (!body.includes(routePreview.content)) {
+      const part = await reader.read();
+      assert.equal(part.done, false, "child text arrives before the provider finishes");
+      body += decoder.decode(part.value, { stream: true });
+    }
+    assert.match(body, /Travel will help with this\./);
+    assert.match(body, /"type":"child-widget"/);
+    assert.match(body, /"type":"child-delta".*"text":"First stop: Lisbon\."/);
+    assert.doesNotMatch(body, /"type":"(?:child-result|done)"/u);
+    return { reader, decoder, body };
+  };
+  if (scenario === "detached-specialist") {
+    const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+    const route = `/chats/${chat.id}`;
+    const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "specialist-stream-v1" };
+    const response = await call(`${route}/turns`, {
+      method: "POST",
+      headers: { ...headers, "x-proof-disconnect": "yes" },
+      body: JSON.stringify({ provider: "sparky", text: routePrompt }),
+    });
+    const { reader, body } = await readTravelPreview(response);
+    const frames = body
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const parent = frames.find((event) => event.type === "start");
+    const child = frames.find((event) => event.type === "child-start");
+    assert.equal(child?.agentId, "travel");
+    try {
+      await reader.cancel();
+      await offlineDisconnected.promise;
+      const pending = await (await call(route, { headers })).json();
+      assert.deepEqual(pending.activeRun, { id: parent.runId });
+    } finally {
+      routedChildRelease.resolve();
+    }
+    await offlineSettled.promise;
+    const saved = await (await call(route, { headers })).json();
+    const result = saved.chat.messages.at(-1);
+    assert.equal(result.agentId, "travel");
+    assert.equal(result.runId, child.runId);
+    assert.equal(result.text, `${routePreview.content} Take the tram.`);
+    assert.equal(result.status, "complete");
+    assert.equal(result.widgets[0].id, frames.find((event) => event.type === "child-widget").id);
+    fixtureCompleted = true;
+    return;
+  }
+  if (scenario === "copilot-specialist") {
+    const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+    const response = await call(`/chats/${chat.id}/turns`, {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id, "x-alcove-capabilities": "specialist-stream-v1" },
+      body: JSON.stringify({
+        provider: "github-copilot",
+        model: accountModel,
+        thinking: "xhigh",
+        text: "Plan a short trip.",
+        mentions: [{ agentId: "travel" }],
+        credential: { accessToken: githubToken },
+      }),
+    });
+    const stream = await response.text();
+    assert.match(stream, /"type":"child-result".*"text":"Canonical Copilot reply\."/);
+    assert.match(stream, /"type":"done"/);
+    assert.deepEqual(
+      copilotBodies.map((body) => [body.model, body.reasoning?.effort]),
+      [
+        [accountModel, "xhigh"],
+        [accountModel, "xhigh"],
+      ],
+    );
+    assert.deepEqual(
+      providerRequests
+        .filter(
+          (request) => request.endpoint === "https://api.business.githubcopilot.com/responses",
+        )
+        .map((request) => request.authorization),
+      [`Bearer ${rawGithubToken}`, `Bearer ${rawGithubToken}`],
+    );
+    fixtureCompleted = true;
+    return;
+  }
   if (scenario === "final-widgets") {
     for (const withNote of [false, true]) {
       const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
@@ -5785,20 +5958,12 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       "X-Alcove-Capabilities": "specialist-stream-v1",
     },
   });
-  assert.equal(routedTurn.status, 200);
-  const routedReader = routedTurn.body!.getReader();
-  const routedDecoder = new TextDecoder();
-  let routedBody = "";
-  try {
-    while (!routedBody.includes('"type":"child-widget"')) {
-      const part = await routedReader.read();
-      assert.equal(part.done, false, "the child widget arrives before the provider finishes");
-      routedBody += routedDecoder.decode(part.value, { stream: true });
-    }
-    assert.doesNotMatch(routedBody, /"type":"child-result"/u);
-  } finally {
-    routedChildRelease.resolve();
-  }
+  const {
+    reader: routedReader,
+    decoder: routedDecoder,
+    body: preview,
+  } = await readTravelPreview(routedTurn).finally(() => routedChildRelease.resolve());
+  let routedBody = preview;
   for (;;) {
     const part = await routedReader.read();
     if (part.done) {
@@ -5826,7 +5991,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       (event) =>
         event.type === "child-delta" &&
         event.runId === childStart.runId &&
-        event.text.includes("Committed synthetic answer."),
+        event.text === routePreview.content,
     ),
     "the child's own model output is streamed with its identity",
   );
@@ -5839,7 +6004,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     routedEvents
       .filter((event) => event.type === "child-result")
       .map((event) => [event.agentId, event.text]),
-    [["travel", "Committed synthetic answer."]],
+    [["travel", `${routePreview.content} Take the tram.`]],
   );
   const routedRequests = seen.slice(firstRoutedRequest);
   assert.equal(routedRequests.length, 3, "Grogu routes once and Travel creates a widget");
@@ -5867,7 +6032,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     [
       ["user", undefined, routePrompt],
       ["assistant", undefined, "Travel will help with this."],
-      ["assistant", "travel", "Committed synthetic answer."],
+      ["assistant", "travel", `${routePreview.content} Take the tram.`],
     ],
   );
   assert.equal(routedRead.chat.messages[1]?.status, "complete", "a routing reply reloads complete");
@@ -7593,7 +7758,8 @@ void test("automation authoring chats hold a server binding and save only the se
   const formChat = (
     await (await call("alice", "/automations/authoring", { method: "POST" })).json()
   ).chat;
-  const recovery = `${negotiated}, automations-draft-recovery-v1`;
+  await app.startAutomations(() => {});
+  const recovery = `${negotiated}, automations-draft-recovery-v1, automations-pacing-v1`;
   const formSave = (subject: string, chatId: string, capabilities = negotiated, sent = draft) =>
     call(
       subject,
@@ -7674,7 +7840,11 @@ void test("automation authoring chats hold a server binding and save only the se
   const legacy = await (await call("alice", route)).json();
   assert.equal("authoringDraft" in legacy || "authoringBusy" in legacy, false);
   assert.equal((await call("bob", route, {}, recovery)).status, 404);
-  const edited = { ...draft, instructions: "Summarize public library updates." };
+  const edited = {
+    ...draft,
+    instructions: "Summarize public library updates.",
+    pacing: { minMs: 60_000, maxMs: 300_000 },
+  };
   const checkpoint = (subject: string, baseDraftRevision: string, profileId = profiles[subject]!) =>
     call(
       subject,
@@ -7693,6 +7863,19 @@ void test("automation authoring chats hold a server binding and save only the se
     draftRevision: "2",
   });
   assert.equal((await checkpoint("alice", "1")).status, 412);
+  const legacyRecovery = `${negotiated}, automations-draft-recovery-v1`;
+  const legacyOverwrite = await call(
+    "alice",
+    `${route}/authoring-draft`,
+    {
+      method: "PUT",
+      headers: { "x-grogu-profile": profiles.alice! },
+      body: JSON.stringify({ baseDraftRevision: "2", draft }),
+    },
+    legacyRecovery,
+  );
+  assert.equal(legacyOverwrite.status, 409);
+  assert.equal((await legacyOverwrite.json()).error.code, "pacing_unavailable");
   assert.equal(
     (await turn("alice", draftChat.id, "stale", { draft, draftRevision: "2" }, recovery)).code,
     "draft_mismatch",
@@ -7732,6 +7915,7 @@ void test("automation authoring chats hold a server binding and save only the se
   // Reconstruct the HTTP service over the same isolated SQLite state, not a client cache.
   await app.shutdown();
   app = createProtectedHttp(options);
+  await app.startAutomations(() => {});
   const recovered = await read();
   assert.ok(Value.Check(ProtectedDraftRecoveryChatSchema, recovered));
   const snapshot = { draft: { ...edited, name: "Revised by chat" }, draftRevision: "3" };

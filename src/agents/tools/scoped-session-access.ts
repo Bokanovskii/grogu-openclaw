@@ -15,6 +15,8 @@ export type HostSessionAccess = {
   revalidate: () => Promise<void>;
   signal?: AbortSignal;
   creatorProfileId: string;
+  /** Set only when the resolver enforces same-owner isolated-run visibility. */
+  readonly isolatedAutomationRunReads?: true;
   resolve: (request: {
     action: HostSessionAccessAction;
     requesterSessionKey: string;

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import { sql, type Generated, type Selectable } from "kysely";
+import type { Generated, Selectable } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import {
   deferSqliteWorkerCommitReceipt,
@@ -15,66 +15,76 @@ import {
   readProtectedAutomationLifecycleAuthority,
   isProtectedAutomationLifecycleMemberActive,
 } from "./protected-automation-lifecycle-access.js";
-import { prepareProtectedAutomationLifecycleRetirements } from "./protected-automation-lifecycle-retention.js";
+import {
+  prepareProtectedAutomationInboxReceipts,
+  prepareProtectedAutomationLifecycleRetirements,
+} from "./protected-automation-lifecycle-retention.js";
 import type {
   ProtectedAutomationLifecycleCommand,
   ProtectedAutomationLifecycleAccess,
   ProtectedAutomationLifecycleReceipt,
-  ProtectedAutomationLifecycleRun,
   ProtectedAutomationLifecycleWrite,
   ProtectedAutomationRunError,
   ProtectedAutomationRunStatus,
 } from "./protected-automation-lifecycle.types.js";
+import {
+  protectedAutomationCheckColumns,
+  resolveFinishedAutomationCheck,
+  type ProtectedAutomationCheckColumns,
+} from "./protected-automation-pacing.js";
 import {
   admitResults,
   type ProtectedAutomationResultDatabase,
 } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { readProtectedAutomationSharingStorageUsage } from "./protected-automation-sharing.js";
+import { storedDefinitionCharge } from "./protected-automation-storage-codec.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
-export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase & {
-  protected_automation_run_chats: {
-    automation_id: string;
-    profile_id: string;
-    chat_id: string | null;
-    last_scheduled_at_ms: number | null;
-    reserved_run_bytes: number;
-    charged_bytes: number;
+export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase &
+  ProtectedAutomationDatabase & {
+    protected_automation_run_chats: ProtectedAutomationCheckColumns & {
+      automation_id: string;
+      profile_id: string;
+      chat_id: string | null;
+      last_scheduled_at_ms: number | null;
+      reserved_run_bytes: number;
+      charged_bytes: number;
+    };
+    protected_automation_run_lifecycle: {
+      sequence: Generated<number>;
+      id: string;
+      automation_id: string;
+      profile_id: string;
+      definition_revision: number;
+      trigger: "scheduled" | "manual";
+      scheduled_at_ms: number;
+      queued_at_ms: number;
+      status: ProtectedAutomationRunStatus;
+      started_at_ms: number | null;
+      finished_at_ms: number | null;
+      error_code: ProtectedAutomationRunError | null;
+      result_id: string | null;
+      delivered_at_ms: number | null;
+      charged_bytes: number;
+    };
+    protected_automation_owner_inbox: {
+      sequence: Generated<number>;
+      run_id: string;
+      automation_id: string;
+      profile_id: string;
+      result_id: string;
+      created_at_ms: number;
+      charged_bytes: number;
+    };
   };
-  protected_automation_run_lifecycle: {
-    sequence: Generated<number>;
-    id: string;
-    automation_id: string;
-    profile_id: string;
-    definition_revision: number;
-    trigger: "scheduled" | "manual";
-    scheduled_at_ms: number;
-    queued_at_ms: number;
-    status: ProtectedAutomationRunStatus;
-    started_at_ms: number | null;
-    finished_at_ms: number | null;
-    error_code: ProtectedAutomationRunError | null;
-    result_id: string | null;
-    delivered_at_ms: number | null;
-    charged_bytes: number;
-  };
-  protected_automation_owner_inbox: {
-    sequence: Generated<number>;
-    run_id: string;
-    automation_id: string;
-    profile_id: string;
-    result_id: string;
-    created_at_ms: number;
-    charged_bytes: number;
-  };
-};
 type RunRow = Selectable<
   ProtectedAutomationLifecycleDatabase["protected_automation_run_lifecycle"]
 >;
 
 const ensureSchema = createOpenClawStateSchemaEnsurer({
   table: "protected_automation_run_chats",
+  migrateExistingTables: ["protected_automation_run_chats"],
   additionalTables: ["protected_automation_run_lifecycle", "protected_automation_owner_inbox"],
   indexes: [
     "idx_protected_automation_lifecycle_history",
@@ -123,25 +133,6 @@ export function chatRow(database: OpenClawStateDatabase, automationId: string) {
       .selectAll()
       .where("automation_id", "=", automationId),
   ).rows[0];
-}
-export function dto(row: RunRow, chatId: string | null): ProtectedAutomationLifecycleRun {
-  return {
-    id: row.id,
-    automationId: row.automation_id,
-    profileId: row.profile_id,
-    definitionRevision: row.definition_revision,
-    trigger: row.trigger,
-    scheduledAtMs: row.scheduled_at_ms,
-    queuedAtMs: row.queued_at_ms,
-    status: row.status,
-    runChatId: chatId,
-    startedAtMs: row.started_at_ms,
-    finishedAtMs: row.finished_at_ms,
-    errorCode: row.error_code,
-    resultId: row.result_id,
-    delivery:
-      row.status === "succeeded" ? (row.delivered_at_ms === null ? "pending" : "delivered") : null,
-  };
 }
 
 export type PrepareProtectedAutomationLifecycleOutcome =
@@ -201,7 +192,7 @@ export function prepareProtectedAutomationLifecycle(
     retired: [],
     pruneRunIds: [],
     pruneResultIds: [],
-    pruneInboxRunIds: [],
+    pruneInbox: [],
   };
   const entry = (id: string, bytes: number): ProtectedAutomationResultStorageEntry => ({
     id,
@@ -303,8 +294,7 @@ export function prepareProtectedAutomationLifecycle(
           .select([
             "id",
             "central_owner_profile_id as profileId",
-            /* kysely-allow-raw: SQLite BLOB length counts stored UTF-8 bytes. */
-            sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+            storedDefinitionCharge.as("definitionBytes"),
           ])
           .where("id", "=", command.automationId)
           .where("central_owner_profile_id", "=", command.profileId),
@@ -432,6 +422,25 @@ export function prepareProtectedAutomationLifecycle(
       if (outcome.status === "succeeded" && row.status !== "running") {
         return { status: "conflict" };
       }
+      if (
+        row.trigger === "scheduled" &&
+        automation.enabled &&
+        row.definition_revision === automation.definitionRevision &&
+        (outcome.status === "succeeded" ||
+          !["automation_disabled", "definition_changed", "member_inactive"].includes(
+            outcome.errorCode,
+          ))
+      ) {
+        const check = resolveFinishedAutomationCheck(
+          automation.definition,
+          row.definition_revision,
+          command,
+          chat,
+        );
+        if (check) {
+          write.check = check;
+        }
+      }
     } else {
       if (
         row.status !== "succeeded" ||
@@ -446,16 +455,12 @@ export function prepareProtectedAutomationLifecycle(
       if (command.now < (row.finished_at_ms ?? row.queued_at_ms)) {
         return { status: "conflict" };
       }
-      const inbox = executeSqliteQuerySync(
-        database.db,
-        typed(database.db)
-          .selectFrom("protected_automation_owner_inbox")
-          .selectAll()
-          .where("profile_id", "=", command.profileId)
-          .orderBy("sequence", "desc"),
-      ).rows;
-      write.pruneInboxRunIds = inbox.slice(199).map((retained) => retained.run_id);
-      write.entries.push(entry(`protected-automation-inbox:${row.id}`, 640));
+      prepareProtectedAutomationInboxReceipts(
+        database,
+        write,
+        row,
+        automation.definitionRevision === row.definition_revision,
+      );
     }
   }
   prepareProtectedAutomationLifecycleRetirements(database, write, rows, chat);
@@ -512,7 +517,7 @@ export function commitProtectedAutomationLifecycle(
         write,
       };
       deferSqliteWorkerCommitReceipt(db, receipt);
-      return { status: "committed" as const };
+      return { status: "committed" as const, ...(write.check ? { check: write.check } : {}) };
     },
     { path: database.path },
     { operationLabel: "protected.automationLifecycle.commit" },
@@ -523,13 +528,13 @@ function applyWrite(database: OpenClawStateDatabase, write: ProtectedAutomationL
   const { db } = database;
   const k = typed(db);
   const { command } = write;
-  if (write.pruneInboxRunIds.length) {
+  for (const { profileId, runId } of write.pruneInbox) {
     executeSqliteQuerySync(
       db,
       k
         .deleteFrom("protected_automation_owner_inbox")
-        .where("profile_id", "=", command.profileId)
-        .where("run_id", "in", write.pruneInboxRunIds),
+        .where("profile_id", "=", profileId)
+        .where("run_id", "=", runId),
     );
   }
   for (const removed of write.retired.filter((row) =>
@@ -649,6 +654,16 @@ function applyWrite(database: OpenClawStateDatabase, write: ProtectedAutomationL
         .where("id", "=", command.runId),
     );
   } else if (command.kind === "finish") {
+    if (write.check) {
+      executeSqliteQuerySync(
+        db,
+        k
+          .updateTable("protected_automation_run_chats")
+          .set(protectedAutomationCheckColumns(write.check))
+          .where("automation_id", "=", command.automationId)
+          .where("profile_id", "=", command.profileId),
+      );
+    }
     executeSqliteQuerySync(
       db,
       k
@@ -665,21 +680,22 @@ function applyWrite(database: OpenClawStateDatabase, write: ProtectedAutomationL
     const row = runRows(database, command.automationId).find(
       (candidate) => candidate.id === command.runId,
     );
-    const [inboxEntry] = write.entries;
-    if (!row?.result_id || !inboxEntry) {
+    if (!row?.result_id || !write.entries.some((entry) => entry.profileId === command.profileId)) {
       throw new Error("Protected automation delivery has no committed result or capacity.");
     }
-    executeSqliteQuerySync(
-      db,
-      k.insertInto("protected_automation_owner_inbox").values({
-        run_id: row.id,
-        automation_id: row.automation_id,
-        profile_id: command.profileId,
-        result_id: row.result_id,
-        created_at_ms: command.now,
-        charged_bytes: inboxEntry.bytes,
-      }),
-    );
+    for (const inboxEntry of write.entries) {
+      executeSqliteQuerySync(
+        db,
+        k.insertInto("protected_automation_owner_inbox").values({
+          run_id: row.id,
+          automation_id: row.automation_id,
+          profile_id: inboxEntry.profileId,
+          result_id: row.result_id,
+          created_at_ms: command.now,
+          charged_bytes: inboxEntry.bytes,
+        }),
+      );
+    }
     executeSqliteQuerySync(
       db,
       k

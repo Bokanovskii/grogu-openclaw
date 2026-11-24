@@ -96,8 +96,13 @@ maintenance helper corrected, not another account bootstrap or source install.
 
 `install` accepts only an empty `service/`. Later releases use `update`, which
 runs as the service account with no added privilege. Stop the runtime, then run
-`receive`, `update`, `dependencies`, and `restart runtime`. `update` extracts
-`inbox/runtime.tar` into a fresh staging directory under the service home. It
+`receive`, `update`, `dependencies`, and `restart runtime`. Before replacing
+`service/`, `update` runs the installed runtime's read-only `release-check`.
+It refuses unrecoverable child chats and preserves the installed runtime and archive.
+The control helper repeats the check with the candidate runtime before `start`
+or `restart runtime` loads its LaunchDaemon. A refusal leaves the listener stopped,
+not in a launchd restart loop. Tunnel control does not run this check.
+`update` then extracts `inbox/runtime.tar` into a fresh staging directory under the service home. It
 checks for the runtime entry point, `scripts/tsx.mjs`, `pnpm-lock.yaml`, and
 `protected-client/index.html`. It then swaps the staged tree into `service/`
 and removes the previous tree and the archive. Nothing durable lives in
@@ -397,6 +402,12 @@ is ready. Requests to create isolated definitions also return 503. The later
 enablement must default new definitions to isolated access
 without changing stored definitions that omit the field. Omitted access never
 qualifies an automation for publication.
+When isolated execution is enabled, an isolated run may list and read only this
+member's other isolated automation run chats, identified by their recorded
+automation lifecycle origin. It cannot access ordinary chats, member
+memory, run search, `sessions_send`, `sessions_spawn`, or the message tool.
+Specialist handoffs remain in the isolated child runtime and receive only the
+same list-and-history access.
 Only clients that send `automations-context-v1` receive the access field. Those
 clients see `capabilities.automations.contextAccess: false` until activation.
 
@@ -466,6 +477,28 @@ reduces storage can free budget. Enabling also reserves bounded run-metadata
 capacity. A quota refusal returns `413 quota_exceeded` before the state worker
 writes.
 
+Clients that negotiate `automations-pacing-v1` can offer model-chosen checks when
+`catalog.schedule.pacing` is present. The owner sets `pacing: { minMs, maxMs }`
+beside an interval `schedule`. Both limits and the fallback interval are whole
+milliseconds. The minimum is one minute and the maximum is 30 days. The fallback
+must fit between the limits. Omit `pacing` on PATCH to keep the bounds, or send
+`pacing: null` to return to a fixed schedule. A calendar schedule cannot use pacing.
+
+Only a scheduled run can propose its next delay. The scheduler clamps the delay
+to the owner's bounds after the run succeeds. A missing proposal uses the
+fallback interval. Failures use the longer of the fallback and native retry
+backoff, within the same bounds. Restart restores the accepted time for the
+current revision. Run now does not change it. A negotiated owner record returns
+`nextCheckReason` (`model`, `fallback`, or `backoff`) alongside an armed `nextCheckAt`.
+Run history, results, and public records do not expose pacing decisions.
+
+Upgrade adds nullable integers to the existing definition and run-chat rows.
+Existing automations remain fixed, without a backfill. Retention does not change.
+For a deliberate rollback, clear pacing on saved automations and unfinished
+authoring drafts first. Use the fixed-schedule rollback build that recognizes
+the six nullable columns. Unmodified 2b10 refuses to open the migrated database,
+even when all six columns are empty. Do not remove columns or edit state by hand.
+
 Clients that send `X-Alcove-Capabilities: automation-delete-v1` receive
 `capabilities.automations.delete: true` when deletion is available.
 `DELETE /api/protected/v1/automations/:id` requires the current version in
@@ -533,6 +566,17 @@ storage budgets. Runs use the owner's protected turn and one dedicated
 chat per automation. At most 50 runs and results per automation and 200 inbox
 entries per recipient are retained, oldest first. Push is not started; an inbox
 delivery that cannot fit remains pending for retry.
+The owner owns an automation's runs and results. When a delivery commits, each
+subscribed follower of a published, isolated automation also gets its own inbox
+entry in the same transaction; the subscribers at that commit are the audience,
+so a retry reaches whoever is subscribed then. Each recipient owns and pays for
+its entry under its own storage quota and 200-entry limit. A follower that is
+over quota or inactive is skipped without blocking the owner or other followers.
+Unfollowing, unpublishing, or deleting the automation removes the entries at
+once, and a retired run takes every recipient's entry with it. A receipt names
+the run and result only; it never makes private text readable. Followers read
+them while publication, follow, and membership stay current, and the routes that
+create follows stay disabled until public automation is available.
 The first release stores no Research Topics reference and does not give
 automation turns the Research Topics tool. Automation IDs are canonical
 lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines
@@ -674,6 +718,10 @@ time the turn waited behind other storage admissions, which share one queue, and
 `storageScanMs` is the time it spent measuring stored data (zero when it reused
 another admission's measurement); both fall between the `aliasesPrepared` and
 `storageAdmitted` steps. They are present only when storage limits are configured.
+For specialist handoffs, `childDispatchReady` marks the first child ready to
+start. `childProviderOutput` marks its first observed model output (text,
+reasoning, or tool input), and `childTextEnqueued` marks the first child text the
+server sends to an attached stream. It does not confirm receipt by the browser.
 `modelRequests` counts the turn's finished model requests (the turn itself plus
 any specialist it started), and the other `model` fields add them up:
 `modelWallMs`; `modelFirstOutputMs`, the time from request start to the first text,
@@ -686,6 +734,21 @@ flush makes a model request of its own, these fields do not include it. `toolCal
 `toolMs` count the tool calls that finished, from their start to their result, across the turn
 and its specialists; calls that run in parallel overlap. `searchMs` and `fetchMs` are the
 parts spent in web search and web fetch. Tool names, arguments, and results are not recorded.
+`loopBusyMs` is the time the server's main thread spent running code during the turn, and
+`loopMaxStallMs` is the longest delay of a 50 ms timer on it (delays under 100 ms count as
+zero, and a stall that began before the turn counts from the turn's start). `sqliteWrites`,
+`sqliteWriteQueueMs`, and `sqliteWriteMs` count the SQLite writes that finished, the time they
+waited for the writer, and the time they took, including each write's wait for the main thread
+to admit it, so a long write next to a long stall points at a busy main thread. `transcriptTasks`,
+`transcriptQueueMs`, and `transcriptMs` give the same three totals for the transcript worker,
+and `workerTasks`, `workerQueueMs`, and `workerMs` for every other worker (for example state
+reads, read-only snapshots, and memory). These eleven fields cover the whole server, not only
+the turn: they include other members' work in the same period, and requests that overlap add
+up, so a total can exceed the turn's wall time. A request's wait counts for the turn in which it
+starts and its count and time for the turn in which it finishes; events reach the totals a moment
+after the request ends, so the last request before a turn finishes can count toward the next turn.
+The worker totals come from the server's diagnostic events, so they stay at zero when the server
+config sets `diagnostics.enabled` to `false`.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not
@@ -920,7 +983,9 @@ and the original parent session generation.
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
-provider credential, file boundary, and deadline. Child work is not detached:
+provider credential, file boundary, and deadline. A Copilot specialist uses the
+model and endpoint from the member's account, not the service's default model.
+Child work is not detached:
 child transcript and file bytes count against the initiating profile while
 present. These temporary children do not count as retained chats or change
 the reported last retained chat activity. The turn saves each completed result as an assistant message with its
@@ -969,6 +1034,76 @@ Prerequisite: install Chromium as the service account with
 browser tools report that the page could not be loaded and the turn continues.
 
 ## Verification and release gates
+
+Before each protected runtime release, stop the listener and run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run release-check
+```
+
+The command holds the service-state lock and reads the canonical session and run
+stores. It uses startup recovery's ownership, parent-generation, and run-record
+rules. A missing parent passes only when startup can safely retire its transient
+child. Ambiguous children refuse the release with an operator repair instruction.
+The command does not retire children, change transcripts or files, or migrate storage.
+Startup still performs recovery after the release.
+
+Existing installations need this runtime command and the updated maintenance and
+control helpers before the automatic gates are available.
+Do not treat this child-recovery check as a complete release acceptance test.
+
+### First adoption of the release check
+
+The canonical bootstrap provides `--adopt-release-check` for the reviewed
+`groguProtected` predecessor. It accepts only the pinned installed control and
+maintenance helper bytes, with root ownership, mode 0755, and one link.
+It refuses other installations without replacing their files.
+
+On the protected Mac, stage the qualified candidate as `runtime.tar` in the
+operator's private staging directory. The directory must have mode 0700.
+The archive must be an operator-owned regular file with mode 0600 and no links.
+Use its independently recorded release SHA256, not a new digest of an unknown archive.
+Keep the qualified fallback artifact available to the deployment owner.
+
+Authenticate through native sudo while the listener is still running.
+Only after authentication succeeds, stop it through the installed fixed helper.
+From the reviewed source checkout on that Mac, run:
+
+```sh
+sudo -v &&
+sudo -n /Library/PrivilegedHelperTools/ai.grogu.protected-control stop runtime &&
+sudo -n /bin/bash grogu/deploy/protected-bootstrap-macos.sh \
+  --operator USER --staging-dir /absolute/private/staging \
+  --adopt-release-check --archive-sha256 REVIEWED_SHA256
+```
+
+Replace `USER`, the staging path, and `REVIEWED_SHA256` before running the commands.
+The native authentication authorizes the bootstrap's root-owned helper replacement.
+It does not add a sudo permission. If the cached authorization expires,
+`sudo -n` refuses instead of asking for a password after the listener stops.
+
+The operation requires an unloaded runtime. It privately captures the pinned
+archive, prepares its dependencies as the service user, and checks that candidate
+against the existing isolated state. A failed candidate check leaves the installed
+runtime and helpers unchanged. After the check passes, the installed maintenance
+owner receives and installs the same captured archive. The operation prepares
+dependencies and checks the installed candidate again with the explicit storage-key
+environment that the older launcher does not supply.
+
+Finally, it replaces only `ai.grogu.protected-control` and
+`ai.grogu.protected-maintain` with the exact generated bytes, owned by root:wheel
+with mode 0755. It does not change sudoers, configuration, secrets, other helpers,
+or LaunchDaemon definitions. It leaves the runtime stopped. The deployment owner
+handles startup separately through the fixed control helper.
+
+A helper publication failure restores the predecessor pair. The candidate runtime
+can already be installed at that point, but it remains stopped. An uncertain updater
+outcome or failed restoration retains the private operation directory and bootstrap
+lock for authenticated operator inspection. Do not remove active custody or retry
+blindly. Successful and safely refused operations remove their temporary candidate
+and rollback files. No settled backup is retained.
+
+### Isolated verification
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
 real profile and chat storage. On macOS, run it from the checkout with Node

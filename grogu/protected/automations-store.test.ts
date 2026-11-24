@@ -565,15 +565,17 @@ void test("encrypted automation writes admit and settle actual stored bytes", as
     }),
     [],
   );
+  const pacedDefinition = { ...definition, pacing: { minMs: 60_000, maxMs: 90_000 } };
   const created = await createProtectedAutomationWithAdmission(
     context,
-    { profileId: profile.id, definition, now: 2 },
+    { profileId: profile.id, definition: pacedDefinition, now: 2 },
     authority,
   );
   assert.equal(created.status, "created");
   if (created.status !== "created") {
     return;
   }
+  assert.deepEqual(created.automation.definition, pacedDefinition);
   const readStored = () => {
     const database = new DatabaseSync(resolveOpenClawStateSqlitePath(env), { readOnly: true });
     try {
@@ -592,8 +594,43 @@ void test("encrypted automation writes admit and settle actual stored bytes", as
   );
   assert.equal(stored.definition_json.includes(definition.instructions), false);
   assert.equal(admitted[0]?.currentStoredBytes, 0);
-  assert.equal(admitted[0]?.nextStoredBytes, stored.bytes);
-  assert.equal(committed[0]?.committedStoredBytes, stored.bytes);
+  const chargedBytes = stored.bytes + 16;
+  assert.equal(admitted[0]?.nextStoredBytes, chargedBytes);
+  assert.equal(committed[0]?.committedStoredBytes, chargedBytes);
+  assert.equal(
+    (await readProtectedAutomationStorageUsage(stateDir, profile.id, () => {}))
+      .profileDefinitionBytes,
+    chargedBytes,
+  );
+  // A pre-pacing reader selects only the old encrypted JSON, not the new bound columns.
+  const readFromDatabase = () =>
+    withExistingOpenClawStateDatabaseReadOnly(
+      ({ db }) => {
+        const row = db
+          .prepare("SELECT id, definition_json FROM protected_automations WHERE id = ?")
+          .get(created.automation.id);
+        assert.ok(row && typeof row.id === "string" && typeof row.definition_json === "string");
+        return JSON.parse(
+          readStoredDefinition(db, { id: row.id, definition_json: row.definition_json }),
+        );
+      },
+      { path: resolveOpenClawStateSqlitePath(env), env },
+    );
+  assert.deepEqual(readFromDatabase(), definition);
+  await assert.rejects(
+    patchProtectedAutomationWithAdmission(
+      context,
+      {
+        profileId: profile.id,
+        automationId: created.automation.id,
+        expectedRevision: 1,
+        definition: { ...definition, pacing: { minMs: 61_000, maxMs: 90_000 } },
+        now: 3,
+      },
+      authority,
+    ),
+    /pacing range/u,
+  );
   const changedDefinition = { ...definition, instructions: "An updated synthetic instruction." };
   const result = await patchProtectedAutomationWithAdmission(
     context,
@@ -608,7 +645,7 @@ void test("encrypted automation writes admit and settle actual stored bytes", as
   );
   assert.equal(result.status, "updated");
   const updated = readStored();
-  assert.equal(admitted[1]?.currentStoredBytes, stored.bytes);
+  assert.equal(admitted[1]?.currentStoredBytes, chargedBytes);
   assert.equal(admitted[1]?.nextStoredBytes, updated?.bytes);
   assert.equal(committed[1]?.committedStoredBytes, updated?.bytes);
   assert.equal(
@@ -620,19 +657,6 @@ void test("encrypted automation writes admit and settle actual stored bytes", as
     )?.definition.instructions,
     changedDefinition.instructions,
   );
-  const readFromDatabase = () =>
-    withExistingOpenClawStateDatabaseReadOnly(
-      ({ db }) => {
-        const row = db
-          .prepare("SELECT id, definition_json FROM protected_automations WHERE id = ?")
-          .get(created.automation.id);
-        assert.ok(row && typeof row.id === "string" && typeof row.definition_json === "string");
-        return JSON.parse(
-          readStoredDefinition(db, { id: row.id, definition_json: row.definition_json }),
-        );
-      },
-      { path: resolveOpenClawStateSqlitePath(env), env },
-    );
   assert.deepEqual(readFromDatabase(), changedDefinition);
   assert.deepEqual(
     await withOpenClawStateDatabaseReadSnapshot(async () => readFromDatabase(), {

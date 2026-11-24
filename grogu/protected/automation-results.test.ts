@@ -9,6 +9,10 @@ import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/s
 import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
+import type {
+  ProtectedAutomationLifecycleAuthority,
+  ProtectedAutomationLifecycleCommand,
+} from "../../src/state/protected-automation-lifecycle.types.js";
 import { createProtectedAutomationWithAdmission } from "../../src/state/protected-automation-operations.js";
 import type {
   PreparedProtectedAutomationFinishedResult,
@@ -19,6 +23,10 @@ import type {
 } from "../../src/state/protected-automation-results.types.js";
 import { ensureCanonicalUserProfileForVerifiedIdentity } from "../../src/state/user-profile-writes.js";
 import { addProtectedSubject, bindProtectedProfile } from "./admission-store.js";
+import {
+  canReadProtectedIsolatedAutomationRunChat,
+  writeProtectedAutomationLifecycle,
+} from "./automation-lifecycle-store.js";
 import { handleProtectedAutomationResultsRoute } from "./automation-results-http.js";
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
@@ -32,7 +40,10 @@ import {
 const issuer = "https://synthetic.example";
 const finalText = "Synthetic private final answer with enough text to notice in storage.";
 
-async function createFixture(t: { after(fn: () => Promise<void>): void }) {
+async function createFixture(
+  t: { after(fn: () => Promise<void>): void },
+  contextAccess?: ProtectedAutomationDraft["contextAccess"],
+) {
   const home = await mkdtemp(path.join(os.tmpdir(), "protected-automation-results-"));
   const stateDir = path.join(home, "state");
   const keyPath = path.join(home, "key");
@@ -83,6 +94,7 @@ async function createFixture(t: { after(fn: () => Promise<void>): void }) {
     model: { provider: "sparky", id: "00000000-0000-4000-8000-000000000001" },
     thinking: "low",
     schedule: { kind: "every", everyMs: 60_000 },
+    ...(contextAccess === undefined ? {} : { contextAccess }),
   };
   const created = await createProtectedAutomationWithAdmission(
     captureProtectedStateWorkerContext(stateDir),
@@ -117,7 +129,87 @@ async function createFixture(t: { after(fn: () => Promise<void>): void }) {
     transcript: { sessionKey: "synthetic-session-key", sessionId: randomUUID() },
     ...overrides,
   });
-  return { stateDir, ownerId, otherId, automationId, rows, finished };
+  const createAutomation = async (
+    profileId: string,
+    access: ProtectedAutomationDraft["contextAccess"],
+    name: string,
+  ) => {
+    const additionalAutomation = await createProtectedAutomationWithAdmission(
+      captureProtectedStateWorkerContext(stateDir),
+      {
+        profileId,
+        definition: { ...definition, contextAccess: access, name },
+        now: 2,
+      },
+      { profileId, assertCurrent: () => {}, admitStorage: () => {} },
+    );
+    assert.equal(additionalAutomation.status, "created");
+    if (additionalAutomation.status !== "created") {
+      throw new Error("Synthetic automation was not created.");
+    }
+    return additionalAutomation.automation.id;
+  };
+  return { stateDir, ownerId, otherId, automationId, rows, finished, definition, createAutomation };
+}
+
+function lifecycleAuthority(profileId: string): ProtectedAutomationLifecycleAuthority {
+  return {
+    profileId,
+    revalidate: async () => {},
+    assertCurrent() {},
+    enrollPublication: () => ({ finish() {} }),
+    reserveStorage: async () => ({ settle() {}, release() {} }),
+    reserveReplacement: async () => ({ settle() {}, release() {} }),
+    reserveBatchReplacement: async () => ({ settle() {}, release() {} }),
+    retireStorage() {},
+    retainUncertainCommit() {},
+  };
+}
+
+type WithoutLifecycleOwner<Command> = Command extends unknown
+  ? Omit<Command, "profileId" | "automationId">
+  : never;
+
+async function recordRunChat(
+  stateDir: string,
+  profileId: string,
+  automationId: string,
+  chatId: string,
+  finish = true,
+) {
+  const authority = lifecycleAuthority(profileId);
+  const runId = randomUUID();
+  const write = (command: WithoutLifecycleOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(stateDir, { ...command, profileId, automationId }, authority);
+  assert.equal((await write({ kind: "provision" })).status, "committed");
+  assert.equal(
+    (
+      await write({
+        kind: "queue",
+        runId,
+        definitionRevision: 1,
+        trigger: "manual",
+        scheduledAtMs: 10,
+        now: 10,
+      })
+    ).status,
+    "committed",
+  );
+  assert.equal((await write({ kind: "start", runId, chatId, now: 11 })).status, "committed");
+  if (!finish) {
+    return;
+  }
+  assert.equal(
+    (
+      await write({
+        kind: "finish",
+        runId,
+        now: 12,
+        outcome: { status: "failed", errorCode: "turn_failed" },
+      })
+    ).status,
+    "committed",
+  );
 }
 
 function admission(
@@ -291,6 +383,75 @@ void test("a finished run is stored sealed, charged once to its owner, and reada
       undefined,
     );
   }
+});
+
+void test("isolated run chat access follows recorded owner origin, not definition name", async (t) => {
+  const fixture = await createFixture(t, "isolated");
+  const isolatedRunChatId = randomUUID();
+  await recordRunChat(fixture.stateDir, fixture.ownerId, fixture.automationId, isolatedRunChatId);
+
+  const memberAutomationId = await fixture.createAutomation(
+    fixture.ownerId,
+    "member",
+    "Synthetic isolated run",
+  );
+  const memberRunChatId = randomUUID();
+  await recordRunChat(fixture.stateDir, fixture.ownerId, memberAutomationId, memberRunChatId);
+
+  const foreignAutomationId = await fixture.createAutomation(
+    fixture.otherId,
+    "isolated",
+    "Synthetic isolated run",
+  );
+  const foreignRunChatId = randomUUID();
+  await recordRunChat(fixture.stateDir, fixture.otherId, foreignAutomationId, foreignRunChatId);
+
+  const check = (input: {
+    action: "list" | "history" | "send" | "status" | "search";
+    currentChatId?: string;
+    targetChatId: string;
+  }) =>
+    canReadProtectedIsolatedAutomationRunChat(
+      fixture.stateDir,
+      {
+        action: input.action,
+        currentChatId: input.currentChatId ?? randomUUID(),
+        targetChatId: input.targetChatId,
+      },
+      readAuthority(fixture.ownerId),
+    );
+
+  assert.equal(await check({ action: "list", targetChatId: isolatedRunChatId }), true);
+  assert.equal(await check({ action: "history", targetChatId: isolatedRunChatId }), true);
+
+  const activeAutomationId = await fixture.createAutomation(
+    fixture.ownerId,
+    "isolated",
+    "Another isolated run",
+  );
+  const activeRunChatId = randomUUID();
+  await recordRunChat(
+    fixture.stateDir,
+    fixture.ownerId,
+    activeAutomationId,
+    activeRunChatId,
+    false,
+  );
+  assert.equal(await check({ action: "history", targetChatId: activeRunChatId }), true);
+
+  assert.equal(await check({ action: "history", targetChatId: randomUUID() }), false);
+  assert.equal(await check({ action: "history", targetChatId: foreignRunChatId }), false);
+  assert.equal(await check({ action: "list", targetChatId: memberRunChatId }), false);
+  assert.equal(await check({ action: "search", targetChatId: isolatedRunChatId }), false);
+  assert.equal(
+    await check({
+      action: "history",
+      currentChatId: isolatedRunChatId,
+      targetChatId: isolatedRunChatId,
+    }),
+    false,
+  );
+  assert.equal(await check({ action: "send", targetChatId: isolatedRunChatId }), false);
 });
 
 void test("native run identity is idempotent, conflicts on changed content, and refuses non-owners before reserving", async (t) => {

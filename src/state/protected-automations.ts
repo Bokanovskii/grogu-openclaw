@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { sql } from "kysely";
 import { Value } from "typebox/value";
 import {
+  isValidProtectedAutomationPacing,
   ProtectedAutomationDraftSchema,
   type ProtectedAutomationDraft,
 } from "../../packages/gateway-protocol/src/protected.js";
@@ -21,10 +21,15 @@ import {
   type ProtectedAdmissionDatabase,
 } from "./protected-admission.js";
 import {
+  assertIsolatedAutomationCreation,
+  isolatedAutomationHasActiveRun,
+} from "./protected-automation-lifecycle-retention.js";
+import {
   assertStoredDefinitionBytes,
   readStoredDefinition,
   storedDefinition,
   storedDefinitionBytes,
+  storedDefinitionCharge,
 } from "./protected-automation-storage-codec.js";
 
 type AutomationVisibility = "private" | "shared";
@@ -37,6 +42,8 @@ export type ProtectedAutomationDatabase = ProtectedAdmissionDatabase & {
     central_owner_profile_id: string;
     provider: "sparky";
     definition_json: string;
+    pacing_min_ms: number | null;
+    pacing_max_ms: number | null;
     definition_revision: number;
     visibility: AutomationVisibility;
     publication_revision: number;
@@ -62,6 +69,7 @@ export type ProtectedAutomationDatabase = ProtectedAdmissionDatabase & {
 
 const ensureAutomationSchema = createOpenClawStateSchemaEnsurer({
   table: "protected_automations",
+  migrateExistingTables: ["protected_automations"],
   additionalTables: ["protected_automation_members", "protected_automation_job_bindings"],
   indexes: [
     "idx_protected_automations_owner",
@@ -126,18 +134,7 @@ export type BindProtectedAutomationJobResult =
         | "binding_conflict";
     };
 
-type AutomationRow = {
-  id: string;
-  creator_profile_id: string;
-  central_owner_profile_id: string;
-  provider: "sparky";
-  definition_json: string;
-  definition_revision: number;
-  visibility: AutomationVisibility;
-  publication_revision: number;
-  enabled: number;
-  created_at: number;
-  updated_at: number;
+type AutomationRow = ProtectedAutomationDatabase["protected_automations"] & {
   member_role: "owner" | "follower" | null;
 };
 
@@ -150,37 +147,55 @@ function ensureSchema(database: OpenClawStateDatabase): void {
   ensureAutomationSchema({ database, path: database.path });
 }
 
-function parseDefinition(definitionJson: string): ProtectedAutomationDraft {
+function assertValidDraft(draft: ProtectedAutomationDraft): void {
+  if (!Value.Check(ProtectedAutomationDraftSchema, draft)) {
+    throw new TypeError("Protected automation definition does not match its schema.");
+  }
+  if (draft.pacing && !isValidProtectedAutomationPacing(draft.schedule, draft.pacing)) {
+    throw new TypeError("Protected automation pacing range must contain its fallback interval.");
+  }
+}
+
+export function parseProtectedAutomationDefinition(
+  db: DatabaseSync,
+  row: Pick<
+    ProtectedAutomationDatabase["protected_automations"],
+    "id" | "definition_json" | "pacing_min_ms" | "pacing_max_ms"
+  >,
+): ProtectedAutomationDraft {
+  const definitionJson = readStoredDefinition(db, row);
   let definition: unknown;
   try {
     definition = JSON.parse(definitionJson);
   } catch {
     throw new Error("Stored protected automation definition is invalid JSON.");
   }
-  if (!Value.Check(ProtectedAutomationDraftSchema, definition)) {
+  if (!Value.Check(ProtectedAutomationDraftSchema, definition) || definition.pacing !== undefined) {
     throw new Error("Stored protected automation definition does not match its schema.");
   }
-  return definition;
+  if (row.pacing_min_ms === null && row.pacing_max_ms === null) {
+    return definition;
+  }
+  if (row.pacing_min_ms === null || row.pacing_max_ms === null) {
+    throw new Error("Stored protected automation pacing bounds are incomplete.");
+  }
+  const paced = { ...definition, pacing: { minMs: row.pacing_min_ms, maxMs: row.pacing_max_ms } };
+  assertValidDraft(paced);
+  return paced;
 }
 
 function toStorageRecord(db: DatabaseSync, row: AutomationRow): ProtectedAutomationStorageRecord {
-  const relation =
-    row.member_role === "owner"
-      ? "owner"
-      : row.member_role === "follower"
-        ? "follower"
-        : "published";
   return {
     id: row.id,
     creatorProfileId: row.creator_profile_id,
     centralOwnerProfileId: row.central_owner_profile_id,
     provider: row.provider,
-    definition: parseDefinition(readStoredDefinition(db, row)),
+    definition: parseProtectedAutomationDefinition(db, row),
     definitionRevision: row.definition_revision,
     visibility: row.visibility,
     publicationRevision: row.publication_revision,
     enabled: row.enabled === 1,
-    relation,
+    relation: row.member_role ?? "published",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -198,8 +213,7 @@ export function readProtectedAutomationStorageUsage(
       .select([
         "id",
         "central_owner_profile_id as profileId",
-        /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for stored definitions. */
-        sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+        storedDefinitionCharge.as("definitionBytes"),
       ])
       .orderBy("central_owner_profile_id")
       .orderBy("id"),
@@ -244,6 +258,8 @@ function selectOwnedAutomations(
       "automation.central_owner_profile_id",
       "automation.provider",
       "automation.definition_json",
+      "automation.pacing_min_ms",
+      "automation.pacing_max_ms",
       "automation.definition_revision",
       "automation.visibility",
       "automation.publication_revision",
@@ -295,11 +311,8 @@ export function createProtectedAutomation(
   | { status: "created" | "exists"; automation: ProtectedAutomationStorageRecord }
   | { status: "member_inactive" } {
   ensureSchema(database);
-  if (!Value.Check(ProtectedAutomationDraftSchema, input.definition)) {
-    throw new TypeError("Protected automation definition does not match its schema.");
-  }
+  assertValidDraft(input.definition);
   const automationId = input.automationId ?? randomUUID();
-  const definitionJson = JSON.stringify(input.definition);
   const admissionFacts = {
     kind: "protected-automation",
     action: "create",
@@ -338,11 +351,12 @@ export function createProtectedAutomation(
           return { status: "exists" as const, automation: owned };
         }
       }
-      const definitionValue = storedDefinition(db, automationId, definitionJson);
+      assertIsolatedAutomationCreation(db, automationId, input.definition);
+      const definition = storedDefinition(db, automationId, input.definition);
       const storage = {
         automationId,
         currentStoredBytes: 0,
-        nextStoredBytes: Buffer.byteLength(definitionValue),
+        nextStoredBytes: definition.bytes,
       };
       requestSqliteWorkerOperationAdmission({
         stage: "transaction",
@@ -355,7 +369,7 @@ export function createProtectedAutomation(
           creator_profile_id: input.profileId,
           central_owner_profile_id: input.profileId,
           provider: "sparky",
-          definition_json: definitionValue,
+          ...definition.columns,
           definition_revision: 1,
           visibility: "private",
           publication_revision: 0,
@@ -419,6 +433,7 @@ export type PatchProtectedAutomationResult =
         | "automation_not_found"
         | "owner_mismatch"
         | "version_mismatch"
+        | "automation_busy"
         | "scheduler_required";
     };
 
@@ -434,9 +449,7 @@ export function patchProtectedAutomation(
   },
 ): PatchProtectedAutomationResult {
   ensureSchema(database);
-  if (!Value.Check(ProtectedAutomationDraftSchema, input.definition)) {
-    throw new TypeError("Protected automation definition does not match its schema.");
-  }
+  assertValidDraft(input.definition);
   const admissionFacts = {
     kind: "protected-automation",
     action: "patch",
@@ -471,6 +484,9 @@ export function patchProtectedAutomation(
       if (current.definitionRevision !== input.expectedRevision) {
         return { status: "version_mismatch" as const };
       }
+      if (isolatedAutomationHasActiveRun(db, input.automationId, current.definition)) {
+        return { status: "automation_busy" as const };
+      }
       if (
         input.definition.contextAccess !== undefined &&
         input.definition.contextAccess !== (current.definition.contextAccess ?? "member")
@@ -487,18 +503,14 @@ export function patchProtectedAutomation(
       if (currentBinding) {
         return { status: "scheduler_required" as const };
       }
-      const definitionValue = storedDefinition(
-        db,
-        input.automationId,
-        JSON.stringify({
-          ...input.definition,
-          contextAccess: current.definition.contextAccess,
-        }),
-      );
+      const definition = storedDefinition(db, input.automationId, {
+        ...input.definition,
+        contextAccess: current.definition.contextAccess,
+      });
       const storage = {
         automationId: input.automationId,
         currentStoredBytes: storedDefinitionBytes(db, input.automationId),
-        nextStoredBytes: Buffer.byteLength(definitionValue),
+        nextStoredBytes: definition.bytes,
       };
       requestSqliteWorkerOperationAdmission({
         stage: "transaction",
@@ -509,7 +521,7 @@ export function patchProtectedAutomation(
         kysely
           .updateTable("protected_automations")
           .set({
-            definition_json: definitionValue,
+            ...definition.columns,
             definition_revision: input.expectedRevision + 1,
             enabled: (input.enabled ?? current.enabled) ? 1 : 0,
             updated_at: input.now,

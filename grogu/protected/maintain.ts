@@ -2,6 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SessionCanonicalKeyMigrationRequiredError } from "../../src/config/sessions/session-canonical-key-error.js";
 import { hasErrnoCode, isMissingPathError } from "../../src/infra/errno.js";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { FsSafeError, pathExists, root } from "../../src/infra/fs-safe.js";
@@ -77,6 +78,75 @@ async function main() {
   resolveProtectedStorageKeyFile();
   const configDir = path.dirname(configPath);
   const runtimePath = path.join(configDir, "protected.json");
+  if (action === "release-check" && arg === undefined && rest.length === 0) {
+    const { configureProtectedRuntimeWorkers } = await import("./runtime-workers.js");
+    await configureProtectedRuntimeWorkers(fileURLToPath(new URL("../..", import.meta.url)));
+    const { acquireProtectedStateOwner } = await import("./state-owner.js");
+    const owner = await acquireProtectedStateOwner(stateDir);
+    if (!owner) {
+      throw new MaintenanceRefused("Stop the listener before running release-check.");
+    }
+    try {
+      const { createProtectedChats } = await import("./chats.js");
+      const { createProtectedAgentCatalog } = await import("./agents.js");
+      const { withArtifactPreservingStateReads, withExistingOpenClawStateDatabaseReadOnly } =
+        await import("../../src/state/openclaw-state-db-readonly.js");
+      const { inspectTransientSubagentRunInDatabase } =
+        await import("../../src/agents/subagents/registry/subagent-registry.store.worker.js");
+      const encryption = requireProtectedStorageEncryption();
+      encryption.dispose();
+      const chats = createProtectedChats({
+        stateDir,
+        maxChatsPerUser: 100,
+        agentCatalog: createProtectedAgentCatalog(),
+        usersRoot: await root(path.join(stateDir, "users")),
+        maxFileBytes: protectedMaxFileBytes,
+      });
+      const result = await withArtifactPreservingStateReads(
+        () =>
+          chats.inspectTransient(owner.assertCurrent, async (child) => {
+            child.assertCurrent();
+            // Offline maintenance is a one-shot reader; the recovery writer uses this same classifier.
+            const inspection = withExistingOpenClawStateDatabaseReadOnly(
+              ({ db }) =>
+                inspectTransientSubagentRunInDatabase(db, {
+                  childSessionKey: child.sessionKey,
+                  childSessionId: child.sessionId,
+                  childLifecycleRevision: child.lifecycleRevision,
+                  parentSessionKey: child.parentSessionKey,
+                }),
+              { env: chats.env },
+            );
+            if (!inspection) {
+              throw new MaintenanceRefused(
+                "Release check could not read the protected run registry. Inspect the isolated state before updating.",
+              );
+            }
+            return inspection.safe;
+          }),
+        { agentDatabases: true },
+      );
+      owner.assertCurrent();
+      if (result.skipped) {
+        throw new MaintenanceRefused(
+          `Release refused: ${result.skipped} child chat(s) cannot be recovered at startup. Keep the listener stopped. Ask the operator to repair ambiguous child ownership in the isolated state, then rerun release-check.`,
+        );
+      }
+      process.stdout.write(
+        `Child recovery release check passed: ${result.recoverable} recoverable child chat(s). No stored state was changed.\n`,
+      );
+    } catch (error) {
+      if (error instanceof SessionCanonicalKeyMigrationRequiredError) {
+        throw new MaintenanceRefused(
+          "Release refused: protected session data needs repair before child recovery can be checked. Keep the listener stopped. Ask the operator to repair the isolated session state, then rerun release-check.",
+        );
+      }
+      throw error;
+    } finally {
+      owner.release();
+    }
+    return;
+  }
   if (action === "turn-timings" && arg === undefined && rest.length === 0) {
     const file = await open(path.join(stateDir, "logs", "runtime.stdout.log"), "r");
     try {
@@ -429,7 +499,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log, release-check.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

@@ -9,6 +9,7 @@ usage() {
   echo "       /bin/bash $0 --operator USER --add-subject UUID"
   echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --install-policy-helper"
   echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --update-policy-helper"
+  echo "       sudo /bin/bash $0 --operator USER [--staging-dir DIR] --adopt-release-check --archive-sha256 SHA256"
   echo "Creates isolated service ownership. It does not activate either service."
 }
 
@@ -17,15 +18,17 @@ service_user="groguProtected"
 staging_dir=""
 mode="install"
 subject=""
+archive_sha256=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --operator|--service-user|--staging-dir|--add-subject)
+    --operator|--service-user|--staging-dir|--add-subject|--archive-sha256)
       [ "$#" -ge 2 ] || { usage >&2; exit 64; }
       case "$1" in
         --operator) operator="$2" ;;
         --service-user) service_user="$2" ;;
         --staging-dir) staging_dir="$2" ;;
         --add-subject) mode="add-subject"; subject="$2" ;;
+        --archive-sha256) archive_sha256="$2" ;;
       esac
       shift 2
       ;;
@@ -33,6 +36,7 @@ while [ "$#" -gt 0 ]; do
     --verify) mode="verify"; shift ;;
     --install-policy-helper) mode="install-policy-helper"; shift ;;
     --update-policy-helper) mode="update-policy-helper"; shift ;;
+    --adopt-release-check) mode="adopt-release-check"; shift ;;
     *) usage >&2; exit 64 ;;
   esac
 done
@@ -168,6 +172,11 @@ SCRIPT
   echo "Installed the root-owned fixed policy helper. No Cloudflare request was made."
   exit 0
 fi
+as_service() {
+  /usr/bin/sudo -u "$service_user" /usr/bin/env -i \
+    HOME="$service_home" PATH="$service_home/runtime/node/bin:$service_home/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$@"
+}
+provision_install() {
 tunnel_input="$staging_dir/cloudflared-tunnel-token"
 sparky_input="$staging_dir/sparky-api-key"
 deploy_input="$staging_dir/cloudflare-deploy.json"
@@ -255,10 +264,6 @@ mkdir "$service_home"
 chown "$service_user:$service_user" "$service_home"
 chmod 700 "$service_home"
 
-as_service() {
-  /usr/bin/sudo -u "$service_user" /usr/bin/env -i \
-    HOME="$service_home" PATH="$service_home/runtime/node/bin:$service_home/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$@"
-}
 as_service /bin/mkdir -p "$service_home/runtime/bin" "$service_home/service" \
   "$service_home/config" "$service_home/secrets" "$service_home/state/logs" "$service_home/inbox"
 as_service /bin/chmod 700 "$service_home/secrets" "$service_home/inbox"
@@ -270,11 +275,13 @@ cat "$tunnel_input" | as_service /usr/bin/tee "$service_home/secrets/tunnel-toke
 cat "$sparky_input" | as_service /usr/bin/tee "$service_home/secrets/sparky-key" >/dev/null
 cat "$deploy_input" | as_service /usr/bin/tee "$service_home/config/cloudflare-deploy.json" >/dev/null
 as_service /bin/chmod 600 "$service_home/secrets/tunnel-token" "$service_home/secrets/sparky-key"
+}
 
 context() {
   printf '%s\n' '#!/bin/sh' 'set -eu' 'umask 077' \
     "SERVICE_USER='$service_user'" "SERVICE_HOME='$service_home'" "LABEL='$label'"
 }
+write_launchers() {
 {
   context
   cat <<'SCRIPT'
@@ -301,6 +308,8 @@ exec "$SERVICE_HOME/runtime/bin/cloudflared" --no-autoupdate \
   --token-file "$SERVICE_HOME/secrets/tunnel-token"
 SCRIPT
 } > "$stage/tunnel"
+}
+write_helpers() {
 {
   context
   cat <<'SCRIPT'
@@ -308,11 +317,18 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 [ "$(id -u)" -eq 0 ] && [ "$#" -eq 2 ] || exit 64
 case "$2" in runtime|tunnel) target="$LABEL.$2" ;; *) exit 64 ;; esac
 plist="/Library/LaunchDaemons/$target.plist"
+release_check() {
+  if [ "$target" = "$LABEL.runtime" ]; then
+    /usr/bin/sudo -n -u "$SERVICE_USER" \
+      "/Library/PrivilegedHelperTools/$LABEL-maintain" run release-check
+  fi
+}
 case "$1" in
   start)
     if /bin/launchctl print "system/$target" >/dev/null 2>&1; then
       echo "The service is already loaded. Use restart for a new build." >&2; exit 73
     fi
+    release_check
     /bin/launchctl bootstrap system "$plist"
     ;;
   restart)
@@ -328,6 +344,7 @@ case "$1" in
         sleep 1
       done
     fi
+    release_check
     /bin/launchctl bootstrap system "$plist"
     ;;
   stop) /bin/launchctl bootout "system/$target" ;;
@@ -348,6 +365,14 @@ export OPENCLAW_CONFIG_PATH="$SERVICE_HOME/config/openclaw.json"
 export OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$SERVICE_HOME/secrets/storage-key"
 export PATH="$SERVICE_HOME/runtime/node/bin:$SERVICE_HOME/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$SERVICE_HOME"
+run_maintenance() {
+  cd "$SERVICE_HOME/service"
+  exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
+    OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
+    OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$OPENCLAW_PROTECTED_STORAGE_KEY_FILE" \
+    "$SERVICE_HOME/runtime/node/bin/node" --import "$SERVICE_HOME/service/scripts/tsx.mjs" \
+    "$SERVICE_HOME/service/grogu/protected/maintain.ts" "$@"
+}
 case "${1-}" in
   provision-node)
     [ "$#" -eq 1 ] || exit 64
@@ -406,6 +431,7 @@ case "${1-}" in
       echo "An earlier update left staging state that requires inspection." >&2
       exit 73
     fi
+    (run_maintenance release-check)
     staged="$(mktemp -d "$SERVICE_HOME/service-update.XXXXXX")"
     trap '/bin/rm -rf "$staged"' EXIT
     /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
@@ -463,18 +489,161 @@ case "${1-}" in
     ;;
   run)
     shift
-    cd "$SERVICE_HOME/service"
-    exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
-      OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
-      OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$OPENCLAW_PROTECTED_STORAGE_KEY_FILE" \
-      "$SERVICE_HOME/runtime/node/bin/node" --import "$SERVICE_HOME/service/scripts/tsx.mjs" \
-      "$SERVICE_HOME/service/grogu/protected/maintain.ts" "$@"
+    run_maintenance "$@"
     ;;
   *) exit 64 ;;
 esac
 SCRIPT
 } > "$stage/maintain"
+}
 
+adopt_release_check() {
+  [ "$service_user" = groguProtected ] && [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "First adoption requires the reviewed groguProtected identity and archive SHA256." >&2; exit 64;
+  }
+  service_uid="$(id -u "$service_user")"
+  [ -d "$helpers" ] && [ ! -L "$helpers" ] &&
+    [ "$(stat -f '%u:%g:%Lp' "$helpers")" = 0:0:755 ] &&
+    [ -d "$service_home" ] && [ ! -L "$service_home" ] &&
+    [ "$(stat -f '%u:%Lp' "$service_home")" = "$service_uid:700" ] || {
+      echo "First adoption requires the existing isolated home and root-owned helper directory." >&2; exit 77;
+    }
+  old_control=77ad55d13d05eaea08fb454ae34a19f22425c54e25789ed32d5c3ca566c2a290
+  old_maintain=0b20d9bd2dce52b9714b6a198508ff778efbab300eb563dd5ad413c2c15e5926
+  new_control=d548f30ff825394a3beb467c5dbb22b9efbca9e0a4d542bfe71318fbaf069f9b
+  new_maintain=e7fb8b2488a24103b534852cca40ae36e9cec70349cc48e6f734bc8bc1491410
+  check_digest() {
+    printf '%s  %s\n' "$2" "$1" | /usr/bin/shasum -a 256 -c - >/dev/null
+  }
+  check_helper() {
+    [ -f "$1" ] && [ ! -L "$1" ] &&
+      [ "$(stat -f '%u:%g:%Lp:%l' "$1")" = 0:0:755:1 ] && check_digest "$1" "$2"
+  }
+  check_installed_helpers() {
+    check_helper "$helpers/$label-control" "$old_control" &&
+      check_helper "$helpers/$label-maintain" "$old_maintain"
+  }
+  require_stopped() {
+    /bin/launchctl print system >/dev/null
+    if /bin/launchctl print "system/$label.runtime" >/dev/null 2>&1; then
+      echo "Stop the runtime through its fixed control helper before first adoption." >&2; return 73;
+    fi
+  }
+  check_installed_helpers || {
+    echo "Installed helper bytes or ownership differ from the reviewed predecessor; nothing was replaced." >&2; exit 65;
+  }
+  require_stopped
+  archive_input="$staging_dir/runtime.tar"
+  [ -f "$archive_input" ] && [ ! -L "$archive_input" ] &&
+    [ "$(stat -f '%u:%Lp:%l' "$archive_input")" = "$operator_uid:600:1" ] || {
+      echo "Stage the reviewed runtime.tar as an operator-owned, mode 0600 regular file without links." >&2; exit 77;
+    }
+  check_digest "$archive_input" "$archive_sha256" || {
+    echo "The staged runtime archive does not match the reviewed SHA256." >&2; exit 65;
+  }
+  lock="/var/run/$label.bootstrap"
+  mkdir "$lock" || {
+    echo "Another bootstrap or unfinished adoption owns $lock. Inspect its owner before recovery." >&2; exit 75;
+  }
+  stage="$(mktemp -d "$helpers/.grogu-adoption.XXXXXX")" || { rmdir "$lock"; exit 1; }
+  candidate=""
+  helpers_changed=0
+  retain_custody=0
+  finish_adoption() {
+    status=$?
+    trap - EXIT INT TERM
+    if [ "$status" -ne 0 ] && [ "$helpers_changed" -eq 1 ]; then
+      for target in control maintain; do
+        if ! /usr/bin/install -o root -g wheel -m 755 "$stage/old-$target" "$stage/restore-$target" ||
+          ! /bin/mv -f "$stage/restore-$target" "$helpers/$label-$target"; then
+          retain_custody=1
+        fi
+      done
+      if ! check_installed_helpers; then retain_custody=1; fi
+    fi
+    if [ "$retain_custody" -eq 1 ]; then
+      echo "Adoption did not settle. Keep runtime stopped. The authenticated operator must inspect $stage and $lock before recovery; do not remove active custody." >&2
+      exit 1
+    fi
+    if [ -n "$candidate" ] && ! as_service /bin/rm -rf "$candidate"; then
+      echo "Candidate cleanup failed at $candidate. Keep runtime stopped; adoption custody remains at $stage and $lock." >&2
+      exit 1
+    fi
+    /bin/rm -f "$stage/control" "$stage/maintain" "$stage/old-control" "$stage/old-maintain" \
+      "$stage/restore-control" "$stage/restore-maintain" "$stage/runtime.tar"
+    /bin/rmdir "$stage"
+    /bin/rmdir "$lock"
+    if [ "$status" -ne 0 ]; then
+      echo "Adoption failed with the previous helper pair retained. Keep runtime stopped and inspect the reported failure before retrying." >&2
+    fi
+    exit "$status"
+  }
+  trap finish_adoption EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  /usr/bin/install -o root -g wheel -m 600 "$archive_input" "$stage/runtime.tar"
+  check_digest "$stage/runtime.tar" "$archive_sha256"
+  write_helpers
+  check_digest "$stage/control" "$new_control"
+  check_digest "$stage/maintain" "$new_maintain"
+  for target in control maintain; do
+    /bin/sh -n "$stage/$target"
+    /usr/bin/install -o root -g wheel -m 755 "$helpers/$label-$target" "$stage/old-$target"
+    /bin/chmod 755 "$stage/$target"
+  done
+  check_helper "$stage/old-control" "$old_control"
+  check_helper "$stage/old-maintain" "$old_maintain"
+  candidate="$(as_service /usr/bin/mktemp -d "$service_home/adoption-candidate.XXXXXX")"
+  as_service /usr/bin/tar -xf - -C "$candidate" < "$stage/runtime.tar"
+  for required in grogu/protected/maintain.ts grogu/protected/main.ts scripts/tsx.mjs pnpm-lock.yaml protected-client/index.html; do
+    [ -f "$candidate/$required" ] && [ ! -L "$candidate/$required" ] || {
+      echo "The candidate archive is incomplete. Keep runtime stopped." >&2; exit 65;
+    }
+  done
+  (
+    cd "$candidate"
+    as_service "$service_home/runtime/node/bin/node" \
+      "$service_home/runtime/pnpm/lib/node_modules/pnpm/bin/pnpm.mjs" install --frozen-lockfile --ignore-scripts
+  )
+  candidate_check() {
+    (
+      cd "$1"
+      as_service /usr/bin/env \
+        OPENCLAW_STATE_DIR="$service_home/state" OPENCLAW_CONFIG_PATH="$service_home/config/openclaw.json" \
+        OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$service_home/secrets/storage-key" \
+        "$service_home/runtime/node/bin/node" --import "$1/scripts/tsx.mjs" \
+        "$1/grogu/protected/maintain.ts" release-check
+    )
+  }
+  candidate_check "$candidate"
+  require_stopped
+  check_installed_helpers
+  /usr/bin/sudo -u "$service_user" "$helpers/$label-maintain" receive < "$stage/runtime.tar"
+  check_digest "$service_home/inbox/runtime.tar" "$archive_sha256"
+  # A failed old updater may still own its rename/rollback files. Never clean those here.
+  retain_custody=1
+  /usr/bin/sudo -u "$service_user" "$helpers/$label-maintain" update
+  retain_custody=0
+  /usr/bin/sudo -u "$service_user" "$helpers/$label-maintain" dependencies
+  # The predecessor's run launcher drops the storage-key environment.
+  candidate_check "$service_home/service"
+  require_stopped
+  check_installed_helpers
+  helpers_changed=1
+  /bin/mv -f "$stage/control" "$helpers/$label-control"
+  /bin/mv -f "$stage/maintain" "$helpers/$label-maintain"
+  check_helper "$helpers/$label-control" "$new_control"
+  check_helper "$helpers/$label-maintain" "$new_maintain"
+  echo "Adopted the checked runtime and the two fixed helpers. Runtime remains stopped; sudo policy and other service files were not changed."
+}
+
+if [ "$mode" = adopt-release-check ]; then
+  adopt_release_check
+  exit 0
+fi
+provision_install
+write_launchers
+write_helpers
 for target in runtime tunnel; do
   cat > "$stage/$target.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

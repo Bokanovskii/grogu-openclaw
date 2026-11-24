@@ -722,6 +722,12 @@ export function createProtectedChats(options: {
     scope,
     readEntry,
     list,
+    async hasAutomationRunHistory(authority: ProtectedChatAuthority, automationId: string) {
+      authority.assertCurrent();
+      const entries = await readSessionEntrySummariesInWorker({ agentId, env, storePath });
+      authority.assertCurrent();
+      return entries.some(({ entry }) => entry.protectedAutomationRunId === automationId);
+    },
     async sideChatsOf(authority: ProtectedChatAuthority, parentId: string) {
       return (await list(authority)).filter((chat) => chat.side?.parentId === parentId);
     },

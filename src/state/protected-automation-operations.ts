@@ -4,7 +4,11 @@ import {
   createSqliteWorkerOperationAdmission,
   observeSqliteWorkerCommittedFacts,
 } from "../infra/sqlite-worker-operation-admission.js";
-import type { SqliteWorkerAdmissionFactory } from "../infra/sqlite-worker-operation-admission.js";
+import type {
+  SqliteWorkerAdmissionFactory,
+  SqliteWorkerOperationAdmission,
+} from "../infra/sqlite-worker-operation-admission.js";
+import type { RetainedWorkerTransactionAdmission } from "../infra/sqlite-worker-operation-settlement.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "./openclaw-state-worker-store.js";
 import type {
@@ -19,6 +23,10 @@ export type ProtectedAutomationMutationAuthority = {
   admitStorage?: (facts: ProtectedAutomationStoredBytes) => void;
   onStorageCommitted?: (facts: ProtectedAutomationCommittedBytes) => void;
   onStorageAborted?: (facts: ProtectedAutomationStoredBytes) => void;
+  onNativeAdmission?: (
+    admission: SqliteWorkerOperationAdmission,
+    operation: RetainedWorkerTransactionAdmission,
+  ) => void;
 };
 
 function assertMutationProfile(profileId: string, authority: ProtectedAutomationMutationAuthority) {
@@ -109,6 +117,7 @@ function createMutationAdmission(
       }
       authority.onStorageCommitted?.({ ...admittedStorage, committedStoredBytes });
     });
+    authority.onNativeAdmission?.(admission, operation);
     void operation.settled.then((outcome) => {
       if (outcome.kind !== "unknown" && admittedStorage && !admission.committed) {
         authority.onStorageAborted?.(admittedStorage);

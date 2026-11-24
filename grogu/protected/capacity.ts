@@ -60,6 +60,7 @@ export type StorageAdmission = {
   recordCreatedChat(id: string, sessionKey: string): void;
   chargeAutomationCreate(storedBytes: number): void;
   settleAutomationCreate(storedBytes: number, created: boolean, automationId?: string): void;
+  retainPendingWrite(): () => void;
   chargeAutomationPatch(currentStoredBytes: number, nextStoredBytes: number): void;
   settleAutomationPatch(
     currentStoredBytes: number,
@@ -539,6 +540,17 @@ export function createStorageAdmission(
         scanMs,
         release,
         charge,
+        retainPendingWrite() {
+          pendingWrites++;
+          let settled = false;
+          return () => {
+            if (!settled) {
+              settled = true;
+              pendingWrites--;
+              finishReservation();
+            }
+          };
+        },
         reserveStoredData(bytes) {
           return createStoredDataReservation({
             ...storedDataOptions,

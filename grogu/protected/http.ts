@@ -748,6 +748,15 @@ export function createProtectedHttp(options: {
     shutdown.signal.throwIfAborted();
     assertAutomationHostCurrent();
   });
+  const automationCreationSafety = (authority: {
+    profileId: string;
+    assertCurrent: () => void;
+  }) => ({
+    hasRunHistory: (automationId: string) => chats.hasAutomationRunHistory(authority, automationId),
+    enrollPublication: automationStorageRecovery.enrollPublication,
+    retainUncertainCreateCommit: automationStorageRecovery.retainUncertainCreateCommit,
+    reconcile: () => reconcileUncertainAutomationStorage(),
+  });
   const createAutomationPublicationAuthority = (
     member: ReturnType<typeof automationAuthority>,
   ): {
@@ -1201,6 +1210,7 @@ export function createProtectedHttp(options: {
               "automation",
               await storageLimit(assertRun),
             ),
+          creationSafety: automationCreationSafety(runAuthority),
           bind: async (automation) => {
             const chat = await bindSavedAutomation(runAuthority, id, automation);
             const bound = chat.authoring?.automationId === automation.id;
@@ -4232,6 +4242,7 @@ export function createProtectedHttp(options: {
             },
             authority,
             storage,
+            automationCreationSafety(authority),
           );
           if (!automation) {
             unauthorized();

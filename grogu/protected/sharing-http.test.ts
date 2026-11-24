@@ -855,6 +855,8 @@ void test("legacy public automation data remains private at the HTTP boundary", 
   });
   for (const pathname of [
     "/automations/public",
+    `/automations/public/${automation.id}/runs`,
+    `/automations/public/${automation.id}/runs/${run.id}`,
     `/automations/${automation.id}/publication`,
     `/automations/${automation.id}/follow`,
     `/automations/${automation.id}/notifications`,

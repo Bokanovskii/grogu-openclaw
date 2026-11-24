@@ -2,6 +2,7 @@ import type {
   ProtectedAutomationFinishedRun,
   ProtectedAutomationRunListResponse,
   ProtectedAutomationRunResponse,
+  ProtectedPublicAutomationRun,
 } from "../../packages/gateway-protocol/src/protected-automation-results.js";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
 import type { ProtectedAutomationMutationAuthority } from "../../src/state/protected-automation-operations.js";
@@ -57,6 +58,34 @@ export async function readProtectedAutomationRunRecord(
     throw new ProtectedError(404, "not_found", "Not found.");
   }
   return { run };
+}
+
+export async function listProtectedPublicAutomationRunRecords(
+  stateDir: string,
+  input: { automationId: string; id?: string },
+  authority: ProtectedAutomationResultReadAuthority,
+): Promise<ProtectedPublicAutomationRun[]> {
+  const context = captureProtectedStateWorkerContext(stateDir);
+  await authority.revalidate();
+  const runs = await runOpenClawStateWorkerOperation(
+    context,
+    (scope) =>
+      scope.execute({
+        type: "protectedAutomationResults.publicRuns",
+        input: { profileId: authority.profileId, ...input },
+      }),
+    {
+      assertCurrent: () => {
+        context.admission.assertCurrent();
+        authority.assertCurrent();
+      },
+    },
+  );
+  authority.assertCurrent();
+  if (!runs) {
+    throw new ProtectedError(404, "not_found", "Not found.");
+  }
+  return runs;
 }
 
 /** Existing-owner contribution to `storedDataUsage`; includes every retained run, readable or not. */

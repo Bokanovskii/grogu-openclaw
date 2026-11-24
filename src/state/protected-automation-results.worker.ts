@@ -1,5 +1,6 @@
 import {
   listProtectedAutomationRuns,
+  listProtectedPublicAutomationRuns,
   readProtectedAutomationResultStorageUsage,
 } from "./protected-automation-results-read.js";
 import {
@@ -21,6 +22,10 @@ export const protectedAutomationResultOperations = {
     input: Parameters<typeof listProtectedAutomationRuns>[1],
     { open },
   ) => listProtectedAutomationRuns(open(), input),
+  "protectedAutomationResults.publicRuns": (
+    input: Parameters<typeof listProtectedPublicAutomationRuns>[1],
+    { open },
+  ) => listProtectedPublicAutomationRuns(open(), input),
   "protectedAutomationResults.storageUsage": (_input: undefined, { open }) =>
     readProtectedAutomationResultStorageUsage(open()),
 } satisfies WorkerOperationHandlers;

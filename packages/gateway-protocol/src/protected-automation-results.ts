@@ -29,6 +29,26 @@ export const ProtectedAutomationRunResponseSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ProtectedPublicAutomationRunSchema = Type.Object(
+  {
+    id,
+    runAtMs: timestamp,
+    completedAtMs: timestamp,
+    text: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+export const ProtectedPublicAutomationRunListResponseSchema = Type.Object(
+  { runs: Type.Array(ProtectedPublicAutomationRunSchema) },
+  { additionalProperties: false },
+);
+
+export const ProtectedPublicAutomationRunResponseSchema = Type.Object(
+  { run: ProtectedPublicAutomationRunSchema },
+  { additionalProperties: false },
+);
+
 export const ProtectedAutomationLifecycleRunSchema = Type.Object(
   {
     id,
@@ -93,6 +113,7 @@ export const ProtectedAutomationInboxResponseSchema = Type.Object(
 );
 
 export type ProtectedAutomationFinishedRun = Static<typeof ProtectedAutomationFinishedRunSchema>;
+export type ProtectedPublicAutomationRun = Static<typeof ProtectedPublicAutomationRunSchema>;
 export type ProtectedAutomationRunListResponse = Static<
   typeof ProtectedAutomationRunListResponseSchema
 >;

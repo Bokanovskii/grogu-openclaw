@@ -16,6 +16,7 @@ import {
   readSettingsJson,
   sparky,
 } from "./settings.js";
+import { describeStartupFailure } from "./startup-failure.js";
 import {
   requireProtectedStorageEncryption,
   resolveProtectedStorageKeyFile,
@@ -307,5 +308,12 @@ void main().catch((error: unknown) => {
       ? "Protected runtime initialization failed. Restore the original storage key or provision it before startup; never replace a lost key.\n"
       : `${error instanceof ProtectedStartupError || error instanceof ProtectedWorkerBuildError ? error.message : "Protected runtime initialization failed. Check isolated runtime configuration."}\n`,
   );
+  let detail: string;
+  try {
+    detail = describeStartupFailure(error);
+  } catch {
+    detail = "Startup failure details could not be formatted.";
+  }
+  process.stderr.write(`${detail}\n`);
   process.exitCode = 1;
 });

@@ -472,6 +472,39 @@ export async function readProtectedAutomationRunChat(
   return result;
 }
 
+export async function canReadProtectedIsolatedAutomationRunChat(
+  stateDir: string,
+  input: {
+    action: "list" | "history" | "send" | "status" | "search";
+    currentChatId: string;
+    targetChatId: string;
+  },
+  authority: ReadAuthority,
+) {
+  if (
+    (input.action !== "list" && input.action !== "history") ||
+    input.currentChatId === input.targetChatId
+  ) {
+    return false;
+  }
+  const context = captureProtectedStateWorkerContext(stateDir);
+  const originInput = { profileId: authority.profileId, chatId: input.targetChatId };
+  await authority.revalidate();
+  const result = await runOpenClawStateWorkerOperation(
+    context,
+    (scope) =>
+      scope.execute({ type: "protectedAutomationLifecycle.isolatedRunChat", input: originInput }),
+    {
+      assertCurrent: () => {
+        context.admission.assertCurrent();
+        authority.assertCurrent();
+      },
+    },
+  );
+  authority.assertCurrent();
+  return result;
+}
+
 export async function readProtectedAutomationLifecycleStorageUsage(
   stateDir: string,
   assertCurrent: () => void,

@@ -402,6 +402,12 @@ is ready. Requests to create isolated definitions also return 503. The later
 enablement must default new definitions to isolated access
 without changing stored definitions that omit the field. Omitted access never
 qualifies an automation for publication.
+When isolated execution is enabled, an isolated run may list and read only this
+member's other isolated automation run chats, identified by their recorded
+automation lifecycle origin. It cannot access ordinary chats, member
+memory, run search, `sessions_send`, `sessions_spawn`, or the message tool.
+Specialist handoffs remain in the isolated child runtime and receive only the
+same list-and-history access.
 Only clients that send `automations-context-v1` receive the access field. Those
 clients see `capabilities.automations.contextAccess: false` until activation.
 

@@ -4,6 +4,7 @@ import {
   readProtectedAutomationOwnerInbox,
   readProtectedAutomationLastScheduledAttempt,
   readProtectedAutomationRunChat,
+  readProtectedIsolatedAutomationRunChat,
   readProtectedAutomationInterruptedRun,
 } from "./protected-automation-lifecycle-read.js";
 import {
@@ -37,6 +38,10 @@ export const protectedAutomationLifecycleOperations = {
     input: Parameters<typeof readProtectedAutomationRunChat>[1],
     { open },
   ) => readProtectedAutomationRunChat(open(), input),
+  "protectedAutomationLifecycle.isolatedRunChat": (
+    input: Parameters<typeof readProtectedIsolatedAutomationRunChat>[1],
+    { open },
+  ) => readProtectedIsolatedAutomationRunChat(open(), input),
   "protectedAutomationLifecycle.storageUsage": (_input: undefined, { open }) =>
     readProtectedAutomationLifecycleStorageUsage(open()),
   "protectedAutomationLifecycle.interruptedRun": (

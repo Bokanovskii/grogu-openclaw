@@ -11,6 +11,7 @@ import { readProtectedAutomationCheck } from "./protected-automation-pacing.js";
 import { isOwner } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { readProtectedAutomationFollowerGrant } from "./protected-automation-sharing.js";
+import { readProtectedAutomation } from "./protected-automations.js";
 
 function dto(
   row: ReturnType<typeof runRows>[number],
@@ -48,6 +49,40 @@ export function readProtectedAutomationLifecycle(
     .slice(0, 50)
     .filter((row) => row.profile_id === input.profileId)
     .map((row) => dto(row, chat?.chat_id ?? null));
+}
+
+export function readProtectedIsolatedAutomationRunChat(
+  database: OpenClawStateDatabase,
+  input: { profileId: string; chatId: string },
+): boolean {
+  admit(database);
+  const origin = executeSqliteQuerySync(
+    database.db,
+    typed(database.db)
+      .selectFrom("protected_automation_run_chats as chat")
+      .innerJoin(
+        "protected_automation_run_lifecycle as run",
+        "run.automation_id",
+        "chat.automation_id",
+      )
+      .select(["chat.automation_id as automationId"])
+      .where("chat.profile_id", "=", input.profileId)
+      .where("chat.chat_id", "=", input.chatId)
+      .whereRef("run.profile_id", "=", "chat.profile_id")
+      .limit(1),
+  ).rows[0];
+  if (!origin || !isOwner(database, input.profileId, origin.automationId)) {
+    return false;
+  }
+  const automation = readProtectedAutomation(database, {
+    profileId: input.profileId,
+    automationId: origin.automationId,
+  });
+  return (
+    automation?.relation === "owner" &&
+    automation.centralOwnerProfileId === input.profileId &&
+    automation.definition.contextAccess === "isolated"
+  );
 }
 
 export function readProtectedAutomationOwnerInbox(

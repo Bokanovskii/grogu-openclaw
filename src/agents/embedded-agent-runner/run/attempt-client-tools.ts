@@ -34,6 +34,7 @@ import {
   resolveToolSearchConfig,
   type ToolSearchCatalogRef,
 } from "../../tool-search.js";
+import { getHostSessionAccess } from "../../tools/scoped-session-access.js";
 import { log } from "../logger.js";
 import {
   AGENT_RESERVED_TOOL_NAMES,
@@ -54,7 +55,10 @@ export function createDeferredAttemptToolResolver(params: {
     return undefined;
   }
   return ({ toolCall }) => {
-    if (attempt.contextIsolation === "isolated" && isIsolatedContextForbiddenTool(toolCall.name)) {
+    if (
+      attempt.contextIsolation === "isolated" &&
+      isIsolatedContextForbiddenTool(toolCall.name, getHostSessionAccess())
+    ) {
       throw new Error("Memory and other sessions are unavailable in isolated automations.");
     }
     if (!preparation.deferredDirectoryToolsCallable) {

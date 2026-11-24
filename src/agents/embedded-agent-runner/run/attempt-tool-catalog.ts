@@ -31,6 +31,7 @@ import {
   type ToolSearchCatalogToolExecutor,
 } from "../../tool-search.js";
 import type { AnyAgentTool } from "../../tools/common.js";
+import { getHostSessionAccess } from "../../tools/scoped-session-access.js";
 import { textResult } from "../../tools/tool-results.js";
 import { log } from "../logger.js";
 import type { prepareEmbeddedAttemptBundleTools } from "./attempt-bundle-tools.js";
@@ -64,13 +65,17 @@ export async function prepareEmbeddedAttemptToolCatalog(input: {
     } = preparedToolBase;
     const { clientTools, uncompactedEffectiveTools } = input.bundleTools;
     const abortSignal = preparedToolBase.toolAbortSignal ?? input.abortSignal;
+    const hostSessionAccess =
+      attempt.contextIsolation === "isolated" ? getHostSessionAccess() : undefined;
     // Detached skill review keeps every foreground schema for prompt-cache reuse
     // but executes only the allowed tools. Wrap before catalog compaction so a
     // tool hidden behind tool_call/exec is gated too; the catalog controls stay
     // callable because they only dispatch into the gated tools.
     const admittedTools =
       attempt.contextIsolation === "isolated"
-        ? uncompactedEffectiveTools.filter((tool) => !isIsolatedContextForbiddenTool(tool.name))
+        ? uncompactedEffectiveTools.filter(
+            (tool) => !isIsolatedContextForbiddenTool(tool.name, hostSessionAccess),
+          )
         : uncompactedEffectiveTools;
     let effectiveTools = attempt.toolExecutionAllow
       ? gateToolExecution(admittedTools, attempt.toolExecutionAllow)

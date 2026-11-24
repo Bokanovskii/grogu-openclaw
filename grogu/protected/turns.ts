@@ -208,7 +208,10 @@ type ProtectedMemberMemoryLease = Awaited<
 
 function turnAgentTools(turn: ProtectedTurn, agent: ProtectedAgentDefinition) {
   return turn.automationContextAccess === "isolated"
-    ? agent.tools.filter((name) => !name.startsWith("sessions_"))
+    ? agent.tools.filter(
+        (name) =>
+          !name.startsWith("sessions_") || name === "sessions_list" || name === "sessions_history",
+      )
     : agent.tools;
 }
 

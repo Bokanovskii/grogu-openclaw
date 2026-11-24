@@ -33,42 +33,43 @@ import type { ProtectedAutomationResultStorageEntry } from "./protected-automati
 import { readProtectedAutomationSharingStorageUsage } from "./protected-automation-sharing.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
-export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase & {
-  protected_automation_run_chats: {
-    automation_id: string;
-    profile_id: string;
-    chat_id: string | null;
-    last_scheduled_at_ms: number | null;
-    reserved_run_bytes: number;
-    charged_bytes: number;
+export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase &
+  ProtectedAutomationDatabase & {
+    protected_automation_run_chats: {
+      automation_id: string;
+      profile_id: string;
+      chat_id: string | null;
+      last_scheduled_at_ms: number | null;
+      reserved_run_bytes: number;
+      charged_bytes: number;
+    };
+    protected_automation_run_lifecycle: {
+      sequence: Generated<number>;
+      id: string;
+      automation_id: string;
+      profile_id: string;
+      definition_revision: number;
+      trigger: "scheduled" | "manual";
+      scheduled_at_ms: number;
+      queued_at_ms: number;
+      status: ProtectedAutomationRunStatus;
+      started_at_ms: number | null;
+      finished_at_ms: number | null;
+      error_code: ProtectedAutomationRunError | null;
+      result_id: string | null;
+      delivered_at_ms: number | null;
+      charged_bytes: number;
+    };
+    protected_automation_owner_inbox: {
+      sequence: Generated<number>;
+      run_id: string;
+      automation_id: string;
+      profile_id: string;
+      result_id: string;
+      created_at_ms: number;
+      charged_bytes: number;
+    };
   };
-  protected_automation_run_lifecycle: {
-    sequence: Generated<number>;
-    id: string;
-    automation_id: string;
-    profile_id: string;
-    definition_revision: number;
-    trigger: "scheduled" | "manual";
-    scheduled_at_ms: number;
-    queued_at_ms: number;
-    status: ProtectedAutomationRunStatus;
-    started_at_ms: number | null;
-    finished_at_ms: number | null;
-    error_code: ProtectedAutomationRunError | null;
-    result_id: string | null;
-    delivered_at_ms: number | null;
-    charged_bytes: number;
-  };
-  protected_automation_owner_inbox: {
-    sequence: Generated<number>;
-    run_id: string;
-    automation_id: string;
-    profile_id: string;
-    result_id: string;
-    created_at_ms: number;
-    charged_bytes: number;
-  };
-};
 type RunRow = Selectable<
   ProtectedAutomationLifecycleDatabase["protected_automation_run_lifecycle"]
 >;

@@ -110,6 +110,7 @@ import {
   validGeneratedFilename,
 } from "./artifacts.js";
 import {
+  canReadProtectedIsolatedAutomationRunChat,
   listProtectedAutomationLifecycleRuns,
   listProtectedAutomationOwnerInbox,
   readProtectedAutomationLastScheduledAttempt,
@@ -1252,22 +1253,34 @@ export function createProtectedHttp(options: {
       revalidate: checkRun,
       signal,
       resolve: async ({
+        action,
         requesterSessionKey,
         reference,
       }: {
+        action: "list" | "history" | "send" | "status" | "search";
         requesterSessionKey: string;
         reference: string;
       }) => {
         await checkRun();
+        const targetId = reference.startsWith(profileSessionPrefix)
+          ? reference.slice(profileSessionPrefix.length)
+          : reference;
         if (
           requesterSessionKey !== parentSessionKey &&
           !ownedChildSessionKeys.has(requesterSessionKey)
         ) {
           return undefined;
         }
-        const targetId = reference.startsWith(profileSessionPrefix)
-          ? reference.slice(profileSessionPrefix.length)
-          : reference;
+        if (
+          context.automationContextAccess === "isolated" &&
+          !(await canReadProtectedIsolatedAutomationRunChat(
+            options.stateDir,
+            { action, currentChatId: id, targetChatId: targetId },
+            { ...runAuthority, revalidate: checkRun },
+          ))
+        ) {
+          return undefined;
+        }
         try {
           const entry = await chats.readEntry(runAuthority, targetId);
           await checkRun();

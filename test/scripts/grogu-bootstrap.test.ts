@@ -268,7 +268,10 @@ describe("Grogu runtime configuration bootstrap", () => {
         .mockResolvedValueOnce({
           valid: true,
           hash: "observed-config-revision",
-          config: { mcp: { apps: { sameOriginSandbox: current } } },
+          config: {
+            mcp: { apps: { sameOriginSandbox: current } },
+            agents: { defaults: { thinkingDefault: "ultra" } },
+          },
         })
         .mockResolvedValueOnce({
           ok: true,
@@ -292,6 +295,30 @@ describe("Grogu runtime configuration bootstrap", () => {
       }
     },
   );
+
+  it("installs medium on a fresh setup without setting a separate child or job override", async () => {
+    native.call
+      .mockResolvedValueOnce({ valid: true, hash: "fresh", config: {} })
+      .mockResolvedValueOnce({
+        ok: true,
+        config: {
+          mcp: { apps: { sameOriginSandbox: true } },
+          agents: { defaults: { thinkingDefault: "medium" } },
+        },
+      });
+    const result = await bootstrapGroguRuntimeConfig(profile, true);
+    expect(result.thinkingDefault).toBe("medium");
+    expect(native.call.mock.calls[1]?.slice(1, 3)).toEqual([
+      "config.patch",
+      expect.objectContaining({
+        baseHash: "fresh",
+        raw: JSON.stringify({
+          mcp: { apps: { sameOriginSandbox: true } },
+          agents: { defaults: { thinkingDefault: "medium" } },
+        }),
+      }),
+    ]);
+  });
 
   it("does not replay the default over a concurrent operator choice", async () => {
     native.call
@@ -318,7 +345,11 @@ describe("Grogu runtime configuration bootstrap", () => {
         config: {
           mcp: { apps: { sameOriginSandbox: false } },
           agents: {
-            defaults: { maxConcurrent: input.maxConcurrent, subagents: { maxConcurrent: 1 } },
+            defaults: {
+              thinkingDefault: "high",
+              maxConcurrent: input.maxConcurrent,
+              subagents: { maxConcurrent: 1 },
+            },
           },
         },
       })
@@ -350,7 +381,7 @@ describe("Grogu runtime configuration bootstrap", () => {
   it("does not claim the legacy cap was removed when native config kept it", async () => {
     const config = {
       mcp: { apps: { sameOriginSandbox: true } },
-      agents: { defaults: { maxConcurrent: 2 } },
+      agents: { defaults: { maxConcurrent: 2, thinkingDefault: "high" } },
     };
     native.call
       .mockResolvedValueOnce({ valid: true, hash: "observed-config-revision", config })

@@ -317,7 +317,9 @@ export async function bootstrapGroguRuntimeConfig(profile: OperatorProfile, appl
       .optional(),
     agents: z
       .object({
-        defaults: z.object({ maxConcurrent: z.number().optional() }).optional(),
+        defaults: z
+          .object({ maxConcurrent: z.number().optional(), thinkingDefault: z.string().optional() })
+          .optional(),
       })
       .optional(),
   });
@@ -329,17 +331,23 @@ export async function bootstrapGroguRuntimeConfig(profile: OperatorProfile, appl
     })
     .parse(await callNative(profile, "config.get", {}, directory));
   const current = snapshot.config.mcp?.apps?.sameOriginSandbox;
-  const removeLegacyConcurrency =
-    snapshot.config.agents?.defaults?.maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT;
-  const changed = current === undefined || removeLegacyConcurrency;
+  const defaults = snapshot.config.agents?.defaults;
+  const removeLegacyConcurrency = defaults?.maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT;
+  const defaultThinking = defaults?.thinkingDefault === undefined;
+  const changed = current === undefined || removeLegacyConcurrency || defaultThinking;
+  const defaultsPatch = {
+    ...(removeLegacyConcurrency ? { maxConcurrent: null } : {}),
+    ...(defaultThinking ? { thinkingDefault: "medium" } : {}),
+  };
   const patch = {
     ...(current === undefined ? { mcp: { apps: { sameOriginSandbox: true } } } : {}),
-    ...(removeLegacyConcurrency ? { agents: { defaults: { maxConcurrent: null } } } : {}),
+    ...(removeLegacyConcurrency || defaultThinking ? { agents: { defaults: defaultsPatch } } : {}),
   };
   const planReceipt = await writePrivateReceipt(directory, "runtime-config-plan.json", {
     apply,
     changed,
     sameOriginSandbox: current ?? true,
+    thinkingDefault: defaults?.thinkingDefault ?? "medium",
     removeLegacyConcurrency,
     restartRequired: changed,
   });
@@ -359,6 +367,9 @@ export async function bootstrapGroguRuntimeConfig(profile: OperatorProfile, appl
     if (current === undefined && result.config.mcp?.apps?.sameOriginSandbox !== true) {
       throw new Error("Native configuration did not enable the widget sandbox");
     }
+    if (defaultThinking && result.config.agents?.defaults?.thinkingDefault !== "medium") {
+      throw new Error("Native configuration did not set the Grogu thinking default");
+    }
     if (
       removeLegacyConcurrency &&
       result.config.agents?.defaults?.maxConcurrent === LEGACY_GROGU_AGENT_MAX_CONCURRENT
@@ -371,6 +382,7 @@ export async function bootstrapGroguRuntimeConfig(profile: OperatorProfile, appl
   return {
     mode: apply ? "applied" : "preview",
     sameOriginSandbox: current ?? true,
+    thinkingDefault: defaults?.thinkingDefault ?? "medium",
     removeLegacyConcurrency,
     changed,
     restartRequired: changed,

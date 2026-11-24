@@ -674,6 +674,10 @@ time the turn waited behind other storage admissions, which share one queue, and
 `storageScanMs` is the time it spent measuring stored data (zero when it reused
 another admission's measurement); both fall between the `aliasesPrepared` and
 `storageAdmitted` steps. They are present only when storage limits are configured.
+For specialist handoffs, `childDispatchReady` marks the first child ready to
+start. `childProviderOutput` marks its first observed model output (text,
+reasoning, or tool input), and `childTextEnqueued` marks the first child text the
+server sends to an attached stream. It does not confirm receipt by the browser.
 `modelRequests` counts the turn's finished model requests (the turn itself plus
 any specialist it started), and the other `model` fields add them up:
 `modelWallMs`; `modelFirstOutputMs`, the time from request start to the first text,
@@ -920,7 +924,9 @@ and the original parent session generation.
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
-provider credential, file boundary, and deadline. Child work is not detached:
+provider credential, file boundary, and deadline. A Copilot specialist uses the
+model and endpoint from the member's account, not the service's default model.
+Child work is not detached:
 child transcript and file bytes count against the initiating profile while
 present. These temporary children do not count as retained chats or change
 the reported last retained chat activity. The turn saves each completed result as an assistant message with its

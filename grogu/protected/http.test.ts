@@ -4037,7 +4037,18 @@ void test("Family final widgets complete with or without a closing note", async 
   await exerciseCanonicalTurns(t, "final-widgets");
 });
 
-async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" | "final-widgets") {
+void test("Family Copilot specialist completes with the selected account model", async (t) => {
+  await exerciseCanonicalTurns(t, "copilot-specialist");
+});
+
+void test("Family specialist streams before completion and saves its result after disconnect", async (t) => {
+  await exerciseCanonicalTurns(t, "detached-specialist");
+});
+
+async function exerciseCanonicalTurns(
+  t: TestContext,
+  scenario: "conversation" | "final-widgets" | "copilot-specialist" | "detached-specialist",
+) {
   const stateRoot = process.env.OPENCLAW_STATE_DIR;
   assert.ok(
     stateRoot &&
@@ -4092,6 +4103,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   const sourceUrl = "https://example.com/family-source";
   const routePrompt = "Hand this trip to the right agent.";
   const routeBrief = "Plan a relaxed weekend in Lisbon for two adults.";
+  const routePreview = { role: "assistant", content: "First stop: Lisbon." };
   const failedRoutePrompt = "Hand this unsuccessful request to travel.";
   const failedRouteBrief = "Simulate a specialist provider failure.";
   const selfRoutePrompt = "Hand this request back to yourself.";
@@ -4143,6 +4155,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     input?: unknown;
     reasoning?: { effort?: string; summary?: string };
   }> = [];
+  const accountModel = scenario === "copilot-specialist" ? "gpt-5-account-fixture" : "gpt-5.4";
   let copilotOverflow = false;
   let copilotSummary: string | undefined;
   let foreignAutomationId = "";
@@ -4195,7 +4208,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                   capabilities: { type: "chat", supports: { reasoning_effort: ["low", "high"] } },
                 },
                 {
-                  id: "gpt-5.4",
+                  id: accountModel,
                   name: "Second model",
                   object: "model",
                   vendor: " OpenAI ",
@@ -4213,7 +4226,12 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                   capabilities: {
                     type: "chat",
                     limits: { max_context_window_tokens: 1_000_000 },
-                    supports: { reasoning_effort: ["low", "high"] },
+                    supports: {
+                      reasoning_effort:
+                        scenario === "copilot-specialist"
+                          ? ["low", "high", "xhigh"]
+                          : ["low", "high"],
+                    },
                   },
                 },
                 {
@@ -4385,10 +4403,6 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       const hasToolResponse = body.messages.some(
         (message: { role?: string }) => message.role === "tool",
       );
-      if (routedTravelTurn && hasToolResponse) {
-        response.flushHeaders();
-        await routedChildRelease.promise;
-      }
       const sessionListTurn = JSON.stringify(body.messages).includes(
         "Inspect my permitted sessions.",
       );
@@ -4633,13 +4647,16 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
                         [{}, "tool_calls"],
                       ]
                     : [
+                        ...(routedTravelTurn && hasToolResponse ? [[routePreview, null]] : []),
                         [
                           {
                             role: "assistant",
                             content:
                               automationChatTurn && hasToolResponse
                                 ? "Proposed only; nothing was saved."
-                                : "Committed synthetic answer.",
+                                : routedTravelTurn
+                                  ? " Take the tram."
+                                  : "Committed synthetic answer.",
                           },
                           null,
                         ],
@@ -4655,6 +4672,10 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
             choices: [{ index: 0, delta, finish_reason }],
           })}\n\n`,
         );
+        if (delta === routePreview) {
+          // Hold the remaining answer until the HTTP client receives Travel's first words.
+          await routedChildRelease.promise;
+        }
       }
       response.write(
         `data: ${JSON.stringify({
@@ -4772,7 +4793,13 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   const generatedFileHtml = "<p>Private generated artifact content.</p>";
   const runWithGeneratedArtifact = options.turns.run.bind(options.turns);
   options.turns.run = async (turn) => {
-    await runWithGeneratedArtifact(turn);
+    try {
+      await runWithGeneratedArtifact(turn);
+    } finally {
+      if (scenario === "detached-specialist" && turn.input.text === routePrompt) {
+        offlineSettled.resolve();
+      }
+    }
     if (turn.input.text === "Reply briefly") {
       await turn.files.write(`chats/${turn.id}/artifacts/${generatedFileName}`, generatedFileHtml);
     }
@@ -4826,6 +4853,93 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
   assert.equal(me.status, 200, await me.clone().text());
   const meBody = await me.json();
   const { user, models: fixedModels } = meBody;
+  const readTravelPreview = async (response: Response) => {
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let body = "";
+    while (!body.includes(routePreview.content)) {
+      const part = await reader.read();
+      assert.equal(part.done, false, "child text arrives before the provider finishes");
+      body += decoder.decode(part.value, { stream: true });
+    }
+    assert.match(body, /Travel will help with this\./);
+    assert.match(body, /"type":"child-widget"/);
+    assert.match(body, /"type":"child-delta".*"text":"First stop: Lisbon\."/);
+    assert.doesNotMatch(body, /"type":"(?:child-result|done)"/u);
+    return { reader, decoder, body };
+  };
+  if (scenario === "detached-specialist") {
+    const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+    const route = `/chats/${chat.id}`;
+    const headers = { "x-grogu-profile": user.id, "x-alcove-capabilities": "specialist-stream-v1" };
+    const response = await call(`${route}/turns`, {
+      method: "POST",
+      headers: { ...headers, "x-proof-disconnect": "yes" },
+      body: JSON.stringify({ provider: "sparky", text: routePrompt }),
+    });
+    const { reader, body } = await readTravelPreview(response);
+    const frames = body
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const parent = frames.find((event) => event.type === "start");
+    const child = frames.find((event) => event.type === "child-start");
+    assert.equal(child?.agentId, "travel");
+    try {
+      await reader.cancel();
+      await offlineDisconnected.promise;
+      const pending = await (await call(route, { headers })).json();
+      assert.deepEqual(pending.activeRun, { id: parent.runId });
+    } finally {
+      routedChildRelease.resolve();
+    }
+    await offlineSettled.promise;
+    const saved = await (await call(route, { headers })).json();
+    const result = saved.chat.messages.at(-1);
+    assert.equal(result.agentId, "travel");
+    assert.equal(result.runId, child.runId);
+    assert.equal(result.text, `${routePreview.content} Take the tram.`);
+    assert.equal(result.status, "complete");
+    assert.equal(result.widgets[0].id, frames.find((event) => event.type === "child-widget").id);
+    fixtureCompleted = true;
+    return;
+  }
+  if (scenario === "copilot-specialist") {
+    const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
+    const response = await call(`/chats/${chat.id}/turns`, {
+      method: "POST",
+      headers: { "x-grogu-profile": user.id, "x-alcove-capabilities": "specialist-stream-v1" },
+      body: JSON.stringify({
+        provider: "github-copilot",
+        model: accountModel,
+        thinking: "xhigh",
+        text: "Plan a short trip.",
+        mentions: [{ agentId: "travel" }],
+        credential: { accessToken: githubToken },
+      }),
+    });
+    const stream = await response.text();
+    assert.match(stream, /"type":"child-result".*"text":"Canonical Copilot reply\."/);
+    assert.match(stream, /"type":"done"/);
+    assert.deepEqual(
+      copilotBodies.map((body) => [body.model, body.reasoning?.effort]),
+      [
+        [accountModel, "xhigh"],
+        [accountModel, "xhigh"],
+      ],
+    );
+    assert.deepEqual(
+      providerRequests
+        .filter(
+          (request) => request.endpoint === "https://api.business.githubcopilot.com/responses",
+        )
+        .map((request) => request.authorization),
+      [`Bearer ${rawGithubToken}`, `Bearer ${rawGithubToken}`],
+    );
+    fixtureCompleted = true;
+    return;
+  }
   if (scenario === "final-widgets") {
     for (const withNote of [false, true]) {
       const { chat } = await (await call("/chats", { method: "POST", body: "{}" })).json();
@@ -5785,20 +5899,12 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       "X-Alcove-Capabilities": "specialist-stream-v1",
     },
   });
-  assert.equal(routedTurn.status, 200);
-  const routedReader = routedTurn.body!.getReader();
-  const routedDecoder = new TextDecoder();
-  let routedBody = "";
-  try {
-    while (!routedBody.includes('"type":"child-widget"')) {
-      const part = await routedReader.read();
-      assert.equal(part.done, false, "the child widget arrives before the provider finishes");
-      routedBody += routedDecoder.decode(part.value, { stream: true });
-    }
-    assert.doesNotMatch(routedBody, /"type":"child-result"/u);
-  } finally {
-    routedChildRelease.resolve();
-  }
+  const {
+    reader: routedReader,
+    decoder: routedDecoder,
+    body: preview,
+  } = await readTravelPreview(routedTurn).finally(() => routedChildRelease.resolve());
+  let routedBody = preview;
   for (;;) {
     const part = await routedReader.read();
     if (part.done) {
@@ -5826,7 +5932,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
       (event) =>
         event.type === "child-delta" &&
         event.runId === childStart.runId &&
-        event.text.includes("Committed synthetic answer."),
+        event.text === routePreview.content,
     ),
     "the child's own model output is streamed with its identity",
   );
@@ -5839,7 +5945,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     routedEvents
       .filter((event) => event.type === "child-result")
       .map((event) => [event.agentId, event.text]),
-    [["travel", "Committed synthetic answer."]],
+    [["travel", `${routePreview.content} Take the tram.`]],
   );
   const routedRequests = seen.slice(firstRoutedRequest);
   assert.equal(routedRequests.length, 3, "Grogu routes once and Travel creates a widget");
@@ -5867,7 +5973,7 @@ async function exerciseCanonicalTurns(t: TestContext, scenario: "conversation" |
     [
       ["user", undefined, routePrompt],
       ["assistant", undefined, "Travel will help with this."],
-      ["assistant", "travel", "Committed synthetic answer."],
+      ["assistant", "travel", `${routePreview.content} Take the tram.`],
     ],
   );
   assert.equal(routedRead.chat.messages[1]?.status, "complete", "a routing reply reloads complete");

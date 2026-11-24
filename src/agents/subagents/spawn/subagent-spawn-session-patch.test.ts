@@ -506,7 +506,7 @@ it("commits transient classification with the child and recovers only exactly ow
       env: state.env,
       storePath,
       owns: ({ lifetime: found, parent }) =>
-        found.profileId === "p1" && parent.sessionId === "parent-id",
+        found.profileId === "p1" && parent?.sessionId === "parent-id",
       retireRegistry: ({
         sessionKey,
         sessionId,

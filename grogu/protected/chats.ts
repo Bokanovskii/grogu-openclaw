@@ -27,6 +27,7 @@ import {
   buildForkedChildTranscriptEvents,
   resolveParentForkSourceTranscript,
 } from "../../src/config/sessions/session-accessor.sqlite-parent-fork.js";
+import { sessionCreatorProfileId } from "../../src/config/sessions/session-entry-provenance.js";
 import {
   readSessionEntrySummariesInWorker,
   withSessionEntryReadOnlyInWorker,
@@ -44,6 +45,7 @@ import {
   createSessionTranscriptUsageAccumulator,
 } from "../../src/gateway/session-transcript-derived-readers.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
+import { runExclusiveSessionLifecycleMutation } from "../../src/sessions/session-lifecycle-admission.js";
 import {
   isTranscriptOnlyOpenClawAssistantMessage,
   OPENCLAW_DELIVERY_MIRROR_MODEL,
@@ -858,17 +860,22 @@ export function createProtectedChats(options: {
           }),
         beforeDelete: ({ sessionId, lifetime, assertCurrent: assertRecoveryCurrent }) =>
           removeFiles(lifetime.profileId, sessionId, assertRecoveryCurrent),
-        owns: ({ sessionKey, sessionId, lifetime, parent }) =>
-          /^[a-zA-Z0-9_-]{1,128}$/u.test(lifetime.profileId) &&
-          validId(lifetime.parentSessionId) &&
-          validId(sessionId) &&
-          lifetime.parentSessionKey ===
-            `${prefix(lifetime.profileId)}${lifetime.parentSessionId}` &&
-          sessionKey.startsWith(`agent:${agentId}:subagent:`) &&
-          parent.createdVia === "plugin" &&
-          parent.createdActor?.type === "human" &&
-          parent.createdActor.source === "profile" &&
-          parent.createdActor.id === lifetime.profileId,
+        owns: ({ sessionKey, entry, lifetime, parent }) => {
+          // Spawn stamps the admitted parent's profile onto the child in the creation commit.
+          return (
+            /^[a-zA-Z0-9_-]{1,128}$/u.test(lifetime.profileId) &&
+            validId(lifetime.parentSessionId) &&
+            validId(entry.sessionId) &&
+            lifetime.parentSessionKey ===
+              `${prefix(lifetime.profileId)}${lifetime.parentSessionId}` &&
+            sessionKey.startsWith(`agent:${agentId}:subagent:`) &&
+            (!parent ||
+              (parent.createdVia === "plugin" &&
+                sessionCreatorProfileId(parent.createdActor) === lifetime.profileId)) &&
+            ((parent !== undefined && entry.createdActor === undefined) ||
+              sessionCreatorProfileId(entry.createdActor) === lifetime.profileId)
+          );
+        },
       });
     },
     async transcriptBytes(sessionId: string, sessionKey: string) {
@@ -1274,38 +1281,60 @@ export function createProtectedChats(options: {
       id: string,
       version: string,
       removeChatFiles: () => Promise<void>,
+      sideChatIds: readonly string[] = [],
     ) {
-      const entry = await readEntry(authority, id);
-      if (version !== String(entry.updatedAt)) {
-        throw new ProtectedError(
-          409,
-          "version_conflict",
-          "This chat changed. Reload before deleting.",
-        );
-      }
-      await removeChatFiles();
-      authority.assertCurrent();
       const target = scope(authority, id);
-      const result = await deleteSessionEntryLifecycle({
-        ...target,
-        target: { canonicalKey: target.sessionKey, storeKeys: [target.sessionKey] },
-        archiveTranscript: false,
-        deleteTranscriptWithoutArchive: true,
-        deleteDeliveryArtifacts: true,
-        expectedEntry: entry,
-        expectedSessionId: id,
-        expectedUpdatedAt: entry.updatedAt,
-        commitGuard: authority.assertCurrent,
-        requireWriteSuccess: true,
+      const ids = [id, ...sideChatIds];
+      const keys = new Set(ids.map((chatId) => scope(authority, chatId).sessionKey));
+      return runExclusiveSessionLifecycleMutation("delete", {
+        scope: storePath,
+        identities: [...ids, ...keys],
+        run: async () => {
+          const entry = await readEntry(authority, id);
+          const conflict = () =>
+            new ProtectedError(
+              409,
+              "version_conflict",
+              "This chat changed. Reload before deleting.",
+            );
+          if (version !== String(entry.updatedAt)) {
+            throw conflict();
+          }
+          const entries = await readSessionEntrySummariesInWorker(target);
+          authority.assertCurrent();
+          if (
+            entries.some(
+              ({ entry: child }) =>
+                child.transientLifetime !== undefined &&
+                [
+                  child.parentSessionKey,
+                  child.spawnedBy,
+                  child.transientLifetime?.parentSessionKey,
+                ].some((key) => key !== undefined && keys.has(key)),
+            )
+          ) {
+            throw new ProtectedError(409, "busy", "Wait for specialist cleanup before deleting.");
+          }
+          await removeChatFiles();
+          authority.assertCurrent();
+          const result = await deleteSessionEntryLifecycle({
+            ...target,
+            target: { canonicalKey: target.sessionKey, storeKeys: [target.sessionKey] },
+            archiveTranscript: false,
+            deleteTranscriptWithoutArchive: true,
+            deleteDeliveryArtifacts: true,
+            expectedEntry: entry,
+            expectedSessionId: id,
+            expectedUpdatedAt: entry.updatedAt,
+            commitGuard: authority.assertCurrent,
+            requireWriteSuccess: true,
+          });
+          authority.assertCurrent();
+          if (!result.deletedEntry) {
+            throw conflict();
+          }
+        },
       });
-      authority.assertCurrent();
-      if (!result.deletedEntry) {
-        throw new ProtectedError(
-          409,
-          "version_conflict",
-          "This chat changed. Reload before deleting.",
-        );
-      }
     },
   };
 }

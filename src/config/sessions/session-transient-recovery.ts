@@ -4,6 +4,7 @@ import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lif
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { deleteSessionEntryLifecycle } from "./session-accessor.js";
 import {
+  readSessionEntriesFromStoreInWorker,
   readSessionEntryReadOnlyInWorker,
   readSessionEntrySummariesInWorker,
 } from "./session-entry-read-runtime.js";
@@ -21,17 +22,17 @@ export type TransientSessionRecoveryResult = { deleted: number; skipped: number 
 /**
  * Deletes request-scoped children left by a stopped process, without archiving.
  * The parent lifecycle fence encloses the authoritative parent and child rereads;
- * the child's exact generation is then enforced at its deletion commit. A missing,
- * reset, different-profile, or caller-rejected parent leaves the child intact.
+ * the child's exact generation is then enforced at its deletion commit. Only
+ * the caller can recognize its orphan when the same-store parent is absent.
  */
 export async function recoverTransientSessionEntries(
   scope: TransientSessionRecoveryScope & {
-    /** Extra caller ownership check against the freshly read parent entry. */
+    /** Verify caller ownership using the fresh entries, including the orphan's own stamp. */
     owns: (child: {
       sessionKey: string;
-      sessionId: string;
+      entry: SessionEntry;
       lifetime: TransientSessionLifetime;
-      parent: SessionEntry;
+      parent: SessionEntry | undefined;
     }) => boolean;
     retireRegistry: (child: {
       sessionKey: string;
@@ -95,18 +96,27 @@ export async function recoverTransientSessionEntries(
       identities: [lifetime.parentSessionKey, lifetime.parentSessionId],
       run: async () => {
         assertCurrent();
-        const parent = await readSessionEntryReadOnlyInWorker(
-          { ...store, sessionKey: lifetime.parentSessionKey, projection: "full" },
-          assertCurrent,
-        );
+        // An entry-only deletion can leave an occupied key with no readable parent.
+        const parentRead = await readSessionEntriesFromStoreInWorker({
+          ...store,
+          sessionKeys: [lifetime.parentSessionKey],
+          projection: "sharing",
+        });
+        assertCurrent();
+        if (!parentRead.sharing || parentRead.sharing.placeholders.length) {
+          return false;
+        }
+        const parent = parentRead.entries[0]?.entry;
         const entry = await readSessionEntryReadOnlyInWorker(
           { ...store, sessionKey, projection: "full" },
           assertCurrent,
         );
         const current = readSessionTransientLifetime(entry);
+        const hasParentReceipt =
+          entry?.spawnedBySessionId !== undefined ||
+          entry?.parentSessionLifecycleRevision !== undefined;
         if (
-          !parent ||
-          parent.sessionId !== lifetime.parentSessionId ||
+          (parent !== undefined && parent.sessionId !== lifetime.parentSessionId) ||
           !entry ||
           !current ||
           entry.sessionId !== sessionId ||
@@ -117,8 +127,13 @@ export async function recoverTransientSessionEntries(
           entry.createdVia !== "spawn" ||
           entry.parentSessionKey !== lifetime.parentSessionKey ||
           entry.spawnedBy !== lifetime.parentSessionKey ||
+          ((!parent || hasParentReceipt) &&
+            entry.spawnedBySessionId !== lifetime.parentSessionId) ||
+          (parent &&
+            hasParentReceipt &&
+            entry.parentSessionLifecycleRevision !== parent.lifecycleRevision) ||
           !entry.lifecycleRevision ||
-          !owns({ sessionKey, sessionId, lifetime: current, parent })
+          !owns({ sessionKey, entry, lifetime: current, parent })
         ) {
           return false;
         }

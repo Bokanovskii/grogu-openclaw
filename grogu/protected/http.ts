@@ -5567,11 +5567,17 @@ export function createProtectedHttp(options: {
         // Locking the parent first stops a concurrent side chat creation from missing the cascade.
         const locked = [id];
         mutations.add(id);
-        const deleteChat = async (chatId: string, chatVersion: string) => {
-          await chats.delete(authority, chatId, chatVersion, async () => {
-            await files((owned) => removeChatFilesDirectory(owned, chatId));
-            await revalidate();
-          });
+        const deleteChat = async (chatId: string, chatVersion: string, sideChatIds?: string[]) => {
+          await chats.delete(
+            authority,
+            chatId,
+            chatVersion,
+            async () => {
+              await files((owned) => removeChatFilesDirectory(owned, chatId));
+              await revalidate();
+            },
+            sideChatIds,
+          );
           await removeProtectedChatFeedback(options.stateDir, profile.id, chatId);
           retireSharing(
             await sharing("protectedSharing.delete", {
@@ -5593,7 +5599,11 @@ export function createProtectedHttp(options: {
             mutations.add(sideChat.id);
             locked.push(sideChat.id);
           }
-          await deleteChat(id, version);
+          await deleteChat(
+            id,
+            version,
+            sideChats.map((side) => side.id),
+          );
           // Side chats go with their parent. The parent's version check comes first, so a stale
           // delete removes nothing. A side chat that is already gone or changed stays deletable alone.
           const deletedSideChats: string[] = [];

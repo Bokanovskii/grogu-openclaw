@@ -890,9 +890,14 @@ present. These temporary children do not count as retained chats or change
 the reported last retained chat activity. The turn saves each completed result as an assistant message with its
 agent ID, removes the child's exact file directory, then lets native cleanup
 delete the child without archiving it. Stopping, revoking access, timing out, or
-shutting down also cancels the child. A listener restart does not resume
-children; it removes files and sessions only when the exact parent, profile, and
-session generation still match. Run this cleanup before rolling back to an
+shutting down also cancels the child. Chat deletion returns `409 busy` while a
+specialist child of the chat or one of its side chats still needs cleanup.
+A listener restart does not resume children. It removes a child and its files
+if its generation and registry ownership match and the original parent still
+belongs to the same profile, or the parent key is gone and the child's spawn record
+confirms both the parent and profile. A reset parent, retained parent history
+without a chat entry, or conflicting ownership still stops
+startup. Run this cleanup before rolling back to an
 older service version, which does not recognize the transient-child
 classification.
 

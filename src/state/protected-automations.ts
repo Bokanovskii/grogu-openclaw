@@ -156,7 +156,13 @@ function assertValidDraft(draft: ProtectedAutomationDraft): void {
   }
 }
 
-function parseDefinition(db: DatabaseSync, row: AutomationRow): ProtectedAutomationDraft {
+export function parseProtectedAutomationDefinition(
+  db: DatabaseSync,
+  row: Pick<
+    ProtectedAutomationDatabase["protected_automations"],
+    "id" | "definition_json" | "pacing_min_ms" | "pacing_max_ms"
+  >,
+): ProtectedAutomationDraft {
   const definitionJson = readStoredDefinition(db, row);
   let definition: unknown;
   try {
@@ -184,7 +190,7 @@ function toStorageRecord(db: DatabaseSync, row: AutomationRow): ProtectedAutomat
     creatorProfileId: row.creator_profile_id,
     centralOwnerProfileId: row.central_owner_profile_id,
     provider: row.provider,
-    definition: parseDefinition(db, row),
+    definition: parseProtectedAutomationDefinition(db, row),
     definitionRevision: row.definition_revision,
     visibility: row.visibility,
     publicationRevision: row.publication_revision,

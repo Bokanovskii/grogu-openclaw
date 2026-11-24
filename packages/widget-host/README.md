@@ -32,6 +32,9 @@ the keys in `src/shared/widget-theme.ts` with nonempty string values up to
 256 characters. Values can include `oklch()` colors and quoted font stacks.
 The sandbox does not inherit the application's loaded fonts. Embed data fonts
 or use local and system fallbacks.
+In protected widgets the generic `.card` keeps its surrounding palette. It
+doesn't paint a theme background beneath inherited text. For a filled card,
+use `background: var(--card); color: var(--text)` or the Alcove content styles.
 Fixed authored backgrounds do not change with tokens. For a widget that mixes
 a white background with theme-dependent text, a client can offer an explicit
 light appearance through `setTheme("light", completeLightTokens)`. Do not infer
@@ -75,7 +78,7 @@ previews. Wrap content in an element with `class="alcove"` to use the styles.
 The classes `alcove-stack`, `alcove-grid`, `alcove-card`, `alcove-badge`,
 `alcove-badge-warn`, and `alcove-muted` provide common layouts and treatments.
 Use semantic HTML for headings, links, and tables. Custom styles can override
-the library. Content without the `alcove` class keeps its existing appearance.
+the library. The Alcove-specific classes only apply inside `.alcove`.
 
 An HTML file generator can embed the same exported CSS in a `<style>` element.
 The asset needs no network access and follows the browser's light or dark

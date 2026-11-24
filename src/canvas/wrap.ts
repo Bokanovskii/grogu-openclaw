@@ -1,7 +1,11 @@
 import { WIDGET_CDN_ORIGINS } from "../plugin-sdk/widget-html.js";
 import { escapeHtml } from "../shared/html-escape.js";
 import { WIDGET_MEDIA_SOURCES } from "../shared/widget-media.js";
-import { WIDGET_THEME_MESSAGE_TYPE, WIDGET_THEME_TOKENS } from "../shared/widget-theme.js";
+import {
+  WIDGET_CARD_RULE,
+  WIDGET_THEME_MESSAGE_TYPE,
+  WIDGET_THEME_TOKENS,
+} from "../shared/widget-theme.js";
 
 // Baked palettes mirror the host claw theme (ui/src/styles/base.css) so
 // fallback renders match Control UI renders, where the theme bridge pushes the
@@ -46,7 +50,7 @@ th{text-align:left;font-weight:500;color:var(--muted);font-size:12px;padding:4px
 td{padding:6px 8px;border-top:1px solid var(--border)}
 code,pre{font-family:var(--font-mono);font-size:12px;background:var(--card);border-radius:4px}
 code{padding:1px 5px}pre{padding:10px;overflow-x:auto}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px}
+${WIDGET_CARD_RULE}
 .badge{display:inline-block;font-size:12px;padding:2px 10px;border-radius:999px;background:var(--accent-subtle);color:var(--accent)}
 .badge.ok{background:var(--ok-subtle);color:var(--ok)}
 .badge.warn{background:var(--warn-subtle);color:var(--warn)}

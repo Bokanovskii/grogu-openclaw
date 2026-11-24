@@ -127,6 +127,64 @@ void test(
         assert.equal(await page.evaluate(() => window.scrollY), 0);
       },
     );
+    await t.test("generic cards preserve the surrounding palette", async (cards) => {
+      const itinerary = `<style>
+        .itinerary { background: white; color: #202322; padding: 20px; font: 16px/1.5 system-ui }
+        .itinerary h2 { color: inherit; font: bold 22px/1.3 system-ui; margin: 0 0 16px }
+        .itinerary section { padding: 16px; border-radius: 12px; margin-top: 12px }
+        .station { background: #e2efec; color: #204b40 }
+        </style><main class="itinerary"><h2>Weekend by rail</h2>
+        <section class="card"><strong>Saturday · Riverside</strong>
+        <ul><li>Walk along the river before lunch.</li><li>Take the afternoon train to the gardens.</li></ul></section>
+        <section class="card station"><strong>Meeting point</strong><br>North entrance, platform two.</section></main>
+        <aside style="color:#202322"><div class="card" style="background:#e2efec">Inherited ink</div>
+        <div class="card" style="background:var(--card);color:var(--text)">Themed pair</div></aside>`;
+      // Minimal serialized head from a released wrapper, independent of today's CSS.
+      const retained = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Weekend by rail</title><style>:root{color-scheme:light dark;--card:#17211d;--text:#e8ede7}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px}</style></head><body>${itinerary}</body></html>`;
+      for (const [theme, tokens] of [
+        ["light", { card: "rgb(250, 250, 247)", text: "rgb(43, 48, 44)" }],
+        ["dark", { card: "rgb(23, 33, 29)", text: "rgb(232, 237, 231)" }],
+      ] as const) {
+        for (const kind of ["saved", "draft", ...(theme === "dark" ? ["retained"] : [])]) {
+          await cards.test(`${theme} ${kind}`, async () => {
+            const inner = await mount(
+              kind === "retained"
+                ? retained
+                : kind === "draft"
+                  ? itinerary
+                  : buildWidgetDocument("Weekend by rail", itinerary),
+              theme,
+              kind === "draft",
+              ".itinerary",
+              false,
+              tokens,
+            );
+            await page.locator('body[data-ready-count="1"]').waitFor();
+            if (kind === "saved" && process.env.ALCOVE_WIDGET_PROOF_DIR) {
+              await inner.locator("main").screenshot({
+                path: path.join(process.env.ALCOVE_WIDGET_PROOF_DIR, `itinerary-${theme}.png`),
+              });
+            }
+            assert.deepEqual(
+              await inner.locator(".card").evaluateAll((elements) =>
+                elements.map((card) => ({
+                  card: getComputedStyle(card).backgroundColor,
+                  text: getComputedStyle(card).color,
+                })),
+              ),
+              [
+                { card: "rgba(0, 0, 0, 0)", text: "rgb(32, 35, 34)" },
+                { card: "rgb(226, 239, 236)", text: "rgb(32, 75, 64)" },
+                { card: "rgb(226, 239, 236)", text: "rgb(32, 35, 34)" },
+                tokens,
+              ],
+            );
+          });
+        }
+      }
+    });
     const draft = await mount(fragment, "light", true);
     await page.locator('body[data-ready-count="1"]').waitFor();
     assert.equal(await draft.locator("body").getAttribute("data-ran"), null);

@@ -141,6 +141,28 @@ void test("protected chunks publish without remote access work and stop at local
     turn.markStep("runnerStarting");
     turn.markTiming("providerRequestStartMs");
     turn.markTiming("firstProviderOutputMs");
+    turn.modelRequest({
+      requestId: "synthetic-request",
+      provider: "sparky",
+      model: "synthetic",
+      workClass: null,
+      outcome: "completed",
+      usageSource: "provider",
+      wallDurationMs: 900,
+      queueWaitMs: null,
+      timeToHeadersMs: null,
+      timeToFirstByteMs: null,
+      timeToFirstOutputMs: 300,
+      timeToFirstTextMs: 400,
+      timeToFirstReasoningMs: 300,
+      inputTokens: 1200,
+      outputTokens: 80,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: null,
+      reasoningTokens: 30,
+    });
+    turn.toolTiming("fetch", 25.4);
+    turn.toolTiming("tool", 10);
     const before = remoteChecks;
     const beforeMs = accessElapsedMs;
     const beforeTime = performance.now();
@@ -208,6 +230,17 @@ void test("protected chunks publish without remote access work and stop at local
       "activeTurns",
       "storageQueueMs",
       "storageScanMs",
+      "modelRequests",
+      "modelWallMs",
+      "modelFirstOutputMs",
+      "modelFirstTextMs",
+      "modelInputTokens",
+      "modelOutputTokens",
+      "modelCacheReadTokens",
+      "modelReasoningTokens",
+      "toolCalls",
+      "toolMs",
+      "fetchMs",
       "marks",
     ].toSorted(),
   );
@@ -217,6 +250,23 @@ void test("protected chunks publish without remote access work and stop at local
   for (const note of ["storageQueueMs", "storageScanMs"]) {
     assert.ok(Number.isInteger(timing[note]) && Number(timing[note]) >= 0);
   }
+  // Model requests and tool calls report totals; a tool kind that never ran has no total.
+  assert.deepEqual(
+    [
+      timing.modelRequests,
+      timing.modelWallMs,
+      timing.modelFirstOutputMs,
+      timing.modelFirstTextMs,
+      timing.modelInputTokens,
+      timing.modelOutputTokens,
+      timing.modelCacheReadTokens,
+      timing.modelReasoningTokens,
+      timing.toolCalls,
+      timing.toolMs,
+      timing.fetchMs,
+    ],
+    [1, 900, 300, 400, 1200, 80, 1000, 30, 2, 35, 25],
+  );
   assert.ok(Math.abs(Number(timing.finishedAtSec) - Date.now() / 1000) < 60);
   const marks: unknown = timing.marks;
   assert.ok(isRecord(marks));

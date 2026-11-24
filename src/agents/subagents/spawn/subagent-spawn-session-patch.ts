@@ -24,6 +24,7 @@ import {
   prepareSessionWorktreeCreation,
   resolveSessionProjectRoot,
 } from "../../../gateway/session-worktree-preparation.js";
+import { runExclusiveSessionLifecycleMutation } from "../../../sessions/session-lifecycle-admission.js";
 import { waitForSessionParticipantRecording } from "../../../sessions/session-participant-recording.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../../state/openclaw-agent-db.js";
 import { resolveUserPath } from "../../../utils.js";
@@ -329,9 +330,16 @@ export async function createInitialSubagentSession(params: {
         ),
       );
     };
-    const entry = preparedWorktree?.withCommit
-      ? await preparedWorktree.withCommit(commit)
-      : await commit();
+    const create = () =>
+      preparedWorktree?.withCommit ? preparedWorktree.withCommit(commit) : commit();
+    // Do not publish a child between a parent's last child check and its deletion.
+    const entry = transient
+      ? await runExclusiveSessionLifecycleMutation("create", {
+          scope: parentStorePath,
+          identities: [transient.parentSessionKey, transient.parentSessionId],
+          run: create,
+        })
+      : await create();
     return { status: "ok", entry: entry ?? undefined };
   } catch (err) {
     const message = err instanceof Error ? err.message : typeof err === "string" ? err : "error";

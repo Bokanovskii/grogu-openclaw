@@ -5,10 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { withTranscriptWriteBudget } from "../../src/agents/sessions/transcript-write-budget.js";
+import { createInitialSubagentSession } from "../../src/agents/subagents/spawn/subagent-spawn-session-patch.js";
 import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
-import { loadTranscriptEvents } from "../../src/config/sessions/session-accessor.js";
+import {
+  createSessionEntryWithTranscript,
+  deleteSessionEntryLifecycle,
+  loadTranscriptEvents,
+} from "../../src/config/sessions/session-accessor.js";
 import { appendTranscriptMessages } from "../../src/config/sessions/session-accessor.transcript-turn.js";
+import { readSessionEntryReadOnlyInWorker } from "../../src/config/sessions/session-entry-read-runtime.js";
 import type { SessionTranscriptAssistantMessage } from "../../src/config/sessions/transcript.js";
+import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
 import {
   isTranscriptOnlyOpenClawAssistantMessage,
@@ -20,6 +27,7 @@ import { createProtectedAgentCatalog, protectedResearchAgent } from "./agents.js
 import { createProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import { sideReturnTextLimit, sideReturnTruncationMarker } from "./side-return.js";
+import { acquireProtectedStateOwner } from "./state-owner.js";
 
 async function createChats(t: TestContext) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "protected-chat-"));
@@ -43,6 +51,187 @@ async function createChats(t: TestContext) {
     maxFileBytes: 64_000,
   });
 }
+
+async function seedTransientChild(t: TestContext, inSideChat = false) {
+  const {
+    chats,
+    authority: member,
+    parent: main,
+    append,
+    user,
+    assistant,
+  } = await seedSideParent(t);
+  const owner = await acquireProtectedStateOwner(chats.env.OPENCLAW_STATE_DIR);
+  assert.ok(owner);
+  t.after(() => owner.release());
+  const { profileId } = member;
+  const authority = { profileId, assertCurrent: owner.assertCurrent };
+  if (inSideChat) {
+    await append(main.id, [user("Question"), assistant("Answer")]);
+  }
+  const parent = inSideChat
+    ? (await chats.createSide(authority, main.id, { requestId: randomUUID() })).chat
+    : main;
+  const scope = chats.scope(authority, parent.id);
+  const childScope = { ...scope, sessionKey: `agent:protected:subagent:${randomUUID()}` };
+  const result = await createInitialSubagentSession({
+    cfg: {},
+    requesterAgentId: scope.agentId,
+    targetAgentId: scope.agentId,
+    requesterInternalKey: scope.sessionKey,
+    childSessionKey: childScope.sessionKey,
+    expectedParentSessionId: parent.id,
+    completionOwnerSessionKey: scope.sessionKey,
+    transientLifetime: {
+      parentSessionId: parent.id,
+      parentSessionKey: scope.sessionKey,
+      profileId,
+    },
+    creationPolicy: { actor: { type: "agent", id: scope.agentId } },
+    incognito: false,
+    collect: false,
+    modelPatch: {},
+  });
+  if (result.status === "error") {
+    assert.fail(result.error);
+  }
+  assert.ok(result.entry);
+  const readChild = () => readSessionEntryReadOnlyInWorker({ ...childScope, projection: "full" });
+  return {
+    chats,
+    authority,
+    main,
+    parent,
+    scope,
+    childScope,
+    childId: result.entry.sessionId,
+    readChild,
+  };
+}
+
+void test("chat deletion keeps the parent and its files until its transient child settles", async (t) => {
+  const { chats, authority, main, parent, childId, readChild } = await seedTransientChild(t, true);
+  let filesRemoved = false;
+  const remove = () =>
+    chats.delete(authority, parent.id, parent.version, async () => {
+      filesRemoved = true;
+    });
+  await assert.rejects(remove(), { code: "busy" });
+  const mainVersion = String((await chats.readEntry(authority, main.id)).updatedAt);
+  await assert.rejects(
+    chats.delete(authority, main.id, mainVersion, async () => assert.fail("Removed parent files"), [
+      parent.id,
+    ]),
+    { code: "busy" },
+  );
+  assert.equal(filesRemoved, false);
+  assert.equal((await chats.readEntry(authority, parent.id)).sessionId, parent.id);
+  assert.equal((await readChild())?.sessionId, childId);
+  assert.deepEqual(await chats.recoverTransient(authority.assertCurrent), {
+    deleted: 1,
+    skipped: 0,
+  });
+  await remove();
+  assert.equal(filesRemoved, true);
+  assert.deepEqual(
+    (await chats.list(authority)).map(({ id }) => id),
+    [main.id],
+  );
+  assert.equal(await readChild(), undefined);
+});
+
+void test("startup retires an orphaned transient child only with unambiguous ownership", async (t) => {
+  const { chats, authority, parent, scope, childScope, childId, readChild } =
+    await seedTransientChild(t);
+  const files = await createAuthorizedUserFiles({
+    ...authority,
+    usersRoot: await root(path.join(chats.env.OPENCLAW_STATE_DIR, "users")),
+    maxBytes: 64_000,
+  });
+  t.after(() => files.dispose());
+  const filename = `chats/${childId}/work.txt`;
+  await files.write(filename, "unfinished");
+  const target = { canonicalKey: scope.sessionKey, storeKeys: [scope.sessionKey] };
+  const removeGeneration = async (
+    expectedSessionId: string,
+    deleteTranscriptWithoutArchive = true,
+  ) => {
+    const result = await deleteSessionEntryLifecycle({
+      ...scope,
+      target,
+      expectedSessionId,
+      archiveTranscript: false,
+      deleteTranscriptWithoutArchive,
+    });
+    assert.ok(result.deletedEntry);
+  };
+  const original = await chats.readEntry(authority, parent.id);
+  const child = await readChild();
+  assert.ok(child);
+  const retained = async () => {
+    assert.deepEqual(await chats.recoverTransient(authority.assertCurrent), {
+      deleted: 0,
+      skipped: 1,
+    });
+    assert.equal((await readChild())?.sessionId, childId);
+    assert.equal(await files.readText(filename), "unfinished");
+  };
+  await removeGeneration(parent.id);
+  for (const changed of [
+    { sessionId: randomUUID() },
+    { lifecycleRevision: randomUUID() },
+    { createdActor: { type: "human", source: "profile", id: randomUUID() } as const },
+  ]) {
+    const entry = { ...original, ...changed };
+    const replacement = await createSessionEntryWithTranscript(scope, () => ({ ok: true, entry }));
+    assert.ok(replacement.ok);
+    await retained();
+    await removeGeneration(entry.sessionId);
+  }
+  const successor = { ...original, sessionId: randomUUID() };
+  assert.ok(
+    (await createSessionEntryWithTranscript(scope, () => ({ ok: true, entry: successor }))).ok,
+  );
+  await appendTranscriptMessages(
+    { ...scope, sessionId: successor.sessionId },
+    {
+      messages: [{ message: { role: "user", content: "retained history", timestamp: Date.now() } }],
+    },
+  );
+  await removeGeneration(successor.sessionId, false);
+  await retained();
+  assert.ok(
+    (await createSessionEntryWithTranscript(scope, () => ({ ok: true, entry: successor }))).ok,
+  );
+  await removeGeneration(successor.sessionId);
+  assert.deepEqual(await chats.recoverTransient(authority.assertCurrent), {
+    deleted: 1,
+    skipped: 0,
+  });
+  assert.equal(await readChild(), undefined);
+  await assert.rejects(files.stat(filename), { code: "not-found" });
+
+  assert.ok(
+    (await createSessionEntryWithTranscript(scope, () => ({ ok: true, entry: original }))).ok,
+  );
+  for (const conflict of [
+    { createdActor: { type: "human", source: "profile", id: randomUUID() } as const },
+    { spawnedBySessionId: undefined, parentSessionLifecycleRevision: randomUUID() },
+  ]) {
+    const entry: typeof child = { ...child, sessionId: randomUUID(), ...conflict };
+    const candidate = { ...childScope, sessionKey: `agent:protected:subagent:${randomUUID()}` };
+    assert.ok((await createSessionEntryWithTranscript(candidate, () => ({ ok: true, entry }))).ok);
+  }
+  assert.deepEqual(await chats.recoverTransient(authority.assertCurrent), {
+    deleted: 0,
+    skipped: 2,
+  });
+  await removeGeneration(original.sessionId);
+  assert.deepEqual(await chats.recoverTransient(authority.assertCurrent), {
+    deleted: 0,
+    skipped: 2,
+  });
+});
 
 void test("a child result is saved once in its owner's chat and charged to the request", async (t) => {
   const chats = await createChats(t);

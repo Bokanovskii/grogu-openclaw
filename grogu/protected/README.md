@@ -1030,8 +1030,11 @@ The agent cannot type into pages, sign in, or ask the member to take control.
 Sites that need a password, one-time code, or passkey are unsupported. There
 is no persistent or owner profile in this version.
 
-Prerequisite: install Chromium as the service account with
-`npx playwright-core install chromium` (about 150 MB). If Chromium is missing,
+Prerequisite: with the listener stopped, run
+`sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run enable-fresh-browser`.
+It downloads Chromium (about 150 MB) for the service account with the pinned
+`playwright-core`, then sets `"browser": "fresh"` in `protected.json`. Rerunning
+is safe. If the download fails, the config is unchanged. Restart the listener after. If Chromium is missing,
 browser tools report that the page could not be loaded and the turn continues.
 
 ## Verification and release gates

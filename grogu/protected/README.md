@@ -1005,14 +1005,15 @@ classification.
 ### Private browser
 
 The browser is off by default. Set `"browser": "fresh"` in `protected.json` to
-give interactive member turns four read-only tools: `browser_open`,
+give interactive member turns and automation runs, isolated ones included, four read-only tools: `browser_open`,
 `browser_snapshot`, `browser_follow_link`, and `browser_back`. Each turn gets a new,
 empty headless Chromium context that the turn closes when it ends. No cookies,
 storage, or history survive the turn or are shared between members or chats.
 
-Automation runs, protected automation runs, authoring turns, and routed or
-mentioned children never get the tools. The gate uses server-owned turn
-context, not client input, and missing context means no browser.
+Authoring turns, follow-ups in stored automation run chats, and delegated
+children never get the tools. The browser holds no profile, memory, or session data, so isolated runs
+keep their isolation. The gate uses server-owned turn context, not client
+input.
 
 Chromium reaches the web only through a loopback proxy that requires a
 per-session secret, allows ports 80 and 443 only, and pins each connection to

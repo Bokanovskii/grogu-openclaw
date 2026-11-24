@@ -1123,9 +1123,10 @@ export function createProtectedHttp(options: {
         assertRunChatWritable(currentEntry, context.automationId);
         const authoring = await admitAuthoringTurn(currentEntry);
         timing.at("turnEntryRead");
-        // Only interactive member turns get a browser; any automation run or run chat fails closed.
+        // Fresh, disposable browsing for interactive turns and automation runs, isolated included. A
+        // member's follow-up in a stored run chat gets none.
         const browserEligible =
-          context.automationId === undefined && currentEntry.protectedAutomationRunId === undefined;
+          context.automationId !== undefined || currentEntry.protectedAutomationRunId === undefined;
         const selectedAgentId = currentEntry.protectedAgentId ?? agentCatalog.legacyDefaultAgentId;
         const selectedAgent = agentCatalog.get(selectedAgentId);
         if (!selectedAgent) {

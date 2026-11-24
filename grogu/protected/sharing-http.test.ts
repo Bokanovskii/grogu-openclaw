@@ -53,7 +53,6 @@ import {
   canMemberReadAutomationRun,
   canMemberReadChat,
   canMemberReadChatArtifact,
-  listAutomationRecipients,
   runProtectedSharing,
 } from "./sharing-store.js";
 import {
@@ -757,6 +756,7 @@ void test("legacy public automation data remains private at the HTTP boundary", 
     reserveStorage: async () => ({ settle: () => {}, release: () => {} }),
     reserveReplacement: async () => ({ settle: () => {}, release: () => {} }),
     reserveBatchReplacement: async () => ({ settle: () => {}, release: () => {} }),
+    reserveRecipient: async () => ({ settle: () => {}, release: () => {} }),
     retireStorage: () => {},
     retainUncertainCommit: () => assert.fail("Unexpected lifecycle reconciliation."),
   };
@@ -931,14 +931,11 @@ void test("legacy public automation data remains private at the HTTP boundary", 
     ),
     [runId],
   );
+  // A legacy (non-isolated) run never gives followers a receipt.
   assert.deepEqual(
     (await ok(await call("recipient", "/automations/inbox", {}, capabilities))).entries,
     [],
   );
-  assert.deepEqual(await listAutomationRecipients(stateDir, automation.id, () => {}), {
-    ownerProfileId: id("owner"),
-    recipients: [id("owner")],
-  });
   assert.equal((await call("recipient", `/chats/${runChatId}`, {}, capabilities)).status, 404);
   assert.equal(
     (await ok(await call("owner", `/chats/${runChatId}`, {}, capabilities))).chat.id,
@@ -1143,15 +1140,9 @@ void test.skip("retired public automation behavior is no longer a contract", asy
     publishedAt,
     followers: 2,
   });
-  const recipients = () => listAutomationRecipients(stateDir, automation.id, () => {});
-  assert.deepEqual(await recipients(), {
-    ownerProfileId: id("owner"),
-    recipients: [id("owner"), id("second"), id("recipient")],
-  });
   await ok(
     await pub("recipient", `${item}/notifications`, { method: "PUT", body: { subscribed: false } }),
   );
-  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("second")]);
 
   // Followers read runs and results under the owner; owner routes stay owner-only.
   const run = await commitProtectedAutomationFinishedResult(
@@ -1254,7 +1245,6 @@ void test.skip("retired public automation behavior is no longer a contract", asy
   // Leaving stops access and notifications; unpublishing removes every follower.
   await ok(await pub("second", `${item}/follow`, { method: "DELETE" }), 204);
   assert.equal(await access("second"), undefined);
-  assert.deepEqual((await recipients())?.recipients, [id("owner")]);
   assert.equal(
     (await ok(await pub("second", "/automations/public"))).automations[0].following,
     false,
@@ -1264,7 +1254,6 @@ void test.skip("retired public automation behavior is no longer a contract", asy
   assert.equal(await access("recipient"), undefined);
   assert.equal(await runAccess("recipient"), undefined);
   assert.equal((await call("recipient", runs, {}, results)).status, 404);
-  assert.deepEqual(await recipients(), { ownerProfileId: id("owner"), recipients: [id("owner")] });
   const unavailable = await pub("recipient", "/automations/public");
   assert.equal(unavailable.status, 503);
   assert.equal(await errorCode(unavailable), "public_automations_unavailable");
@@ -1311,11 +1300,9 @@ void test.skip("retired public automation behavior is no longer a contract", asy
   await ok(await pub("owner", `${item}/publication`, { method: "PUT" }));
   await ok(await pub("second", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
   await ok(await pub("outsider", `${item}/follow`, { method: "PUT", body: { subscribed: true } }));
-  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("second"), id("outsider")]);
   storageLimits.globalBytes = (await globalUsage()) + storageEntryOverheadBytes / 2;
   assert.equal((await pub("recipient", `${item}/follow`, { method: "PUT" })).status, 413);
   await removeMember("second");
-  assert.deepEqual((await recipients())?.recipients, [id("owner"), id("outsider")]);
   await t.test("member removal immediately releases a removed follower's quota", async () => {
     await ok(await pub("recipient", `${item}/follow`, { method: "PUT" }));
   });
@@ -1367,7 +1354,6 @@ void test.skip("retired public automation behavior is no longer a contract", asy
     ownerEntries.map((removed) => ({ removed })),
   );
   assert.equal(await access("outsider"), undefined);
-  assert.equal(await recipients(), undefined);
   assert.deepEqual((await ok(await pub("outsider", "/automations/public"))).automations, []);
   assert.deepEqual(countRows(), [0, 0, 0]);
 });
@@ -1429,10 +1415,6 @@ void test("deleting a published automation unpublishes it and removes its follow
     )?.created,
   );
   const member = (name: Member) => ({ profileId: id(name), assertCurrent() {} });
-  assert.deepEqual(await listAutomationRecipients(stateDir, automation.id, () => {}), {
-    ownerProfileId: id("owner"),
-    recipients: [id("owner")],
-  });
   await app.startAutomations(() => {});
 
   // The deletion plan retires the publication and follow ledger entries with the definition.
@@ -1475,7 +1457,6 @@ void test("deleting a published automation unpublishes it and removes its follow
     await canMemberReadAutomation(stateDir, member("recipient"), automation.id),
     undefined,
   );
-  assert.equal(await listAutomationRecipients(stateDir, automation.id, () => {}), undefined);
   const unavailable = await pub("recipient", "/automations/public");
   assert.equal(unavailable.status, 503);
   assert.equal(await errorCode(unavailable), "public_automations_unavailable");

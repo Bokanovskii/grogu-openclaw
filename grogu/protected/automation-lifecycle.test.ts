@@ -68,7 +68,10 @@ type WithoutOwner<Command> = Command extends unknown
   ? Omit<Command, "profileId" | "automationId">
   : never;
 
-async function fixture(t: { after(fn: () => Promise<void>): void }) {
+async function fixture(
+  t: { after(fn: () => Promise<void>): void },
+  contextAccess?: ProtectedAutomationDraft["contextAccess"],
+) {
   const home = path.resolve(".artifacts", `automation-lifecycle-${randomUUID()}`);
   const stateDir = path.join(home, "state");
   const keyPath = path.join(home, "key");
@@ -118,6 +121,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
     model: { provider: "sparky", id: "00000000-0000-4000-8000-000000000001" },
     thinking: "low",
     schedule: { kind: "every", everyMs: 60_000 },
+    ...(contextAccess === undefined ? {} : { contextAccess }),
   };
   const context = captureProtectedStateWorkerContext(stateDir);
   const mutationAuthority = { profileId: ownerId, assertCurrent: () => {}, admitStorage: () => {} };
@@ -255,6 +259,109 @@ function authority(profileId: string) {
     pending: () => pending,
   };
 }
+
+void test("isolated automation results require a matching active run", async (t) => {
+  const f = await fixture(t, "isolated");
+  const owner = authority(f.ownerId);
+  const runId = randomUUID();
+  const chatId = randomUUID();
+  const result = {
+    automationId: f.automationId,
+    centralOwnerProfileId: f.ownerId,
+    definitionRevision: f.revision,
+    jobId: f.automationId,
+    runId,
+    runAtMs: 10,
+    completedAtMs: 15,
+    automationName: f.definition.name,
+    privateFinalText: "Synthetic isolated result.",
+    transcript: { sessionKey: "synthetic-isolated-run", sessionId: chatId },
+  };
+  const save = (input: Parameters<typeof commitProtectedAutomationFinishedResult>[1] = result) =>
+    commitProtectedAutomationFinishedResult(f.stateDir, input, owner.resultAdmission);
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+
+  assert.deepEqual(await save(), { status: "conflict" });
+  assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+  assert.deepEqual(await save(), { status: "conflict" });
+  assert.deepEqual(
+    await write({
+      kind: "queue",
+      runId,
+      definitionRevision: f.revision,
+      trigger: "manual",
+      scheduledAtMs: 10,
+      now: 10,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(await save(), { status: "conflict" });
+  assert.deepEqual(await write({ kind: "start", runId, chatId, now: 11 }), {
+    status: "committed",
+  });
+  assert.deepEqual(await save({ ...result, runId: randomUUID() }), { status: "conflict" });
+  assert.deepEqual(
+    await save({ ...result, transcript: { ...result.transcript, sessionId: randomUUID() } }),
+    { status: "conflict" },
+  );
+  const saved = await save();
+  assert.equal(saved.status, "created");
+  if (saved.status !== "created") {
+    throw new Error("Synthetic isolated result was not created.");
+  }
+  assert.deepEqual(
+    await write({
+      kind: "finish",
+      runId,
+      now: 15,
+      outcome: { status: "succeeded", resultId: saved.id },
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(await save({ ...result, runId: randomUUID() }), { status: "conflict" });
+  for (let index = 0; index < 50; index++) {
+    const now = 100 + index;
+    assert.deepEqual(
+      await write({
+        kind: "refuse",
+        runId: randomUUID(),
+        definitionRevision: f.revision,
+        trigger: "manual",
+        scheduledAtMs: now,
+        now,
+        errorCode: "quota_exceeded",
+      }),
+      { status: "committed" },
+    );
+  }
+  const retained = await listProtectedAutomationLifecycleRuns(
+    f.stateDir,
+    f.automationId,
+    owner.admission,
+  );
+  assert.ok(retained);
+  assert.equal(
+    retained.some((entry) => entry.id === runId),
+    false,
+  );
+  assert.deepEqual(await readProtectedAutomationResultStorageUsage(f.stateDir, () => {}), []);
+  const skipped = retained.find((entry) => entry.status === "skipped");
+  assert.ok(skipped);
+  assert.deepEqual(
+    await save({
+      ...result,
+      runId: skipped.id,
+      runAtMs: skipped.scheduledAtMs,
+      completedAtMs: skipped.scheduledAtMs + 1,
+    }),
+    { status: "conflict" },
+  );
+});
 
 void test("paused automations allow manual lifecycle runs but refuse scheduled runs", async (t) => {
   const f = await fixture(t);

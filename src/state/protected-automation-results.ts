@@ -73,9 +73,15 @@ export function admitResults(database: OpenClawStateDatabase) {
   ensureSchema({ database, path: database.path });
 }
 
-export function isOwner(database: OpenClawStateDatabase, profileId: string, automationId: string) {
+function ownedAutomation(database: OpenClawStateDatabase, profileId: string, automationId: string) {
   const automation = readProtectedAutomation(database, { profileId, automationId });
-  return automation?.relation === "owner" && automation.centralOwnerProfileId === profileId;
+  return automation?.relation === "owner" && automation.centralOwnerProfileId === profileId
+    ? automation
+    : undefined;
+}
+
+export function isOwner(database: OpenClawStateDatabase, profileId: string, automationId: string) {
+  return Boolean(ownedAutomation(database, profileId, automationId));
 }
 
 function privatePayload(input: PreparedProtectedAutomationFinishedResult) {
@@ -86,18 +92,26 @@ function privatePayload(input: PreparedProtectedAutomationFinishedResult) {
   };
 }
 
+function isPrivatePayload(value: unknown): value is {
+  automationName: string;
+  privateFinalText: string;
+  transcript: { sessionKey: string; sessionId: string };
+} {
+  return (
+    isRecord(value) &&
+    typeof value.automationName === "string" &&
+    typeof value.privateFinalText === "string" &&
+    isRecord(value.transcript) &&
+    typeof value.transcript.sessionKey === "string" &&
+    typeof value.transcript.sessionId === "string"
+  );
+}
+
 function openPayload(db: DatabaseSync, row: Pick<RunRow, "id" | "payload_json">) {
   const value: unknown = JSON.parse(
     openProtectedAutomationResultText(db, row.payload_json, payloadContext(row.id)),
   );
-  if (
-    !isRecord(value) ||
-    typeof value.automationName !== "string" ||
-    typeof value.privateFinalText !== "string" ||
-    !isRecord(value.transcript) ||
-    typeof value.transcript.sessionKey !== "string" ||
-    typeof value.transcript.sessionId !== "string"
-  ) {
+  if (!isPrivatePayload(value)) {
     throw new Error("Retained protected automation run payload is invalid.");
   }
   return value;
@@ -113,8 +127,8 @@ export function privateRecord(db: DatabaseSync, row: RunRow): ProtectedAutomatio
     runId: row.native_run_id,
     runAtMs: row.run_at_ms,
     completedAtMs: row.completed_at_ms,
-    automationName: payload.automationName as string,
-    text: payload.privateFinalText as string,
+    automationName: payload.automationName,
+    text: payload.privateFinalText,
   };
 }
 
@@ -159,7 +173,8 @@ export function prepareProtectedAutomationResult(
   const input = captureProtectedAutomationFinishedResult(original);
   admitResults(database);
   // Refuse before the host reserves anything for an automation this member does not own.
-  if (!isOwner(database, input.centralOwnerProfileId, input.automationId)) {
+  const automation = ownedAutomation(database, input.centralOwnerProfileId, input.automationId);
+  if (!automation) {
     return { status: "not-owner" };
   }
   const existing = existingRun(database.db, input);
@@ -173,7 +188,13 @@ export function prepareProtectedAutomationResult(
   if (protectedAutomationResultHistoryFull(database, input)) {
     return { status: "retention-required" };
   }
-  if (!protectedAutomationResultLifecycleCurrent(database, input)) {
+  if (
+    !protectedAutomationResultLifecycleCurrent(database, {
+      ...input,
+      transcriptSessionId: input.transcript.sessionId,
+      isolated: automation.definition.contextAccess === "isolated",
+    })
+  ) {
     return { status: "conflict" };
   }
   const id = randomUUID();
@@ -229,7 +250,8 @@ export function commitProtectedAutomationResult(
     ({ db }) => {
       requestSqliteWorkerOperationAdmission({ stage: "transaction", facts });
       // A rollback here releases the reservation; the owner may have lost access since prepare.
-      if (!isOwner(database, input.centralOwnerProfileId, input.automationId)) {
+      const automation = ownedAutomation(database, input.centralOwnerProfileId, input.automationId);
+      if (!automation) {
         throw new Error("Protected automation result owner no longer owns the automation.");
       }
       if (existingRun(db, input)) {
@@ -240,10 +262,16 @@ export function commitProtectedAutomationResult(
       if (protectedAutomationResultHistoryFull(database, input)) {
         throw new Error("Protected automation result retention must settle before publication.");
       }
-      if (!protectedAutomationResultLifecycleCurrent(database, input)) {
+      const payload = openPayload(db, { id: input.id, payload_json: input.payload.value });
+      if (
+        !protectedAutomationResultLifecycleCurrent(database, {
+          ...input,
+          transcriptSessionId: payload.transcript.sessionId,
+          isolated: automation.definition.contextAccess === "isolated",
+        })
+      ) {
         throw new Error("Protected automation result run is no longer current.");
       }
-      openProtectedAutomationResultText(db, input.payload.value, payloadContext(input.id));
       const kysely = typedDatabase(db);
       executeSqliteQuerySync(
         db,

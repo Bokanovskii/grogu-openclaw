@@ -170,6 +170,8 @@ export function protectedAutomationResultLifecycleCurrent(
     definitionRevision: number;
     runId: string;
     runAtMs: number;
+    transcriptSessionId: string;
+    isolated: boolean;
   },
 ) {
   const tables = getAdmittedSqliteSchemaFacts(database.db)?.tables;
@@ -177,7 +179,7 @@ export function protectedAutomationResultLifecycleCurrent(
     throw new Error("Protected automation publication requires admitted schema facts.");
   }
   if (!tables.has("protected_automation_run_chats")) {
-    return true;
+    return !input.isolated;
   }
   const k = getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase & ProtectedAutomationDatabase>(
     database.db,
@@ -186,11 +188,14 @@ export function protectedAutomationResultLifecycleCurrent(
     database.db,
     k
       .selectFrom("protected_automation_run_chats")
-      .select("reserved_run_bytes")
+      .select(["reserved_run_bytes", "chat_id"])
       .where("automation_id", "=", input.automationId),
   ).rows[0];
   if (!pool?.reserved_run_bytes) {
-    return true;
+    return !input.isolated;
+  }
+  if (input.isolated && pool.chat_id !== input.transcriptSessionId) {
+    return false;
   }
   return Boolean(
     executeSqliteQuerySync(

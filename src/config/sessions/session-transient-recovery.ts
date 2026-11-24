@@ -19,6 +19,44 @@ export type TransientSessionRecoveryScope = {
 
 export type TransientSessionRecoveryResult = { deleted: number; skipped: number };
 
+type RecoveryChild = {
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision: string;
+  parentSessionKey: string;
+  assertCurrent: () => void;
+};
+
+type RecoveryScope = TransientSessionRecoveryScope & {
+  /** Verify caller ownership using the fresh entries, including the orphan's own stamp. */
+  owns: (child: {
+    sessionKey: string;
+    entry: SessionEntry;
+    lifetime: TransientSessionLifetime;
+    parent: SessionEntry | undefined;
+  }) => boolean;
+  assertCurrent?: () => void;
+};
+
+type RecoveryEffects = {
+  retireRegistry: (child: RecoveryChild) => Promise<boolean>;
+  beforeDelete?: (child: {
+    sessionKey: string;
+    sessionId: string;
+    lifetime: TransientSessionLifetime;
+    assertCurrent: () => void;
+  }) => Promise<void>;
+};
+
+/** Classify stopped-service children without retiring runs, files, or sessions. */
+export async function inspectTransientSessionEntries(
+  scope: RecoveryScope & { inspectRegistry: (child: RecoveryChild) => Promise<boolean> },
+): Promise<{ recoverable: number; skipped: number }> {
+  const { inspectRegistry, ...store } = scope;
+  const result = await visitTransientSessionEntries(store, { inspectRegistry });
+  return { recoverable: result.processed, skipped: result.skipped };
+}
+
 /**
  * Deletes request-scoped children left by a stopped process, without archiving.
  * The parent lifecycle fence encloses the authoritative parent and child rereads;
@@ -26,37 +64,18 @@ export type TransientSessionRecoveryResult = { deleted: number; skipped: number 
  * the caller can recognize its orphan when the same-store parent is absent.
  */
 export async function recoverTransientSessionEntries(
-  scope: TransientSessionRecoveryScope & {
-    /** Verify caller ownership using the fresh entries, including the orphan's own stamp. */
-    owns: (child: {
-      sessionKey: string;
-      entry: SessionEntry;
-      lifetime: TransientSessionLifetime;
-      parent: SessionEntry | undefined;
-    }) => boolean;
-    retireRegistry: (child: {
-      sessionKey: string;
-      sessionId: string;
-      lifecycleRevision: string;
-      parentSessionKey: string;
-      assertCurrent: () => void;
-    }) => Promise<boolean>;
-    beforeDelete?: (child: {
-      sessionKey: string;
-      sessionId: string;
-      lifetime: TransientSessionLifetime;
-      assertCurrent: () => void;
-    }) => Promise<void>;
-    assertCurrent?: () => void;
-  },
+  scope: RecoveryScope & RecoveryEffects,
 ): Promise<TransientSessionRecoveryResult> {
-  const {
-    owns,
-    retireRegistry,
-    beforeDelete,
-    assertCurrent: assertCallerCurrent,
-    ...store
-  } = scope;
+  const { retireRegistry, beforeDelete, ...store } = scope;
+  const result = await visitTransientSessionEntries(store, { retireRegistry, beforeDelete });
+  return { deleted: result.processed, skipped: result.skipped };
+}
+
+async function visitTransientSessionEntries(
+  scope: RecoveryScope,
+  effects: RecoveryEffects | { inspectRegistry: (child: RecoveryChild) => Promise<boolean> },
+): Promise<{ processed: number; skipped: number }> {
+  const { owns, assertCurrent: assertCallerCurrent, ...store } = scope;
   const assertCurrent = () => {
     assertExclusiveServiceStateOwner(resolveOpenClawStateSqlitePath(store.env));
     assertCallerCurrent?.();
@@ -82,7 +101,7 @@ export async function recoverTransientSessionEntries(
       ];
     },
   );
-  let deleted = 0;
+  let processed = 0;
   for (const { sessionKey, sessionId, lifecycleRevision, lifetime } of candidates) {
     assertCurrent();
     const sameStoreParent =
@@ -91,7 +110,7 @@ export async function recoverTransientSessionEntries(
       skipped += 1;
       continue;
     }
-    const removed = await runExclusiveSessionLifecycleMutation("recover", {
+    const accepted = await runExclusiveSessionLifecycleMutation("recover", {
       scope: store.storePath,
       identities: [lifetime.parentSessionKey, lifetime.parentSessionId],
       run: async () => {
@@ -138,19 +157,23 @@ export async function recoverTransientSessionEntries(
           return false;
         }
         assertCurrent();
-        if (
-          !(await retireRegistry({
-            sessionKey,
-            sessionId,
-            lifecycleRevision,
-            parentSessionKey: lifetime.parentSessionKey,
-            assertCurrent,
-          }))
-        ) {
+        const registryChild = {
+          sessionKey,
+          sessionId,
+          lifecycleRevision,
+          parentSessionKey: lifetime.parentSessionKey,
+          assertCurrent,
+        };
+        if ("inspectRegistry" in effects) {
+          const safe = await effects.inspectRegistry(registryChild);
+          assertCurrent();
+          return safe;
+        }
+        if (!(await effects.retireRegistry(registryChild))) {
           return false;
         }
         assertCurrent();
-        await beforeDelete?.({ sessionKey, sessionId, lifetime: current, assertCurrent });
+        await effects.beforeDelete?.({ sessionKey, sessionId, lifetime: current, assertCurrent });
         assertCurrent();
         const result = await deleteSessionEntryLifecycle({
           ...store,
@@ -168,11 +191,11 @@ export async function recoverTransientSessionEntries(
         return Boolean(result.deletedEntry);
       },
     });
-    if (removed) {
-      deleted += 1;
+    if (accepted) {
+      processed += 1;
     } else {
       skipped += 1;
     }
   }
-  return { deleted, skipped };
+  return { processed, skipped };
 }

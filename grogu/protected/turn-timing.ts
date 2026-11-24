@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
+import { createProcessLoad, processLoadNotes, type ProcessLoad } from "./process-load.js";
 type Phase =
   | "admissionMs"
   | "providerRequestStartMs"
@@ -61,6 +62,7 @@ export const protectedTurnNotes = [
   "toolMs",
   "searchMs",
   "fetchMs",
+  ...processLoadNotes,
 ] as const;
 export type ProtectedTurnNote = (typeof protectedTurnNotes)[number];
 
@@ -82,8 +84,12 @@ type Extra = (typeof protectedTurnExtras)[number];
 // Counts admitted turns since this process started, so a first-turn warm-up cost stands out.
 let admittedTurns = 0;
 
+// Started by the first request, because it runs a timer and a diagnostics listener until exit.
+let sharedLoad: ProcessLoad | undefined;
+const processLoad = () => (sharedLoad ??= createProcessLoad());
+
 /** Only elapsed times, counts and fixed outcomes leave the protected turn's timing owner. */
-export function createProtectedTurnTiming(startedAt: number) {
+export function createProtectedTurnTiming(startedAt: number, load: ProcessLoad = processLoad()) {
   const phases: Record<Phase, number | null> = {
     admissionMs: null,
     providerRequestStartMs: null,
@@ -99,6 +105,7 @@ export function createProtectedTurnTiming(startedAt: number) {
   let toolCalls = 0;
   let toolMs = 0;
   const toolMsByKind: Partial<Record<ProtectedActivity["kind"], number>> = {};
+  const loadAtStart = load.mark();
   return {
     mark: (phase: Phase) => {
       const now = performance.now();
@@ -167,6 +174,10 @@ export function createProtectedTurnTiming(startedAt: number) {
         completionMs: Math.round(performance.now() - (admittedAt ?? startedAt)),
       };
       notes.finishedAtSec = Math.round(Date.now() / 1000);
+      const processChange = load.since(loadAtStart);
+      for (const name of processLoadNotes) {
+        notes[name] = Math.round(processChange[name]);
+      }
       if (toolCalls > 0) {
         notes.toolCalls = toolCalls;
         notes.toolMs = Math.round(toolMs);

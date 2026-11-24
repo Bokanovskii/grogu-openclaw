@@ -686,6 +686,21 @@ flush makes a model request of its own, these fields do not include it. `toolCal
 `toolMs` count the tool calls that finished, from their start to their result, across the turn
 and its specialists; calls that run in parallel overlap. `searchMs` and `fetchMs` are the
 parts spent in web search and web fetch. Tool names, arguments, and results are not recorded.
+`loopBusyMs` is the time the server's main thread spent running code during the turn, and
+`loopMaxStallMs` is the longest delay of a 50 ms timer on it (delays under 100 ms count as
+zero, and a stall that began before the turn counts from the turn's start). `sqliteWrites`,
+`sqliteWriteQueueMs`, and `sqliteWriteMs` count the SQLite writes that finished, the time they
+waited for the writer, and the time they took, including each write's wait for the main thread
+to admit it, so a long write next to a long stall points at a busy main thread. `transcriptTasks`,
+`transcriptQueueMs`, and `transcriptMs` give the same three totals for the transcript worker,
+and `workerTasks`, `workerQueueMs`, and `workerMs` for every other worker (for example state
+reads, read-only snapshots, and memory). These eleven fields cover the whole server, not only
+the turn: they include other members' work in the same period, and requests that overlap add
+up, so a total can exceed the turn's wall time. A request's wait counts for the turn in which it
+starts and its count and time for the turn in which it finishes; events reach the totals a moment
+after the request ends, so the last request before a turn finishes can count toward the next turn.
+The worker totals come from the server's diagnostic events, so they stay at zero when the server
+config sets `diagnostics.enabled` to `false`.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not

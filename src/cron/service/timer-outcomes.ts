@@ -2,6 +2,7 @@ import { resolveCronTriggerMinIntervalMs } from "../../config/cron-limits.js";
 import type { CronActiveJobMarker } from "../active-jobs.js";
 import { resolveAdmittedCronCompletionStatus } from "../completion-status.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
+import { DEFAULT_ERROR_BACKOFF_SCHEDULE_MS, errorBackoffMs } from "../error-backoff.js";
 import { resolvePacedNextRunAtMs } from "../pacing.js";
 import { normalizeCronRunDiagnostics, summarizeCronRunDiagnostics } from "../run-diagnostics.js";
 import { resolveCronRunErrorReason } from "../run-error-reason.js";
@@ -16,8 +17,6 @@ import {
 } from "./failure-alerts.js";
 import {
   computeJobNextRunAtMs,
-  DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
-  errorBackoffMs,
   isJobEnabled,
   recordScheduleComputeError,
   resolveNextRunAtMsOrDisable,

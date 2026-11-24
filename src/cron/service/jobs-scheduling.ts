@@ -1,10 +1,10 @@
 /** Scheduling state and next-run computation for cron jobs. */
 import crypto from "node:crypto";
-import { expectDefined } from "@openclaw/normalization-core";
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { formatErrorMessageWithCode } from "../../infra/errors.js";
 import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import { isCronJobActive } from "../active-jobs.js";
+import { DEFAULT_ERROR_BACKOFF_SCHEDULE_MS, errorBackoffMs } from "../error-backoff.js";
 import { coerceFiniteScheduleNumber } from "../schedule-number.js";
 import { computeNextRunAtMs, computePreviousRunAtMs } from "../schedule.js";
 import { resolveCronStaggerMs } from "../stagger.js";
@@ -66,15 +66,6 @@ export function normalizeStreamScheduleBounds(schedule: CronSchedule): CronSched
   };
 }
 
-/** Default retry delays applied after consecutive cron execution errors. */
-export const DEFAULT_ERROR_BACKOFF_SCHEDULE_MS = [
-  30_000,
-  60_000,
-  5 * 60_000,
-  15 * 60_000,
-  60 * 60_000,
-];
-
 function isFiniteTimestamp(value: unknown): value is number {
   return asDateTimestampMs(value) !== undefined;
 }
@@ -108,15 +99,6 @@ export function resolveNextRunAtMsOrDisable(params: {
 /** Resolves the newest persisted cron run status while older state is still readable. */
 export function resolveJobLastRunStatus(job: Pick<CronJob, "state">) {
   return job.state.lastRunStatus ?? job.state.lastStatus;
-}
-
-/** Resolves the retry backoff delay for a one-based consecutive error count. */
-export function errorBackoffMs(
-  consecutiveErrors: number,
-  scheduleMs = DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
-): number {
-  const idx = Math.min(consecutiveErrors - 1, scheduleMs.length - 1);
-  return expectDefined(scheduleMs[Math.max(0, idx)], "schedule ms entry at math.max(0, idx)");
 }
 
 /** Returns the earliest retry timestamp after a failed cron run and its runtime duration. */

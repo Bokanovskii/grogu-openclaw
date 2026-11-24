@@ -1,6 +1,8 @@
+import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hasErrnoCode, isMissingPathError } from "../../src/infra/errno.js";
 import { withFileLock } from "../../src/infra/file-lock.js";
 import { FsSafeError, pathExists, root } from "../../src/infra/fs-safe.js";
 import { writeJsonAtomic } from "../../src/infra/json-files.js";
@@ -146,6 +148,47 @@ async function main() {
       }
       if (records.length > 0) {
         process.stdout.write(`${records.slice(-20).join("\n")}\n`);
+      }
+    } finally {
+      await file.close();
+    }
+    return;
+  }
+  if (action === "startup-log" && arg === undefined && rest.length === 0) {
+    const notRegular = new MaintenanceRefused(
+      "The runtime stderr log is not a regular file; it was not read.",
+    );
+    let file: Awaited<ReturnType<typeof open>>;
+    try {
+      file = await open(
+        path.join(stateDir, "logs", "runtime.stderr.log"),
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        return;
+      }
+      throw hasErrnoCode(error, "ELOOP") ? notRegular : error;
+    }
+    try {
+      const info = await file.stat();
+      // Raw text is printed, so a link must not redirect the read to another service file.
+      if (!info.isFile() || info.nlink !== 1) {
+        throw notRegular;
+      }
+      const length = Math.min(info.size, 64 * 1024);
+      const bytes = Buffer.alloc(length);
+      const { bytesRead } = await file.read(bytes, 0, length, info.size - length);
+      const lines = bytes.subarray(0, bytesRead).toString("utf8").split("\n");
+      if (info.size > length) {
+        lines.shift();
+      }
+      const { redactSensitiveText } = await import("../../src/logging/redact.js");
+      const text = redactSensitiveText(lines.join("\n").replace(/(?![\t\n])\p{Cc}/gu, ""), {
+        mode: "tools",
+      }).trimEnd();
+      if (text) {
+        process.stdout.write(`${text}\n`);
       }
     } finally {
       await file.close();
@@ -386,7 +429,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

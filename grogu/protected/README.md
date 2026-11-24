@@ -680,6 +680,19 @@ On the macOS host, the operator can read up to 20 recent timing records with
 The command returns only the numeric timing fields, the fixed outcome, and the
 fixed step names. It prints nothing when no recent records are available.
 
+When the runtime fails to start, it writes two lines to its stderr log. The first is
+the fixed guidance. The second starts with `Startup failure:`. It names each error in
+the `cause` chain (up to four causes) with its class, error code, message (up to 300
+characters), and first two stack frames. Credentials are redacted, the input quoted by
+JSON parse errors is withheld, and the line has at most 4,000 characters. The operator
+cannot read the service account's log directly. To read the last 64 KiB of it, run
+`sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run startup-log`.
+This command drops a partial first line, redacts credentials, and removes control
+characters other than tabs and newlines. It prints nothing when the log is missing or
+empty, and it refuses a symlinked or hard-linked log. Apart from that redaction, it
+shows the raw log text. This also includes crashes that happen before the runtime can
+write its own line, such as module load failures.
+
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read
 the chat again to find the saved reply. This does not replay the stream or start

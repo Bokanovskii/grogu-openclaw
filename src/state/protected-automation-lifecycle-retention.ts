@@ -37,6 +37,42 @@ export function isolatedAutomationHasActiveRun(
   );
 }
 
+export function assertIsolatedAutomationCreation(
+  db: DatabaseSync,
+  automationId: string,
+  definition: ProtectedAutomationDraft,
+): void {
+  if (definition.contextAccess !== "isolated") {
+    return;
+  }
+  const tables = getAdmittedSqliteSchemaFacts(db)?.tables;
+  if (!tables) {
+    throw new Error("Protected automation creation requires admitted schema facts.");
+  }
+  const history = getNodeSqliteKysely<
+    ProtectedAutomationDatabase & ProtectedAutomationLifecycleDatabase
+  >(db);
+  for (const table of [
+    "protected_automation_run_chats",
+    "protected_automation_run_lifecycle",
+    "protected_automation_runs",
+  ] as const) {
+    if (
+      tables.has(table) &&
+      executeSqliteQuerySync(
+        db,
+        history
+          .selectFrom(table)
+          .select("automation_id")
+          .where("automation_id", "=", automationId)
+          .limit(1),
+      ).rows.length
+    ) {
+      throw new Error("Cannot create an isolated automation over retained run history.");
+    }
+  }
+}
+
 /** A new queue slot also retires legacy result-only history before another result can publish. */
 export function prepareProtectedAutomationLifecycleRetirements(
   database: OpenClawStateDatabase,

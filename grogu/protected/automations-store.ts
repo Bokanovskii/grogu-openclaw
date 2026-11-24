@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   protectedAutomationPacingLimits,
   type ProtectedAutomationCatalog,
@@ -6,15 +8,24 @@ import {
   type ProtectedAutomationPatchRequest,
   type ProtectedAutomationRecord,
 } from "../../packages/gateway-protocol/src/protected.js";
+import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
+import type { SqliteWorkerOperationAdmission } from "../../src/infra/sqlite-worker-operation-admission.js";
+import type { RetainedWorkerTransactionAdmission } from "../../src/infra/sqlite-worker-operation-settlement.js";
 import { runOpenClawStateWorkerOperation } from "../../src/state/openclaw-state-worker-store.js";
+import type { ProtectedAutomationRetirementUncertainCommit } from "../../src/state/protected-automation-lifecycle.types.js";
 import {
   createProtectedAutomationWithAdmission,
   patchProtectedAutomationWithAdmission,
   type ProtectedAutomationMutationAuthority,
 } from "../../src/state/protected-automation-operations.js";
 import type { ProtectedAutomationStorageRecord } from "../../src/state/protected-automations.js";
+import {
+  protectedAutomationStorageLeaseKeys,
+  protectedAutomationStorageLeases,
+} from "./automation-storage-leases.js";
 import { applyProtectedAutomationPatch, validateProtectedAutomationDraft } from "./automations.js";
 import type { StorageAdmission } from "./capacity.js";
+import { ProtectedError } from "./errors.js";
 import { captureProtectedStateWorkerContext } from "./state-worker-context.js";
 
 function context(stateDir: string) {
@@ -33,6 +44,13 @@ export type StoredAutomationRecord = Omit<
   ProtectedAutomationRecord,
   "nextCheckAt" | "nextCheckReason"
 >;
+
+export type ProtectedAutomationCreationSafety = {
+  hasRunHistory(automationId: string): Promise<boolean>;
+  enrollPublication(): { finish(outcome: "settled" | "recovery-required"): void };
+  retainUncertainCreateCommit(handle: ProtectedAutomationRetirementUncertainCommit): void;
+  reconcile(): void;
+};
 
 export function projectProtectedAutomationRecord(
   automation: ProtectedAutomationStorageRecord,
@@ -146,24 +164,161 @@ export async function createProtectedAutomationRecord(
   authority: ProtectedAutomationMutationAuthority,
   storage: Pick<
     StorageAdmission,
-    "chargeAutomationCreate" | "settleAutomationCreate" | "assertResult"
+    "chargeAutomationCreate" | "settleAutomationCreate" | "assertResult" | "retainPendingWrite"
   >,
+  safety?: ProtectedAutomationCreationSafety,
 ): Promise<StoredAutomationRecord | undefined> {
   const workerContext = context(stateDir);
-  const result = await createProtectedAutomationWithAdmission(workerContext, input, {
-    ...authority,
-    admitStorage: ({ nextStoredBytes }) => storage.chargeAutomationCreate(nextStoredBytes),
-    onStorageCommitted: ({ committedStoredBytes, automationId }) =>
-      storage.settleAutomationCreate(committedStoredBytes, true, automationId),
-    onStorageAborted: ({ nextStoredBytes }) =>
-      storage.settleAutomationCreate(nextStoredBytes, false),
-  });
-  const created = result.status === "created" || result.status === "exists";
-  storage.assertResult();
-  if (!created) {
-    return undefined;
+  if (input.definition.contextAccess !== "isolated") {
+    const result = await createProtectedAutomationWithAdmission(workerContext, input, {
+      ...authority,
+      admitStorage: ({ nextStoredBytes }) => storage.chargeAutomationCreate(nextStoredBytes),
+      onStorageCommitted: ({ committedStoredBytes, automationId }) =>
+        storage.settleAutomationCreate(committedStoredBytes, true, automationId),
+      onStorageAborted: ({ nextStoredBytes }) =>
+        storage.settleAutomationCreate(nextStoredBytes, false),
+    });
+    storage.assertResult();
+    return result.status === "created" || result.status === "exists"
+      ? projectProtectedAutomationRecord(result.automation)
+      : undefined;
   }
-  return projectProtectedAutomationRecord(result.automation);
+  if (!safety) {
+    throw new Error("Isolated automation creation requires run-chat admission.");
+  }
+  const automationId = input.automationId ?? randomUUID();
+  const lease = protectedAutomationStorageLeases.reserve(
+    protectedAutomationStorageLeaseKeys(
+      workerContext.admission.databasePath,
+      automationId,
+      input.profileId,
+    ),
+  );
+  if (!lease) {
+    throw new Error("Protected automation creation identity could not be reserved.");
+  }
+  let enrollment: ReturnType<ProtectedAutomationCreationSafety["enrollPublication"]> | undefined;
+  let native:
+    | {
+        admission: SqliteWorkerOperationAdmission;
+        operation: RetainedWorkerTransactionAdmission;
+      }
+    | undefined;
+  let chargedBytes: number | undefined;
+  let storageSettled = false;
+  let writerSettled = false;
+  let retained = false;
+  const releasePending = storage.retainPendingWrite();
+  const settleStorage = (created: boolean) => {
+    if (!storageSettled && chargedBytes !== undefined) {
+      storage.settleAutomationCreate(chargedBytes, created, created ? automationId : undefined);
+      storageSettled = true;
+    }
+  };
+  const retainNative = () => {
+    if (!native || retained) {
+      return;
+    }
+    safety.retainUncertainCreateCommit({
+      admission: native.admission,
+      retained: native.operation,
+      lease,
+      verifyReceipt: (facts) =>
+        chargedBytes !== undefined &&
+        isDeepStrictEqual(facts, {
+          kind: "protected-automation",
+          action: "create",
+          profileId: input.profileId,
+          storage: {
+            automationId,
+            currentStoredBytes: 0,
+            nextStoredBytes: chargedBytes,
+            committedStoredBytes: chargedBytes,
+          },
+        }),
+      settleStorage: () => {
+        settleStorage(true);
+        releasePending();
+      },
+      releaseStorage: () => {
+        settleStorage(false);
+        releasePending();
+      },
+    });
+    retained = true;
+  };
+  try {
+    enrollment = safety.enrollPublication();
+    await lease.wait();
+    assertCurrent(workerContext, authority);
+    const existing = await readAutomation(
+      stateDir,
+      { profileId: input.profileId, automationId },
+      authority,
+    );
+    if (!existing && (await safety.hasRunHistory(automationId))) {
+      throw new ProtectedError(
+        409,
+        "automation_history_conflict",
+        "This automation ID has existing run history. Start a separate isolated automation.",
+      );
+    }
+    assertCurrent(workerContext, authority);
+    const outcome = await createProtectedAutomationWithAdmission(
+      workerContext,
+      { ...input, automationId },
+      {
+        ...authority,
+        admitStorage: ({ automationId: admittedId, nextStoredBytes }) => {
+          if (admittedId !== automationId) {
+            throw new Error("Protected automation creation identity changed.");
+          }
+          storage.chargeAutomationCreate(nextStoredBytes);
+          chargedBytes = nextStoredBytes;
+        },
+        onStorageCommitted: () => settleStorage(true),
+        onStorageAborted: () => settleStorage(false),
+        onNativeAdmission: (admission, operation) => {
+          native = { admission, operation };
+        },
+      },
+    ).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    const currentNative = native;
+    if (currentNative) {
+      const settled = await currentNative.operation.settled;
+      writerSettled =
+        settled.kind !== "unknown" && (outcome.ok || chargedBytes === undefined || storageSettled);
+      if (!writerSettled) {
+        retainNative();
+        throw new SqliteWorkerError(
+          "Protected automation creation requires native reconciliation.",
+          "outcome-unknown",
+        );
+      }
+    }
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+    storage.assertResult();
+    return outcome.value.status === "created" || outcome.value.status === "exists"
+      ? projectProtectedAutomationRecord(outcome.value.automation)
+      : undefined;
+  } finally {
+    if (native && !writerSettled && !retained) {
+      retainNative();
+    }
+    if (!retained) {
+      lease.release();
+      releasePending();
+    }
+    enrollment?.finish(retained ? "recovery-required" : "settled");
+    if (retained) {
+      safety.reconcile();
+    }
+  }
 }
 
 export async function patchProtectedAutomationRecord(

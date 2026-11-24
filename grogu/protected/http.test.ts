@@ -678,15 +678,9 @@ void test("Protected turns load skills on request and retain credentials during 
   assert.match(JSON.stringify(automationRequest?.messages), /Summarize synthetic public news/u);
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_search"));
   assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "web_fetch"));
-  // Automation runs never receive a browser, even for an interactive member's definition.
-  assert.ok(
-    requests
-      .slice(automationRequestStart)
-      .every(
-        (request) => !request.tools?.some((tool) => tool.function.name.startsWith("browser_")),
-      ),
-  );
-  assert.equal(browserSessions.opened, browsersBeforeAutomation);
+  // Automation runs get the same fresh, disposable browser as interactive turns.
+  assert.ok(automationRequest?.tools?.some((tool) => tool.function.name === "browser_open"));
+  assert.equal(browserSessions.opened, browsersBeforeAutomation + 1);
   const accepted = (await (await automationCall(`/automations/${automation.id}`)).json())
     .automation;
   assert.equal(accepted.nextCheckReason, "model");

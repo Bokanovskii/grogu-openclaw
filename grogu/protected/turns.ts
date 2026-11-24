@@ -140,8 +140,8 @@ export type ProtectedTurn = {
   /** Server-bound to this scheduled adaptive run; only successful settlement can use its proposal. */
   proposeNextCheck?: (delayMs: number) => void;
   /**
-   * Server-derived: set only for interactive member turns. Automation runs, automation-run chats,
-   * shared views and delegated children never receive a browser.
+   * Server-derived: a fresh, empty browser with no profile or member data. Never set for authoring
+   * turns, follow-ups in stored run chats, shared views or delegated children.
    */
   browserAccess?: "fresh";
   mentionedAgents: readonly Readonly<ProtectedAgentDefinition>[];

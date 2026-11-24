@@ -38,6 +38,7 @@ import { createAgentSession } from "../../sessions/sdk.js";
 import { sessionManagerOpenTranscriptCohort } from "../../sessions/session-manager-core.js";
 import { withSessionManagerWrite } from "../../sessions/session-manager-write-admission.js";
 import { isIsolatedContextForbiddenTool } from "../../tool-policy-shared.js";
+import { getHostSessionAccess } from "../../tools/scoped-session-access.js";
 import { runContextEngineMaintenance } from "../context-engine-maintenance.js";
 import { buildEmbeddedExtensionFactories } from "../extensions.js";
 import { log } from "../logger.js";
@@ -199,7 +200,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   if (attempt.contextIsolation === "isolated") {
     const beforeToolCall = activeSession.agent.beforeToolCall;
     activeSession.agent.beforeToolCall = async (call, signal) => {
-      if (isIsolatedContextForbiddenTool(call.toolCall.name)) {
+      if (isIsolatedContextForbiddenTool(call.toolCall.name, getHostSessionAccess())) {
         return {
           block: true,
           reason: "Memory and other sessions are unavailable in isolated automations.",

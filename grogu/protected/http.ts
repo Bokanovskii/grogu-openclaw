@@ -1320,6 +1320,9 @@ export function createProtectedHttp(options: {
     };
     const sessionAccess = {
       creatorProfileId: profile.id,
+      ...(context.automationContextAccess === "isolated"
+        ? { isolatedAutomationRunReads: true as const }
+        : {}),
       assertCurrent: assertRun,
       revalidate: checkRun,
       signal,

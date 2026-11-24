@@ -6,6 +6,7 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { CORE_TOOL_GROUPS } from "./tool-catalog.js";
+import type { HostSessionAccess } from "./tools/scoped-session-access.js";
 
 export { resolveCoreToolProfilePolicy as resolveToolProfilePolicy } from "./tool-catalog.js";
 export type { ToolProfileId } from "./tool-catalog.js";
@@ -77,11 +78,17 @@ export function normalizeToolPolicyName(name: string): string {
   return TOOL_NAME_ALIASES.get(normalized) ?? normalized;
 }
 
-export function isIsolatedContextForbiddenTool(name: string): boolean {
+export function isIsolatedContextForbiddenTool(
+  name: string,
+  hostSessionAccess?: HostSessionAccess,
+): boolean {
   const normalized = normalizeToolPolicyName(name);
+  const isScopedAutomationRead =
+    hostSessionAccess?.isolatedAutomationRunReads === true &&
+    (normalized === "sessions_list" || normalized === "sessions_history");
   return (
     normalized === "sessions" ||
-    normalized.startsWith("sessions_") ||
+    (normalized.startsWith("sessions_") && !isScopedAutomationRead) ||
     normalized.startsWith("memory_") ||
     normalized === "session_status" ||
     normalized === "intent"

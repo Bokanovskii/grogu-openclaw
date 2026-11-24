@@ -7,8 +7,10 @@ import { test } from "node:test";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { appendTranscriptMessage } from "../../src/config/sessions/session-accessor.js";
 import { root } from "../../src/infra/fs-safe.js";
+import { createStorageValueEncryption } from "../../src/storage/encryption.js";
 import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
+import { prepareProtectedSharedState } from "./state-worker-context.js";
 import type { ProtectedTurn } from "./turns.js";
 
 void test("protected chunks publish without remote access work and stop at local invalidation", async (t) => {
@@ -34,6 +36,10 @@ void test("protected chunks publish without remote access work and stop at local
   const expired = new Set<string>();
   const deniedRemotely = new Set<string>();
   const timingLogs: string[] = [];
+  // Storage admission measures stored data, which needs an admitted encrypted state database.
+  const encryption = createStorageValueEncryption(randomBytes(32));
+  t.after(() => encryption.dispose());
+  await prepareProtectedSharedState(stateDir, () => {});
   t.mock.method(console, "info", (...args: unknown[]) => {
     if (args[0] === "[protected-turn-timing]") {
       assert.equal(typeof args[1], "string");
@@ -46,8 +52,10 @@ void test("protected chunks publish without remote access work and stop at local
     stateDir,
     directory: { issuer: origin, allowedSubjects: [] },
     usersRoot: await root(usersDir),
+    encryption,
     maxChatsPerUser: 10,
     maxFileBytes: 64_000,
+    storageLimits: { globalBytes: 16_000_000, userBytes: 8_000_000, freeFloorBytes: 1 },
     verifyIdentity: async (request) => {
       const subject = request.headers.get("cookie")!;
       return {
@@ -198,12 +206,17 @@ void test("protected chunks publish without remote access work and stop at local
       "turnOrdinal",
       "finishedAtSec",
       "activeTurns",
+      "storageQueueMs",
+      "storageScanMs",
       "marks",
     ].toSorted(),
   );
   assert.equal(timing.outcome, "complete");
   assert.ok(Number.isInteger(timing.turnOrdinal) && Number(timing.turnOrdinal) >= 1);
   assert.equal(timing.activeTurns, 1);
+  for (const note of ["storageQueueMs", "storageScanMs"]) {
+    assert.ok(Number.isInteger(timing[note]) && Number(timing[note]) >= 0);
+  }
   assert.ok(Math.abs(Number(timing.finishedAtSec) - Date.now() / 1000) < 60);
   const marks: unknown = timing.marks;
   assert.ok(isRecord(marks));

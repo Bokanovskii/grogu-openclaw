@@ -43,8 +43,8 @@ export const protectedTurnMarks = [
 ] as const;
 export type ProtectedTurnMark = (typeof protectedTurnMarks)[number];
 
-/** Counts a turn may report about the load it ran under. */
-export const protectedTurnNotes = ["activeTurns"] as const;
+/** Counts and durations a turn may report about the load it ran under. */
+export const protectedTurnNotes = ["activeTurns", "storageQueueMs", "storageScanMs"] as const;
 export type ProtectedTurnNote = (typeof protectedTurnNotes)[number];
 
 /** Optional numbers on the timing line, in output order. */

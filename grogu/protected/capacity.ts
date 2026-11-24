@@ -1,4 +1,5 @@
 import { statfsSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import type { ProtectedChatStorage } from "@openclaw/gateway-protocol/protected";
 import {
   authorizedUserFilesDirectory,
@@ -50,6 +51,9 @@ export type StorageFiles = AuthorizedUserFiles & {
 };
 
 export type StorageAdmission = {
+  // Time spent behind other admissions, then measuring storage (zero when the ledger was reused).
+  queueMs: number;
+  scanMs: number;
   release(): void;
   charge(bytes: number): void;
   chargeChatCreation(): void;
@@ -305,12 +309,15 @@ export function createStorageAdmission(
     // null exempts the caller (the owner) from member and shared budgets, not the disk floor.
     userLimitBytes: number | null = options.limits.userBytes,
   ): Promise<StorageAdmission> => {
+    const requestedAt = performance.now();
     const previous = pending;
     let unlock!: () => void;
     pending = new Promise<void>((resolve) => {
       unlock = resolve;
     });
     await previous;
+    const queueMs = performance.now() - requestedAt;
+    let scanMs = 0;
     let active = true;
     let pendingWrites = 0;
     let currentLedger: Ledger | undefined;
@@ -349,6 +356,7 @@ export function createStorageAdmission(
         assertDisk();
       }
       const measure = async () => {
+        const scanStartedAt = performance.now();
         const deleted = new Set<string>();
         const deletedAutomations = new Map<
           string,
@@ -421,6 +429,7 @@ export function createStorageAdmission(
           }
           ledger = account;
         } finally {
+          scanMs += performance.now() - scanStartedAt;
           deletedDuringScan = undefined;
           deletedAutomationsDuringScan = undefined;
           storedDataChangesDuringScan = undefined;
@@ -526,6 +535,8 @@ export function createStorageAdmission(
         },
       };
       return {
+        queueMs,
+        scanMs,
         release,
         charge,
         reserveStoredData(bytes) {

@@ -1,8 +1,12 @@
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import {
+  ProtectedAutomationCapabilitiesSchema,
+  ProtectedAutomationCatalogSchema,
+  ProtectedAutomationCatalogV1Schema,
   ProtectedAutomationDraftSchema,
   ProtectedAutomationRecordSchema,
+  ProtectedChatResponseSchema,
   ProtectedChatSchema,
   ProtectedTurnEventSchema,
   ProtectedTurnRequestSchema,
@@ -11,12 +15,50 @@ import {
 const protectedRevision = Type.String({ pattern: "^[1-9][0-9]{0,15}$" });
 const node = <T extends import("typebox").TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
-/** Authoring turns carry the client-held unsaved draft; the chat binding stays server-held. */
+const ProtectedAuthoringDraftSchema = node({
+  draft: ProtectedAutomationDraftSchema,
+  draftRevision: protectedRevision,
+});
+// Recovery is opt-in. Older catalog and chat detail schemas remain strict.
+const automations = ProtectedAutomationCapabilitiesSchema.properties;
+const capabilities = node({
+  automations: node({
+    ...automations,
+    chat: node({ ...automations.chat.properties, draftRecovery: Type.Literal(true) }),
+  }),
+});
+export const ProtectedDraftRecoveryCatalogSchema = node({
+  ...ProtectedAutomationCatalogSchema.properties,
+  agents: Type.Union([
+    ProtectedAutomationCatalogSchema.properties.agents,
+    ProtectedAutomationCatalogV1Schema.properties.agents,
+  ]),
+  capabilities,
+});
+export const ProtectedDraftRecoveryChatSchema = node({
+  ...ProtectedChatResponseSchema.properties,
+  authoringDraft: Type.Optional(ProtectedAuthoringDraftSchema),
+  authoringBusy: Type.Boolean(),
+});
+const createDraft = node({ draft: ProtectedAutomationDraftSchema });
+const checkpoint = node({
+  draft: ProtectedAutomationDraftSchema,
+  baseDraftRevision: Type.Union([protectedRevision, Type.Null()]),
+});
+export type ProtectedAuthoringDraft = Static<typeof ProtectedAuthoringDraftSchema>;
+export const isProtectedAuthoringDraft = (value: unknown): value is ProtectedAuthoringDraft =>
+  Value.Check(ProtectedAuthoringDraftSchema, value);
+export const isProtectedAuthoringCreate = (value: unknown): value is Static<typeof createDraft> =>
+  Value.Check(createDraft, value);
+export const isProtectedAuthoringCheckpoint = (
+  value: unknown,
+): value is Static<typeof checkpoint> => Value.Check(checkpoint, value);
+
+/** Authoring turns carry the member's exact draft; the server owns the chat binding. */
 export const ProtectedAuthoringTurnRequestSchema = node({
   ...ProtectedTurnRequestSchema.properties,
   authoring: node({
-    draft: ProtectedAutomationDraftSchema,
-    draftRevision: protectedRevision,
+    ...ProtectedAuthoringDraftSchema.properties,
     automationVersion: Type.Optional(protectedRevision),
   }),
 });

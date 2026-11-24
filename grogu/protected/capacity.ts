@@ -141,6 +141,7 @@ export async function measureProtectedStorage(
     try {
       const bytes =
         chatBytes +
+        (entry.authoringDraftBytes ?? 0) +
         (await options.chats.transcriptBytes(entry.id, entry.sessionKey)) +
         (await measureAuthorizedUserFileTree(
           files,

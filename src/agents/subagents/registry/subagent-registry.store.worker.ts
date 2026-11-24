@@ -56,6 +56,41 @@ import {
 
 const log = createSubsystemLogger("state/worker");
 
+/** Shared by stopped-service inspection and the recovery transaction. */
+export function inspectTransientSubagentRunInDatabase(
+  db: DatabaseSync,
+  input: Omit<TransientRegistryRecovery, "writeId">,
+) {
+  const rows = executeSqliteQuerySync(
+    db,
+    getNodeSqliteKysely<Pick<OpenClawStateKyselyDatabase, "subagent_runs">>(db)
+      .selectFrom("subagent_runs")
+      .selectAll()
+      .where("child_session_key", "=", input.childSessionKey),
+  ).rows;
+  const stored = rows.length === 1 ? rows[0] : undefined;
+  const payload = stored ? safeParseJson(stored.payload_json) : undefined;
+  const row = stored ? rowToSubagentRunRecord(stored) : undefined;
+  const safe =
+    rows.length === 0 ||
+    (rows.length === 1 &&
+      isRecord(payload) &&
+      payload.runId === stored?.run_id &&
+      payload.childSessionKey === input.childSessionKey &&
+      payload.requesterSessionKey === input.parentSessionKey &&
+      row !== null &&
+      row !== undefined &&
+      row.requesterSessionKey === input.parentSessionKey &&
+      row.childSessionIdentity?.sessionId === input.childSessionId &&
+      row.childSessionIdentity.lifecycleRevision === input.childLifecycleRevision &&
+      row.cleanup === "delete" &&
+      row.spawnMode === "run" &&
+      row.expectsCompletionMessage === false &&
+      row.task === "" &&
+      row.execution.suppressSessionEffects === true);
+  return { safe, row };
+}
+
 /** An unreadable or mismatched row is ambiguous and must remain untouched. */
 export function retireTransientSubagentRunInWorker(
   input: TransientRegistryRecovery,
@@ -64,33 +99,7 @@ export function retireTransientSubagentRunInWorker(
   return runOpenClawStateWriteTransaction(
     (database) => {
       requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: input.writeId });
-      const rows = executeSqliteQuerySync(
-        database.db,
-        getNodeSqliteKysely<Pick<OpenClawStateKyselyDatabase, "subagent_runs">>(database.db)
-          .selectFrom("subagent_runs")
-          .selectAll()
-          .where("child_session_key", "=", input.childSessionKey),
-      ).rows;
-      const stored = rows.length === 1 ? rows[0] : undefined;
-      const payload = stored ? safeParseJson(stored.payload_json) : undefined;
-      const row = stored ? rowToSubagentRunRecord(stored) : undefined;
-      const safe =
-        rows.length === 0 ||
-        (rows.length === 1 &&
-          isRecord(payload) &&
-          payload.runId === stored?.run_id &&
-          payload.childSessionKey === input.childSessionKey &&
-          payload.requesterSessionKey === input.parentSessionKey &&
-          row !== null &&
-          row !== undefined &&
-          row.requesterSessionKey === input.parentSessionKey &&
-          row.childSessionIdentity?.sessionId === input.childSessionId &&
-          row.childSessionIdentity.lifecycleRevision === input.childLifecycleRevision &&
-          row.cleanup === "delete" &&
-          row.spawnMode === "run" &&
-          row.expectsCompletionMessage === false &&
-          row.task === "" &&
-          row.execution.suppressSessionEffects === true);
+      const { safe, row } = inspectTransientSubagentRunInDatabase(database.db, input);
       if (safe && row) {
         writeSubagentRunValuesInDatabase(database, [], [row.runId]);
       }

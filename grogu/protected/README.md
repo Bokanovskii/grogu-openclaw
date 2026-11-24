@@ -96,8 +96,13 @@ maintenance helper corrected, not another account bootstrap or source install.
 
 `install` accepts only an empty `service/`. Later releases use `update`, which
 runs as the service account with no added privilege. Stop the runtime, then run
-`receive`, `update`, `dependencies`, and `restart runtime`. `update` extracts
-`inbox/runtime.tar` into a fresh staging directory under the service home. It
+`receive`, `update`, `dependencies`, and `restart runtime`. Before replacing
+`service/`, `update` runs the installed runtime's read-only `release-check`.
+It refuses unrecoverable child chats and preserves the installed runtime and archive.
+The control helper repeats the check with the candidate runtime before `start`
+or `restart runtime` loads its LaunchDaemon. A refusal leaves the listener stopped,
+not in a launchd restart loop. Tunnel control does not run this check.
+`update` then extracts `inbox/runtime.tar` into a fresh staging directory under the service home. It
 checks for the runtime entry point, `scripts/tsx.mjs`, `pnpm-lock.yaml`, and
 `protected-client/index.html`. It then swaps the staged tree into `service/`
 and removes the previous tree and the archive. Nothing durable lives in
@@ -969,6 +974,25 @@ Prerequisite: install Chromium as the service account with
 browser tools report that the page could not be loaded and the turn continues.
 
 ## Verification and release gates
+
+Before each protected runtime release, stop the listener and run:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run release-check
+```
+
+The command holds the service-state lock and reads the canonical session and run
+stores. It uses startup recovery's ownership, parent-generation, and run-record
+rules. A missing parent passes only when startup can safely retire its transient
+child. Ambiguous children refuse the release with an operator repair instruction.
+The command does not retire children, change transcripts or files, or migrate storage.
+Startup still performs recovery after the release.
+
+Existing installations need this runtime command and the updated maintenance and
+control helpers before the automatic gates are available. For the first upgrade,
+run the candidate command against the stopped service's isolated state before replacement.
+Install the runtime with the existing helper, then update the root-owned helpers before starting it.
+Do not treat this child-recovery check as a complete release acceptance test.
 
 The focused HTTP boundary fixture uses loopback HTTP, synthetic identities, and
 real profile and chat storage. On macOS, run it from the checkout with Node

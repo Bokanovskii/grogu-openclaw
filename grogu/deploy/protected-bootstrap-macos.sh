@@ -308,11 +308,18 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 [ "$(id -u)" -eq 0 ] && [ "$#" -eq 2 ] || exit 64
 case "$2" in runtime|tunnel) target="$LABEL.$2" ;; *) exit 64 ;; esac
 plist="/Library/LaunchDaemons/$target.plist"
+release_check() {
+  if [ "$target" = "$LABEL.runtime" ]; then
+    /usr/bin/sudo -n -u "$SERVICE_USER" \
+      "/Library/PrivilegedHelperTools/$LABEL-maintain" run release-check
+  fi
+}
 case "$1" in
   start)
     if /bin/launchctl print "system/$target" >/dev/null 2>&1; then
       echo "The service is already loaded. Use restart for a new build." >&2; exit 73
     fi
+    release_check
     /bin/launchctl bootstrap system "$plist"
     ;;
   restart)
@@ -328,6 +335,7 @@ case "$1" in
         sleep 1
       done
     fi
+    release_check
     /bin/launchctl bootstrap system "$plist"
     ;;
   stop) /bin/launchctl bootout "system/$target" ;;
@@ -348,6 +356,14 @@ export OPENCLAW_CONFIG_PATH="$SERVICE_HOME/config/openclaw.json"
 export OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$SERVICE_HOME/secrets/storage-key"
 export PATH="$SERVICE_HOME/runtime/node/bin:$SERVICE_HOME/runtime/pnpm/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$SERVICE_HOME"
+run_maintenance() {
+  cd "$SERVICE_HOME/service"
+  exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
+    OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
+    OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$OPENCLAW_PROTECTED_STORAGE_KEY_FILE" \
+    "$SERVICE_HOME/runtime/node/bin/node" --import "$SERVICE_HOME/service/scripts/tsx.mjs" \
+    "$SERVICE_HOME/service/grogu/protected/maintain.ts" "$@"
+}
 case "${1-}" in
   provision-node)
     [ "$#" -eq 1 ] || exit 64
@@ -406,6 +422,7 @@ case "${1-}" in
       echo "An earlier update left staging state that requires inspection." >&2
       exit 73
     fi
+    (run_maintenance release-check)
     staged="$(mktemp -d "$SERVICE_HOME/service-update.XXXXXX")"
     trap '/bin/rm -rf "$staged"' EXIT
     /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
@@ -463,12 +480,7 @@ case "${1-}" in
     ;;
   run)
     shift
-    cd "$SERVICE_HOME/service"
-    exec /usr/bin/env -i HOME="$HOME" PATH="$PATH" \
-      OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" \
-      OPENCLAW_PROTECTED_STORAGE_KEY_FILE="$OPENCLAW_PROTECTED_STORAGE_KEY_FILE" \
-      "$SERVICE_HOME/runtime/node/bin/node" --import "$SERVICE_HOME/service/scripts/tsx.mjs" \
-      "$SERVICE_HOME/service/grogu/protected/maintain.ts" "$@"
+    run_maintenance "$@"
     ;;
   *) exit 64 ;;
 esac

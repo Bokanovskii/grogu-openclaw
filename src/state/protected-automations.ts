@@ -20,7 +20,10 @@ import {
   ensureProtectedAdmissionSchema,
   type ProtectedAdmissionDatabase,
 } from "./protected-admission.js";
-import { isolatedAutomationHasActiveRun } from "./protected-automation-lifecycle-retention.js";
+import {
+  assertIsolatedAutomationCreation,
+  isolatedAutomationHasActiveRun,
+} from "./protected-automation-lifecycle-retention.js";
 import {
   assertStoredDefinitionBytes,
   readStoredDefinition,
@@ -348,6 +351,7 @@ export function createProtectedAutomation(
           return { status: "exists" as const, automation: owned };
         }
       }
+      assertIsolatedAutomationCreation(db, automationId, input.definition);
       const definition = storedDefinition(db, automationId, input.definition);
       const storage = {
         automationId,

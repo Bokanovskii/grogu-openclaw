@@ -17,6 +17,7 @@ import {
   listProtectedAutomationRecords,
   readProtectedAutomationRecord,
   saveProtectedAutomationPatch,
+  type ProtectedAutomationCreationSafety,
   type StoredAutomationRecord,
 } from "./automations-store.js";
 import { applyProtectedAutomationPatch, validateProtectedAutomationDraft } from "./automations.js";
@@ -173,6 +174,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
   boundAutomationId?: string;
   sent: { draft: ProtectedAutomationDraft; draftRevision: string; automationVersion?: string };
   admitStorage: AdmitStorage;
+  creationSafety: ProtectedAutomationCreationSafety;
   bind: (automation: StoredAutomationRecord) => Promise<boolean>;
   publish: (event: AuthoringEvent) => Promise<void>;
 }): AutomationsAuthoringBindings {
@@ -241,6 +243,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
         },
         input.authority,
         storage,
+        input.creationSafety,
       );
     } finally {
       storage.release();

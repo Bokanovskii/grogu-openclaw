@@ -52,11 +52,13 @@ import {
   createProtectedAutomationRecord,
   readOwnedProtectedAutomationStorageRecord,
 } from "./automations-store.js";
+import { storageEntryOverheadBytes } from "./capacity.js";
 import { createProtectedChats } from "./chats.js";
 import {
   readProtectedFeedbackStorageUsage,
   submitProtectedFeedbackReport,
 } from "./feedback-store.js";
+import { runProtectedSharing } from "./sharing-store.js";
 import {
   captureProtectedStateWorkerContext,
   prepareProtectedSharedState,
@@ -159,6 +161,7 @@ async function fixture(
     throw new Error("Synthetic automation was not enabled.");
   }
   return {
+    member,
     stateDir,
     ownerId,
     otherId,
@@ -183,6 +186,8 @@ function authority(profileId: string) {
   let failRetirement = false;
   let pending = 0;
   const uncertain: ProtectedAutomationLifecycleUncertainCommit[] = [];
+  // Followers charge their own receipt to their own authority; unknown or over-quota ones are skipped.
+  const recipients = new Map<string, ProtectedAutomationLifecycleAuthority>();
   const assertCurrent = () => {
     if (revoked) {
       throw new Error("Synthetic authority revoked.");
@@ -225,6 +230,29 @@ function authority(profileId: string) {
       createStoredDataReplacementReservation({ ...options, change }),
     reserveBatchReplacement: async (change) =>
       createStoredDataBatchReplacementReservation({ ...options, change }),
+    reserveRecipient: async (recipientId, change) => {
+      const recipient = recipients.get(recipientId);
+      if (!recipient) {
+        return undefined;
+      }
+      try {
+        if (change.previous) {
+          const previous = change.previous;
+          const held = await recipient.reserveReplacement({ previous, current: change.current });
+          return {
+            settle: () => held.settle(change.current),
+            release: () => held.release(previous),
+          };
+        }
+        const held = await recipient.reserveStorage(change.current.bytes);
+        return {
+          settle: () => held.settle({ created: true, entries: [change.current] }),
+          release: () => held.release(),
+        };
+      } catch {
+        return undefined;
+      }
+    },
     retireStorage: (entries) => {
       if (failRetirement) {
         throw new Error("Synthetic retirement settlement failed.");
@@ -250,6 +278,7 @@ function authority(profileId: string) {
     resultAdmission,
     ledger,
     uncertain,
+    recipients,
     quota: (value: number) => {
       quota = value;
     },
@@ -1497,4 +1526,256 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
       );
     },
   );
+});
+
+// Published automation with followers: the owner owns runs and results, each recipient owns and
+// pays for its own inbox receipt.
+async function receiptFixture(
+  t: { after(fn: () => Promise<void>): void },
+  contextAccess?: ProtectedAutomationDraft["contextAccess"],
+) {
+  const f = await fixture(t, { contextAccess });
+  const owner = authority(f.ownerId);
+  const chatId = randomUUID();
+  let clock = 1_000;
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  const sharing = {
+    profileId: f.ownerId,
+    automationId: f.automationId,
+    storageOverheadBytes: storageEntryOverheadBytes,
+  };
+  assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+  assert.ok(
+    (
+      await runProtectedSharing(
+        f.stateDir,
+        "protectedSharing.publishAutomation",
+        { ...sharing, now: 3 },
+        () => {},
+      )
+    )?.created,
+  );
+  const newFollower = async () => {
+    const member = await f.member();
+    const auth = authority(member.id);
+    owner.recipients.set(member.id, auth.admission);
+    return { id: member.id, auth };
+  };
+  const follow = async (who: { id: string }, subscribed: boolean) =>
+    assert.ok(
+      (
+        await runProtectedSharing(
+          f.stateDir,
+          "protectedSharing.followAutomation",
+          { ...sharing, profileId: who.id, subscribed, now: (clock += 1) },
+          () => {},
+        )
+      )?.created,
+    );
+  const unfollow = (who: { id: string }) =>
+    runProtectedSharing(
+      f.stateDir,
+      "protectedSharing.unfollowAutomation",
+      { ...sharing, profileId: who.id },
+      () => {},
+    );
+  const unpublish = () =>
+    runProtectedSharing(f.stateDir, "protectedSharing.unpublishAutomation", sharing, () => {});
+  // A finished run with a saved result, ready to deliver.
+  const run = async () => {
+    const runId = randomUUID();
+    const now = (clock += 10);
+    assert.deepEqual(
+      await write({
+        kind: "queue",
+        runId,
+        definitionRevision: f.revision,
+        trigger: "manual",
+        scheduledAtMs: now,
+        now,
+      }),
+      { status: "committed" },
+    );
+    assert.deepEqual(await write({ kind: "start", runId, chatId, now: now + 1 }), {
+      status: "committed",
+    });
+    const saved = await commitProtectedAutomationFinishedResult(
+      f.stateDir,
+      {
+        automationId: f.automationId,
+        centralOwnerProfileId: f.ownerId,
+        definitionRevision: f.revision,
+        jobId: f.automationId,
+        runId,
+        runAtMs: now,
+        completedAtMs: now + 2,
+        automationName: f.definition.name,
+        privateFinalText: "Synthetic private result.",
+        transcript: { sessionKey: `synthetic-${runId}`, sessionId: chatId },
+      },
+      owner.resultAdmission,
+    );
+    assert.equal(saved.status, "created");
+    if (saved.status !== "created") {
+      throw new Error("Synthetic result was not created.");
+    }
+    assert.deepEqual(
+      await write({
+        kind: "finish",
+        runId,
+        now: now + 3,
+        outcome: { status: "succeeded", resultId: saved.id },
+      }),
+      { status: "committed" },
+    );
+    return { runId, deliveredAtMs: now + 4 };
+  };
+  const deliver = (finished: { runId: string; deliveredAtMs: number }) =>
+    write({ kind: "deliver", runId: finished.runId, now: finished.deliveredAtMs });
+  const inbox = async (profileId: string) =>
+    (
+      await listProtectedAutomationOwnerInbox(f.stateDir, {
+        profileId,
+        revalidate: async () => {},
+        assertCurrent: () => {},
+      })
+    )
+      .map((entry) => entry.runId)
+      .toSorted();
+  const receipts = async (profileId: string) =>
+    (await readProtectedAutomationLifecycleStorageUsage(f.stateDir, () => {})).filter(
+      (entry) =>
+        entry.profileId === profileId && entry.id.startsWith("protected-automation-inbox:"),
+    );
+  return {
+    f,
+    owner,
+    write,
+    newFollower,
+    follow,
+    unfollow,
+    unpublish,
+    run,
+    deliver,
+    inbox,
+    receipts,
+  };
+}
+
+void test("each subscribed follower owns and pays for its own receipt of an isolated run", async (t) => {
+  const r = await receiptFixture(t, "isolated");
+  const subscribed = await r.newFollower();
+  const optedOut = await r.newFollower();
+  const full = await r.newFollower();
+  await r.follow(subscribed, true);
+  await r.follow(optedOut, false);
+  await r.follow(full, true);
+  full.auth.quota(0);
+  const finished = await r.run();
+
+  assert.deepEqual(await r.deliver(finished), { status: "committed" });
+  assert.deepEqual(await r.inbox(r.f.ownerId), [finished.runId]);
+  assert.deepEqual(await r.inbox(subscribed.id), [finished.runId]);
+  // Not subscribed, or unable to pay: left out without blocking the owner or anyone else.
+  assert.deepEqual(await r.inbox(optedOut.id), []);
+  assert.deepEqual(await r.inbox(full.id), []);
+  const [receipt, ...extra] = await r.receipts(subscribed.id);
+  assert.ok(receipt);
+  assert.deepEqual(extra, []);
+  assert.equal(receipt.id, `protected-automation-inbox:${finished.runId}`);
+  assert.equal(subscribed.auth.ledger.globalBytes, receipt.bytes);
+  assert.equal(full.auth.ledger.globalBytes, 0);
+  assert.equal(optedOut.auth.ledger.globalBytes, 0);
+  assert.equal(subscribed.auth.pending(), 0);
+  assert.deepEqual(await r.deliver(finished), { status: "unchanged" });
+  assert.equal(subscribed.auth.ledger.globalBytes, receipt.bytes);
+});
+
+void test("a retried delivery reaches the subscribers present at its successful commit", async (t) => {
+  const r = await receiptFixture(t, "isolated");
+  const early = await r.newFollower();
+  await r.follow(early, true);
+  const finished = await r.run();
+
+  r.owner.quota(0);
+  await assert.rejects(r.deliver(finished), /quota exceeded/);
+  assert.equal(early.auth.ledger.globalBytes, 0);
+  assert.equal(early.auth.pending(), 0);
+  assert.deepEqual(await r.inbox(early.id), []);
+
+  const late = await r.newFollower();
+  await r.follow(late, true);
+  r.owner.quota(Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(await r.deliver(finished), { status: "committed" });
+  assert.deepEqual(await r.inbox(early.id), [finished.runId]);
+  assert.deepEqual(await r.inbox(late.id), [finished.runId]);
+});
+
+void test("unfollowing or unpublishing removes receipts and they never come back", async (t) => {
+  const r = await receiptFixture(t, "isolated");
+  const leaver = await r.newFollower();
+  const stayer = await r.newFollower();
+  await r.follow(leaver, true);
+  await r.follow(stayer, true);
+  const first = await r.run();
+  assert.deepEqual(await r.deliver(first), { status: "committed" });
+
+  await r.unfollow(leaver);
+  assert.deepEqual(await r.inbox(leaver.id), []);
+  assert.deepEqual(await r.receipts(leaver.id), []);
+  assert.deepEqual(await r.inbox(stayer.id), [first.runId]);
+  await r.follow(leaver, true);
+  assert.deepEqual(await r.inbox(leaver.id), []);
+  const second = await r.run();
+  assert.deepEqual(await r.deliver(second), { status: "committed" });
+  assert.deepEqual(await r.inbox(leaver.id), [second.runId]);
+
+  await r.unpublish();
+  assert.deepEqual(await r.inbox(leaver.id), []);
+  assert.deepEqual(await r.inbox(stayer.id), []);
+  assert.deepEqual(await r.receipts(stayer.id), []);
+  assert.deepEqual(await r.inbox(r.f.ownerId), [first.runId, second.runId].toSorted());
+});
+
+void test("retention retires a pruned run's receipts for every recipient", async (t) => {
+  const r = await receiptFixture(t, "isolated");
+  const follower = await r.newFollower();
+  await r.follow(follower, true);
+  const finished = await r.run();
+  assert.deepEqual(await r.deliver(finished), { status: "committed" });
+  assert.deepEqual(await r.inbox(follower.id), [finished.runId]);
+  for (let index = 0; index < 50; index++) {
+    const now = 10_000 + index;
+    assert.deepEqual(
+      await r.write({
+        kind: "refuse",
+        runId: randomUUID(),
+        definitionRevision: r.f.revision,
+        trigger: "manual",
+        scheduledAtMs: now,
+        now,
+        errorCode: "quota_exceeded",
+      }),
+      { status: "committed" },
+    );
+  }
+  assert.deepEqual(await r.inbox(follower.id), []);
+  assert.deepEqual(await r.inbox(r.f.ownerId), []);
+  assert.deepEqual(await r.receipts(follower.id), []);
+});
+
+void test("followers get no receipt for an automation that is not isolated", async (t) => {
+  const r = await receiptFixture(t);
+  const follower = await r.newFollower();
+  await r.follow(follower, true);
+  const finished = await r.run();
+  assert.deepEqual(await r.deliver(finished), { status: "committed" });
+  assert.deepEqual(await r.inbox(r.f.ownerId), [finished.runId]);
+  assert.deepEqual(await r.inbox(follower.id), []);
+  assert.equal(follower.auth.ledger.globalBytes, 0);
 });

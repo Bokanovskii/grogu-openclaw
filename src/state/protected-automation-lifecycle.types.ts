@@ -81,7 +81,13 @@ export type ProtectedAutomationLifecycleCommand = {
         | { status: "succeeded"; resultId: string; proposedDelayMs?: number }
         | { status: "failed" | "skipped"; errorCode: ProtectedAutomationRunError };
     }
-  | { kind: "deliver"; runId: string; now: number }
+  | {
+      kind: "deliver";
+      runId: string;
+      now: number;
+      /** Followers whose own quota could not take the entry; the owner is never skipped. */
+      skipRecipients?: string[];
+    }
   | { kind: "delete" }
   | { kind: "remove"; expectedRevision: number }
 );
@@ -99,7 +105,7 @@ export type ProtectedAutomationLifecycleWrite = {
   retired: ProtectedAutomationResultStorageEntry[];
   pruneRunIds: string[];
   pruneResultIds: string[];
-  pruneInboxRunIds: string[];
+  pruneInbox: { profileId: string; runId: string }[];
   check?: ProtectedAutomationCheckDecision;
   retiredDefinition?: { id: string; profileId: string; definitionBytes: number };
   replacement?: {
@@ -146,6 +152,14 @@ export type ProtectedAutomationLifecycleAuthority = {
     settle(committed: readonly ProtectedAutomationResultStorageEntry[]): void;
     release(rolledBack: readonly ProtectedAutomationResultStorageEntry[]): void;
   }>;
+  /** Charges a follower's own inbox entry; undefined when that member cannot take it. */
+  reserveRecipient(
+    profileId: string,
+    change: {
+      previous?: ProtectedAutomationResultStorageEntry;
+      current: ProtectedAutomationResultStorageEntry;
+    },
+  ): Promise<{ settle(): void; release(): void } | undefined>;
   retireStorage(entries: readonly ProtectedAutomationResultStorageEntry[]): void;
   retireDefinition?(entry: { id: string; profileId: string; definitionBytes: number }): void;
   retainUncertainCommit(handle: ProtectedAutomationLifecycleUncertainCommit): void;

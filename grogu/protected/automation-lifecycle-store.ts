@@ -97,6 +97,8 @@ async function writeLifecycle(
         reservation: Awaited<ReturnType<typeof authority.reserveReplacement>>;
       }
     | undefined;
+  // Each follower owns and pays for its own receipt, so each reserves against its own quota.
+  const recipients: { reservation: { settle(): void; release(): void }; done: boolean }[] = [];
   const nativeState: {
     admission?: SqliteWorkerOperationAdmission;
     retained?: RetainedWorkerTransactionAdmission;
@@ -114,7 +116,8 @@ async function writeLifecycle(
     assertOwnerCurrent?.();
   };
   const settleStorage = () => {
-    if (!write || (write.entries.length > 0 && !reservation && !replacement && !batch)) {
+    const owned = write?.entries.filter((entry) => entry.profileId === command.profileId) ?? [];
+    if (!write || (owned.length > 0 && !reservation && !replacement && !batch)) {
       throw new Error("Protected automation lifecycle has no storage reservation.");
     }
     if (!reservationSettled) {
@@ -123,7 +126,13 @@ async function writeLifecycle(
       } else if (replacement) {
         replacement.reservation.settle(replacement.current);
       } else {
-        reservation?.settle({ created: write.entries.length > 0, entries: write.entries });
+        reservation?.settle({ created: owned.length > 0, entries: owned });
+      }
+      for (const recipient of recipients) {
+        if (!recipient.done) {
+          recipient.done = true;
+          recipient.reservation.settle();
+        }
       }
       reservationSettled = true;
     }
@@ -147,6 +156,12 @@ async function writeLifecycle(
         replacement.reservation.release(replacement.previous);
       } else {
         reservation?.release();
+      }
+    }
+    for (const recipient of recipients) {
+      if (!recipient.done) {
+        recipient.done = true;
+        recipient.reservation.release();
       }
     }
   };
@@ -175,28 +190,68 @@ async function writeLifecycle(
     await lease.wait();
     await authority.revalidate();
     assertCurrent();
-    const prepared = await runOpenClawStateWorkerOperation(
-      context,
-      (scope) =>
-        scope.execute({
-          type: "protectedAutomationLifecycle.prepare",
-          input: { command, access, entryOverheadBytes: storageEntryOverheadBytes },
-        }),
-      { assertCurrent },
-    );
-    assertCurrent();
-    if (prepared.status !== "prepared") {
-      return prepared;
+    // A follower that cannot take its receipt is left out; it never blocks the owner or others.
+    const skipped: string[] = [];
+    for (;;) {
+      const planned =
+        command.kind === "deliver" && skipped.length
+          ? { ...command, skipRecipients: [...skipped] }
+          : command;
+      const prepared = await runOpenClawStateWorkerOperation(
+        context,
+        (scope) =>
+          scope.execute({
+            type: "protectedAutomationLifecycle.prepare",
+            input: { command: planned, access, entryOverheadBytes: storageEntryOverheadBytes },
+          }),
+        { assertCurrent },
+      );
+      assertCurrent();
+      if (prepared.status !== "prepared") {
+        return prepared;
+      }
+      write = prepared.write;
+      let refused: string | undefined;
+      for (const entry of write.entries) {
+        if (entry.profileId === command.profileId) {
+          continue;
+        }
+        const previous = write.retired.find(
+          (retired) =>
+            retired.profileId === entry.profileId &&
+            retired.id.split(":")[0] === entry.id.split(":")[0],
+        );
+        const held = await authority.reserveRecipient(entry.profileId, {
+          previous,
+          current: entry,
+        });
+        if (!held) {
+          refused = entry.profileId;
+          break;
+        }
+        recipients.push({ reservation: held, done: false });
+      }
+      if (!refused) {
+        break;
+      }
+      for (const recipient of recipients.splice(0)) {
+        recipient.reservation.release();
+      }
+      skipped.push(refused);
     }
-    write = prepared.write;
-    const bytes = write.entries.reduce((sum, entry) => sum + entry.bytes, 0);
+    const owned = write.entries.filter((entry) => entry.profileId === command.profileId);
+    const bytes = owned.reduce((sum, entry) => sum + entry.bytes, 0);
     if (!Number.isSafeInteger(bytes)) {
       throw new Error("Protected automation lifecycle allocation is invalid.");
     }
-    const [current] = write.entries;
+    const [current] = owned;
     const previous =
-      current && write.entries.length === 1
-        ? write.retired.find((entry) => entry.id.split(":")[0] === current.id.split(":")[0])
+      current && owned.length === 1
+        ? write.retired.find(
+            (entry) =>
+              entry.profileId === current.profileId &&
+              entry.id.split(":")[0] === current.id.split(":")[0],
+          )
         : undefined;
     if (write.replacement) {
       batch = {

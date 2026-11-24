@@ -11,6 +11,7 @@ import { readProtectedAutomationCheck } from "./protected-automation-pacing.js";
 import { isOwner } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { readProtectedAutomation } from "./protected-automations.js";
+import { readProtectedAutomationFollowerGrant } from "./protected-automation-sharing.js";
 
 function dto(
   row: ReturnType<typeof runRows>[number],
@@ -100,24 +101,36 @@ export function readProtectedAutomationOwnerInbox(
         "inbox.automation_id as automationId",
         "inbox.result_id as resultId",
         "inbox.created_at_ms as createdAtMs",
+        "run.profile_id as ownerProfileId",
       ])
       .where("inbox.profile_id", "=", input.profileId)
-      .where("run.profile_id", "=", input.profileId)
-      .where("result.central_owner_profile_id", "=", input.profileId)
       .where("run.status", "=", "succeeded")
+      .whereRef("result.central_owner_profile_id", "=", "run.profile_id")
       .whereRef("run.automation_id", "=", "inbox.automation_id")
       .whereRef("run.result_id", "=", "inbox.result_id")
       .whereRef("result.automation_id", "=", "inbox.automation_id")
       .orderBy("inbox.sequence", "desc")
       .limit(200),
   ).rows;
-  const authorized = new Map<string, boolean>();
-  return rows.filter((row) => {
-    if (!authorized.has(row.automationId)) {
-      authorized.set(row.automationId, isOwner(database, input.profileId, row.automationId));
-    }
-    return authorized.get(row.automationId);
-  });
+  // A member's own receipts are visible while they own the automation or follow it as a current
+  // member of its published audience; leaving or revocation hides them at once.
+  const authorized = new Map<string, string | undefined>();
+  return rows
+    .filter((row) => {
+      if (!authorized.has(row.automationId)) {
+        authorized.set(
+          row.automationId,
+          isOwner(database, input.profileId, row.automationId)
+            ? input.profileId
+            : readProtectedAutomationFollowerGrant(database, {
+                profileId: input.profileId,
+                automationId: row.automationId,
+              })?.ownerProfileId,
+        );
+      }
+      return authorized.get(row.automationId) === row.ownerProfileId;
+    })
+    .map(({ ownerProfileId: _owner, ...entry }) => entry);
 }
 
 /** The cadence cursor is queue time, not the missed scheduled deadline or Run now. */

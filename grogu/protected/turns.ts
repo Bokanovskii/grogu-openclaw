@@ -266,7 +266,6 @@ async function runMentionedAgent(
   agent: Readonly<ProtectedAgentDefinition>,
   credential: ReturnType<typeof createRequestModelCredential>,
   recordUsage: (usage: NormalizedUsage | undefined) => void,
-  recordModelRequest: (record: TerminalModelRequestMetadata) => void,
   memberMemory: ProtectedMemberMemoryLease | undefined,
   task = turn.input.text,
 ) {
@@ -341,6 +340,7 @@ async function runMentionedAgent(
           recordUsage(usage);
         },
         requestModelCredential: credential.handle,
+        ...(turn.input.thinking === undefined ? {} : { thinkLevel: turn.input.thinking }),
         memoryAudience: child.memoryGrant?.audience,
         ...(turn.automationContextAccess === "isolated"
           ? { contextIsolation: "isolated" as const }
@@ -527,6 +527,7 @@ async function runMentionedAgent(
               }),
             });
             spawnedRunId = child.runId;
+            turn.markStep("childDispatchReady");
             turn.childEvent({ type: "child-start", runId: child.runId, agentId: agent.id });
           },
           beforeChildDeleteCleanup: async (child) => {
@@ -603,7 +604,8 @@ async function runMentionedAgent(
             child?.memoryGrant?.release();
             settle(outcome);
           },
-          requesterThinkingLevel: turn.input.provider === "sparky" ? "ultra" : undefined,
+          requesterModel: { provider: scope.provider, model: scope.model },
+          requesterThinkingLevel: turn.input.thinking,
         },
       ),
     );
@@ -812,28 +814,7 @@ export function createCanonicalProtectedTurns(options: {
           "Connect this provider first.",
         );
       }
-      const config = turn.input.copilotModel
-        ? {
-            ...options.config,
-            models: {
-              ...options.config.models,
-              providers: {
-                ...options.config.models?.providers,
-                "github-copilot": {
-                  baseUrl: turn.input.copilotModel.baseUrl,
-                  models: [
-                    turn.input.contextSize === undefined
-                      ? turn.input.copilotModel.definition
-                      : {
-                          ...turn.input.copilotModel.definition,
-                          contextTokens: turn.input.contextSize,
-                        },
-                  ],
-                },
-              },
-            },
-          }
-        : options.config;
+      const { config } = options;
       const admission = prepareAgentRunAdmission({
         cfg: config,
         operationalRunInstance: createOperationalRunInstanceRef(turn.runId),
@@ -927,11 +908,23 @@ export function createCanonicalProtectedTurns(options: {
         }
         turn.usage(tokenTotal);
       };
-      const recordModelRequest = turn.modelRequest;
       try {
+        const accountModel = turn.input.copilotModel
+          ? {
+              baseUrl: turn.input.copilotModel.baseUrl,
+              definition:
+                turn.input.contextSize === undefined
+                  ? turn.input.copilotModel.definition
+                  : {
+                      ...turn.input.copilotModel.definition,
+                      contextTokens: turn.input.contextSize,
+                    },
+            }
+          : undefined;
         const requestCredential = createRequestModelCredential({
           provider,
           model,
+          accountModel,
           accessToken,
           expiresAt: turn.input.credential?.expiresAt,
           assertCurrent: turn.assertCurrent,
@@ -1022,6 +1015,9 @@ export function createCanonicalProtectedTurns(options: {
               config,
               provider,
               model,
+              ...(accountModel
+                ? { thinkingCatalog: [{ ...accountModel.definition, provider }] }
+                : {}),
               modelSelectionLocked: true,
               timeoutMs: protectedTurnTimeoutMs,
               blockReplyBreak: "text_end",
@@ -1322,7 +1318,6 @@ export function createCanonicalProtectedTurns(options: {
                     agent,
                     requestCredential,
                     recordUsage,
-                    recordModelRequest,
                     memberMemory,
                   );
                 }
@@ -1334,14 +1329,13 @@ export function createCanonicalProtectedTurns(options: {
                     route.agent,
                     requestCredential,
                     recordUsage,
-                    recordModelRequest,
                     memberMemory,
                     route.task,
                   );
                 }
               }),
-            undefined,
-            recordModelRequest,
+            () => turn.markStep("childProviderOutput"),
+            turn.modelRequest,
           );
           turn.markStep("childrenFinished");
         }

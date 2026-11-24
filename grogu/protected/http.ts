@@ -1332,6 +1332,9 @@ export function createProtectedHttp(options: {
             assertRun();
           }
           const published = write(`${JSON.stringify(event)}\n`);
+          if (published && event.type === "child-delta" && event.text) {
+            timing.at("childTextEnqueued");
+          }
           if (
             published &&
             event.type !== "start" &&

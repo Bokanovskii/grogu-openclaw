@@ -16,6 +16,7 @@ type ChildSessionIdentity = {
 type ChildConstraints = Pick<
   RunEmbeddedAgentInternalParams,
   | "requestModelCredential"
+  | "thinkLevel"
   | "memoryAudience"
   | "contextIsolation"
   | "toolRuntimeBindings"

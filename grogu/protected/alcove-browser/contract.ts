@@ -12,6 +12,9 @@ export const ALCOVE_BROWSER_TOOL_NAMES = [
   "browser_back",
 ] as const;
 
+/** Offered only when the turn's client negotiated member browser control. */
+export const ALCOVE_BROWSER_HANDOFF_TOOL_NAME = "browser_request_user";
+
 export const AlcoveBrowserOpenParametersSchema = node({
   url: Type.String({ minLength: 1, maxLength: 2048 }),
 });
@@ -20,6 +23,7 @@ export const AlcoveBrowserFollowLinkParametersSchema = node({
   ref: Type.String({ minLength: 2, maxLength: 16, pattern: "^e[1-9][0-9]{0,6}$" }),
 });
 export const AlcoveBrowserBackParametersSchema = node({});
+export const AlcoveBrowserRequestUserParametersSchema = node({});
 
 export type AlcoveBrowserOpenParameters = Static<typeof AlcoveBrowserOpenParametersSchema>;
 export type AlcoveBrowserFollowLinkParameters = Static<
@@ -35,6 +39,7 @@ export type AlcoveBrowserPage = {
 };
 export type AlcoveBrowserResult =
   | AlcoveBrowserPage
+  | { status: "returned"; url: string; title: string }
   | {
       status: "blocked" | "invalid" | "unavailable" | "failed";
       reason: string;
@@ -47,6 +52,7 @@ export type AlcoveBrowserBindings = {
   snapshot: () => Promise<AlcoveBrowserResult>;
   followLink: (input: AlcoveBrowserFollowLinkParameters) => Promise<AlcoveBrowserResult>;
   back: () => Promise<AlcoveBrowserResult>;
+  requestUser?: () => Promise<AlcoveBrowserResult>;
 };
 
 export const isAlcoveBrowserOpenParameters = (

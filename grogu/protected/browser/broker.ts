@@ -7,6 +7,12 @@ import {
 } from "../../../src/infra/net/ssrf.js";
 import type { AlcoveBrowserBindings, AlcoveBrowserResult } from "../alcove-browser/contract.js";
 import { startEgressProxy, type EgressProxy } from "./egress-proxy.js";
+import {
+  browserHandoffViewport,
+  committedHttpsOrigin,
+  runBrowserHandoff,
+  type BrowserHandoffHost,
+} from "./handoff.js";
 
 const maxSessions = 4;
 const snapshotMaxChars = 20_000;
@@ -73,7 +79,11 @@ export type ProtectedBrowserSession = {
 };
 
 export type ProtectedBrowserBroker = {
-  openSession: (input: { signal: AbortSignal }) => ProtectedBrowserSession;
+  /** `handoff` is present only for turns whose client negotiated member browser control. */
+  openSession: (input: {
+    signal: AbortSignal;
+    handoff?: BrowserHandoffHost;
+  }) => ProtectedBrowserSession;
   shutdown: () => Promise<void>;
 };
 
@@ -160,7 +170,7 @@ export function createProtectedBrowserBroker(
   };
 
   return {
-    openSession({ signal }) {
+    openSession({ signal, handoff }) {
       let context: BrowserContext | undefined;
       let page: Page | undefined;
       let opening: Promise<Page> | undefined;
@@ -206,7 +216,7 @@ export function createProtectedBrowserBroker(
             acceptDownloads: false,
             serviceWorkers: "block",
             permissions: [],
-            viewport: { width: 1280, height: 800 },
+            viewport: browserHandoffViewport,
           });
           const created = context;
           if (closed || sessionClosed) {
@@ -321,6 +331,34 @@ export function createProtectedBrowserBroker(
               const previous = await page.goBack({ waitUntil: "domcontentloaded" });
               return previous ? describe(page) : { status: "invalid", reason: "No earlier page." };
             }),
+          ...(handoff
+            ? {
+                // Held inside the serial queue, so agent browser calls wait while the member drives.
+                requestUser: () =>
+                  serial(async () => {
+                    if (!page || page.isClosed()) {
+                      return { status: "invalid", reason: "Open a page first." };
+                    }
+                    if (committedHttpsOrigin(page.url()) === null) {
+                      return {
+                        status: "invalid",
+                        reason: "The member can only take control of an https page.",
+                      };
+                    }
+                    const outcome = await runBrowserHandoff({ page, host: handoff, signal });
+                    if (outcome !== "returned" || page.isClosed()) {
+                      return { status: "unavailable", reason: "The member ended browser control." };
+                    }
+                    // Member navigation can leave tokens in the query or fragment; keep only the path.
+                    const returned = new URL(page.url());
+                    return {
+                      status: "returned",
+                      url: `${returned.origin}${returned.pathname}`,
+                      title: (await page.title()).slice(0, 300),
+                    };
+                  }),
+              }
+            : {}),
         },
       };
     },

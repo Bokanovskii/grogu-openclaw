@@ -6,11 +6,13 @@ import { wrapExternalContent } from "openclaw/plugin-sdk/security-runtime";
 import { textResult } from "openclaw/plugin-sdk/tool-results";
 // The captured source plugin resolves its TypeScript sibling directly.
 import {
+  ALCOVE_BROWSER_HANDOFF_TOOL_NAME,
   ALCOVE_BROWSER_PLUGIN_ID,
   ALCOVE_BROWSER_TOOL_NAMES,
   AlcoveBrowserBackParametersSchema,
   AlcoveBrowserFollowLinkParametersSchema,
   AlcoveBrowserOpenParametersSchema,
+  AlcoveBrowserRequestUserParametersSchema,
   AlcoveBrowserSnapshotParametersSchema,
   isAlcoveBrowserFollowLinkParameters,
   isAlcoveBrowserOpenParameters,
@@ -31,11 +33,20 @@ function isAlcoveBrowserBindings(value: unknown): value is AlcoveBrowserBindings
     "followLink" in value &&
     typeof value.followLink === "function" &&
     "back" in value &&
-    typeof value.back === "function"
+    typeof value.back === "function" &&
+    (!("requestUser" in value) ||
+      value.requestUser === undefined ||
+      typeof value.requestUser === "function")
   );
 }
 
 function render(result: AlcoveBrowserResult): string {
+  if (result.status === "returned") {
+    return wrapExternalContent(
+      `The member handed the browser back.\nURL: ${result.url}\nTitle: ${result.title}`,
+      { source: "browser" },
+    );
+  }
   if (result.status !== "ok") {
     return `Browser ${result.status}: ${result.reason}`;
   }
@@ -63,7 +74,22 @@ function createTools(context: OpenClawPluginToolContext<2>) {
   };
   const invalid = () =>
     textResult("Invalid browser request.", { status: "invalid", reason: "invalid parameters" });
+  const requestUser = bindings.requestUser;
   return [
+    ...(requestUser
+      ? [
+          {
+            name: ALCOVE_BROWSER_HANDOFF_TOOL_NAME,
+            label: "Ask member to take control",
+            description:
+              "Pause and let the member see and drive this chat's private browser on the current https page with taps, scrolling, Enter and Tab, for example to accept a consent prompt or choose an option. First say in your reply why. The member cannot type text, passwords or codes here, so do not use this for signing in. Waits until the member hands the browser back; if they cancel, this reply ends.",
+            parameters: AlcoveBrowserRequestUserParametersSchema,
+            async execute() {
+              return invoke(requestUser);
+            },
+          },
+        ]
+      : []),
     {
       name: ALCOVE_BROWSER_TOOL_NAMES[0],
       label: "Open web page",
@@ -119,7 +145,7 @@ export default definePluginEntry({
         contextVersion: 2,
         create: createTools,
       },
-      { names: [...ALCOVE_BROWSER_TOOL_NAMES] },
+      { names: [...ALCOVE_BROWSER_TOOL_NAMES, ALCOVE_BROWSER_HANDOFF_TOOL_NAME] },
     );
   },
 });

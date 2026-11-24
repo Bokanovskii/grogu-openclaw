@@ -10,6 +10,8 @@ export {
   type ProtectedMemoryListResponse,
   type ProtectedMemoryReadResponse,
 } from "./protected-memory.js";
+import { ProtectedBrowserHandoffSchema } from "./protected-browser.js";
+export * from "./protected-browser.js";
 
 const id = Type.String({ minLength: 1, maxLength: 256 });
 const protectedAgentId = Type.String({ pattern: "^[a-z][a-z0-9-]{0,47}$" });
@@ -179,6 +181,10 @@ export const ProtectedTurnEventSchema = Type.Union([
     contextSize: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
   ProtectedWidgetDraftEventSchema,
+  node({
+    type: Type.Literal("browser-handoff"),
+    handoff: ProtectedBrowserHandoffSchema,
+  }),
   node({ type: Type.Literal("done"), chatVersion: Type.String() }),
   node({ type: Type.Literal("error"), code: Type.String(), message: Type.String() }),
 ]);

@@ -144,6 +144,8 @@ import {
   createProtectedAutomationCatalog,
   validateProtectedAutomationDraft,
 } from "./automations.js";
+import { browserHandoffResponse } from "./browser/handoff-http.js";
+import type { BrowserHandoffControl } from "./browser/handoff.js";
 import {
   createStorageAdmission,
   measureProtectedStorage,
@@ -244,6 +246,7 @@ type Run = {
   sessionHash?: string;
   controller: AbortController;
   steering: Map<string, AbortController>;
+  browserHandoff?: BrowserHandoffControl;
 };
 type ProtectedTurnCompletion = {
   runId: string;
@@ -425,6 +428,7 @@ function accessReceipt(request: Request): string | undefined {
   const value = cookie?.slice("protected_access_receipt=".length);
   return value && /^[A-Za-z0-9_-]{43}$/u.test(value) ? value : undefined;
 }
+const browserHandoffCapability = "browser-handoff-v2";
 function supportsAutomationsChat(request: Request) {
   return hasClientCapability(request.headers, automationsChatCapability);
 }
@@ -457,6 +461,8 @@ export function createProtectedHttp(options: {
   stateDir: string;
   accessIssuer: string;
   ownerSubject?: string;
+  /** Present only when the operator enabled the private browser; `handoff` adds member control. */
+  browser?: { handoff: boolean };
   onRemoveSubject?: (subject: string) => void;
   onPolicyChanged?: () => void;
   isPolicyInFlight?: (id: string) => boolean;
@@ -1234,6 +1240,9 @@ export function createProtectedHttp(options: {
               return true;
             } catch {
               attached = false;
+              if (run.browserHandoff) {
+                run.controller.abort();
+              }
             }
           }
           return false;
@@ -1305,6 +1314,32 @@ export function createProtectedHttp(options: {
                     input,
                     ...(automationChat ? { automationChat } : {}),
                     ...(browserEligible && !authoring ? { browserAccess: "fresh" as const } : {}),
+                    ...(browserEligible &&
+                    !authoring &&
+                    options.browser?.handoff &&
+                    hasClientCapability(request.headers, browserHandoffCapability)
+                      ? {
+                          browserHandoff: {
+                            publish: (handoff) => {
+                              if (!signal.aborted) {
+                                send({ type: "browser-handoff", handoff });
+                              }
+                            },
+                            register: (control) => {
+                              run.browserHandoff = control;
+                              if (!attached) {
+                                run.controller.abort();
+                              }
+                              return () => {
+                                if (run.browserHandoff === control) {
+                                  run.browserHandoff = undefined;
+                                }
+                              };
+                            },
+                            end: () => run.controller.abort(),
+                          },
+                        }
+                      : {}),
                     mentionedAgents,
                     agent: selectedAgent,
                     ...(authoring ? {} : { routing: agentRouting }),
@@ -1649,6 +1684,9 @@ export function createProtectedHttp(options: {
       cancel() {
         // Stop is an explicit route. A closed connection only detaches the reader.
         attached = false;
+        if (run.browserHandoff) {
+          run.controller.abort();
+        }
       },
     });
     return {
@@ -3393,8 +3431,7 @@ export function createProtectedHttp(options: {
         return { id: profile.id, displayName: name.slice(0, 40), setupRequired: !name, icon };
       };
       if (pathname === "/me" && method === "GET") {
-        const disclosure =
-          "Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.";
+        const disclosure = `Encrypted on Grogu's server. The server admin can read your chats. Your chats and generated files are stored on the server until you delete them, with no backups, so a disk failure can lose your history. The server records your last app activity, including automatic refreshes, and keeps daily message counts, token totals, model names, and error counts for up to 90 days. The server uses personal provider credentials only for the current request. Agents can search the public web through DuckDuckGo, which receives the search words, and can fetch public URLs.${options.browser ? " Agents in your own chats can also open public web pages in a private browser on Grogu's server that starts empty and is deleted when the reply ends; visited sites see Grogu's server, not your device." : ""}`;
         return profileJson({
           user: profileCapability
             ? accountUser(profile.displayName, await readAccountIcon())
@@ -3424,6 +3461,10 @@ export function createProtectedHttp(options: {
                       : {}),
                   },
                 }
+              : {}),
+            ...(options.browser?.handoff &&
+            hasClientCapability(request.headers, browserHandoffCapability)
+              ? { browserHandoff: { version: 2 } }
               : {}),
           },
         });
@@ -5651,6 +5692,46 @@ export function createProtectedHttp(options: {
           startedAt,
         });
         return turn.response;
+      }
+      const handoffRoute =
+        /^runs\/([^/]+)\/browser-handoffs\/([A-Za-z0-9_-]{22})\/(claim|frame|input|return|cancel)$/u.exec(
+          rest ?? "",
+        );
+      if (handoffRoute) {
+        requireProfile();
+        const [, runId, handoffId, action] = handoffRoute;
+        const owner = runs.get(id);
+        const handoff = owner?.browserHandoff;
+        // The same member, sign-in session and run that started the turn own its handoff.
+        if (
+          !action ||
+          !owner ||
+          !handoff ||
+          owner.id !== runId ||
+          owner.profileId !== profile.id ||
+          owner.sessionHash === undefined ||
+          owner.sessionHash !== identity.sessionId ||
+          handoff.id !== handoffId ||
+          owner.controller.signal.aborted
+        ) {
+          return notFound();
+        }
+        return browserHandoffResponse({
+          request,
+          action,
+          control: handoff,
+          readBody: () => body(request),
+          revalidate: async () => {
+            await revalidate();
+            if (
+              runs.get(id) !== owner ||
+              owner.browserHandoff !== handoff ||
+              owner.controller.signal.aborted
+            ) {
+              notFound();
+            }
+          },
+        });
       }
       const control = /^runs\/([^/]+)\/(steer|stop)(?:\/([^/]+))?$/u.exec(rest ?? "");
       const run = runs.get(id);

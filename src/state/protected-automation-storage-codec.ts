@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
+import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.js";
 import {
@@ -17,14 +18,27 @@ export function protectedAutomationDefinitionContext(id: string): string {
   return protectedStorageValueContext("protected_automations", "definition_json", [id]);
 }
 
-export function storedDefinition(db: DatabaseSync, id: string, definitionJson: string): string {
-  if (!isSqliteStorageValueEncryptionStrict(db)) {
-    return definitionJson;
-  }
-  // The existing schema requires valid JSON, including for protected ciphertext.
-  return JSON.stringify(
-    sealSqliteStorageText(db, definitionJson, protectedAutomationDefinitionContext(id)),
-  );
+// Reserve one full SQLite INTEGER per populated bound, independent of its on-page encoding.
+const boundBytes = 8;
+/* kysely-allow-raw: use the stored UTF-8 payload and the same logical INTEGER charge on all receipts. */
+export const storedDefinitionCharge = sql<number>`length(CAST(definition_json AS BLOB)) +
+  ${boundBytes} * ((pacing_min_ms IS NOT NULL) + (pacing_max_ms IS NOT NULL))`;
+
+export function storedDefinition(db: DatabaseSync, id: string, draft: ProtectedAutomationDraft) {
+  // The old strict reader must still see only its fixed fallback schedule, even after decryption.
+  const { pacing, ...fallback } = draft;
+  const json = JSON.stringify(fallback);
+  const value = isSqliteStorageValueEncryptionStrict(db)
+    ? JSON.stringify(sealSqliteStorageText(db, json, protectedAutomationDefinitionContext(id)))
+    : json;
+  return {
+    columns: {
+      definition_json: value,
+      pacing_min_ms: pacing?.minMs ?? null,
+      pacing_max_ms: pacing?.maxMs ?? null,
+    },
+    bytes: Buffer.byteLength(value) + (pacing ? 2 * boundBytes : 0),
+  };
 }
 
 export function storedDefinitionBytes(db: DatabaseSync, id: string): number {
@@ -32,7 +46,7 @@ export function storedDefinitionBytes(db: DatabaseSync, id: string): number {
     db,
     getNodeSqliteKysely<ProtectedAutomationDatabase>(db)
       .selectFrom("protected_automations")
-      .select(sql<number>`length(CAST(definition_json AS BLOB))`.as("bytes"))
+      .select(storedDefinitionCharge.as("bytes"))
       .where("id", "=", id),
   ).rows[0];
   if (!row) {

@@ -1,9 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
-import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
+import { storedDefinitionCharge } from "./protected-automation-storage-codec.js";
 import type {
   ProtectedAutomationDatabase,
   ProtectedAutomationStorageUsage,
@@ -54,8 +54,7 @@ export function retireProtectedAutomationMemberDefinitions(
     .returning([
       "id",
       "central_owner_profile_id as profileId",
-      /* kysely-allow-raw: SQLite BLOB length counts UTF-8 bytes for deleted definitions. */
-      sql<number>`length(CAST(definition_json AS BLOB))`.as("definitionBytes"),
+      storedDefinitionCharge.as("definitionBytes"),
     ]);
   if (!fenced) {
     definitions = definitions.where("creator_profile_id", "=", profileId).where("enabled", "=", 0);

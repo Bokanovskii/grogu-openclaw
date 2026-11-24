@@ -48,6 +48,7 @@ import { readAdmittedPublishedModelCatalog } from "../../prepared-model-runtime.
 import { assertPreparedModelRuntimeInputCurrent } from "../../prepared-model-runtime.errors.js";
 import type { PreparedModelRuntimeSnapshot } from "../../prepared-model-runtime.js";
 import { capturePreparedModelRuntimeLifetime } from "../../prepared-model-runtime.lifecycle.js";
+import { resolveRequestModelConfig } from "../../request-model-credential.js";
 import { resolveTieredModel } from "../model-resolution.js";
 import { createEmptyAgentDiscoveryStores } from "../model.js";
 import type { RunEmbeddedAgentInternalParams } from "./internal-params.js";
@@ -457,7 +458,7 @@ export async function resolveEmbeddedRunModelSetup(params: {
       requestedRouteResolution: modelSelectionChangedByHook
         ? "raw"
         : runParams.requestedRouteResolution,
-      config: runParams.config,
+      config: resolveRequestModelConfig(runParams, provider, modelId),
       workspaceDir: params.workspaceDir,
       authProfileId: runParams.authProfileId,
       preparedModelRuntime: params.preparedModelRuntime,

@@ -49,6 +49,8 @@ import type { ProviderResolveDynamicModelContext } from "openclaw/plugin-sdk/cor
 import {
   COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS,
   fetchCopilotModelCatalog,
+  getCopilotCatalogContextSizes,
+  isCopilotCatalogModelVisible,
   resolveCopilotForwardCompatModel,
   selectCopilotStarterModel,
 } from "./models.js";
@@ -750,6 +752,41 @@ describe("fetchCopilotModelCatalog", () => {
     expect(opus45?.compat).toEqual({
       supportsEagerToolInputStreaming: false,
       supportedReasoningEfforts: ["low", "medium", "high", "max"],
+    });
+  });
+
+  it("requests the catalog with price tiers and exposes both prompt sizes", async () => {
+    const standard = { input_price: 10, output_price: 50, cache_price: 1, cache_write_price: 12 };
+    const long = { input_price: 20, output_price: 75, cache_price: 2, cache_write_price: 25 };
+    const limits = { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 };
+    const entry = {
+      id: "tiered-chat",
+      model_picker_enabled: true,
+      policy: { state: "enabled" },
+      capabilities: { type: "chat", limits },
+      billing: {
+        token_prices: {
+          batch_size: 1_000_000,
+          default: { ...standard, context_max: 272_000 },
+          long_context: { ...long, context_max: 872_000 },
+        },
+      },
+    };
+    const catalog = await fetchCatalogWithFetch({
+      copilotApiToken: "fixture-token",
+      baseUrl: "https://api.githubcopilot.com",
+      signal: new AbortController().signal,
+      fetchImpl: vi.fn<typeof fetch>(async (_url, init) => {
+        expect(new Headers(init?.headers).get("x-github-api-version")).toBe("2026-06-01");
+        return Response.json({ data: [entry] });
+      }),
+    });
+
+    const model = expectDefined(catalog.find(isCopilotCatalogModelVisible), "visible tiered model");
+    expect(getCopilotCatalogContextSizes(model)).toEqual({
+      options: [272_000, 872_000],
+      default: 272_000,
+      longContextSurcharge: true,
     });
   });
 

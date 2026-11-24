@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
+import { root } from "../../src/infra/fs-safe.js";
 import { SqliteWorkerError } from "../../src/infra/sqlite-worker-contract.js";
 import { createSqliteWorkerOperationAdmission } from "../../src/infra/sqlite-worker-operation-admission.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
@@ -28,6 +30,7 @@ import {
   listProtectedAdmissions,
   removeProtectedAdmission,
 } from "./admission-store.js";
+import { createProtectedAgentCatalog } from "./agents.js";
 import {
   listProtectedAutomationLifecycleRuns,
   listProtectedAutomationOwnerInbox,
@@ -45,7 +48,11 @@ import {
 import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import { createProtectedAutomationStorageRecoveryOwner } from "./automation-storage-recovery.js";
-import { readOwnedProtectedAutomationStorageRecord } from "./automations-store.js";
+import {
+  createProtectedAutomationRecord,
+  readOwnedProtectedAutomationStorageRecord,
+} from "./automations-store.js";
+import { createProtectedChats } from "./chats.js";
 import {
   readProtectedFeedbackStorageUsage,
   submitProtectedFeedbackReport,
@@ -70,7 +77,7 @@ type WithoutOwner<Command> = Command extends unknown
 
 async function fixture(
   t: { after(fn: () => Promise<void>): void },
-  contextAccess?: ProtectedAutomationDraft["contextAccess"],
+  options: Pick<ProtectedAutomationDraft, "contextAccess" | "pacing"> = {},
 ) {
   const home = path.resolve(".artifacts", `automation-lifecycle-${randomUUID()}`);
   const stateDir = path.join(home, "state");
@@ -121,7 +128,7 @@ async function fixture(
     model: { provider: "sparky", id: "00000000-0000-4000-8000-000000000001" },
     thinking: "low",
     schedule: { kind: "every", everyMs: 60_000 },
-    ...(contextAccess === undefined ? {} : { contextAccess }),
+    ...options,
   };
   const context = captureProtectedStateWorkerContext(stateDir);
   const mutationAuthority = { profileId: ownerId, assertCurrent: () => {}, admitStorage: () => {} };
@@ -261,7 +268,7 @@ function authority(profileId: string) {
 }
 
 void test("isolated automation results require a matching active run", async (t) => {
-  const f = await fixture(t, "isolated");
+  const f = await fixture(t, { contextAccess: "isolated" });
   const owner = authority(f.ownerId);
   const runId = randomUUID();
   const chatId = randomUUID();
@@ -361,6 +368,331 @@ void test("isolated automation results require a matching active run", async (t)
     }),
     { status: "conflict" },
   );
+});
+
+void test("isolated automation edits wait until the active run settles", async (t) => {
+  const f = await fixture(t, { contextAccess: "isolated" });
+  const owner = authority(f.ownerId);
+  const runId = randomUUID();
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  const patch = () =>
+    patchProtectedAutomationWithAdmission(
+      captureProtectedStateWorkerContext(f.stateDir),
+      {
+        profileId: f.ownerId,
+        automationId: f.automationId,
+        expectedRevision: f.revision,
+        definition: { ...f.definition, instructions: "Updated synthetic instructions." },
+        now: 20,
+      },
+      { profileId: f.ownerId, assertCurrent: () => {}, admitStorage: () => {} },
+    );
+
+  assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+  assert.deepEqual(
+    await write({
+      kind: "queue",
+      runId,
+      definitionRevision: f.revision,
+      trigger: "manual",
+      scheduledAtMs: 10,
+      now: 10,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(await patch(), { status: "automation_busy" });
+  assert.deepEqual(await write({ kind: "start", runId, chatId: randomUUID(), now: 11 }), {
+    status: "committed",
+  });
+  assert.deepEqual(await patch(), { status: "automation_busy" });
+  assert.deepEqual(
+    await write({
+      kind: "finish",
+      runId,
+      now: 15,
+      outcome: { status: "failed", errorCode: "turn_failed" },
+    }),
+    { status: "committed" },
+  );
+  assert.equal((await patch()).status, "updated");
+});
+
+void test("isolated automation creation refuses identities with retained run history", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId);
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { kind: "provision", profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    ),
+    { status: "committed" },
+  );
+  const chatId = randomUUID();
+  const lifecycleId = randomUUID();
+  const resultId = randomUUID();
+  const databasePath = resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: f.stateDir });
+  await closeOpenClawStateDatabaseByPathAsync(databasePath);
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.prepare(
+      "INSERT INTO protected_automation_run_chats (automation_id, profile_id, chat_id, charged_bytes) VALUES (?, ?, ?, 1)",
+    ).run(chatId, f.ownerId, randomUUID());
+    db.prepare(
+      "INSERT INTO protected_automation_run_lifecycle (id, automation_id, profile_id, definition_revision, trigger, scheduled_at_ms, queued_at_ms, status, charged_bytes) VALUES (?, ?, ?, 1, 'manual', 1, 1, 'queued', 0)",
+    ).run(randomUUID(), lifecycleId, f.ownerId);
+    db.prepare(
+      "INSERT INTO protected_automation_runs (id, automation_id, central_owner_profile_id, job_id, run_at_ms, native_run_id, version, definition_revision, completed_at_ms, payload_json, charged_bytes) VALUES (?, ?, ?, ?, 1, ?, ?, 1, 2, '{}', 0)",
+    ).run(randomUUID(), resultId, f.ownerId, randomUUID(), randomUUID(), randomUUID());
+  } finally {
+    db.close();
+  }
+  const context = captureProtectedStateWorkerContext(f.stateDir);
+  const mutation = { profileId: f.ownerId, assertCurrent: () => {}, admitStorage: () => {} };
+  for (const automationId of [chatId, lifecycleId, resultId]) {
+    await assert.rejects(
+      createProtectedAutomationWithAdmission(
+        context,
+        {
+          profileId: f.ownerId,
+          automationId,
+          definition: { ...f.definition, contextAccess: "isolated" },
+          now: 3,
+        },
+        mutation,
+      ),
+      /retained run history/u,
+    );
+  }
+});
+
+void test("isolated creation retains its lease and storage until a failed receipt settles", async (t) => {
+  const f = await fixture(t);
+  const automationId = randomUUID();
+  const recovery = createProtectedAutomationStorageRecoveryOwner(() => {});
+  let pending = 0;
+  let charged = 0;
+  let committed = 0;
+  let failSettlement = true;
+  const storage = {
+    chargeAutomationCreate(bytes: number) {
+      charged += bytes;
+    },
+    settleAutomationCreate(bytes: number, created: boolean) {
+      if (created && failSettlement) {
+        throw new Error("Synthetic creation receipt settlement failed.");
+      }
+      if (created) {
+        committed += bytes;
+      } else {
+        charged -= bytes;
+      }
+    },
+    retainPendingWrite() {
+      pending++;
+      return () => {
+        pending--;
+      };
+    },
+    assertResult() {},
+  };
+  const create = () =>
+    createProtectedAutomationRecord(
+      f.stateDir,
+      {
+        profileId: f.ownerId,
+        automationId,
+        definition: { ...f.definition, contextAccess: "isolated" },
+        now: 3,
+      },
+      { profileId: f.ownerId, assertCurrent() {} },
+      storage,
+      {
+        hasRunHistory: async () => false,
+        enrollPublication: recovery.enrollPublication,
+        retainUncertainCreateCommit: recovery.retainUncertainCreateCommit,
+        reconcile() {},
+      },
+    );
+  await assert.rejects(
+    create(),
+    (error: unknown) => error instanceof SqliteWorkerError && error.code === "outcome-unknown",
+  );
+  assert.equal(recovery.status().pending, 1);
+  assert.equal(pending, 1);
+  assert.ok(charged > 0);
+  assert.equal(committed, 0);
+  await assert.rejects(create(), /requires storage recovery/u);
+  assert.equal(pending, 1);
+  failSettlement = false;
+  assert.deepEqual(await recovery.reconcile(), { resolved: 1, pending: 0 });
+  assert.equal(committed, charged);
+  assert.equal(pending, 0);
+  assert.equal((await create())?.id, automationId);
+  assert.equal(
+    (
+      await readOwnedProtectedAutomationStorageRecord(f.stateDir, automationId, {
+        profileId: f.ownerId,
+        assertCurrent() {},
+      })
+    )?.definition.contextAccess,
+    "isolated",
+  );
+});
+
+void test("isolated creation waits for deletion before checking orphaned run chats", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId);
+  const usersDir = path.join(f.stateDir, "users");
+  await mkdir(usersDir);
+  const chats = createProtectedChats({
+    stateDir: f.stateDir,
+    maxChatsPerUser: 3,
+    agentCatalog: createProtectedAgentCatalog([]),
+    usersRoot: await root(usersDir),
+    maxFileBytes: 64_000,
+  });
+  const chatAuthority = { profileId: f.ownerId, assertCurrent() {} };
+  await chats.create(chatAuthority, "Synthetic run", undefined, undefined, {
+    chatId: randomUUID(),
+    automationId: f.automationId,
+  });
+  const removalStarted = Promise.withResolvers<void>();
+  const releaseRemoval = Promise.withResolvers<void>();
+  const creationStarted = Promise.withResolvers<void>();
+  t.after(() => releaseRemoval.resolve());
+  let held = false;
+  const removal = writeProtectedAutomationLifecycle(
+    f.stateDir,
+    {
+      kind: "remove",
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      expectedRevision: f.revision,
+    },
+    {
+      ...owner.admission,
+      retireDefinition() {},
+      async revalidate() {
+        if (!held) {
+          held = true;
+          removalStarted.resolve();
+          await releaseRemoval.promise;
+        }
+      },
+    },
+  );
+  await removalStarted.promise;
+  const creation = createProtectedAutomationRecord(
+    f.stateDir,
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      definition: { ...f.definition, contextAccess: "isolated" },
+      now: 20,
+    },
+    chatAuthority,
+    {
+      chargeAutomationCreate: () => assert.fail("History must be checked before charging."),
+      settleAutomationCreate: () => assert.fail("No creation should be settled."),
+      retainPendingWrite: () => () => {},
+      assertResult() {},
+    },
+    {
+      hasRunHistory: (id) => chats.hasAutomationRunHistory(chatAuthority, id),
+      enrollPublication() {
+        creationStarted.resolve();
+        return { finish() {} };
+      },
+      retainUncertainCreateCommit: () => assert.fail("No native create should be admitted."),
+      reconcile() {},
+    },
+  );
+  void creation.catch(() => {});
+  await creationStarted.promise;
+  releaseRemoval.resolve();
+  assert.deepEqual(await removal, { status: "committed" });
+  await assert.rejects(creation, { code: "automation_history_conflict" });
+});
+
+void test("restores scheduled failure backoff and ignores manual or replaced runs", async (t) => {
+  const f = await fixture(t, { pacing: { minMs: 60_000, maxMs: 360_000 } });
+  const owner = authority(f.ownerId);
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  const cursor = async () =>
+    (await readProtectedAutomationLastScheduledAttempt(f.stateDir, f.automationId, owner.admission))
+      ?.check;
+  const queue = async (trigger: "scheduled" | "manual", now: number) => {
+    const runId = randomUUID();
+    assert.equal(
+      (
+        await write({
+          kind: "queue",
+          runId,
+          definitionRevision: f.revision,
+          trigger,
+          scheduledAtMs: now,
+          now,
+        })
+      ).status,
+      "committed",
+    );
+    return runId;
+  };
+  const fail = async (runId: string, now: number) =>
+    assert.equal(
+      (
+        await write({
+          kind: "finish",
+          runId,
+          now,
+          outcome: { status: "failed", errorCode: "provider_busy" },
+        })
+      ).status,
+      "committed",
+    );
+  await write({ kind: "provision" });
+  for (const at of [10, 60_011, 120_012]) {
+    await fail(await queue("scheduled", at), at + 1);
+  }
+  const expected = {
+    version: String(f.revision),
+    atMs: 420_013,
+    reason: "backoff",
+    consecutiveFailures: 3,
+  };
+  await closeOpenClawStateDatabaseByPathAsync(
+    resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: f.stateDir }),
+  );
+  assert.deepEqual(await cursor(), expected);
+  await fail(await queue("manual", 130_000), 130_001);
+  assert.deepEqual(await cursor(), expected);
+  const stale = await queue("scheduled", expected.atMs);
+  const paused = await patchProtectedAutomationWithAdmission(
+    captureProtectedStateWorkerContext(f.stateDir),
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      expectedRevision: f.revision,
+      definition: f.definition,
+      enabled: false,
+      now: expected.atMs + 1,
+    },
+    { profileId: f.ownerId, assertCurrent() {}, admitStorage() {} },
+  );
+  assert.equal(paused.status, "updated");
+  await fail(stale, expected.atMs + 2);
+  assert.deepEqual(await cursor(), expected);
 });
 
 void test("paused automations allow manual lifecycle runs but refuse scheduled runs", async (t) => {

@@ -132,3 +132,33 @@ void test("retains only the saved resolvable agent when it leaves new-agent disc
     }
   }
 });
+
+void test("paced drafts require an advertised interval and an in-bounds fallback", () => {
+  const catalog = createProtectedAutomationCatalog({
+    agents,
+    models: [model],
+    calendarDraftValidationAvailable: true,
+  });
+  assert.ok(catalog);
+  const paced = {
+    ...catalog,
+    schedule: { ...catalog.schedule, pacing: { minimumMs: 60_000, maximumMs: 2_592_000_000 } },
+  };
+  const draft = {
+    ...baseDraft,
+    schedule: { kind: "every", everyMs: 90_000 },
+    pacing: { minMs: 60_000, maxMs: 120_000 },
+  };
+  assert.equal(validateProtectedAutomationDraft(draft, catalog).valid, false);
+  assert.equal(validateProtectedAutomationDraft(draft, paced).valid, true);
+  for (const candidate of [
+    { ...draft, schedule: { kind: "cron", expr: "0 7 * * *", tz: "America/Los_Angeles" } },
+    { ...draft, pacing: { minMs: 1, maxMs: 120_000 } },
+    { ...draft, pacing: { minMs: 120_000, maxMs: 180_000 } },
+    { ...draft, pacing: { minMs: 60_000, maxMs: 80_000 } },
+    { ...draft, pacing: { minMs: 60_000.5, maxMs: 120_000 } },
+    { ...draft, pacing: { minMs: 60_000, maxMs: 2_592_000_001 } },
+  ]) {
+    assert.equal(validateProtectedAutomationDraft(candidate, paced).valid, false);
+  }
+});

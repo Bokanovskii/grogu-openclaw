@@ -15,6 +15,7 @@ import {
   AutomationsChatProposeCreateParametersSchema,
   AutomationsChatProposePatchParametersSchema,
   AutomationsChatReadParametersSchema,
+  NEXT_CHECK_TOOL_NAME,
   isAutomationsAuthoringSaveParameters,
   isAutomationsAuthoringUpdateParameters,
   isAutomationsChatListParameters,
@@ -24,6 +25,7 @@ import {
   type AutomationsAuthoringBindings,
   type AutomationsChatBindings,
 } from "./contract.ts";
+import { createNextCheckTool } from "./next-check.ts";
 
 function isAutomationsAuthoringBindings(value: unknown): value is AutomationsAuthoringBindings {
   return (
@@ -192,6 +194,10 @@ export default definePluginEntry({
         create: (context) => createTools(context),
       },
       { names: [...AUTOMATIONS_CHAT_TOOL_NAMES, ...AUTOMATIONS_AUTHORING_TOOL_NAMES] },
+    );
+    api.registerTool(
+      { contextVersion: 2, create: createNextCheckTool },
+      { name: NEXT_CHECK_TOOL_NAME, optional: true },
     );
   },
 });

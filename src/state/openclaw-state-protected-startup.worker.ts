@@ -6,6 +6,10 @@ import { withStateDatabaseSchemaMaintenance } from "../infra/state-database-main
 import { hasSqliteStorageValueEncryption } from "../storage/sqlite-encryption.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db-contract.js";
 import { openTrackedStateDatabase } from "./openclaw-state-db-handle.js";
+import {
+  ensureFirstUseStateColumns,
+  missingFirstUseStateColumns,
+} from "./openclaw-state-db-schema-helpers.js";
 import { assertSupportedStateSchemaVersion } from "./openclaw-state-db-schema-version.js";
 import { assertOpenClawStateWriteAllowed } from "./openclaw-state-ownership.js";
 import { cleanupProtectedSharedStateAfterMigration } from "./openclaw-state-protected-cleanup.js";
@@ -69,5 +73,17 @@ export function prepareProtectedSharedStateInWorker(params: {
       });
     }
     assertSupportedStateSchemaVersion(db, pathname);
+    const automationTables = ["protected_automations", "protected_automation_run_chats"];
+    if (!missingFirstUseStateColumns(db, automationTables).length) {
+      return;
+    }
+    write(
+      () => {
+        admit("transaction");
+        ensureFirstUseStateColumns(db, automationTables);
+        admit("commit");
+      },
+      { operationLabel: "state.protected.automationPacingSchema" },
+    );
   });
 }

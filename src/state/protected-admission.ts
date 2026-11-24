@@ -114,6 +114,7 @@ const getNodeSqliteKysely = (db: DatabaseSync) =>
 
 const ensureSchema = createOpenClawStateSchemaEnsurer({
   table: "protected_access_requests",
+  migrateExistingTables: ["protected_automations"],
   additionalTables: [
     "protected_admissions",
     "protected_admission_migrations",

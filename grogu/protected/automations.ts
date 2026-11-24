@@ -1,5 +1,6 @@
 import { Value } from "typebox/value";
 import {
+  isValidProtectedAutomationPacing,
   ProtectedAutomationDraftSchema,
   type ProtectedAgentCatalogDto,
   type ProtectedAutomationCatalog,
@@ -190,6 +191,21 @@ export function validateProtectedAutomationDraft(
     if (scheduleError) {
       errors.push(scheduleError);
     }
+    if (resolvedDraft.pacing) {
+      if (!catalog.schedule.pacing) {
+        errors.push(
+          error("pacing", "unsupported_schedule", "Model-chosen checks are unavailable."),
+        );
+      } else if (!isValidProtectedAutomationPacing(resolvedDraft.schedule, resolvedDraft.pacing)) {
+        errors.push(
+          error(
+            "pacing",
+            "invalid_value",
+            "Choose an interval fallback between the minimum and maximum delays.",
+          ),
+        );
+      }
+    }
   }
   if (
     resolvedDraft &&
@@ -224,6 +240,7 @@ export function applyProtectedAutomationPatch(
   delete definition.enabled;
   delete definition.state;
   delete definition.nextCheckAt;
+  delete definition.nextCheckReason;
   for (const [key, value] of Object.entries(patch)) {
     if (key === "enabled") {
       continue;

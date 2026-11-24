@@ -421,6 +421,12 @@ Only the owner can read automation definitions, runs, lifecycle history, and
 inbox entries. Missing or legacy origin information never grants follower
 access or delivery.
 
+The future follower result routes use `/automations/public/:id/runs` and
+`/automations/public/:id/runs/:resultId`. They return only the result ID, start
+time, completion time, and text. They remain unavailable until the public
+automation boundary is enabled. A current follow and publication are required
+for every read. Member-context and legacy results remain private.
+
 This restriction does not affect owner access to private automations or
 explicit chat-sharing grants. Chat shares remain a separate, owner-granted
 read-only permission and do not publish an automation.

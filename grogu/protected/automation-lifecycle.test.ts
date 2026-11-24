@@ -1633,7 +1633,13 @@ async function receiptFixture(
       }),
       { status: "committed" },
     );
-    return { runId, deliveredAtMs: now + 4 };
+    return {
+      runId,
+      resultId: saved.id,
+      runAtMs: now,
+      completedAtMs: now + 2,
+      deliveredAtMs: now + 4,
+    };
   };
   const deliver = (finished: { runId: string; deliveredAtMs: number }) =>
     write({ kind: "deliver", runId: finished.runId, now: finished.deliveredAtMs });
@@ -1666,6 +1672,51 @@ async function receiptFixture(
     receipts,
   };
 }
+
+void test("follower results require a current grant and an isolated finished run", async (t) => {
+  const r = await receiptFixture(t, "isolated");
+  const follower = await r.newFollower();
+  const run = await r.run();
+  const read = (profileId: string, id?: string) =>
+    executeOpenClawStateWorker(captureProtectedStateWorkerContext(r.f.stateDir), {
+      type: "protectedAutomationResults.publicRuns",
+      input: { profileId, automationId: r.f.automationId, id },
+    });
+  assert.equal(await read(follower.id), undefined);
+  await r.follow(follower, false);
+  const expected = {
+    id: run.resultId,
+    runAtMs: run.runAtMs,
+    completedAtMs: run.completedAtMs,
+    text: "Synthetic private result.",
+  };
+  assert.deepEqual(await read(follower.id), [expected]);
+  assert.deepEqual(await read(follower.id, run.resultId), [expected]);
+  assert.deepEqual(await read(follower.id, randomUUID()), []);
+  await r.unfollow(follower);
+  assert.equal(await read(follower.id), undefined);
+  await r.follow(follower, false);
+  await r.unpublish();
+  assert.equal(await read(follower.id), undefined);
+});
+
+void test("follower results refuse legacy member-context runs", async (t) => {
+  const legacy = await receiptFixture(t, "member");
+  const legacyFollower = await legacy.newFollower();
+  await legacy.follow(legacyFollower, false);
+  const privateRun = await legacy.run();
+  assert.equal(
+    await executeOpenClawStateWorker(captureProtectedStateWorkerContext(legacy.f.stateDir), {
+      type: "protectedAutomationResults.publicRuns",
+      input: {
+        profileId: legacyFollower.id,
+        automationId: legacy.f.automationId,
+        id: privateRun.resultId,
+      },
+    }),
+    undefined,
+  );
+});
 
 void test("each subscribed follower owns and pays for its own receipt of an isolated run", async (t) => {
   const r = await receiptFixture(t, "isolated");

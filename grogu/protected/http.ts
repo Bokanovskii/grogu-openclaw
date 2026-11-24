@@ -125,7 +125,10 @@ import {
   type ProtectedAutomationLifecycleOwnerAuthority,
 } from "./automation-lifecycle-store.js";
 import { handleProtectedAutomationResultsRoute } from "./automation-results-http.js";
-import { readProtectedAutomationResultStorageUsage } from "./automation-results-read.js";
+import {
+  listProtectedPublicAutomationRunRecords,
+  readProtectedAutomationResultStorageUsage,
+} from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import {
   createProtectedAutomationScheduler,
@@ -4541,6 +4544,27 @@ export function createProtectedHttp(options: {
           automations,
         };
         return json(result);
+      }
+      const publicRuns =
+        method === "GET" &&
+        automationsPublicCapability &&
+        hasClientCapability(request.headers, automationResultsCapability)
+          ? /^\/automations\/public\/([^/]+)\/runs(?:\/([^/]+))?$/u.exec(pathname)
+          : null;
+      if (publicRuns) {
+        requirePublicAutomations();
+        const publicResults = await listProtectedPublicAutomationRunRecords(
+          options.stateDir,
+          { automationId: publicRuns[1]!, id: publicRuns[2] },
+          { ...authority, revalidate },
+        );
+        if (publicRuns[2]) {
+          if (!publicResults[0]) {
+            return notFound();
+          }
+          return json({ run: publicResults[0] });
+        }
+        return json({ runs: publicResults });
       }
       const publicAutomation = automationsPublicCapability
         ? /^\/automations\/([^/]+)\/(publication|follow|notifications)$/u.exec(pathname)

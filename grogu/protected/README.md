@@ -560,6 +560,17 @@ storage budgets. Runs use the owner's protected turn and one dedicated
 chat per automation. At most 50 runs and results per automation and 200 inbox
 entries per recipient are retained, oldest first. Push is not started; an inbox
 delivery that cannot fit remains pending for retry.
+The owner owns an automation's runs and results. When a delivery commits, each
+subscribed follower of a published, isolated automation also gets its own inbox
+entry in the same transaction; the subscribers at that commit are the audience,
+so a retry reaches whoever is subscribed then. Each recipient owns and pays for
+its entry under its own storage quota and 200-entry limit. A follower that is
+over quota or inactive is skipped without blocking the owner or other followers.
+Unfollowing, unpublishing, or deleting the automation removes the entries at
+once, and a retired run takes every recipient's entry with it. A receipt names
+the run and result only; it never makes private text readable. Followers read
+them while publication, follow, and membership stay current, and the routes that
+create follows stay disabled until public automation is available.
 The first release stores no Research Topics reference and does not give
 automation turns the Research Topics tool. Automation IDs are canonical
 lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines

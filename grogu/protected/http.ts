@@ -825,6 +825,47 @@ export function createProtectedHttp(options: {
             limit,
           );
         },
+        reserveRecipient: async (profileId, change) => {
+          const recipient = await findAutomationMember(profileId);
+          if (!recipient) {
+            return undefined;
+          }
+          const grant = automationAuthority(recipient);
+          try {
+            await grant.revalidate();
+            const limit = await grant.storageLimit(grant.assertCurrent);
+            if (change.previous) {
+              const previous = change.previous;
+              const held = await storage.reserveStoredDataReplacement(
+                profileId,
+                grant.assertCurrent,
+                { previous, current: change.current },
+                limit,
+              );
+              return {
+                settle: () => held.settle(change.current),
+                release: () => held.release(previous),
+              };
+            }
+            const held = await storage.reserveStoredData(
+              profileId,
+              grant.assertCurrent,
+              change.current.bytes,
+              limit,
+            );
+            return {
+              settle: () => held.settle({ created: true, entries: [change.current] }),
+              release: () => held.release(),
+            };
+          } catch (error) {
+            // A follower's own quota or access never blocks the owner's delivery or other followers.
+            if (!["quota_exceeded", "member_inactive"].includes(publicError(error).code)) {
+              throw error;
+            }
+            process.stderr.write("Protected automation inbox receipt skipped for one follower.\n");
+            return undefined;
+          }
+        },
         retireStorage: (entries) =>
           storage.retiredStoredData(entries.map((removed) => ({ removed }))),
         retireDefinition: (entry) => {

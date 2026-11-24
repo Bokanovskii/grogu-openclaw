@@ -20,6 +20,7 @@ import {
   requireProtectedStorageEncryption,
   resolveProtectedStorageKeyFile,
 } from "./storage-key.js";
+import { protectedTurnExtras, protectedTurnMarks } from "./turn-timing.js";
 
 class MaintenanceRefused extends Error {}
 
@@ -95,6 +96,11 @@ async function main() {
         "accessValidationMs",
         "completionMs",
       ] as const;
+      const isElapsed = (value: unknown): value is number =>
+        typeof value === "number" && Number.isFinite(value) && value >= 0;
+      // Only fixed names and numbers are printed; any other field in the log is dropped.
+      const knownMarks = new Set<string>(protectedTurnMarks);
+      const outcomes = new Set<unknown>(["complete", "failed", "interrupted"]);
       const records: string[] = [];
       for (const line of lines) {
         const prefix = "[protected-turn-timing] ";
@@ -114,20 +120,29 @@ async function main() {
           continue;
         }
         const record = value as Record<string, unknown>;
-        if (
-          !fields.every(
-            (field) =>
-              record[field] === null ||
-              (typeof record[field] === "number" &&
-                Number.isFinite(record[field]) &&
-                record[field] >= 0),
-          )
-        ) {
+        if (!fields.every((field) => record[field] === null || isElapsed(record[field]))) {
           continue;
         }
-        records.push(
-          JSON.stringify(Object.fromEntries(fields.map((field) => [field, record[field]]))),
+        const printed: Record<string, unknown> = Object.fromEntries(
+          fields.map((field) => [field, record[field]]),
         );
+        if (outcomes.has(record.outcome)) {
+          printed.outcome = record.outcome;
+        }
+        for (const extra of protectedTurnExtras) {
+          if (isElapsed(record[extra])) {
+            printed[extra] = record[extra];
+          }
+        }
+        if (record.marks && typeof record.marks === "object") {
+          const marks = Object.entries(record.marks).filter(
+            ([name, elapsed]) => knownMarks.has(name) && isElapsed(elapsed),
+          );
+          if (marks.length > 0) {
+            printed.marks = Object.fromEntries(marks);
+          }
+        }
+        records.push(JSON.stringify(printed));
       }
       if (records.length > 0) {
         process.stdout.write(`${records.slice(-20).join("\n")}\n`);

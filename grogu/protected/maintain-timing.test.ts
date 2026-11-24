@@ -19,7 +19,26 @@ void test("maintenance returns only recent numeric turn timing fields", async (t
       accessChecks,
       accessValidationMs: 4,
       completionMs: 5,
+      // Every record written before the step marks existed already carried an outcome.
+      outcome: "complete",
       privateText: "do-not-export",
+      ...(accessChecks === 24
+        ? {
+            turnOrdinal: 7,
+            finishedAtSec: 1_800_000_000,
+            activeTurns: 2,
+            marks: {
+              identityVerified: 3,
+              "private-step": 4,
+              bodyParsed: "private text",
+              modelResolved: -1,
+              runnerStarting: 40,
+            },
+          }
+        : {}),
+      ...(accessChecks === 23
+        ? { outcome: "private text", activeTurns: -1, marks: "private text" }
+        : {}),
     }),
   );
   await writeFile(
@@ -49,9 +68,14 @@ void test("maintenance returns only recent numeric turn timing fields", async (t
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.equal(returned.length, 20);
-  assert.equal(returned[0].accessChecks, 5);
-  assert.equal(returned[19].accessChecks, 24);
-  assert.deepEqual(Object.keys(returned[0]), [
+  const record = (index: number) => {
+    const found = returned[index];
+    assert.ok(found, `Record ${index} is missing.`);
+    return found;
+  };
+  assert.equal(record(0).accessChecks, 5);
+  assert.equal(record(19).accessChecks, 24);
+  const timingKeys = [
     "admissionMs",
     "providerRequestStartMs",
     "firstProviderOutputMs",
@@ -59,6 +83,30 @@ void test("maintenance returns only recent numeric turn timing fields", async (t
     "accessChecks",
     "accessValidationMs",
     "completionMs",
+  ];
+  assert.deepEqual(Object.keys(record(0)), [...timingKeys, "outcome"]);
+  // Invalid optional values are dropped without discarding the record.
+  assert.deepEqual(Object.keys(record(18)), timingKeys);
+  assert.deepEqual(record(19), {
+    admissionMs: 1,
+    providerRequestStartMs: 2,
+    firstProviderOutputMs: null,
+    firstClientVisibleOutputMs: 3,
+    accessChecks: 24,
+    accessValidationMs: 4,
+    completionMs: 5,
+    outcome: "complete",
+    turnOrdinal: 7,
+    finishedAtSec: 1_800_000_000,
+    activeTurns: 2,
+    marks: { identityVerified: 3, runnerStarting: 40 },
+  });
+  assert.deepEqual(Object.keys(record(19)).slice(timingKeys.length), [
+    "outcome",
+    "turnOrdinal",
+    "finishedAtSec",
+    "activeTurns",
+    "marks",
   ]);
   await writeFile(path.join(stateDir, "logs", "runtime.stdout.log"), "unrelated log text\n");
   const empty = run();

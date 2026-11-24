@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { test } from "node:test";
@@ -19,6 +19,11 @@ void test("protected chunks publish without remote access work and stop at local
   process.env.OPENCLAW_STATE_DIR = stateDir;
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
+  // The protected service refuses to start without its storage key, which must sit outside the state.
+  const keyFile = `${stateDir}.protected-storage-key`;
+  const priorKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+  await writeFile(keyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
+  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyFile;
   const origin = "https://synthetic.example";
   let run: (turn: ProtectedTurn) => Promise<void> = async () => {};
   let remoteChecks = 0;
@@ -81,10 +86,16 @@ void test("protected chunks publish without remote access work and stop at local
     releaseHeld();
     await app.shutdown();
     await rm(stateDir, { recursive: true, force: true });
+    await rm(keyFile, { force: true });
     if (priorStateDir === undefined) {
       delete process.env.OPENCLAW_STATE_DIR;
     } else {
       process.env.OPENCLAW_STATE_DIR = priorStateDir;
+    }
+    if (priorKeyFile === undefined) {
+      delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
+    } else {
+      process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = priorKeyFile;
     }
   });
   const call = (subject: string, route: string, init?: RequestInit) => {
@@ -119,6 +130,7 @@ void test("protected chunks publish without remote access work and stop at local
   let streamingWallMs = 0;
   run = async (turn) => {
     await turn.revalidate();
+    turn.markStep("runnerStarting");
     turn.markTiming("providerRequestStartMs");
     turn.markTiming("firstProviderOutputMs");
     const before = remoteChecks;
@@ -183,9 +195,42 @@ void test("protected chunks publish without remote access work and stop at local
       "accessChecks",
       "accessValidationMs",
       "outcome",
+      "turnOrdinal",
+      "finishedAtSec",
+      "activeTurns",
+      "marks",
     ].toSorted(),
   );
   assert.equal(timing.outcome, "complete");
+  assert.ok(Number.isInteger(timing.turnOrdinal) && Number(timing.turnOrdinal) >= 1);
+  assert.equal(timing.activeTurns, 1);
+  assert.ok(Math.abs(Number(timing.finishedAtSec) - Date.now() / 1000) < 60);
+  const marks: unknown = timing.marks;
+  assert.ok(isRecord(marks));
+  // Every step is recorded once, in the order the request reached it.
+  assert.deepEqual(Object.keys(marks), [
+    "identityVerified",
+    "memberResolved",
+    "accessAdmitted",
+    "accessBound",
+    "chatEntryRead",
+    "routeGrantChecked",
+    "bodyParsed",
+    "turnGrantChecked",
+    "aliasesPrepared",
+    "storageAdmitted",
+    "turnEntryRead",
+    "admissionGrantChecked",
+    "historyRead",
+    "artifactsListed",
+    "runnerStarting",
+    "resultRead",
+  ]);
+  let reached = 0;
+  for (const value of Object.values(marks)) {
+    assert.ok(typeof value === "number" && value >= reached);
+    reached = value;
+  }
   let previous = 0;
   for (const phase of [
     "admissionMs",

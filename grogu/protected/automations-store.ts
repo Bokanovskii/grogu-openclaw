@@ -207,6 +207,7 @@ export type SaveProtectedAutomationPatchResult =
   | { status: "updated"; automation: StoredAutomationRecord }
   | { status: "not_found" }
   | { status: "version_mismatch"; currentVersion?: string }
+  | { status: "automation_busy" }
   | { status: "scheduler_required" }
   | { status: "invalid"; validation: Extract<ProtectedAutomationDraftValidation, { valid: false }> }
   | { status: "member_inactive" }
@@ -296,6 +297,7 @@ export async function saveProtectedAutomationPatch(
     switch (updated.status) {
       case "member_inactive":
       case "version_mismatch":
+      case "automation_busy":
       case "scheduler_required":
         return { status: updated.status };
       default:

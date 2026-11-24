@@ -363,6 +363,58 @@ void test("isolated automation results require a matching active run", async (t)
   );
 });
 
+void test("isolated automation edits wait until the active run settles", async (t) => {
+  const f = await fixture(t, "isolated");
+  const owner = authority(f.ownerId);
+  const runId = randomUUID();
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    );
+  const patch = () =>
+    patchProtectedAutomationWithAdmission(
+      captureProtectedStateWorkerContext(f.stateDir),
+      {
+        profileId: f.ownerId,
+        automationId: f.automationId,
+        expectedRevision: f.revision,
+        definition: { ...f.definition, instructions: "Updated synthetic instructions." },
+        now: 20,
+      },
+      { profileId: f.ownerId, assertCurrent: () => {}, admitStorage: () => {} },
+    );
+
+  assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+  assert.deepEqual(
+    await write({
+      kind: "queue",
+      runId,
+      definitionRevision: f.revision,
+      trigger: "manual",
+      scheduledAtMs: 10,
+      now: 10,
+    }),
+    { status: "committed" },
+  );
+  assert.deepEqual(await patch(), { status: "automation_busy" });
+  assert.deepEqual(await write({ kind: "start", runId, chatId: randomUUID(), now: 11 }), {
+    status: "committed",
+  });
+  assert.deepEqual(await patch(), { status: "automation_busy" });
+  assert.deepEqual(
+    await write({
+      kind: "finish",
+      runId,
+      now: 15,
+      outcome: { status: "failed", errorCode: "turn_failed" },
+    }),
+    { status: "committed" },
+  );
+  assert.equal((await patch()).status, "updated");
+});
+
 void test("paused automations allow manual lifecycle runs but refuse scheduled runs", async (t) => {
   const f = await fixture(t);
   const owner = authority(f.ownerId);

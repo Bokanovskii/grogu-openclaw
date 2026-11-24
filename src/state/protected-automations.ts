@@ -20,6 +20,7 @@ import {
   ensureProtectedAdmissionSchema,
   type ProtectedAdmissionDatabase,
 } from "./protected-admission.js";
+import { isolatedAutomationHasActiveRun } from "./protected-automation-lifecycle-retention.js";
 import {
   assertStoredDefinitionBytes,
   readStoredDefinition,
@@ -432,6 +433,7 @@ export type PatchProtectedAutomationResult =
         | "automation_not_found"
         | "owner_mismatch"
         | "version_mismatch"
+        | "automation_busy"
         | "scheduler_required";
     };
 
@@ -483,6 +485,9 @@ export function patchProtectedAutomation(
       }
       if (current.definitionRevision !== input.expectedRevision) {
         return { status: "version_mismatch" as const };
+      }
+      if (isolatedAutomationHasActiveRun(db, input.automationId, current.definition)) {
+        return { status: "automation_busy" as const };
       }
       if (
         input.definition.contextAccess !== undefined &&

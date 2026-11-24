@@ -406,6 +406,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
             case "not_found":
               return refuse("not_found");
             case "scheduler_required":
+            case "automation_busy":
               return refuse("automation_active");
             default:
               return refuse("unavailable");

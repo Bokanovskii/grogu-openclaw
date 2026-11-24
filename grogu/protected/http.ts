@@ -4716,6 +4716,12 @@ export function createProtectedHttp(options: {
               "version_mismatch",
               "This automation changed. Reload it before saving.",
             );
+          case "automation_busy":
+            throw new ProtectedError(
+              409,
+              "automation_busy",
+              "This automation is running. Try again after its run finishes.",
+            );
           case "scheduler_required":
             throw new ProtectedError(
               503,

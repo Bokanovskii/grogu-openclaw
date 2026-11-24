@@ -1,10 +1,41 @@
+import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
+import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
 import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
 import type { ProtectedAutomationLifecycleWrite } from "./protected-automation-lifecycle.types.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
+
+export function isolatedAutomationHasActiveRun(
+  db: DatabaseSync,
+  automationId: string,
+  definition: ProtectedAutomationDraft,
+): boolean {
+  if (definition.contextAccess !== "isolated") {
+    return false;
+  }
+  const tables = getAdmittedSqliteSchemaFacts(db)?.tables;
+  if (!tables) {
+    throw new Error("Protected automation edits require admitted schema facts.");
+  }
+  if (!tables.has("protected_automation_run_lifecycle")) {
+    return false;
+  }
+  const lifecycle = getNodeSqliteKysely<ProtectedAutomationLifecycleDatabase>(db);
+  return Boolean(
+    executeSqliteQuerySync(
+      db,
+      lifecycle
+        .selectFrom("protected_automation_run_lifecycle")
+        .select("id")
+        .where("automation_id", "=", automationId)
+        .where("status", "in", ["queued", "running"])
+        .limit(1),
+    ).rows[0],
+  );
+}
 
 /** A new queue slot also retires legacy result-only history before another result can publish. */
 export function prepareProtectedAutomationLifecycleRetirements(

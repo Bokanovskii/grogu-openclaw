@@ -217,7 +217,7 @@ import {
   storageLimitView,
 } from "./storage-limit-route.js";
 import { createWidgetChain, widgetIdPattern, type Widget } from "./tool-events.js";
-import { createProtectedTurnTiming } from "./turn-timing.js";
+import { createProtectedTurnTiming, type ProtectedTurnTimer } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
 import { listProtectedUsage, recordProtectedUsage } from "./usage-store.js";
 import { buildProtectedWidgetMeasurementDocument } from "./widget-measurement.js";
@@ -824,7 +824,7 @@ export function createProtectedHttp(options: {
       assert?: () => void,
       signal?: AbortSignal,
     ) => Promise<T>;
-    startedAt: number;
+    timing: ProtectedTurnTimer;
     textLimit?: number;
     automationId?: string;
     automationContextAccess?: "isolated" | "member";
@@ -840,10 +840,11 @@ export function createProtectedHttp(options: {
       checkGrant,
       storageLimit,
       files,
-      startedAt,
+      timing,
       textLimit = 16_000,
     } = context;
     const requestBody = await body(request);
+    timing.at("bodyParsed");
     let data: ProtectedTurnRequest;
     let authoringInput: ProtectedAuthoringTurnRequest["authoring"] | undefined;
     if (isProtectedAuthoringTurnRequest(requestBody)) {
@@ -1004,6 +1005,7 @@ export function createProtectedHttp(options: {
       return { input: authoringInput, catalog: automationCatalog, admitStorage, automationId };
     };
     await revalidate();
+    timing.at("turnGrantChecked");
     if (runs.has(id) || mutations.has(id)) {
       throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
     }
@@ -1019,6 +1021,7 @@ export function createProtectedHttp(options: {
           unauthorized();
         }
         profileAuthority.assertCurrent();
+        timing.at("aliasesPrepared");
         // Storage charges continue after the client disconnects, so they check only the grant.
         storage = await admitStorage?.(
           profile.id,
@@ -1026,6 +1029,7 @@ export function createProtectedHttp(options: {
           "turn",
           await storageLimit(assertGrant),
         );
+        timing.at("storageAdmitted");
         if (shutdown.signal.aborted || runs.has(id)) {
           throw new ProtectedError(409, "busy", "A turn is already running in this chat.");
         }
@@ -1035,6 +1039,7 @@ export function createProtectedHttp(options: {
         const currentEntry = await chats.readEntry(authority, id);
         assertRunChatWritable(currentEntry, context.automationId);
         const authoring = await admitAuthoringTurn(currentEntry);
+        timing.at("turnEntryRead");
         // Only interactive member turns get a browser; any automation run or run chat fails closed.
         const browserEligible =
           context.automationId === undefined && currentEntry.protectedAutomationRunId === undefined;
@@ -1063,6 +1068,7 @@ export function createProtectedHttp(options: {
         }
         await revalidate();
         profileAuthority.assertCurrent();
+        timing.at("admissionGrantChecked");
         const stored =
           authoring && !authoring.automationId ? readAuthoringDraft(currentEntry) : undefined;
         const durableDraft =
@@ -1095,6 +1101,7 @@ export function createProtectedHttp(options: {
           steering: new Map(),
         };
         runs.set(id, run);
+        timing.note("activeTurns", runs.size);
         return {
           run,
           authoring,
@@ -1128,7 +1135,6 @@ export function createProtectedHttp(options: {
       parentLifecycleRevision,
       parentSessionId,
     } = admission;
-    const timing = createProtectedTurnTiming(startedAt);
     timing.mark("admissionMs");
     // The run does not follow request.signal. A phone that sleeps or loses the tunnel only
     // detaches from the stream, and the reply still finishes and saves.
@@ -1344,6 +1350,7 @@ export function createProtectedHttp(options: {
             assertRun();
             send({ type: "start", runId: run.id });
             const before = await chats.read(runAuthority, id);
+            timing.at("historyRead");
             // Returned side replies point at another chat's widgets; they never join this chat's chain.
             const widgetChain = createWidgetChain(
               before.messages.flatMap((message) =>
@@ -1357,6 +1364,7 @@ export function createProtectedHttp(options: {
                   id,
                   options.maxFileBytes,
                 );
+                timing.at("artifactsListed");
                 const storageFiles = storage?.files(owned);
                 const execute = () =>
                   options.turns.run({
@@ -1383,6 +1391,7 @@ export function createProtectedHttp(options: {
                     assertCurrent: assertRun,
                     revalidate: checkRun,
                     markTiming: timing.mark,
+                    markStep: timing.at,
                     saveChildResult,
                     cleanupChildFiles: (sessionId) =>
                       chats.removeTransientFiles(
@@ -1472,6 +1481,7 @@ export function createProtectedHttp(options: {
             );
             storage?.assertResult();
             let { chat, usage } = await chats.readWithUsage(runAuthority, id);
+            timing.at("resultRead");
             await checkRun();
             const newMessages = chat.messages.slice(before.messages.length);
             messageCount = newMessages.length;
@@ -1515,6 +1525,7 @@ export function createProtectedHttp(options: {
                 ? withTranscriptWriteBudget(storage.charge, saveBudget)
                 : saveBudget());
               ({ chat, usage } = await chats.readWithUsage(runAuthority, id));
+              timing.at("budgetSaved");
               await checkRun();
               if (usage?.contextSize !== size) {
                 throw new ProtectedError(
@@ -1757,7 +1768,7 @@ export function createProtectedHttp(options: {
       request,
       id: chatId,
       ...authority,
-      startedAt: performance.now(),
+      timing: createProtectedTurnTiming(performance.now()),
       textLimit: 32_000,
       automationId: automation.id,
       automationContextAccess: definition.contextAccess ?? "member",
@@ -2392,7 +2403,7 @@ export function createProtectedHttp(options: {
     await queued.completion;
   }
   const handle = async (request: Request): Promise<Response> => {
-    const startedAt = performance.now();
+    const timing = createProtectedTurnTiming(performance.now());
     const path = new URL(request.url).pathname;
     try {
       if (path === "/healthz" && request.method === "GET") {
@@ -2549,6 +2560,7 @@ export function createProtectedHttp(options: {
         return notFound();
       }
       const identity = await options.verifyIdentity(request);
+      timing.at("identityVerified");
       if (identity.issuer !== options.directory.issuer) {
         return unauthorized();
       }
@@ -2575,6 +2587,7 @@ export function createProtectedHttp(options: {
         env: chats.env,
         assertCurrent: rawCurrent,
       });
+      timing.at("memberResolved");
       const assertGrant = () => {
         shutdown.signal.throwIfAborted();
         rawCurrent();
@@ -2599,12 +2612,14 @@ export function createProtectedHttp(options: {
       if (!(await touch("admit"))) {
         return unauthorized();
       }
+      timing.at("accessAdmitted");
       assertCurrent();
       await bindProtectedProfile(options.stateDir, {
         issuer: identity.issuer,
         subject: identity.subject,
         profileId: profile.id,
       });
+      timing.at("accessBound");
       assertCurrent();
       const checkGrant = async (assert = assertGrant) => {
         assert();
@@ -5120,6 +5135,7 @@ export function createProtectedHttp(options: {
       let chatEntry: Awaited<ReturnType<typeof chats.readEntry>>;
       try {
         chatEntry = await chats.readEntry(authority, id);
+        timing.at("chatEntryRead");
       } catch (error) {
         const responseId = feedbackReport?.[1];
         if (
@@ -5156,6 +5172,7 @@ export function createProtectedHttp(options: {
         throw error;
       }
       await revalidate();
+      timing.at("routeGrantChecked");
       if (rest === "authoring-draft" && method === "PUT") {
         if (
           !supportsDraftRecovery(request) ||
@@ -5807,7 +5824,7 @@ export function createProtectedHttp(options: {
           checkGrant,
           storageLimit,
           files,
-          startedAt,
+          timing,
         });
         return turn.response;
       }

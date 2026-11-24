@@ -654,15 +654,22 @@ revocation is detected at the next lifecycle check, including its bounded networ
 request, while locally published invalidation takes effect immediately.
 
 Each admitted turn writes one `[protected-turn-timing]` console record on
-completion. It contains only elapsed milliseconds from request handling start:
-`admissionMs`, `providerRequestStartMs`, `firstProviderOutputMs`,
-`firstClientVisibleOutputMs`, and `completionMs`, plus `accessChecks`,
-`accessValidationMs`, and the fixed `complete`, `failed`, or `interrupted`
-outcome. Missing phases are `null`. Provider start is model lifecycle dispatch,
+completion. It contains only elapsed milliseconds: `admissionMs` counts from
+request handling start; `providerRequestStartMs`, `firstProviderOutputMs`,
+`firstClientVisibleOutputMs`, and `completionMs` count from the end of admission.
+It also has `accessChecks`, `accessValidationMs`, and the fixed `complete`,
+`failed`, or `interrupted` outcome. Missing phases are `null`. Provider start is model lifecycle dispatch,
 not a wire-level fetch timestamp; provider output is the first SDK tool-call start
 or nonempty text, reasoning, or tool delta, not headers or a keepalive. Client-visible output marks
 the first content event successfully enqueued for an attached reader, not browser
 receipt or paint. Detached completion therefore may have no client-output time.
+`marks` lists fixed step names (for example `memberResolved`, `storageAdmitted`,
+`runnerStarting`, `contextAssembled`) with the milliseconds from request handling
+start at which the request first reached each step, in the order it reached them.
+The gap between two steps is what the later one cost; a step that did not happen
+is absent. `turnOrdinal` counts admitted turns since the listener started,
+`activeTurns` counts the turns running when this one was admitted (including
+itself), and `finishedAtSec` is the Unix time it finished.
 The record has no content, credentials, provider/model names, or user/session/run
 identifiers. Protected model-request telemetry remains disabled. Reasoning and
 provider startup are separate from publication overhead; these timings do not
@@ -670,8 +677,8 @@ change the model or its reasoning defaults.
 
 On the macOS host, the operator can read up to 20 recent timing records with
 `sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run turn-timings`.
-The command returns only the numeric timing fields. It prints nothing when no
-recent records are available.
+The command returns only the numeric timing fields, the fixed outcome, and the
+fixed step names. It prints nothing when no recent records are available.
 
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read

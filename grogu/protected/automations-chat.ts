@@ -260,6 +260,22 @@ export function createProtectedAutomationAuthoringBindings(input: {
     async update(params) {
       return runCurrent(async () => {
         if (
+          params.draft.pacing !== undefined &&
+          !isDeepStrictEqual(params.draft.pacing, draft.pacing)
+        ) {
+          return {
+            status: "invalid" as const,
+            writeApplied: false as const,
+            errors: [
+              {
+                field: "pacing",
+                code: "invalid_value",
+                message: "Only the member can change the next-check bounds.",
+              },
+            ],
+          };
+        }
+        if (
           params.draft.contextAccess !== undefined &&
           params.draft.contextAccess !== draft.contextAccess
         ) {
@@ -276,9 +292,11 @@ export function createProtectedAutomationAuthoringBindings(input: {
           };
         }
         const validation = validate(
-          draft.contextAccess === undefined
-            ? params.draft
-            : { ...params.draft, contextAccess: draft.contextAccess },
+          {
+            ...params.draft,
+            ...(draft.contextAccess ? { contextAccess: draft.contextAccess } : {}),
+            ...(draft.pacing ? { pacing: draft.pacing } : {}),
+          },
           await readSaved(),
         );
         if (!validation.valid) {
@@ -383,6 +401,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
                 model: sentDraft.model,
                 thinking: sentDraft.thinking ?? null,
                 schedule: sentDraft.schedule,
+                ...(input.catalog.schedule.pacing ? { pacing: sentDraft.pacing ?? null } : {}),
               },
               catalog: input.catalog,
               retainedAgent: input.retainedAgent,

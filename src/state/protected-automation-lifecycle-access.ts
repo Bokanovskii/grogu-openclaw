@@ -34,7 +34,19 @@ export function readProtectedAutomationLifecycleAuthority(
   ) {
     throw new Error("Service-owner recovery cannot execute or publish a member automation.");
   }
-  return readProtectedAutomationLifecycleForOwner(database, command, access);
+  const recovered = readProtectedAutomationLifecycleForOwner(database, command, access);
+  return (
+    recovered && {
+      ...recovered,
+      // Only the active member's current definition can arm a check after interruption.
+      definition:
+        command.kind === "finish" &&
+        command.outcome.status !== "succeeded" &&
+        command.outcome.errorCode === "interrupted"
+          ? readProtectedAutomation(database, command)?.definition
+          : undefined,
+    }
+  );
 }
 
 export function readProtectedAutomationLifecycleForOwner(

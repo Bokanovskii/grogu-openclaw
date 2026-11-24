@@ -259,7 +259,7 @@ it("keeps committed plaintext until readback succeeds and publishes the protecte
   });
 });
 
-it("migrates and resumes cleanup through the protected startup worker", async () => {
+it("migrates and resumes cleanup on a pre-pacing v21 database through the protected startup worker", async () => {
   await withTempDir("protected-shared-startup-", async (directory) => {
     const stateDir = path.join(directory, "service");
     const databaseDir = path.join(stateDir, "state");
@@ -277,6 +277,18 @@ it("migrates and resumes cleanup through the protected startup worker", async ()
       INSERT INTO secret_store_entries
         (scope_kind, scope_id, name, value, kind, created_at_ms, updated_at_ms)
         VALUES ('identity', 'member', 'model-account:example', 'synthetic secret', 'secret', 1, 1);
+      CREATE TABLE user_profiles (id TEXT PRIMARY KEY) STRICT;
+      INSERT INTO user_profiles VALUES ('member');
+      INSERT INTO protected_automations
+        (id, creator_profile_id, central_owner_profile_id, provider, definition_json,
+         definition_revision, visibility, created_at, updated_at)
+        VALUES ('00000000-0000-4000-8000-000000000001', 'member', 'member', 'sparky',
+          '{"name":"Fixture","instructions":"Check the fixture.","whenToNotify":"Only on change.",
+            "agentId":"research","model":{"provider":"sparky","id":"00000000-0000-4000-8000-000000000002"},
+            "schedule":{"kind":"every","everyMs":60000}}', 1, 'private', 123, 123);
+      INSERT INTO protected_automation_run_chats
+        (automation_id, profile_id, chat_id, last_scheduled_at_ms, charged_bytes)
+        VALUES ('00000000-0000-4000-8000-000000000001', 'member', 'chat', 42, 512);
     `);
     database.close();
     const runStartup = (key = keyPath) =>
@@ -308,12 +320,24 @@ it("migrates and resumes cleanup through the protected startup worker", async ()
     expect(first.status, first.stderr).toBe(0);
     expect(JSON.parse(first.stdout)).toEqual([]);
     const migrated = new DatabaseSync(pathname);
+    let oldDefinition;
+    let oldChat;
     try {
       expect(migrated.prepare("PRAGMA user_version").get()?.user_version).toBe(21);
       expect(migrated.prepare("SELECT value FROM secret_store_entries").get()?.value).toMatch(
         /^OCSEAL1:/,
       );
-      migrated.prepare("UPDATE grogu_protected_shared_state SET cleanup_pending = 1").run();
+      migrated.exec(`
+        ALTER TABLE protected_automations DROP COLUMN pacing_min_ms;
+        ALTER TABLE protected_automations DROP COLUMN pacing_max_ms;
+        ALTER TABLE protected_automation_run_chats DROP COLUMN pacing_revision;
+        ALTER TABLE protected_automation_run_chats DROP COLUMN pacing_next_at_ms;
+        ALTER TABLE protected_automation_run_chats DROP COLUMN pacing_reason;
+        ALTER TABLE protected_automation_run_chats DROP COLUMN pacing_failures;
+        UPDATE grogu_protected_shared_state SET cleanup_pending = 1;
+      `);
+      oldDefinition = migrated.prepare("SELECT * FROM protected_automations").get();
+      oldChat = migrated.prepare("SELECT * FROM protected_automation_run_chats").get();
     } finally {
       migrated.close();
     }
@@ -328,6 +352,19 @@ it("migrates and resumes cleanup through the protected startup worker", async ()
       expect(
         reader.prepare("SELECT cleanup_pending FROM grogu_protected_shared_state").get(),
       ).toEqual({ cleanup_pending: 0 });
+      expect(reader.prepare("PRAGMA user_version").get()).toEqual({ user_version: 21 });
+      expect(reader.prepare("SELECT * FROM protected_automations").get()).toEqual({
+        ...oldDefinition,
+        pacing_min_ms: null,
+        pacing_max_ms: null,
+      });
+      expect(reader.prepare("SELECT * FROM protected_automation_run_chats").get()).toEqual({
+        ...oldChat,
+        pacing_revision: null,
+        pacing_next_at_ms: null,
+        pacing_reason: null,
+        pacing_failures: null,
+      });
     } finally {
       reader.close();
     }

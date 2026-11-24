@@ -1,4 +1,5 @@
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
+import { DEFAULT_ERROR_BACKOFF_SCHEDULE_MS, errorBackoffMs } from "../error-backoff.js";
 import { isCronTimeoutErrorText } from "../execution-error-constants.js";
 import { type CronRetryOn, resolveCronExecutionRetryHint } from "../retry-hint.js";
 import {
@@ -14,12 +15,7 @@ import type {
   CronRunErrorClassification,
   CronRunStatus,
 } from "../types.js";
-import {
-  DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
-  errorBackoffMs,
-  HEARTBEAT_SKIP_DISABLED,
-  resolveNextRunAtMsOrDisable,
-} from "./jobs-scheduling.js";
+import { HEARTBEAT_SKIP_DISABLED, resolveNextRunAtMsOrDisable } from "./jobs-scheduling.js";
 import type {
   CronJobPolicyContext,
   CronServiceState,

@@ -471,6 +471,28 @@ reduces storage can free budget. Enabling also reserves bounded run-metadata
 capacity. A quota refusal returns `413 quota_exceeded` before the state worker
 writes.
 
+Clients that negotiate `automations-pacing-v1` can offer model-chosen checks when
+`catalog.schedule.pacing` is present. The owner sets `pacing: { minMs, maxMs }`
+beside an interval `schedule`. Both limits and the fallback interval are whole
+milliseconds. The minimum is one minute and the maximum is 30 days. The fallback
+must fit between the limits. Omit `pacing` on PATCH to keep the bounds, or send
+`pacing: null` to return to a fixed schedule. A calendar schedule cannot use pacing.
+
+Only a scheduled run can propose its next delay. The scheduler clamps the delay
+to the owner's bounds after the run succeeds. A missing proposal uses the
+fallback interval. Failures use the longer of the fallback and native retry
+backoff, within the same bounds. Restart restores the accepted time for the
+current revision. Run now does not change it. A negotiated owner record returns
+`nextCheckReason` (`model`, `fallback`, or `backoff`) alongside an armed `nextCheckAt`.
+Run history, results, and public records do not expose pacing decisions.
+
+Upgrade adds nullable integers to the existing definition and run-chat rows.
+Existing automations remain fixed, without a backfill. Retention does not change.
+For a deliberate rollback, clear pacing on saved automations and unfinished
+authoring drafts first. Use the fixed-schedule rollback build that recognizes
+the six nullable columns. Unmodified 2b10 refuses to open the migrated database,
+even when all six columns are empty. Do not remove columns or edit state by hand.
+
 Clients that send `X-Alcove-Capabilities: automation-delete-v1` receive
 `capabilities.automations.delete: true` when deletion is available.
 `DELETE /api/protected/v1/automations/:id` requires the current version in

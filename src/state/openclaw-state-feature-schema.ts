@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createSqliteSchemaEnsurer } from "../infra/sqlite-schema-ensure.js";
 import { extractSqliteTableSchema } from "../infra/sqlite-schema-sql.js";
+import { ensureFirstUseStateColumns } from "./openclaw-state-db-schema-helpers.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
@@ -12,6 +13,8 @@ import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 export function createOpenClawStateSchemaEnsurer(params: {
   table: string;
   additionalTables?: readonly string[];
+  /** Existing tables whose first-use columns this owner needs, without materializing absent tables. */
+  migrateExistingTables?: readonly string[];
   indexes?: readonly string[];
   endMarker?: string;
   operationLabel: string;
@@ -35,11 +38,16 @@ export function createOpenClawStateSchemaEnsurer(params: {
     runOpenClawStateWriteTransaction(
       ({ db }) => {
         ensure(db);
+        if (params.migrateExistingTables) {
+          ensureFirstUseStateColumns(db, params.migrateExistingTables);
+        }
       },
       options,
       { operationLabel: params.operationLabel },
     );
-    // Preserve successful wrapper-return timing, including nested savepoints.
-    ensuredDatabases.add(database.db);
+    // An enclosing transaction can still roll back first-use DDL after our savepoint succeeds.
+    if (!params.migrateExistingTables || !database.db.isTransaction) {
+      ensuredDatabases.add(database.db);
+    }
   };
 }

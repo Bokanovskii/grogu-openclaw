@@ -31,6 +31,13 @@ followers. A binding ties one native Cron job to its automation, central owner,
 and definition revision; Cron remains the owner of the schedule and execution
 receipts.
 
+For a protected automation with model-chosen checks, `pacing_min_ms` and
+`pacing_max_ms` hold the owner's bounds outside `definition_json`. Both are
+NULL for fixed schedules. The existing `protected_automation_run_chats` row
+stores the accepted revision, next time, reason code, and consecutive failure
+count. Finishing a current scheduled run updates that row in the same transaction.
+These nullable integers need no backfill and do not change run retention.
+
 The first release does not store Research Topics references or inbox data in
 these tables. The additive feature schema does not change the shared
 database's numeric schema version. Alcove upgrades are forward-only; an older

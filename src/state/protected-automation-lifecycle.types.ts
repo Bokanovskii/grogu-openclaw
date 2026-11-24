@@ -1,6 +1,7 @@
 import type { SqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
 import type { RetainedWorkerTransactionAdmission } from "../infra/sqlite-worker-operation-settlement.js";
 import type { KeyedFifoLease } from "../shared/keyed-fifo-lease.js";
+import type { ProtectedAutomationCheckDecision } from "./protected-automation-pacing.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 
 export type ProtectedAutomationRunStatus =
@@ -77,7 +78,7 @@ export type ProtectedAutomationLifecycleCommand = {
       runId: string;
       now: number;
       outcome:
-        | { status: "succeeded"; resultId: string }
+        | { status: "succeeded"; resultId: string; proposedDelayMs?: number }
         | { status: "failed" | "skipped"; errorCode: ProtectedAutomationRunError };
     }
   | { kind: "deliver"; runId: string; now: number }
@@ -99,6 +100,7 @@ export type ProtectedAutomationLifecycleWrite = {
   pruneRunIds: string[];
   pruneResultIds: string[];
   pruneInboxRunIds: string[];
+  check?: ProtectedAutomationCheckDecision;
   retiredDefinition?: { id: string; profileId: string; definitionBytes: number };
   replacement?: {
     previous: ProtectedAutomationResultStorageEntry[];

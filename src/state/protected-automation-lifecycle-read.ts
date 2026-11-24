@@ -10,8 +10,8 @@ import type {
 import { readProtectedAutomationCheck } from "./protected-automation-pacing.js";
 import { isOwner } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
-import { readProtectedAutomation } from "./protected-automations.js";
 import { readProtectedAutomationFollowerGrant } from "./protected-automation-sharing.js";
+import { readProtectedAutomation } from "./protected-automations.js";
 
 function dto(
   row: ReturnType<typeof runRows>[number],

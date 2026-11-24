@@ -226,7 +226,7 @@ export function readProtectedAutomationStorageUsage(
   };
 }
 
-function selectVisibleAutomations(
+function selectOwnedAutomations(
   db: DatabaseSync,
   profileId: string,
   automationId?: string,
@@ -270,22 +270,9 @@ function selectVisibleAutomations(
           .where("owner_admission.status", "=", "approved"),
       ),
     )
-    .where((expression) =>
-      expression.exists(
-        expression
-          .selectFrom("protected_automation_members as owner_membership")
-          .select("owner_membership.automation_id")
-          .whereRef("owner_membership.automation_id", "=", "automation.id")
-          .whereRef("owner_membership.profile_id", "=", "automation.central_owner_profile_id")
-          .where("owner_membership.role", "=", "owner"),
-      ),
-    )
-    .where((expression) =>
-      expression.or([
-        expression("automation.visibility", "=", "shared"),
-        expression("member.role", "=", "owner"),
-      ]),
-    )
+    // Definitions are private even when legacy publication and follow rows still exist.
+    .where("automation.central_owner_profile_id", "=", profileId)
+    .where("member.role", "=", "owner")
     .orderBy("automation.updated_at", "desc")
     .orderBy("automation.id", "asc");
   const rows = executeSqliteQuerySync(
@@ -344,7 +331,7 @@ export function createProtectedAutomation(
             .limit(1),
         ).rows[0];
         if (reserved) {
-          const owned = selectVisibleAutomations(db, input.profileId, automationId)[0];
+          const owned = selectOwnedAutomations(db, input.profileId, automationId)[0];
           if (!owned || owned.relation !== "owner") {
             throw new Error("Reserved protected automation id belongs to another record.");
           }
@@ -386,7 +373,7 @@ export function createProtectedAutomation(
           added_at: input.now,
         }),
       );
-      const automation = selectVisibleAutomations(db, input.profileId, automationId)[0];
+      const automation = selectOwnedAutomations(db, input.profileId, automationId)[0];
       if (!automation) {
         throw new Error("Created protected automation was not visible to its owner.");
       }
@@ -413,7 +400,7 @@ export function listProtectedAutomations(
   profileId: string,
 ): ProtectedAutomationStorageRecord[] {
   ensureSchema(database);
-  return selectVisibleAutomations(database.db, profileId);
+  return selectOwnedAutomations(database.db, profileId);
 }
 
 export function readProtectedAutomation(
@@ -421,7 +408,7 @@ export function readProtectedAutomation(
   input: { profileId: string; automationId: string },
 ): ProtectedAutomationStorageRecord | undefined {
   ensureSchema(database);
-  return selectVisibleAutomations(database.db, input.profileId, input.automationId)[0];
+  return selectOwnedAutomations(database.db, input.profileId, input.automationId)[0];
 }
 
 export type PatchProtectedAutomationResult =
@@ -474,7 +461,7 @@ export function patchProtectedAutomation(
       if (!activeAdmission) {
         return { status: "member_inactive" as const };
       }
-      const current = selectVisibleAutomations(db, input.profileId, input.automationId)[0];
+      const current = selectOwnedAutomations(db, input.profileId, input.automationId)[0];
       if (!current) {
         return { status: "automation_not_found" as const };
       }
@@ -531,7 +518,7 @@ export function patchProtectedAutomation(
           .where("central_owner_profile_id", "=", input.profileId)
           .where("definition_revision", "=", input.expectedRevision),
       );
-      const automation = selectVisibleAutomations(db, input.profileId, input.automationId)[0];
+      const automation = selectOwnedAutomations(db, input.profileId, input.automationId)[0];
       if (!automation || automation.definitionRevision !== input.expectedRevision + 1) {
         throw new Error("Updated protected automation was not visible at its new revision.");
       }

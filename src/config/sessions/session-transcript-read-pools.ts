@@ -19,10 +19,14 @@ export const SESSION_TRANSCRIPT_WORKER_LIMITS = {
   maxYoungGenerationSizeMb: 32,
 };
 
-export function createSessionTranscriptReadPool<Input extends SessionTranscriptWorkerInput>(
-  maxWorkers: number,
-  sharedCompute = false,
-) {
+export function createSessionTranscriptReadPool<
+  Input extends SessionTranscriptWorkerInput,
+>(options: {
+  maxWorkers: number;
+  sharedCompute?: boolean;
+  idleTimeoutMs?: number;
+  burstIdleTimeoutMs?: number;
+}) {
   return new WorkerTaskPool<Input, SessionTranscriptWorkerReply<Input["kind"]>>({
     workerUrl,
     prepareWorker: () => {
@@ -31,8 +35,7 @@ export function createSessionTranscriptReadPool<Input extends SessionTranscriptW
       return { options: {} };
     },
     workerOptions: { resourceLimits: SESSION_TRANSCRIPT_WORKER_LIMITS },
-    maxWorkers,
-    sharedCompute,
+    ...options,
   });
 }
 

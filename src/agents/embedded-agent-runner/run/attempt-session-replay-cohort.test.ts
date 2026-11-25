@@ -122,8 +122,8 @@ describe("transcript replay cohorts", () => {
           const prepared = await fixture.prepare();
           if (change === "admitted-receipt") {
             expect(hydrationReads).toBe(1);
-            expect(messagePresenceReads).toBe(0);
           }
+          expect(messagePresenceReads).toBe(0);
           expect(reload).not.toHaveBeenCalled();
           expect(fixture.attempt.userTurnTranscriptRecorder?.getAdmissionReceipt()).toMatchObject({
             agentId: fixture.target.agentId,

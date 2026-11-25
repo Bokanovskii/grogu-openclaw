@@ -1348,7 +1348,7 @@ export function createCanonicalProtectedTurns(options: {
           admission.close();
         } finally {
           try {
-            await memberMemory?.release();
+            memberMemory?.release();
           } finally {
             try {
               credential?.close();

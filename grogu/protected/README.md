@@ -460,7 +460,8 @@ string code units; instructions to 16,384 UTF-8 bytes; notification rules to
 4,096 UTF-8 bytes; completion rules to 2,000 code units; and the normalized
 definition to 32,768 UTF-8 bytes. The request body is capped at 48,000 bytes.
 Agents, Sparky model ID, and thinking levels must match the live catalogs.
-Omitted thinking uses the catalog's actual default.
+Omitted thinking uses the catalog's default, `medium` for Sparky. A saved
+automation keeps its resolved level until the member changes it.
 
 Valid input returns `{ valid: true, draft }`, including the resolved thinking
 level. Invalid input returns `{ valid: false, errors }` with field, code, and
@@ -664,6 +665,10 @@ select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
 An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
+Ordinary and side chats default to `medium` on models that offer it. Other
+models keep their catalog default. A specialist uses the selected turn level.
+On new and existing chats, the server uses the catalog default only when the
+client omits the level. It never changes effort based on prompt length or tool use.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
 With `model-context-v1`, usage also includes the effective `contextSize` for a

@@ -51,6 +51,8 @@ export type ProtectedTurnMark = (typeof protectedTurnMarks)[number];
 /** Counts and durations a turn may report about the load it ran under and the work it did. */
 export const protectedTurnNotes = [
   "activeTurns",
+  "copilotAccountMs",
+  "copilotCatalogMs",
   "storageQueueMs",
   "storageScanMs",
   "modelRequests",

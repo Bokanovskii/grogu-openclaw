@@ -205,7 +205,11 @@ import {
 } from "./identity.js";
 import type { createProtectedMemberMemory } from "./member-memory.js";
 import type { createProtectedMemoryReview } from "./memory-review.js";
-import { fetchProtectedCopilotModels, withThinking } from "./models.js";
+import {
+  createProtectedCopilotModelLookup,
+  withThinking,
+  type ProtectedCopilotModel,
+} from "./models.js";
 import type { createProviderRelay } from "./provider-relay.js";
 import { captureProtectedReportChatReference, projectProtectedReportChat } from "./report-chat.js";
 import { protectedTurnTimeoutMs, subjectPattern } from "./settings.js";
@@ -508,6 +512,7 @@ export function createProtectedHttp(options: {
   }
   const encryption = options.encryption ?? ownedEncryption;
   const agentCatalog = createProtectedAgentCatalog(options.agentExtensions);
+  const fetchProtectedCopilotModels = createProtectedCopilotModelLookup();
   const agentRouting = {
     tool: agentCatalog.routeTool,
     briefMaxChars: agentCatalog.routeBriefMaxChars,
@@ -991,7 +996,7 @@ export function createProtectedHttp(options: {
         "Reconnect or renew this provider first.",
       );
     }
-    let copilotModel: Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number] | undefined;
+    let copilotModel: ProtectedCopilotModel | undefined;
     if (data.provider === "github-copilot") {
       if (!credential) {
         throw new ProtectedError(
@@ -1002,8 +1007,8 @@ export function createProtectedHttp(options: {
       }
       const models = await fetchProtectedCopilotModels(
         credential,
-        { signal: request.signal, revalidate },
-        { includeContextSizes: data.contextSize !== undefined },
+        { profileId: profile.id, signal: request.signal, revalidate },
+        { includeContextSizes: data.contextSize !== undefined, note: timing.note },
       );
       const requested = data.model ?? fixedModel?.id;
       copilotModel = models.find(({ model }) => model.id === requested);
@@ -4962,6 +4967,7 @@ export function createProtectedHttp(options: {
         const models = await fetchProtectedCopilotModels(
           data.credential,
           {
+            profileId: profile.id,
             signal: request.signal,
             revalidate,
           },

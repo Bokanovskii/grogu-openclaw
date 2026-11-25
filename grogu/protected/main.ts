@@ -228,6 +228,7 @@ async function main() {
     maxChatsPerUser: 100,
     maxFileBytes: protectedMaxFileBytes,
     storageLimits: settings.storageLimits,
+    assertStorageHostCurrent: () => stateOwner.assertCurrent(),
     agentExtensions: [protectedResearchAgent],
     verifyIdentity,
     answerAccessProof: verifyIdentity.answerProof,

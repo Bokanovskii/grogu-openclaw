@@ -229,6 +229,21 @@ again just before the write. Errors: `428 version_required`,
 deleted when the person is removed. A limit below current use deletes nothing;
 it stops further growth with `413 quota_exceeded`.
 
+After outstanding writes finish, the listener measures committed storage in
+the background. The next chat create or turn can use that measurement once,
+within five minutes. Active turns continue to charge the same shared ledger.
+Member requests need at least 8 MiB of measured space in both budgets to use
+the prepared total. Otherwise the listener measures again. Other mutation
+routes invalidate the prepared total. Accounting changes and pending commits
+never become an idle measurement. The listener still checks actual free disk
+space on each admission and charge.
+
+The 8 MiB limit applies to charges per admission, not to writes outside the
+service. An out-of-band increase can make a prepared total too small by the
+number of bytes added. There is no fixed byte bound on such writes. Offline
+maintenance must acquire the state-owner lock; a running listener holds it.
+The preparation changes no stored data. A restart begins with a fresh scan.
+
 Existing installs keep the limits that `init` measured. To apply the current
 policy (512 MiB default, no 256 MiB shared cap), run the following command and
 then restart the listener:

@@ -165,6 +165,8 @@ export type ProtectedTurn = {
   markStep: (step: ProtectedTurnMark) => void;
   /** Reports one finished tool call of the turn or of a specialist it started. */
   toolTiming: (kind: ProtectedActivity["kind"], durationMs: number) => void;
+  /** Saves the member's message when no parent run does: a turn that goes straight to named agents. */
+  saveUserMessage: () => Promise<void>;
   saveChildResult: (result: {
     runId: string;
     agentId: string;
@@ -694,9 +696,6 @@ function readRoute(
       `${turn.agent.name} could not hand this request to another agent.`,
     );
   }
-  if (turn.mentionedAgents.some((mentioned) => mentioned.id === agent.id)) {
-    return undefined;
-  }
   return {
     agent,
     task: `The member asked ${turn.agent.name}:\n${turn.input.text}\n\n${turn.agent.name} handed it to you with this brief:\n${brief}`,
@@ -969,6 +968,36 @@ export function createCanonicalProtectedTurns(options: {
           });
         }
         turn.markStep("memoryOpened");
+        const runChildren = (
+          children: readonly { agent: Readonly<ProtectedAgentDefinition>; task?: string }[],
+        ) =>
+          withoutModelRequestTelemetry(
+            () =>
+              withHostSessionAccess(turn.sessionAccess, async () => {
+                for (const child of children) {
+                  turn.assertCurrent();
+                  await runMentionedAgent(
+                    config,
+                    turn,
+                    child.agent,
+                    requestCredential,
+                    recordUsage,
+                    memberMemory,
+                    child.task,
+                  );
+                }
+              }),
+            () => turn.markStep("childProviderOutput"),
+            turn.modelRequest,
+          );
+        if (turn.mentionedAgents.length) {
+          // The member already chose who answers, so the selected agent's own run would
+          // only delay the named agents by a whole model round trip.
+          await turn.saveUserMessage();
+          await runChildren(turn.mentionedAgents.map((agent) => ({ agent })));
+          turn.markStep("childrenFinished");
+          return;
+        }
         const userFileScope = {
           files:
             turn.automationContextAccess === "isolated"
@@ -1301,37 +1330,8 @@ export function createCanonicalProtectedTurns(options: {
           }
         }
         const route = readRoute(turn, result.meta.pendingToolCalls);
-        if (turn.mentionedAgents.length || route) {
-          await withoutModelRequestTelemetry(
-            () =>
-              withHostSessionAccess(turn.sessionAccess, async () => {
-                for (const agent of turn.mentionedAgents) {
-                  turn.assertCurrent();
-                  await runMentionedAgent(
-                    config,
-                    turn,
-                    agent,
-                    requestCredential,
-                    recordUsage,
-                    memberMemory,
-                  );
-                }
-                if (route) {
-                  turn.assertCurrent();
-                  await runMentionedAgent(
-                    config,
-                    turn,
-                    route.agent,
-                    requestCredential,
-                    recordUsage,
-                    memberMemory,
-                    route.task,
-                  );
-                }
-              }),
-            () => turn.markStep("childProviderOutput"),
-            turn.modelRequest,
-          );
+        if (route) {
+          await runChildren([route]);
           turn.markStep("childrenFinished");
         }
       } finally {

@@ -5384,12 +5384,10 @@ async function exerciseCanonicalTurns(
     const stream = await response.text();
     assert.match(stream, /"type":"child-result".*"text":"Canonical Copilot reply\."/);
     assert.match(stream, /"type":"done"/);
+    // The member named the agent, so the selected agent sends no request of its own.
     assert.deepEqual(
       copilotBodies.map((body) => [body.model, body.reasoning?.effort]),
-      [
-        [accountModel, "xhigh"],
-        [accountModel, "xhigh"],
-      ],
+      [[accountModel, "xhigh"]],
     );
     assert.deepEqual(
       providerRequests
@@ -5397,7 +5395,21 @@ async function exerciseCanonicalTurns(
           (request) => request.endpoint === "https://api.business.githubcopilot.com/responses",
         )
         .map((request) => request.authorization),
-      [`Bearer ${rawGithubToken}`, `Bearer ${rawGithubToken}`],
+      [`Bearer ${rawGithubToken}`],
+    );
+    const saved = await (
+      await call(`/chats/${chat.id}`, { headers: { "x-grogu-profile": user.id } })
+    ).json();
+    assert.deepEqual(
+      saved.chat.messages.map(({ role, text, agentId }: Record<string, unknown>) => [
+        role,
+        text,
+        agentId,
+      ]),
+      [
+        ["user", "Plan a short trip.", undefined],
+        ["assistant", "Canonical Copilot reply.", "travel"],
+      ],
     );
     fixtureCompleted = true;
     return;
@@ -6163,6 +6175,10 @@ async function exerciseCanonicalTurns(
     { chat: { state: "member_removed" } },
   );
   assert.equal("prompt" in memberReportAfterRemoval.report.evidence, false);
+  const tokensBeforeMention = (await listProtectedUsage(stateDir, user.id, Date.now())).reduce(
+    (total, day) => total + day.tokens,
+    0,
+  );
   const firstMentionedRequest = seen.length;
   const mentionedTurn = await reopened(`/chats/${chat.id}/turns`, {
     method: "POST",
@@ -6203,10 +6219,16 @@ async function exerciseCanonicalTurns(
     "the attributed result is committed to the parent transcript before cleanup",
   );
   const usage = await listProtectedUsage(stateDir, user.id, Date.now());
+  const tokensTotal = usage.reduce((total, day) => total + day.tokens, 0);
   assert.equal(
-    usage.reduce((total, day) => total + day.tokens, 0),
-    25 + contextProofTokens,
-    "usage includes the context proof, both parent turns, and both native child provider requests",
+    tokensTotal - tokensBeforeMention,
+    10,
+    "the mention turn is charged for both native child requests and for no parent request",
+  );
+  assert.equal(
+    tokensTotal,
+    20 + contextProofTokens,
+    "usage includes the context proof, the earlier parent turn, and both native child provider requests",
   );
   assert.equal(
     usage.reduce((total, day) => total + day.missingUsage, 0),
@@ -6217,9 +6239,8 @@ async function exerciseCanonicalTurns(
     [
       ["synthetic", "low"],
       ["synthetic", "low"],
-      ["synthetic", "low"],
     ],
-    "the parent and native child serialize the selected model and reasoning",
+    "the native child serializes the selected model and reasoning, and the named agent sends no parent request",
   );
   const childRequests = seen
     .slice(firstMentionedRequest)

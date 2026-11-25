@@ -328,6 +328,87 @@ void test("a child result is saved once in its owner's chat and charged to the r
   await assert.rejects(chats.saveChildResult(authority, chat.id, result), /authority ended/);
 });
 
+void test("a turn that skips the parent run saves the member's message once, ahead of the agent results", async (t) => {
+  const chats = await createChats(t);
+  let current = true;
+  const authority = {
+    profileId: randomUUID(),
+    assertCurrent() {
+      if (!current) {
+        throw new Error("Request authority ended");
+      }
+    },
+  };
+  const chat = await chats.create(authority);
+  const entry = await chats.readEntry(authority, chat.id);
+  const request = {
+    runId: randomUUID(),
+    text: "A synthetic request for the named agent.",
+    timestamp: Date.now(),
+    parentLifecycleRevision: entry.lifecycleRevision ?? null,
+  };
+  let charged = 0;
+  await withTranscriptWriteBudget(
+    (bytes) => (charged += bytes),
+    async () => {
+      await chats.saveUserMessage(authority, chat.id, request);
+      const firstCharge = charged;
+      await chats.saveUserMessage(authority, chat.id, request);
+      assert.equal(charged, firstCharge);
+    },
+  );
+  assert.ok(charged > 0, "The saved message was not charged to the request.");
+  const result = {
+    runId: randomUUID(),
+    agentId: "research",
+    text: "A synthetic research result.",
+    timestamp: request.timestamp + 1,
+    parentLifecycleRevision: request.parentLifecycleRevision,
+  };
+  await chats.saveChildResult(authority, chat.id, result);
+  assert.deepEqual(
+    (await chats.read(authority, chat.id)).messages.map(({ role, text, agentId }) => ({
+      role,
+      text,
+      agentId,
+    })),
+    [
+      { role: "user", text: request.text, agentId: undefined },
+      { role: "assistant", text: result.text, agentId: result.agentId },
+    ],
+  );
+  await assert.rejects(
+    chats.saveUserMessage({ ...authority, profileId: randomUUID() }, chat.id, {
+      ...request,
+      runId: randomUUID(),
+    }),
+    { status: 404 },
+  );
+  await assert.rejects(
+    withTranscriptWriteBudget(
+      () => {
+        throw new Error("Budget exhausted");
+      },
+      () => chats.saveUserMessage(authority, chat.id, { ...request, runId: randomUUID() }),
+    ),
+    /Budget exhausted/,
+  );
+  await assert.rejects(
+    chats.saveUserMessage(authority, chat.id, {
+      ...request,
+      runId: randomUUID(),
+      parentLifecycleRevision: randomUUID(),
+    }),
+    { code: "save_failed" },
+  );
+  assert.equal((await chats.read(authority, chat.id)).messages.length, 2);
+  current = false;
+  await assert.rejects(
+    chats.saveUserMessage(authority, chat.id, { ...request, runId: randomUUID() }),
+    /authority ended/,
+  );
+});
+
 void test("saved tool fragments need completion in their own turn, not a child result", async (t) => {
   const chats = await createChats(t);
   const authority = { profileId: randomUUID(), assertCurrent() {} };

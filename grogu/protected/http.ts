@@ -1356,6 +1356,18 @@ export function createProtectedHttp(options: {
       pendingChildResults.delete(result.runId);
       await checkRun();
     };
+    const saveUserMessage: ProtectedTurn["saveUserMessage"] = async () => {
+      await checkRun();
+      const save = () =>
+        chats.saveUserMessage(runAuthority, id, {
+          runId: run.id,
+          text: input.text,
+          timestamp: Date.now(),
+          parentLifecycleRevision,
+        });
+      await (storage ? withTranscriptWriteBudget(storage.charge, save) : save());
+      await checkRun();
+    };
     const sessionAccess = {
       creatorProfileId: profile.id,
       ...(context.automationContextAccess === "isolated"
@@ -1533,6 +1545,7 @@ export function createProtectedHttp(options: {
                     markTiming: timing.mark,
                     markStep: timing.at,
                     toolTiming: timing.tool,
+                    saveUserMessage,
                     saveChildResult,
                     cleanupChildFiles: (sessionId) =>
                       chats.removeTransientFiles(

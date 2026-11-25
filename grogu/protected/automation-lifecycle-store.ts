@@ -340,7 +340,10 @@ async function writeLifecycle(
       if (!outcome.ok) {
         throw outcome.error;
       }
-      if (command.kind === "remove" && outcome.value.status !== "committed") {
+      if (
+        (command.kind === "remove" && outcome.value.status !== "committed") ||
+        (command.kind === "queue" && outcome.value.status === "definition-changed")
+      ) {
         return outcome.value;
       }
       throw new Error("Protected automation lifecycle completed without a commit receipt.");

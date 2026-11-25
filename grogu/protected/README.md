@@ -229,6 +229,21 @@ again just before the write. Errors: `428 version_required`,
 deleted when the person is removed. A limit below current use deletes nothing;
 it stops further growth with `413 quota_exceeded`.
 
+After outstanding writes finish, the listener measures committed storage in
+the background. The next chat create or turn can use that measurement once,
+within five minutes. Active turns continue to charge the same shared ledger.
+Member requests need at least 8 MiB of measured space in both budgets to use
+the prepared total. Otherwise the listener measures again. Other mutation
+routes invalidate the prepared total. Accounting changes and pending commits
+never become an idle measurement. The listener still checks actual free disk
+space on each admission and charge.
+
+The 8 MiB limit applies to charges per admission, not to writes outside the
+service. An out-of-band increase can make a prepared total too small by the
+number of bytes added. There is no fixed byte bound on such writes. Offline
+maintenance must acquire the state-owner lock; a running listener holds it.
+The preparation changes no stored data. A restart begins with a fresh scan.
+
 Existing installs keep the limits that `init` measured. To apply the current
 policy (512 MiB default, no 256 MiB shared cap), run the following command and
 then restart the listener:
@@ -268,7 +283,9 @@ Grogu and Travel chats can save and search the signed-in member's memory. Notes
 are shared across that member's chats, not with other members or personal Grogu.
 The service encrypts notes as member-owned files; the running service and its
 administrator can read them. Search uses a temporary in-memory keyword index,
-not a paid embedding service. Existing chats are not backfilled.
+not a paid embedding service. The service builds that index when a memory tool
+runs, so chats that never use memory do not wait for it. Existing chats are not
+backfilled.
 
 Ordinary chats, itineraries, automation instructions, and run details do not
 need memory notes. Grogu saves short personal context only when it can help
@@ -395,21 +412,22 @@ plain parent text without `sideNote` or its widgets.
 
 ### Public automations
 
-Automation definitions can record `contextAccess` as `isolated` or `member`.
-Definitions without the field retain member access, including new definitions
-created by existing clients. Isolated runs return 503 until the privacy boundary
-is ready. Requests to create isolated definitions also return 503. The later
-enablement must default new definitions to isolated access
-without changing stored definitions that omit the field. Omitted access never
-qualifies an automation for publication.
-When isolated execution is enabled, an isolated run may list and read only this
+Automation definitions record `contextAccess` as `isolated` or `member`.
+New definitions default to isolated access when the client sends
+`automations-context-v1`. Existing clients and stored definitions without the
+field retain member access. Omitted access never qualifies an automation for
+publication.
+An isolated run may list and read only this
 member's other isolated automation run chats, identified by their recorded
 automation lifecycle origin. It cannot access ordinary chats, member
 memory, run search, `sessions_send`, `sessions_spawn`, or the message tool.
 Specialist handoffs remain in the isolated child runtime and receive only the
 same list-and-history access.
+Overflow and timeout recovery use the built-in compactor with the run's model
+and credentials. Recovery does not load workspace bootstrap or member memory,
+run configured context engines or compaction providers, or refresh memory.
 Only clients that send `automations-context-v1` receive the access field. Those
-clients see `capabilities.automations.contextAccess: false` until activation.
+clients see `capabilities.automations.contextAccess: true`.
 
 Public automation is disabled until the automation origin and model-request
 isolation boundary is verified. Clients that send
@@ -460,7 +478,8 @@ string code units; instructions to 16,384 UTF-8 bytes; notification rules to
 4,096 UTF-8 bytes; completion rules to 2,000 code units; and the normalized
 definition to 32,768 UTF-8 bytes. The request body is capped at 48,000 bytes.
 Agents, Sparky model ID, and thinking levels must match the live catalogs.
-Omitted thinking uses the catalog's actual default.
+Omitted thinking uses the catalog's default, `medium` for Sparky. A saved
+automation keeps its resolved level until the member changes it.
 
 Valid input returns `{ valid: true, draft }`, including the resolved thinking
 level. Invalid input returns `{ valid: false, errors }` with field, code, and
@@ -608,8 +627,11 @@ to `PUT /chats/:id/authoring-draft`. Creation and checkpoint writes require
 the next turn. A chat from an older client can lack a checkpoint. Use `null` as
 its first base revision, or start the first recovery turn with revision `"1"`.
 A running turn returns `409 busy` for edits. A stale draft returns
-`412 draft_mismatch`; reread before applying edits. An explicit save binds the
-chat to the saved automation. If an interrupted save left a different saved
+`412 draft_mismatch`; reread before applying edits. When the member asks to save
+the unchanged draft, `automation_draft_save` uses the revision sent with the
+turn. No tool call is needed to look it up. An edit in the same turn or a
+mismatched revision still prevents the save. A successful save binds the chat
+to the saved automation. If an interrupted save left a different saved
 definition, the server keeps the newer draft in Chats and reports the conflict.
 Older clients receive no new response fields.
 
@@ -661,6 +683,10 @@ select a listed model and reasoning level; unavailable choices are rejected.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
 An absent native list means that the model's native choices are unknown.
 The existing `levels` and `default` fields still control turn admission.
+Ordinary and side chats default to `medium` on models that offer it. Other
+models keep their catalog default. A specialist uses the selected turn level.
+On new and existing chats, the server uses the catalog default only when the
+client omits the level. It never changes effort based on prompt length or tool use.
 When context usage is available, the final stream includes a `usage` event and
 the chat response includes the latest completed reply's usage.
 With `model-context-v1`, usage also includes the effective `contextSize` for a
@@ -672,9 +698,10 @@ omitted, as in native run usage. Admin usage totals do not change.
 
 Reasoning is streamed as append-only `reasoning` text events when the provider
 exposes it. Tool activity uses `activity` events with a safe label and a running,
-done, or failed status. Saved replies include available reasoning, tool activity,
-and duration. Chat summaries include `activeRun` only for the Access session
-that started the active turn.
+done, or failed status, even when the provider sends no reasoning. Each call
+keeps the same activity ID in the stream and in the saved reply. Saved replies
+include available reasoning, tool activity, and duration. Chat summaries include
+`activeRun` only for the Access session that started the active turn.
 
 A turn can run for up to 15 minutes, because Sparky with Ultra reasoning can
 take several minutes to write a widget. While a turn runs, the turn stream sends
@@ -1180,6 +1207,11 @@ Access session and denial tables follow the same first-use contract. Doctor
 accepts older personal Gateway stores without them; the access worker creates
 them when the feature first runs.
 This upgrade keeps the shared schema version and existing state unchanged.
+On each request, the listener checks the Access signature and expiry and contacts
+Access to confirm the identity. It refreshes signing keys in the background every
+four minutes after first use. An unknown key or a key set older than five minutes
+requires a fresh key set before the request can proceed. The profile worker
+records session admission and approved profile binding in the same transaction.
 `init --deploy-json FILE` creates the deny-all configuration; `add-subject UUID`
 adds an exact subject to canonical admission storage. Stop the protected listener
 before this maintenance and restart it afterward; active turns can be interrupted.

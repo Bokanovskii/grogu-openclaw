@@ -2878,6 +2878,16 @@ describe("compactEmbeddedAgentSession hooks (ownsCompaction engine)", () => {
     expect(contextEngineCompactMock).not.toHaveBeenCalled();
   });
 
+  it("rejects an explicitly selected native harness for isolated compaction", async () => {
+    await expect(
+      compactEmbeddedAgentSessionDirect({
+        ...nativeCliArgs(),
+        contextIsolation: "isolated",
+      }),
+    ).rejects.toThrow("Isolated compaction requires the built-in agent harness.");
+    expect(runCliAgentMock).not.toHaveBeenCalled();
+  });
+
   it("holds the queued lane until secondary Codex compaction reaches its terminal event", async () => {
     resolveAgentHarnessPolicyMock.mockReturnValue({
       runtime: "codex",

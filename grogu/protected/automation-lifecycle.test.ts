@@ -77,6 +77,10 @@ type WithoutOwner<Command> = Command extends unknown
   ? Omit<Command, "profileId" | "automationId">
   : never;
 
+function queuedAdmission(definitionRevision: number, contextAccess: "member" | "isolated") {
+  return { status: "committed", admission: { definitionRevision, contextAccess } };
+}
+
 async function fixture(
   t: { after(fn: () => Promise<void>): void },
   options: Pick<ProtectedAutomationDraft, "contextAccess" | "pacing"> = {},
@@ -330,11 +334,12 @@ void test("isolated automation results require a matching active run", async (t)
       kind: "queue",
       runId,
       definitionRevision: f.revision,
+      contextAccess: "isolated",
       trigger: "manual",
       scheduledAtMs: 10,
       now: 10,
     }),
-    { status: "committed" },
+    queuedAdmission(f.revision, "isolated"),
   );
   assert.deepEqual(await save(), { status: "conflict" });
   assert.deepEqual(await write({ kind: "start", runId, chatId, now: 11 }), {
@@ -428,11 +433,12 @@ void test("isolated automation edits wait until the active run settles", async (
       kind: "queue",
       runId,
       definitionRevision: f.revision,
+      contextAccess: "isolated",
       trigger: "manual",
       scheduledAtMs: 10,
       now: 10,
     }),
-    { status: "committed" },
+    queuedAdmission(f.revision, "isolated"),
   );
   assert.deepEqual(await patch(), { status: "automation_busy" });
   assert.deepEqual(await write({ kind: "start", runId, chatId: randomUUID(), now: 11 }), {
@@ -574,6 +580,184 @@ void test("isolated creation retains its lease and storage until a failed receip
   );
 });
 
+void test("stale member runs cannot queue against a recreated isolated automation", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId);
+  const usersDir = path.join(f.stateDir, "users");
+  await mkdir(usersDir);
+  const chats = createProtectedChats({
+    stateDir: f.stateDir,
+    maxChatsPerUser: 3,
+    agentCatalog: createProtectedAgentCatalog([]),
+    usersRoot: await root(usersDir),
+    maxFileBytes: 64_000,
+  });
+  const chatAuthority = { profileId: f.ownerId, assertCurrent() {} };
+  const stale = await readOwnedProtectedAutomationStorageRecord(
+    f.stateDir,
+    f.automationId,
+    chatAuthority,
+  );
+  assert.ok(stale);
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      {
+        kind: "remove",
+        profileId: f.ownerId,
+        automationId: f.automationId,
+        expectedRevision: stale.definitionRevision,
+      },
+      { ...owner.admission, retireDefinition() {} },
+    ),
+    { status: "committed" },
+  );
+  const recreated = await createProtectedAutomationRecord(
+    f.stateDir,
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      definition: { ...f.definition, contextAccess: "isolated" },
+      now: 20,
+    },
+    chatAuthority,
+    {
+      chargeAutomationCreate() {},
+      settleAutomationCreate() {},
+      retainPendingWrite: () => () => {},
+      assertResult() {},
+    },
+    {
+      hasRunHistory: (id) => chats.hasAutomationRunHistory(chatAuthority, id),
+      enrollPublication: () => ({ finish() {} }),
+      retainUncertainCreateCommit: () => assert.fail("Unexpected uncertain creation."),
+      reconcile() {},
+    },
+  );
+  assert.ok(recreated);
+  const enabled = await patchProtectedAutomationWithAdmission(
+    captureProtectedStateWorkerContext(f.stateDir),
+    {
+      profileId: f.ownerId,
+      automationId: f.automationId,
+      expectedRevision: Number(recreated.version),
+      definition: { ...f.definition, contextAccess: "isolated" },
+      enabled: true,
+      now: 21,
+    },
+    { ...chatAuthority, admitStorage() {} },
+  );
+  assert.equal(enabled.status, "updated");
+  if (enabled.status !== "updated") {
+    throw new Error("Synthetic isolated automation was not enabled.");
+  }
+  assert.equal(enabled.automation.definitionRevision, stale.definitionRevision);
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { kind: "provision", profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    ),
+    { status: "committed" },
+  );
+  for (const trigger of ["manual", "scheduled"] as const) {
+    assert.deepEqual(
+      await writeProtectedAutomationLifecycle(
+        f.stateDir,
+        {
+          kind: "queue",
+          profileId: f.ownerId,
+          automationId: f.automationId,
+          runId: randomUUID(),
+          definitionRevision: stale.definitionRevision,
+          contextAccess: stale.definition.contextAccess ?? "member",
+          trigger,
+          scheduledAtMs: 30,
+          now: 30,
+        },
+        owner.admission,
+      ),
+      { status: "definition-changed" },
+    );
+  }
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      {
+        kind: "queue",
+        profileId: f.ownerId,
+        automationId: f.automationId,
+        runId: randomUUID(),
+        definitionRevision: enabled.automation.definitionRevision,
+        contextAccess: "isolated",
+        trigger: "manual",
+        scheduledAtMs: 31,
+        now: 31,
+      },
+      owner.admission,
+    ),
+    queuedAdmission(enabled.automation.definitionRevision, "isolated"),
+  );
+});
+
+void test("queue reports a definition change after preparation without creating a run", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId);
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { kind: "provision", profileId: f.ownerId, automationId: f.automationId },
+      owner.admission,
+    ),
+    { status: "committed" },
+  );
+  let validations = 0;
+  const admission: ProtectedAutomationLifecycleAuthority = {
+    ...owner.admission,
+    revalidate: async () => {
+      await owner.admission.revalidate();
+      if (++validations === 2) {
+        const updated = await patchProtectedAutomationWithAdmission(
+          captureProtectedStateWorkerContext(f.stateDir),
+          {
+            profileId: f.ownerId,
+            automationId: f.automationId,
+            expectedRevision: f.revision,
+            definition: { ...f.definition, name: "Updated during queue admission" },
+            enabled: true,
+            now: 20,
+          },
+          { profileId: f.ownerId, assertCurrent() {}, admitStorage() {} },
+        );
+        assert.equal(updated.status, "updated");
+      }
+    },
+  };
+  assert.deepEqual(
+    await writeProtectedAutomationLifecycle(
+      f.stateDir,
+      {
+        kind: "queue",
+        profileId: f.ownerId,
+        automationId: f.automationId,
+        runId: randomUUID(),
+        definitionRevision: f.revision,
+        contextAccess: "member",
+        trigger: "manual",
+        scheduledAtMs: 21,
+        now: 21,
+      },
+      admission,
+    ),
+    { status: "definition-changed" },
+  );
+  assert.deepEqual(
+    await listProtectedAutomationLifecycleRuns(f.stateDir, f.automationId, owner.admission),
+    [],
+  );
+  assert.deepEqual(owner.uncertain, []);
+});
+
 void test("isolated creation waits for deletion before checking orphaned run chats", async (t) => {
   const f = await fixture(t);
   const owner = authority(f.ownerId);
@@ -669,6 +853,7 @@ void test("restores scheduled failure backoff and ignores manual or replaced run
           kind: "queue",
           runId,
           definitionRevision: f.revision,
+          contextAccess: "member",
           trigger,
           scheduledAtMs: now,
           now,
@@ -740,11 +925,12 @@ void test("paused automations allow manual lifecycle runs but refuse scheduled r
       kind: "queue",
       runId: scheduledRunId,
       definitionRevision: f.revision,
+      contextAccess: "member",
       trigger: "scheduled",
       scheduledAtMs: 10,
       now: 10,
     }),
-    { status: "committed" },
+    queuedAdmission(f.revision, "member"),
   );
   const paused = await patchProtectedAutomationWithAdmission(
     captureProtectedStateWorkerContext(f.stateDir),
@@ -779,11 +965,15 @@ void test("paused automations allow manual lifecycle runs but refuse scheduled r
     kind: "queue" as const,
     runId: randomUUID(),
     definitionRevision: paused.automation.definitionRevision,
+    contextAccess: "member" as const,
     scheduledAtMs: 13,
     now: 13,
   };
   assert.deepEqual(await write({ ...queue, trigger: "scheduled" }), { status: "disabled" });
-  assert.deepEqual(await write({ ...queue, trigger: "manual" }), { status: "committed" });
+  assert.deepEqual(
+    await write({ ...queue, trigger: "manual" }),
+    queuedAdmission(queue.definitionRevision, "member"),
+  );
   assert.deepEqual(await write({ ...queue, runId: randomUUID(), trigger: "manual" }), {
     status: "busy",
   });
@@ -869,6 +1059,7 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
     automationId: f.automationId,
     runId,
     definitionRevision: f.revision,
+    contextAccess: "member",
     trigger: "scheduled",
     scheduledAtMs: 1_000,
     now: 1_000,
@@ -934,7 +1125,7 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
       assert.deepEqual(await listProtectedAutomationOwnerInbox(f.stateDir, other.admission), []);
       assert.deepEqual(
         await writeProtectedAutomationLifecycle(f.stateDir, queue, owner.admission),
-        { status: "committed" },
+        queuedAdmission(f.revision, "member"),
       );
       assert.deepEqual(
         await writeProtectedAutomationLifecycle(f.stateDir, queue, owner.admission),
@@ -1032,11 +1223,12 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
           kind: "queue",
           runId: active,
           definitionRevision: f.revision,
+          contextAccess: "member",
           trigger: "manual",
           scheduledAtMs: 1_005,
           now: 1_005,
         }),
-        { status: "committed" },
+        queuedAdmission(f.revision, "member"),
       );
       assert.deepEqual(await write({ kind: "start", runId: active, chatId, now: 1_006 }), {
         status: "committed",
@@ -1118,11 +1310,12 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
           kind: "queue",
           runId: id,
           definitionRevision: f.revision,
+          contextAccess: "member",
           trigger: "manual",
           scheduledAtMs: 3_000,
           now: 3_000,
         }),
-        { status: "committed" },
+        queuedAdmission(f.revision, "member"),
       );
       assert.deepEqual(
         await write({ kind: "start", runId: id, chatId: randomUUID(), now: 3_001 }),
@@ -1226,6 +1419,7 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
           kind: "queue",
           runId: randomUUID(),
           definitionRevision: f.revision,
+          contextAccess: "member",
           trigger: "manual",
           scheduledAtMs: 4_000,
           now: 4_000,
@@ -1251,11 +1445,12 @@ void test("worker-backed lifecycle admission, sealed-result delivery, retention 
           kind: "queue",
           runId: publication,
           definitionRevision: f.revision,
+          contextAccess: "member",
           trigger: "manual",
           scheduledAtMs: 5_000,
           now: 5_000,
         }),
-        { status: "committed" },
+        queuedAdmission(f.revision, "member"),
       );
       assert.deepEqual(await write({ kind: "start", runId: publication, chatId, now: 5_001 }), {
         status: "committed",
@@ -1625,11 +1820,12 @@ async function receiptFixture(
         kind: "queue",
         runId,
         definitionRevision: f.revision,
+        contextAccess: contextAccess ?? "member",
         trigger: "manual",
         scheduledAtMs: now,
         now,
       }),
-      { status: "committed" },
+      queuedAdmission(f.revision, contextAccess ?? "member"),
     );
     assert.deepEqual(await write({ kind: "start", runId, chatId, now: now + 1 }), {
       status: "committed",

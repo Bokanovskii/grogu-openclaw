@@ -7,7 +7,7 @@ must not see the brief, its inputs, its runs, or its results.
 - Schedule: `35 * * * *` in `America/Los_Angeles`
 - Session target: `isolated`
 - Model: `sparky/qwen3.8-flash-next`
-- Thinking: `ultra`
+- Thinking: use the Sparky catalog default (`medium`) unless the owner selects another level
 - Web tools: `web_search` and `web_fetch`; no browser
 - Delivery: the owner's Alcove inbox and push only; never text messages
 - Required input: the home location supplied by the owner

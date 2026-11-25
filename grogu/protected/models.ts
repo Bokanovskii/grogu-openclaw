@@ -34,7 +34,7 @@ export function withThinking(model: ProtectedModel, catalogEntry?: ThinkingCatal
         catalogEntry?.thinkingLevelMap?.[id as Exclude<ThinkLevel, "adaptive" | "ultra">];
       return efforts.includes(mapped ?? id);
     });
-  const preferred = model.provider === "sparky" ? "ultra" : resolveThinkingDefaultForModel(params);
+  const preferred = levels.includes("medium") ? "medium" : resolveThinkingDefaultForModel(params);
   const defaultLevel = levels.includes(preferred) ? preferred : (levels[0] ?? "off");
   const nativeChoices = resolveNativeThinkingChoices({
     ...params,

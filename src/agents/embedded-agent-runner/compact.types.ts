@@ -27,6 +27,7 @@ export type CompactEmbeddedAgentSessionParams = Pick<
   | "authProfileId"
   | "authProfileIdSource"
   | "requestModelCredential"
+  | "contextIsolation"
   | "groupId"
   | "groupChannel"
   | "groupSpace"

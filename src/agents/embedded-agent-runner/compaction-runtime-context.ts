@@ -81,6 +81,7 @@ type EmbeddedCompactionRuntimeContext = Pick<
   | "bootstrapContextMode"
   | "bootstrapContextRunKind"
   | "requestModelCredential"
+  | "contextIsolation"
   | "cwd"
   | "permissionMode"
   | "sessionRoot"
@@ -372,6 +373,7 @@ export function buildEmbeddedCompactionRuntimeContext(
     authProfileId: resolved.authProfileId,
     authProfileIdSource: params.authProfileIdSource,
     requestModelCredential: params.requestModelCredential,
+    contextIsolation: params.contextIsolation,
     runtimeAuthPlan,
     agentHarnessId,
     modelSelectionLocked: params.modelSelectionLocked,

@@ -22,10 +22,17 @@ export async function admitEmbeddedContextEngine(
           config: params.config,
           agentDir: input.agentDir,
           workspaceDir: input.workspaceDir,
+          isolated: params.contextIsolation === "isolated",
         }),
       { config: params.config },
     ));
   try {
+    if (
+      params.contextIsolation === "isolated" &&
+      contextEngineLogicalTurnLease.effectiveEngineId !== "legacy"
+    ) {
+      throw new Error("An isolated run requires the built-in context engine.");
+    }
     const effective = await beginContextEngineLogicalTurn({
       lease: contextEngineLogicalTurnLease,
       host: {

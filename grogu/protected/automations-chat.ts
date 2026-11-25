@@ -175,6 +175,7 @@ export function createProtectedAutomationAuthoringBindings(input: {
   sent: { draft: ProtectedAutomationDraft; draftRevision: string; automationVersion?: string };
   admitStorage: AdmitStorage;
   creationSafety: ProtectedAutomationCreationSafety;
+  defaultIsolated: boolean;
   bind: (automation: StoredAutomationRecord) => Promise<boolean>;
   publish: (event: AuthoringEvent) => Promise<void>;
 }): AutomationsAuthoringBindings {
@@ -346,7 +347,8 @@ export function createProtectedAutomationAuthoringBindings(input: {
           return saved;
         }
         if (
-          params.draftRevision !== input.sent.draftRevision ||
+          (params.draftRevision !== undefined &&
+            params.draftRevision !== input.sent.draftRevision) ||
           draftRevision !== BigInt(input.sent.draftRevision)
         ) {
           return refuse("draft_changed");
@@ -375,14 +377,18 @@ export function createProtectedAutomationAuthoringBindings(input: {
               errors: validation.errors,
             };
           }
-          const created = await create(validation.draft);
+          const definition =
+            input.defaultIsolated && validation.draft.contextAccess === undefined
+              ? { ...validation.draft, contextAccess: "isolated" as const }
+              : validation.draft;
+          const created = await create(definition);
           if (!created) {
             return refuse("unavailable");
           }
           automation = input.present(created);
           // A retried first save finds the record an interrupted save created; it is only this
           // revision's save when the stored definition still equals the sent draft.
-          if (!(await input.bind(created)) || !savesDraft(created, validation.draft)) {
+          if (!(await input.bind(created)) || !savesDraft(created, definition)) {
             return refuse("version_mismatch", automation.version);
           }
         } else {
@@ -460,7 +466,15 @@ function placeholderFields(draft: ProtectedAutomationDraft) {
 }
 
 export function savesDraft(automation: StoredAutomationRecord, draft: ProtectedAutomationDraft) {
-  return isDeepStrictEqual(definitionOf(automation), withoutUndefined(draft));
+  const definition = definitionOf(automation);
+  return isDeepStrictEqual(
+    definition,
+    withoutUndefined(
+      draft.contextAccess === undefined && automation.contextAccess === "isolated"
+        ? { ...draft, contextAccess: "isolated" }
+        : draft,
+    ),
+  );
 }
 
 function withoutUndefined<T extends object>(value: T) {

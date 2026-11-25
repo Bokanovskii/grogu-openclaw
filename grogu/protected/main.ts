@@ -228,6 +228,7 @@ async function main() {
     maxChatsPerUser: 100,
     maxFileBytes: protectedMaxFileBytes,
     storageLimits: settings.storageLimits,
+    assertStorageHostCurrent: () => stateOwner.assertCurrent(),
     agentExtensions: [protectedResearchAgent],
     verifyIdentity,
     answerAccessProof: verifyIdentity.answerProof,
@@ -260,11 +261,13 @@ async function main() {
   const retention = await startProtectedUsageRetention(stateDir);
   policySync.trigger();
   const server = createProtectedServer(origin, app.fetch, staticClient);
+  const stopKeyRefresh = verifyIdentity.startKeyRefresh();
   server.on("error", () => {
     process.stderr.write("Protected listener failed.\n");
     process.exitCode = 1;
   });
   process.once("SIGTERM", () => {
+    stopKeyRefresh();
     const deadline = setTimeout(() => {
       server.closeAllConnections();
       process.exit(1);

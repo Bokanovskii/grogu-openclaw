@@ -99,6 +99,7 @@ export async function recoverEmbeddedRunTimeout(
     // publish a durable session update or start session-memory index writes.
     if (
       timeoutCompactResult.ok &&
+      input.runParams.contextIsolation !== "isolated" &&
       input.contextEngine.info.ownsCompaction === true &&
       input.runParams.sessionPersistence !== "detached"
     ) {

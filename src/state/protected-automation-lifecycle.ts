@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import type { Generated, Selectable } from "kysely";
+import type { Selectable } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import {
   deferSqliteWorkerCommitReceipt,
@@ -22,62 +22,20 @@ import {
 import type {
   ProtectedAutomationLifecycleCommand,
   ProtectedAutomationLifecycleAccess,
+  ProtectedAutomationLifecycleDatabase,
   ProtectedAutomationLifecycleReceipt,
   ProtectedAutomationLifecycleWrite,
-  ProtectedAutomationRunError,
-  ProtectedAutomationRunStatus,
 } from "./protected-automation-lifecycle.types.js";
 import {
   protectedAutomationCheckColumns,
   resolveFinishedAutomationCheck,
-  type ProtectedAutomationCheckColumns,
 } from "./protected-automation-pacing.js";
-import {
-  admitResults,
-  type ProtectedAutomationResultDatabase,
-} from "./protected-automation-results.js";
+import { admitResults } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { readProtectedAutomationSharingStorageUsage } from "./protected-automation-sharing.js";
 import { storedDefinitionCharge } from "./protected-automation-storage-codec.js";
 import type { ProtectedAutomationDatabase } from "./protected-automations.js";
 
-export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase &
-  ProtectedAutomationDatabase & {
-    protected_automation_run_chats: ProtectedAutomationCheckColumns & {
-      automation_id: string;
-      profile_id: string;
-      chat_id: string | null;
-      last_scheduled_at_ms: number | null;
-      reserved_run_bytes: number;
-      charged_bytes: number;
-    };
-    protected_automation_run_lifecycle: {
-      sequence: Generated<number>;
-      id: string;
-      automation_id: string;
-      profile_id: string;
-      definition_revision: number;
-      trigger: "scheduled" | "manual";
-      scheduled_at_ms: number;
-      queued_at_ms: number;
-      status: ProtectedAutomationRunStatus;
-      started_at_ms: number | null;
-      finished_at_ms: number | null;
-      error_code: ProtectedAutomationRunError | null;
-      result_id: string | null;
-      delivered_at_ms: number | null;
-      charged_bytes: number;
-    };
-    protected_automation_owner_inbox: {
-      sequence: Generated<number>;
-      run_id: string;
-      automation_id: string;
-      profile_id: string;
-      result_id: string;
-      created_at_ms: number;
-      charged_bytes: number;
-    };
-  };
 type RunRow = Selectable<
   ProtectedAutomationLifecycleDatabase["protected_automation_run_lifecycle"]
 >;
@@ -254,6 +212,12 @@ export function prepareProtectedAutomationLifecycle(
     if (command.trigger !== "manual" && command.trigger !== "scheduled") {
       throw new Error("Protected automation trigger is invalid.");
     }
+    if (
+      command.kind === "queue" &&
+      command.contextAccess !== (automation.definition?.contextAccess ?? "member")
+    ) {
+      return { status: "definition-changed" };
+    }
     const existing = rows.find((row) => row.id === command.runId);
     if (existing) {
       return {
@@ -280,6 +244,12 @@ export function prepareProtectedAutomationLifecycle(
       rows.some((row) => row.status === "queued" || row.status === "running")
     ) {
       return { status: "busy" };
+    }
+    if (command.kind === "queue") {
+      write.admission = {
+        definitionRevision: automation.definitionRevision,
+        contextAccess: automation.definition?.contextAccess ?? "member",
+      };
     }
   } else if (command.kind === "delete" || command.kind === "remove") {
     if (command.kind === "remove") {
@@ -501,6 +471,9 @@ export function commitProtectedAutomationLifecycle(
       requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: write });
       const current = prepareProtectedAutomationLifecycle(database, write);
       if (current.status !== "prepared" || !isDeepStrictEqual(current.write, write)) {
+        if (write.command.kind === "queue" && current.status === "definition-changed") {
+          return { status: "definition-changed" as const };
+        }
         if (write.command.kind === "remove") {
           return {
             status: current.status === "prepared" ? ("busy" as const) : current.status,
@@ -517,7 +490,11 @@ export function commitProtectedAutomationLifecycle(
         write,
       };
       deferSqliteWorkerCommitReceipt(db, receipt);
-      return { status: "committed" as const, ...(write.check ? { check: write.check } : {}) };
+      return {
+        status: "committed" as const,
+        ...(write.admission ? { admission: write.admission } : {}),
+        ...(write.check ? { check: write.check } : {}),
+      };
     },
     { path: database.path },
     { operationLabel: "protected.automationLifecycle.commit" },

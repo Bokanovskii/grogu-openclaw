@@ -4,8 +4,10 @@ import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/s
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
-import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
-import type { ProtectedAutomationLifecycleWrite } from "./protected-automation-lifecycle.types.js";
+import type {
+  ProtectedAutomationLifecycleDatabase,
+  ProtectedAutomationLifecycleWrite,
+} from "./protected-automation-lifecycle.types.js";
 import { listProtectedAutomationInboxRecipients } from "./protected-automation-sharing.js";
 import {
   readProtectedAutomation,

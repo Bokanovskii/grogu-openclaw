@@ -1,8 +1,52 @@
+import type { Generated } from "kysely";
 import type { SqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
 import type { RetainedWorkerTransactionAdmission } from "../infra/sqlite-worker-operation-settlement.js";
 import type { KeyedFifoLease } from "../shared/keyed-fifo-lease.js";
-import type { ProtectedAutomationCheckDecision } from "./protected-automation-pacing.js";
+import type {
+  ProtectedAutomationCheckColumns,
+  ProtectedAutomationCheckDecision,
+} from "./protected-automation-pacing.js";
+import type { ProtectedAutomationResultDatabase } from "./protected-automation-results.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
+import type { ProtectedAutomationDatabase } from "./protected-automations.js";
+
+export type ProtectedAutomationLifecycleDatabase = ProtectedAutomationResultDatabase &
+  ProtectedAutomationDatabase & {
+    protected_automation_run_chats: ProtectedAutomationCheckColumns & {
+      automation_id: string;
+      profile_id: string;
+      chat_id: string | null;
+      last_scheduled_at_ms: number | null;
+      reserved_run_bytes: number;
+      charged_bytes: number;
+    };
+    protected_automation_run_lifecycle: {
+      sequence: Generated<number>;
+      id: string;
+      automation_id: string;
+      profile_id: string;
+      definition_revision: number;
+      trigger: "scheduled" | "manual";
+      scheduled_at_ms: number;
+      queued_at_ms: number;
+      status: ProtectedAutomationRunStatus;
+      started_at_ms: number | null;
+      finished_at_ms: number | null;
+      error_code: ProtectedAutomationRunError | null;
+      result_id: string | null;
+      delivered_at_ms: number | null;
+      charged_bytes: number;
+    };
+    protected_automation_owner_inbox: {
+      sequence: Generated<number>;
+      run_id: string;
+      automation_id: string;
+      profile_id: string;
+      result_id: string;
+      created_at_ms: number;
+      charged_bytes: number;
+    };
+  };
 
 export type ProtectedAutomationRunStatus =
   | "queued"
@@ -59,6 +103,7 @@ export type ProtectedAutomationLifecycleCommand = {
       kind: "queue";
       runId: string;
       definitionRevision: number;
+      contextAccess: "member" | "isolated";
       trigger: "scheduled" | "manual";
       scheduledAtMs: number;
       now: number;
@@ -106,6 +151,7 @@ export type ProtectedAutomationLifecycleWrite = {
   pruneRunIds: string[];
   pruneResultIds: string[];
   pruneInbox: { profileId: string; runId: string }[];
+  admission?: { definitionRevision: number; contextAccess: "member" | "isolated" };
   check?: ProtectedAutomationCheckDecision;
   retiredDefinition?: { id: string; profileId: string; definitionBytes: number };
   replacement?: {

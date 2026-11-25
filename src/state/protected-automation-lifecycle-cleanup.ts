@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
-import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
+import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.types.js";
 import type { ProtectedAutomationResultStorageEntry } from "./protected-automation-results.types.js";
 import { storedDefinitionCharge } from "./protected-automation-storage-codec.js";
 import type {

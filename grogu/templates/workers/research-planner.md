@@ -5,7 +5,7 @@ Contract marker: `GROGU_RESEARCH_PLANNER_V2`
 Develop the active questions in `research_topics`. The topic holds current
 details, evidence, category tags, priorities, session links, and its completion
 rule. Each pass starts fresh, so the topic is the only memory between passes.
-Use Sparky with Ultra and the job's admitted tools.
+Use the job's configured model, reasoning level, and admitted tools.
 
 ## Select useful work
 

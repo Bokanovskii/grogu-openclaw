@@ -106,10 +106,13 @@ defaults from their admitted native configuration, unless a caller explicitly
 selects an effort. Activity recaps no longer force thinking off. Other providers
 and installations without a private Grogu profile keep their existing behavior.
 
-`agents.defaults.thinkingDefault: "ultra"` selects the provider's highest
-advertised effort, not a literal provider-native `ultra` value. For a model
-advertising only none, low, medium and high, Ultra uses high. Explicit request,
-session, model, agent and job choices remain in force.
+On a fresh setup, bootstrap sets `agents.defaults.thinkingDefault` to `medium`.
+It leaves existing values alone, including `ultra`. Children inherit the
+requester's level unless a child override applies. Jobs without a thinking
+override use their normal session and configuration defaults.
+To move an existing installation off its old blanket default, set the global
+level to `medium`. Change a child or job override only if it came from that
+same blanket policy. Keep levels the owner chose for a particular use.
 
 ## Provider concurrency
 
@@ -162,7 +165,7 @@ approval for a possible Gateway restart.
 
 Grogu uses `agents.defaults.timeoutSeconds: 0` and
 `agents.defaults.subagents.runTimeoutSeconds: 0` to remove overall chat and
-child-session execution caps without reducing Sparky/Ultra. Model-backed
+child-session execution caps without changing reasoning effort. Model-backed
 automations also need an explicit `payload.timeoutSeconds: 0`; omitting it
 retains OpenClaw's separate 60-minute automation watchdog. The
 [shared assistant policy](plugins/grogu-coordination/policy/AGENTS.md#preserve-authority-and-evidence)
@@ -380,7 +383,6 @@ quiet hours from midnight to 06:00.
      --agent <main-agent-id> \
      --session session:agent:<main-agent-id>:main \
      --model "<provider/model>" \
-     --thinking <thinking level> \
      --timeout-seconds 0 \
      --tools read,research_topics,message \
      --no-deliver \
@@ -403,7 +405,6 @@ quiet hours from midnight to 06:00.
      --agent <main-agent-id> \
      --session session:agent:<main-agent-id>:main \
      --model "<provider/model>" \
-     --thinking <thinking level> \
      --timeout-seconds 0 \
      --tools read,research_topics,message \
      --no-deliver \

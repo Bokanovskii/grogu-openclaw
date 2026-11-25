@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -112,4 +112,32 @@ void test("maintenance returns only recent numeric turn timing fields", async (t
   const empty = run();
   assert.equal(empty.status, 0, empty.stderr);
   assert.equal(empty.stdout, "");
+});
+
+void test("enable-fresh-browser leaves protected.json unchanged when the download fails", async (t) => {
+  const home = path.resolve(".artifacts", `protected-browser-${randomUUID()}`);
+  const configPath = path.join(home, "config", "protected.json");
+  await mkdir(path.join(home, "config"), { recursive: true });
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const original = `${JSON.stringify({ stateDir: path.join(home, "state") })}\n`;
+  await writeFile(configPath, original);
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "./scripts/tsx.mjs", "grogu/protected/maintain.ts", "enable-fresh-browser"],
+    {
+      env: {
+        ...process.env,
+        HOME: home,
+        OPENCLAW_STATE_DIR: path.join(home, "state"),
+        OPENCLAW_CONFIG_PATH: path.join(home, "config", "openclaw.json"),
+        // An empty cache plus an unreachable mirror forces the download to fail offline.
+        PLAYWRIGHT_BROWSERS_PATH: path.join(home, "browsers"),
+        PLAYWRIGHT_DOWNLOAD_HOST: "http://127.0.0.1:9",
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /protected\.json is unchanged/u);
+  assert.equal(await readFile(configPath, "utf8"), original);
 });

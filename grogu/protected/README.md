@@ -1011,14 +1011,15 @@ classification.
 ### Private browser
 
 The browser is off by default. Set `"browser": "fresh"` in `protected.json` to
-give interactive member turns four read-only tools: `browser_open`,
+give interactive member turns and automation runs, isolated ones included, four read-only tools: `browser_open`,
 `browser_snapshot`, `browser_follow_link`, and `browser_back`. Each turn gets a new,
 empty headless Chromium context that the turn closes when it ends. No cookies,
 storage, or history survive the turn or are shared between members or chats.
 
-Automation runs, protected automation runs, authoring turns, and routed or
-mentioned children never get the tools. The gate uses server-owned turn
-context, not client input, and missing context means no browser.
+Authoring turns, follow-ups in stored automation run chats, and delegated
+children never get the tools. The browser holds no profile, memory, or session data, so isolated runs
+keep their isolation. The gate uses server-owned turn context, not client
+input.
 
 Chromium reaches the web only through a loopback proxy that requires a
 per-session secret, allows ports 80 and 443 only, and pins each connection to
@@ -1035,8 +1036,11 @@ The agent cannot type into pages, sign in, or ask the member to take control.
 Sites that need a password, one-time code, or passkey are unsupported. There
 is no persistent or owner profile in this version.
 
-Prerequisite: install Chromium as the service account with
-`npx playwright-core install chromium` (about 150 MB). If Chromium is missing,
+Prerequisite: with the listener stopped, run
+`sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run enable-fresh-browser`.
+It downloads Chromium (about 150 MB) for the service account with the pinned
+`playwright-core`, then sets `"browser": "fresh"` in `protected.json`. Rerunning
+is safe. If the download fails, the config is unchanged. Restart the listener after. If Chromium is missing,
 browser tools report that the page could not be loaded and the turn continues.
 
 ## Verification and release gates

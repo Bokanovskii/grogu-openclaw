@@ -21,12 +21,16 @@ const modelContextReads = createSessionTranscriptReadPool<
   | SessionModelContextWorkerInput
   | SessionSqliteTargetWorkerInput
   | SessionContextMessagesWorkerInput
->(SESSION_TRANSCRIPT_FOREGROUND_WORKERS);
+>({
+  maxWorkers: SESSION_TRANSCRIPT_FOREGROUND_WORKERS,
+  idleTimeoutMs: 5 * 60_000,
+  burstIdleTimeoutMs: 60_000,
+});
 
 // Background transcript exports cannot occupy the foreground context worker.
 const sessionEntries = createSessionTranscriptReadPool<
   SessionEntryWorkerInput | SessionResetRecallWorkerInput
->(resolveWorkerPoolSize("singleton"), true);
+>({ maxWorkers: resolveWorkerPoolSize("singleton"), sharedCompute: true });
 
 export async function readSessionTranscriptModelContextInWorker(
   target: SessionTranscriptRuntimeTarget,

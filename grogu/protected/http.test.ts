@@ -7415,18 +7415,18 @@ void test("automation authoring chats hold a server binding and save only the se
         routed.push(turn.routing !== undefined);
         const tools = turn.automationChat;
         if (tools && "authoring" in tools) {
-          const current = await tools.read();
+          const current = turn.input.text.includes("update") ? await tools.read() : undefined;
           if (turn.input.text === "update while away") {
             away.resolve();
             await writeReply.promise;
           }
           // One model message may carry parallel tool calls; the bindings must order them.
           await Promise.all([
-            turn.input.text.includes("update")
+            current
               ? tools.update({ draft: { ...current.draft, name: "Revised by chat" } })
               : undefined,
             turn.input.text.includes("save")
-              ? tools.save({ draftRevision: turn.input.text.split(" ").at(-1)! })
+              ? tools.save({ draftRevision: turn.input.text.match(/ (\d+)$/u)?.[1] })
               : undefined,
           ]);
         }
@@ -7600,11 +7600,15 @@ void test("automation authoring chats hold a server binding and save only the se
     },
   ]);
   assert.deepEqual(await listAutomations(), []);
-  const changedThenSaved = await turn("alice", chat.id, "Please update and save 5", {
+  const changedThenSaved = await turn("alice", chat.id, "Please update and save", {
     draft,
     draftRevision: "5",
   });
   assert.deepEqual(ofType(changedThenSaved.events, "automation-save-refused"), [
+    { type: "automation-save-refused", draftRevision: "5", reason: "draft_changed" },
+  ]);
+  const staleSave = await turn("alice", chat.id, "Please save 4", { draft, draftRevision: "5" });
+  assert.deepEqual(ofType(staleSave.events, "automation-save-refused"), [
     { type: "automation-save-refused", draftRevision: "5", reason: "draft_changed" },
   ]);
   assert.deepEqual(await listAutomations(), []);
@@ -7665,7 +7669,7 @@ void test("automation authoring chats hold a server binding and save only the se
     (await turn("alice", chat.id, "Hello", { draft, draftRevision: "7" })).code,
     "version_required",
   );
-  const resaved = await turn("alice", chat.id, "Please save 7", {
+  const resaved = await turn("alice", chat.id, "Please save", {
     draft,
     draftRevision: "7",
     automationVersion: savedEvent.automation.version,
@@ -7685,7 +7689,7 @@ void test("automation authoring chats hold a server binding and save only the se
     ).status,
     412,
   );
-  assert.deepEqual(routed, [false, false, false, false, false]);
+  assert.deepEqual(routed, [false, false, false, false, false, false]);
 
   // Saved items reopen their one bound chat; other members cannot see or bind them.
   const reopened = await call("alice", `/automations/${chat.id}/authoring`, { method: "POST" });

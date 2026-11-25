@@ -9,7 +9,7 @@ import {
   runSqliteReadOperationSync,
 } from "../infra/sqlite-schema-facts.js";
 import type { OpenClawStateDatabase } from "./openclaw-state-db.js";
-import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.js";
+import type { ProtectedAutomationLifecycleDatabase } from "./protected-automation-lifecycle.types.js";
 import {
   admitResults,
   isOwner,

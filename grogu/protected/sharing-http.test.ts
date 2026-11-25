@@ -777,11 +777,15 @@ void test("legacy public automation data remains private at the HTTP boundary", 
       automationId: automation.id,
       runId,
       definitionRevision: Number(automation.version),
+      contextAccess: "member",
       trigger: "manual",
       scheduledAtMs: 1_000,
       now: 1_001,
     }),
-    { status: "committed" },
+    {
+      status: "committed",
+      admission: { definitionRevision: Number(automation.version), contextAccess: "member" },
+    },
   );
   assert.deepEqual(
     await writeLifecycle({

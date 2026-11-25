@@ -724,13 +724,30 @@ export function createProtectedHttp(options: {
       subject: string;
       revision: number;
     },
-    run?: { automationId: string; version: number; trigger: "scheduled" | "manual" },
+    run?: {
+      automationId: string;
+      runId: string;
+      version: number;
+      trigger: "scheduled" | "manual";
+      isolated: boolean;
+    },
   ) => {
     const assertGrant = () => {
       shutdown.signal.throwIfAborted();
       assertAutomationHostCurrent();
       if (deniedProfiles.has(member.profileId) || retiringProfiles.has(member.profileId)) {
         throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
+      }
+      if (run?.isolated) {
+        const active = activeAutomations.get(run.automationId);
+        if (
+          !active ||
+          active.profileId !== member.profileId ||
+          active.runId !== run.runId ||
+          active.version !== run.version
+        ) {
+          throw new ProtectedError(409, "automation_unavailable", "This automation run has ended.");
+        }
       }
     };
     const checkGrant = async (assert = assertGrant) => {
@@ -750,7 +767,10 @@ export function createProtectedHttp(options: {
         if (!automation || (run.trigger === "scheduled" && !automation.enabled)) {
           throw new ProtectedError(409, "automation_disabled", "This automation is paused.");
         }
-        if (automation.definitionRevision !== run.version) {
+        if (
+          automation.definitionRevision !== run.version ||
+          (automation.definition.contextAccess === "isolated") !== run.isolated
+        ) {
           throw new ProtectedError(
             409,
             "definition_changed",
@@ -1056,13 +1076,6 @@ export function createProtectedHttp(options: {
         if (authoringInput.automationVersion !== undefined) {
           invalid();
         }
-        if (authoringInput.draft.contextAccess === "isolated") {
-          throw new ProtectedError(
-            503,
-            "automation_isolation_unavailable",
-            "Isolated automation execution is unavailable until its memory boundary is ready.",
-          );
-        }
         return { input: authoringInput, catalog: automationCatalog, admitStorage };
       }
       if (authoringInput.automationVersion === undefined) {
@@ -1296,6 +1309,7 @@ export function createProtectedHttp(options: {
               await storageLimit(assertRun),
             ),
           creationSafety: automationCreationSafety(runAuthority),
+          defaultIsolated: hasClientCapability(request.headers, automationContextCapability),
           bind: async (automation) => {
             const chat = await bindSavedAutomation(runAuthority, id, automation);
             const bound = chat.authoring?.automationId === automation.id;
@@ -1864,12 +1878,16 @@ export function createProtectedHttp(options: {
     automation: NonNullable<Awaited<ReturnType<typeof readOwnedProtectedAutomationStorageRecord>>>,
     chatId: string,
     trigger: "scheduled" | "manual",
+    runId: string,
+    admission: { definitionRevision: number; contextAccess: "member" | "isolated" },
   ) => {
     const definition = automation.definition;
     const authority = automationAuthority(member, {
       automationId: automation.id,
-      version: automation.definitionRevision,
+      runId,
+      version: admission.definitionRevision,
       trigger,
+      isolated: admission.contextAccess === "isolated",
     });
     const prompt = [
       `Automation: ${definition.name}`,
@@ -1900,7 +1918,7 @@ export function createProtectedHttp(options: {
       timing: createProtectedTurnTiming(performance.now()),
       textLimit: 32_000,
       automationId: automation.id,
-      automationContextAccess: definition.contextAccess ?? "member",
+      automationContextAccess: admission.contextAccess,
       ...(trigger === "scheduled" && definition.pacing
         ? {
             proposeNextCheck: (delayMs: number) => {
@@ -1921,7 +1939,12 @@ export function createProtectedHttp(options: {
   const automationRefreshes = new Map<string, number>();
   const activeAutomations = new Map<
     string,
-    { profileId: string; completion?: Promise<ProtectedAutomationCheckDecision | undefined> }
+    {
+      profileId: string;
+      runId: string;
+      version: number;
+      completion?: Promise<ProtectedAutomationCheckDecision | undefined>;
+    }
   >();
   const orphanedAutomationRuns = new Map<string, { profileId: string; runId: string }>();
   const recoveringAutomationRuns = new Map<string, Promise<void>>();
@@ -2237,13 +2260,6 @@ export function createProtectedHttp(options: {
     if (String(automation.definitionRevision) !== scheduled.version) {
       throw new ProtectedError(412, "definition_changed", "Reload the automation before running.");
     }
-    if (automation.definition.contextAccess === "isolated") {
-      throw new ProtectedError(
-        503,
-        "automation_isolation_unavailable",
-        "Isolated automation execution is unavailable until its memory boundary is ready.",
-      );
-    }
     await recoverOrphanedAutomationRun(scheduled.id);
     await retryProtectedAutomationInbox(member, scheduled.id);
     const publication = createAutomationPublicationAuthority(memberAuthority);
@@ -2270,6 +2286,7 @@ export function createProtectedHttp(options: {
           profileId: member.profileId,
           automationId: automation.id,
           definitionRevision: automation.definitionRevision,
+          contextAccess: automation.definition.contextAccess ?? "member",
           trigger,
           scheduledAtMs,
           runId,
@@ -2299,11 +2316,20 @@ export function createProtectedHttp(options: {
       }
       throw new ProtectedError(409, "automation_busy", "This automation cannot start another run.");
     }
+    if (!queued.admission) {
+      recoverOrphanedAutomationRunInBackground(automation.id, member.profileId, runId);
+      throw new Error("Protected automation queue did not return its admitted definition.");
+    }
+    const admission = queued.admission;
     if (retiringProfiles.has(member.profileId)) {
       recoverOrphanedAutomationRunInBackground(automation.id, member.profileId, runId);
       throw new ProtectedError(403, "member_inactive", "This member no longer has access.");
     }
-    activeAutomations.set(automation.id, { profileId: member.profileId });
+    activeAutomations.set(automation.id, {
+      profileId: member.profileId,
+      runId,
+      version: admission.definitionRevision,
+    });
     const completion = track(
       (async () => {
         let started = false;
@@ -2313,8 +2339,10 @@ export function createProtectedHttp(options: {
         try {
           const runAuthority = automationAuthority(member, {
             automationId: automation.id,
-            version: automation.definitionRevision,
+            runId,
+            version: admission.definitionRevision,
             trigger,
+            isolated: admission.contextAccess === "isolated",
           });
           const binding = await readProtectedAutomationRunChat(options.stateDir, automation.id, {
             ...memberAuthority.authority,
@@ -2403,7 +2431,14 @@ export function createProtectedHttp(options: {
               automation.definition.agentId,
             );
           }
-          const turn = await executeProtectedAutomationTurn(member, automation, chatId, trigger);
+          const turn = await executeProtectedAutomationTurn(
+            member,
+            automation,
+            chatId,
+            trigger,
+            runId,
+            admission,
+          );
           if (turn.outcome !== "complete" || !turn.responseId) {
             throw new ProtectedError(500, turn.errorCode ?? "turn_failed", "The run failed.");
           }
@@ -4211,7 +4246,7 @@ export function createProtectedHttp(options: {
                   automations: {
                     ...catalog.capabilities.automations,
                     ...(hasClientCapability(request.headers, automationContextCapability)
-                      ? { contextAccess: false }
+                      ? { contextAccess: true }
                       : {}),
                     ...(chatAvailable
                       ? {
@@ -4315,13 +4350,11 @@ export function createProtectedHttp(options: {
         if (!validation.valid) {
           return json(validation, 422);
         }
-        if (validation.draft.contextAccess === "isolated") {
-          throw new ProtectedError(
-            503,
-            "automation_isolation_unavailable",
-            "Isolated automation execution is unavailable until its memory boundary is ready.",
-          );
-        }
+        const definition =
+          hasClientCapability(request.headers, automationContextCapability) &&
+          validation.draft.contextAccess === undefined
+            ? { ...validation.draft, contextAccess: "isolated" as const }
+            : validation.draft;
         await revalidate();
         if (!admitStorage) {
           return notFound();
@@ -4372,7 +4405,7 @@ export function createProtectedHttp(options: {
             options.stateDir,
             {
               profileId: profile.id,
-              definition: validation.draft,
+              definition,
               now: Date.now(),
               ...(authoringChatId === undefined ? {} : { automationId: authoringChatId }),
             },
@@ -4385,7 +4418,7 @@ export function createProtectedHttp(options: {
           }
           if (authoringChatId !== undefined) {
             const chat = await bindSavedAutomation(authority, authoringChatId, automation);
-            if (!chat.authoring?.automationId || !savesDraft(automation, validation.draft)) {
+            if (!chat.authoring?.automationId || !savesDraft(automation, definition)) {
               throw new ProtectedError(
                 412,
                 "version_mismatch",

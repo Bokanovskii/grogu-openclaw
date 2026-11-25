@@ -161,6 +161,7 @@ function lifecycleAuthority(profileId: string): ProtectedAutomationLifecycleAuth
     reserveStorage: async () => ({ settle() {}, release() {} }),
     reserveReplacement: async () => ({ settle() {}, release() {} }),
     reserveBatchReplacement: async () => ({ settle() {}, release() {} }),
+    reserveRecipient: async () => undefined,
     retireStorage() {},
     retainUncertainCommit() {},
   };
@@ -175,6 +176,7 @@ async function recordRunChat(
   profileId: string,
   automationId: string,
   chatId: string,
+  contextAccess: "member" | "isolated",
   finish = true,
 ) {
   const authority = lifecycleAuthority(profileId);
@@ -188,6 +190,7 @@ async function recordRunChat(
         kind: "queue",
         runId,
         definitionRevision: 1,
+        contextAccess,
         trigger: "manual",
         scheduledAtMs: 10,
         now: 10,
@@ -388,7 +391,13 @@ void test("a finished run is stored sealed, charged once to its owner, and reada
 void test("isolated run chat access follows recorded owner origin, not definition name", async (t) => {
   const fixture = await createFixture(t, "isolated");
   const isolatedRunChatId = randomUUID();
-  await recordRunChat(fixture.stateDir, fixture.ownerId, fixture.automationId, isolatedRunChatId);
+  await recordRunChat(
+    fixture.stateDir,
+    fixture.ownerId,
+    fixture.automationId,
+    isolatedRunChatId,
+    "isolated",
+  );
 
   const memberAutomationId = await fixture.createAutomation(
     fixture.ownerId,
@@ -396,7 +405,13 @@ void test("isolated run chat access follows recorded owner origin, not definitio
     "Synthetic isolated run",
   );
   const memberRunChatId = randomUUID();
-  await recordRunChat(fixture.stateDir, fixture.ownerId, memberAutomationId, memberRunChatId);
+  await recordRunChat(
+    fixture.stateDir,
+    fixture.ownerId,
+    memberAutomationId,
+    memberRunChatId,
+    "member",
+  );
 
   const foreignAutomationId = await fixture.createAutomation(
     fixture.otherId,
@@ -404,7 +419,13 @@ void test("isolated run chat access follows recorded owner origin, not definitio
     "Synthetic isolated run",
   );
   const foreignRunChatId = randomUUID();
-  await recordRunChat(fixture.stateDir, fixture.otherId, foreignAutomationId, foreignRunChatId);
+  await recordRunChat(
+    fixture.stateDir,
+    fixture.otherId,
+    foreignAutomationId,
+    foreignRunChatId,
+    "isolated",
+  );
 
   const check = (input: {
     action: "list" | "history" | "send" | "status" | "search";
@@ -435,6 +456,7 @@ void test("isolated run chat access follows recorded owner origin, not definitio
     fixture.ownerId,
     activeAutomationId,
     activeRunChatId,
+    "isolated",
     false,
   );
   assert.equal(await check({ action: "history", targetChatId: activeRunChatId }), true);

@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import type { ProtectedActivity } from "@openclaw/gateway-protocol/protected";
+import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 
 export type Source = { url: string; title: string };
@@ -29,12 +30,21 @@ const toolLabels: Partial<Record<string, string>> = {
   route_to_agent: "Asking another agent",
 };
 
+/** Responses can pair a call ID with a long opaque item ID. Bound only the public ID. */
+export function projectToolCallId(id: unknown): string | undefined {
+  if (typeof id !== "string" || !id) {
+    return undefined;
+  }
+  return id.length <= 256 && !id.startsWith("sha256:") ? id : `sha256:${sha256Hex(id)}`;
+}
+
 export function projectActivity(
   name: unknown,
-  id: unknown,
+  toolCallId: unknown,
   status: ProtectedActivity["status"],
 ): ProtectedActivity | undefined {
-  if (typeof id !== "string" || !id || id.length > 256 || typeof name !== "string") {
+  const id = projectToolCallId(toolCallId);
+  if (!id || typeof name !== "string") {
     return undefined;
   }
   const [kind, label] =

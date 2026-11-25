@@ -860,52 +860,24 @@ void test("legacy public automation data remains private at the HTTP boundary", 
   );
   const publicCatalog = await ok(await call("owner", "/automations/catalog", {}, capabilities));
   assert.deepEqual(publicCatalog.capabilities.automations.public, {
-    publish: false,
-    follow: false,
-    notifications: false,
+    publish: true,
+    follow: true,
+    notifications: true,
   });
-  for (const pathname of [
-    "/automations/public",
-    `/automations/public/${automation.id}/runs`,
-    `/automations/public/${automation.id}/runs/${run.id}`,
-    `/automations/${automation.id}/publication`,
-    `/automations/${automation.id}/follow`,
-    `/automations/${automation.id}/notifications`,
-  ]) {
-    const response = await call(
-      "owner",
-      pathname,
-      {
-        method:
-          pathname.endsWith("/publication") ||
-          pathname.endsWith("/follow") ||
-          pathname.endsWith("/notifications")
-            ? "PUT"
-            : "GET",
-        body: pathname.endsWith("/notifications") ? { subscribed: true } : undefined,
-      },
-      capabilities,
-    );
-    assert.equal(response.status, 503, pathname);
-    assert.equal(await errorCode(response), "public_automations_unavailable");
-  }
-  for (const pathname of [
-    "/automations/public",
-    `/automations/${automation.id}/publication`,
-    `/automations/${automation.id}/notifications`,
-  ]) {
-    const response = await call(
-      "recipient",
-      pathname,
-      {
-        method:
-          pathname.endsWith("/publication") || pathname.endsWith("/notifications") ? "PUT" : "GET",
-        body: pathname.endsWith("/notifications") ? { subscribed: true } : undefined,
-      },
-      capabilities,
-    );
-    assert.equal(response.status, 503, pathname);
-    assert.equal(await errorCode(response), "public_automations_unavailable");
+  assert.deepEqual(
+    (await ok(await call("recipient", "/automations/public", {}, capabilities))).automations,
+    [],
+  );
+  for (const [member, pathname, method, body] of [
+    ["owner", `/automations/${automation.id}/publication`, "PUT", undefined],
+    ["recipient", `/automations/${automation.id}/follow`, "PUT", undefined],
+    ["recipient", `/automations/${automation.id}/notifications`, "PUT", { subscribed: true }],
+    ["recipient", `/automations/public/${automation.id}/runs`, "GET", undefined],
+    ["recipient", `/automations/public/${automation.id}/runs/${run.id}`, "GET", undefined],
+  ] as const) {
+    const response = await call(member, pathname, { method, body }, capabilities);
+    assert.equal(response.status, 404, pathname);
+    assert.equal(await errorCode(response), "not_found");
   }
   assert.deepEqual(legacySharingState(), retainedLegacySharingState);
   for (const pathname of [
@@ -966,6 +938,91 @@ void test("legacy public automation data remains private at the HTTP boundary", 
   assert.equal(
     (await ok(await call("recipient", sharedChat, {}, capabilities))).chat.id,
     runChatId,
+  );
+  await ok(
+    await call(
+      "owner",
+      `/automations/${automation.id}/publication`,
+      { method: "DELETE" },
+      capabilities,
+    ),
+  );
+  assert.deepEqual(legacySharingState(), { publications: [], followers: [], subscriptions: [] });
+});
+
+void test("isolated automation publishing and follower notifications use current grants", async (t) => {
+  const { call, ok, id } = await createSharingFixture(t);
+  const capabilities = "automations-public-v1, automations-context-v1, automation-results-v1";
+  const catalog = await ok(await call("owner", "/automations/catalog", {}, capabilities));
+  assert.deepEqual(catalog.capabilities.automations.public, {
+    publish: true,
+    follow: true,
+    notifications: true,
+  });
+  const { automation } = await ok(
+    await call(
+      "owner",
+      "/automations",
+      {
+        method: "POST",
+        body: {
+          name: "Synthetic public automation",
+          instructions: "Summarize synthetic material.",
+          whenToNotify: "After each run.",
+          agentId: catalog.defaultAgentId,
+          model: { provider: "sparky", id: "synthetic" },
+          contextAccess: "isolated",
+          schedule: { kind: "every", everyMs: 60_000 },
+        },
+      },
+      capabilities,
+    ),
+    201,
+  );
+  const item = `/automations/${automation.id}`;
+  assert.equal((await call("owner", `${item}/publication`, { method: "PUT" })).status, 404);
+  assert.equal((await call("development", "/automations/public", {}, capabilities)).status, 403);
+  assert.equal(
+    (await call("recipient", `${item}/follow`, { method: "PUT" }, capabilities)).status,
+    404,
+  );
+  await ok(await call("owner", `${item}/publication`, { method: "PUT" }, capabilities));
+  const list = await ok(await call("recipient", "/automations/public", {}, capabilities));
+  assert.ok(Value.Check(ProtectedPublicAutomationsResponseSchema, list));
+  const [published] = list.automations;
+  assert.ok(published);
+  assert.equal(published.id, automation.id);
+  assert.equal(published.owner.personId, id("owner"));
+  const followed = await ok(
+    await call("recipient", `${item}/follow`, { method: "PUT" }, capabilities),
+  );
+  assert.ok(Value.Check(ProtectedPublicAutomationResponseSchema, followed));
+  assert.equal(followed.automation.following, true);
+  const subscribed = await ok(
+    await call(
+      "recipient",
+      `${item}/notifications`,
+      { method: "PUT", body: { subscribed: true } },
+      capabilities,
+    ),
+  );
+  assert.equal(subscribed.automation.subscribed, true);
+  await ok(await call("recipient", `${item}/follow`, { method: "DELETE" }, capabilities), 204);
+  assert.equal(
+    (
+      await call(
+        "recipient",
+        `${item}/notifications`,
+        { method: "PUT", body: { subscribed: true } },
+        capabilities,
+      )
+    ).status,
+    404,
+  );
+  await ok(await call("owner", `${item}/publication`, { method: "DELETE" }, capabilities));
+  assert.deepEqual(
+    (await ok(await call("recipient", "/automations/public", {}, capabilities))).automations,
+    [],
   );
 });
 
@@ -1372,7 +1429,7 @@ void test.skip("retired public automation behavior is no longer a contract", asy
 });
 
 void test("deleting a published automation unpublishes it and removes its followers", async (t) => {
-  const { app, stateDir, databasePath, call, ok, errorCode, id } = await createSharingFixture(t);
+  const { app, stateDir, databasePath, call, ok, id } = await createSharingFixture(t);
   const capabilities = "sharing-v1, automations-public-v1, automation-delete-v1";
   const pub = (
     member: Member,
@@ -1451,9 +1508,7 @@ void test("deleting a published automation unpublishes it and removes its follow
     await canMemberReadAutomation(stateDir, member("recipient"), automation.id),
     undefined,
   );
-  const unavailable = await pub("recipient", "/automations/public");
-  assert.equal(unavailable.status, 503);
-  assert.equal(await errorCode(unavailable), "public_automations_unavailable");
+  assert.deepEqual((await ok(await pub("recipient", "/automations/public"))).automations, []);
   assert.deepEqual(
     await runProtectedSharing(stateDir, "protectedSharing.storageUsage", 4096, () => {}),
     [],

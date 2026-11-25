@@ -4156,19 +4156,15 @@ export function createProtectedHttp(options: {
           "sharing_unavailable",
           "Sharing is not available for this account.",
         );
-      const publicAutomationsUnavailable = () =>
-        new ProtectedError(
-          503,
-          "public_automations_unavailable",
-          "Public automations are temporarily unavailable.",
-        );
       // automations-public-v1 additions; requests without it keep the earlier automation contract.
       const requirePublicAutomations = () => {
         if (!automationsPublicCapability || !automationCatalog?.capabilities.automations.list) {
           notFound();
         }
         requireProfile();
-        throw publicAutomationsUnavailable();
+        if (identity.kind === "development") {
+          throw sharingUnavailable();
+        }
       };
       const withPublication = async (
         automations: StoredAutomationRecord[],
@@ -4239,7 +4235,7 @@ export function createProtectedHttp(options: {
             : deletionCatalog;
         const listing = catalog.capabilities.automations.list;
         const chatAvailable = supportsAutomationsChat(request) && listing;
-        const publicAvailable = false;
+        const publicAvailable = listing && identity.kind !== "development";
         return profileJson(
           chatAvailable ||
             automationsPublicCapability ||

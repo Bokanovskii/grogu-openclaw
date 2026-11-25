@@ -1971,6 +1971,57 @@ async function exerciseMemberMemoryBoundary(
     const seed = await createAutomation("Synthetic allowed isolated run");
     const seedRun = await runNow(seed.id);
     const bob = (await (await call("bob", "/me")).json()).user;
+    assert.ok(seedRun.resultId);
+    const publicHeaders = (profileId: string) => ({
+      "x-grogu-profile": profileId,
+      "x-alcove-capabilities": "automations-public-v1, automation-results-v1",
+    });
+    const publicCall = (subject: string, profileId: string, route: string, init?: RequestInit) =>
+      call(subject, route, { ...init, headers: { ...publicHeaders(profileId), ...init?.headers } });
+    const publish = (id: string, method: "PUT" | "DELETE") =>
+      publicCall("alice", alice.id, `/automations/${id}/publication`, { method });
+    const follow = (method: "PUT" | "DELETE") =>
+      publicCall("bob", bob.id, `/automations/${seed.id}/follow`, { method });
+    const publicRuns = `/automations/public/${seed.id}/runs`;
+    assert.equal((await publish(member.id, "PUT")).status, 404);
+    assert.equal((await publish(seed.id, "PUT")).status, 200);
+    assert.equal((await publicCall("bob", bob.id, publicRuns)).status, 404);
+    assert.equal((await follow("PUT")).status, 200);
+    const ownerResultResponse = await publicCall(
+      "alice",
+      alice.id,
+      `/automations/${seed.id}/runs/${seedRun.resultId}`,
+    );
+    assert.equal(ownerResultResponse.status, 200);
+    const ownerResult = (await ownerResultResponse.json()).run;
+    const followerResultResponse = await publicCall(
+      "bob",
+      bob.id,
+      `${publicRuns}/${seedRun.resultId}`,
+    );
+    assert.equal(followerResultResponse.status, 200);
+    const followerResult = (await followerResultResponse.json()).run;
+    assert.deepEqual(followerResult, {
+      id: seedRun.resultId,
+      runAtMs: ownerResult.runAtMs,
+      completedAtMs: ownerResult.completedAtMs,
+      text: ownerResult.text,
+    });
+    assert.deepEqual((await (await publicCall("bob", bob.id, publicRuns)).json()).runs, [
+      followerResult,
+    ]);
+    assert.equal(
+      (await publicCall("bob", bob.id, `/automations/${seed.id}/runs/${seedRun.resultId}`)).status,
+      404,
+    );
+    assert.equal((await follow("DELETE")).status, 204);
+    assert.equal((await publicCall("bob", bob.id, publicRuns)).status, 404);
+    assert.equal((await follow("PUT")).status, 200);
+    assert.equal((await publish(seed.id, "DELETE")).status, 200);
+    assert.equal(
+      (await publicCall("bob", bob.id, `${publicRuns}/${seedRun.resultId}`)).status,
+      404,
+    );
     const foreign = await createAutomation(
       "Synthetic foreign isolated run",
       "isolated",

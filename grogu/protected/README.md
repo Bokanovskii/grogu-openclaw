@@ -677,6 +677,14 @@ with room reserved for output. It is not a provider mode or a billing guarantee.
 An unavailable size returns `context_size_unavailable`. Omission retains the
 existing budget. The token is used for that request only. Turns may
 select a listed model and reasoning level; unavailable choices are rejected.
+For a public GitHub credential, Alcove remembers the account endpoint
+for up to five minutes. It keeps at most 64 endpoint hints, keyed by a digest
+of the profile ID and credential. It stores neither tokens nor model lists.
+On a repeat lookup, it can check the account and read the catalog in parallel.
+Both checks must succeed. If GitHub reports a different endpoint, Alcove reads
+that catalog instead. Enterprise tenant credentials always resolve the account
+first. The `copilotAccountMs` and `copilotCatalogMs` timing
+fields can overlap; do not add them to estimate the wait.
 `thinking.nativeChoices` groups aliases for the same model effort.
 `thinking.orchestrationLevels` lists harness modes such as `ultra` separately.
 An absent native list means that the model's native choices are unknown.

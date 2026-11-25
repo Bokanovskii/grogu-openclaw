@@ -86,7 +86,7 @@ import type { StorageFiles } from "./capacity.js";
 import { chatFilesDirectory, chatWidgetsDirectory, restrictChatFiles } from "./chat-files.js";
 import { ProtectedError, providerTimeout } from "./errors.js";
 import type { createProtectedMemberMemory } from "./member-memory.js";
-import type { fetchProtectedCopilotModels } from "./models.js";
+import type { ProtectedCopilotModel } from "./models.js";
 import { protectedTurnTimeoutMs } from "./settings.js";
 import {
   createToolTimer,
@@ -122,7 +122,7 @@ export type TurnInput = {
   credential?: { accessToken: string; expiresAt?: number };
   thinking?: ProtectedTurnRequest["thinking"];
   contextSize?: number;
-  copilotModel?: Awaited<ReturnType<typeof fetchProtectedCopilotModels>>[number];
+  copilotModel?: ProtectedCopilotModel;
 };
 export type ProtectedTurn = {
   id: string;

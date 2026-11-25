@@ -132,14 +132,29 @@ export function prepareInitialPersistedUserTurnCohort(params: {
 }) {
   const { message, recorder } = params;
   const hint = recorder?.getAdmissionReceipt()?.entryId;
-  if (!message?.idempotencyKey || !recorder || !hint) {
-    return undefined;
-  }
   const scope: SessionTranscriptRuntimeTarget & SessionTranscriptWriteScope =
     withOwnedSessionTranscriptWriterFence(params.target);
   const owner = getOwnedSessionTranscriptReader(scope);
   if (!owner) {
     return undefined;
+  }
+  let messagePresence: boolean | undefined;
+  const consumePresence = (prepared: PreparedSessionTranscriptReload) => {
+    messagePresence =
+      prepared.kind === "bounded" ? prepared.transcript?.messagePresence : undefined;
+  };
+  const readMessagePresence = () => messagePresence;
+  if (!message?.idempotencyKey || !recorder || !hint) {
+    // Ordinary turns still need raw message presence, including messages outside the active path.
+    return {
+      selection: { sessionKey: scope.sessionKey, entryIds: [], includeMessagePresence: true },
+      consume(_manager: SessionManager, prepared: PreparedSessionTranscriptReload) {
+        owner.assertCurrent();
+        consumePresence(prepared);
+      },
+      readInitial: () => undefined,
+      readMessagePresence,
+    };
   }
   const assertOwned = captureOwnedTranscriptWriteAssertion(scope);
   const initialWriter = getOwnedSessionTranscriptInitialWriter({ sessionTarget: scope });
@@ -156,7 +171,6 @@ export function prepareInitialPersistedUserTurnCohort(params: {
     },
   };
   let initial: InitialPersistedUserTurn | undefined;
-  let messagePresence: boolean | undefined;
   return {
     selection,
     consume(
@@ -166,8 +180,7 @@ export function prepareInitialPersistedUserTurnCohort(params: {
     ) {
       assertOwned();
       owner.assertCurrent();
-      messagePresence =
-        prepared.kind === "bounded" ? prepared.transcript?.messagePresence : undefined;
+      consumePresence(prepared);
       const selected = selectCurrentUserTurnFromCohort({
         sessionManager,
         message,
@@ -185,7 +198,7 @@ export function prepareInitialPersistedUserTurnCohort(params: {
       }
     },
     readInitial: () => initial,
-    readMessagePresence: () => messagePresence,
+    readMessagePresence,
   };
 }
 

@@ -594,6 +594,9 @@ skip idle collection. On Node, SQLite,
 history, transcript, and reclamation workers request a 512 MiB V8 old-generation
 limit; an explicit process-wide `--max-old-space-size` overrides Node's worker
 resource limit. These limits do not cover native allocations or transferred buffers.
+The model-context pool keeps one idle transcript reader for five minutes between
+turns. Surplus readers retire after one minute. Memory pressure can retire idle
+readers earlier.
 Memory diagnostics report each sampled direct worker by script and thread ID,
 including its heap, measured heap limit, and external memory. Task workers also publish ArrayBuffer
 bytes from inside their isolate; ArrayBuffers are already included in external

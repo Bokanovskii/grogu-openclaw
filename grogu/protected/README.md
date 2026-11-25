@@ -1178,6 +1178,11 @@ Access session and denial tables follow the same first-use contract. Doctor
 accepts older personal Gateway stores without them; the access worker creates
 them when the feature first runs.
 This upgrade keeps the shared schema version and existing state unchanged.
+On each request, the listener checks the Access signature and expiry and contacts
+Access to confirm the identity. It refreshes signing keys in the background every
+four minutes after first use. An unknown key or a key set older than five minutes
+requires a fresh key set before the request can proceed. The profile worker
+records session admission and approved profile binding in the same transaction.
 `init --deploy-json FILE` creates the deny-all configuration; `add-subject UUID`
 adds an exact subject to canonical admission storage. Stop the protected listener
 before this maintenance and restart it afterward; active turns can be interrupted.

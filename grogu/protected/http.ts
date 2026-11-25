@@ -88,7 +88,6 @@ import { createProfileAvatarReader } from "../../src/state/user-profiles-avatar.
 import { formatUserProfileAvatarEtag } from "../../src/state/user-profiles.js";
 import { createSqliteStorageValueEncryptionFromEnvironment } from "../../src/storage/sqlite-encryption.js";
 import {
-  bindProtectedProfile,
   editProtectedAccessRequest,
   isProtectedAdmissionCurrent,
   listPendingProtectedPolicy,
@@ -2751,19 +2750,19 @@ export function createProtectedHttp(options: {
       };
       const touch = (action: "admit" | "validate" | "logout", assert = assertCurrent) =>
         updateCanonicalUserProfileAccess(
-          { action, ...session },
+          action === "admit"
+            ? {
+                action,
+                ...session,
+                protectedIdentity: { issuer: identity.issuer, subject: identity.subject },
+              }
+            : { action, ...session },
           { env: chats.env, assertCurrent: assert },
         );
       if (!(await touch("admit"))) {
         return unauthorized();
       }
       timing.at("accessAdmitted");
-      assertCurrent();
-      await bindProtectedProfile(options.stateDir, {
-        issuer: identity.issuer,
-        subject: identity.subject,
-        profileId: profile.id,
-      });
       timing.at("accessBound");
       assertCurrent();
       const checkGrant = async (assert = assertGrant) => {

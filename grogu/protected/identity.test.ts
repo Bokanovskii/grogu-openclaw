@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { createCloudflareAccessVerifier, protectedAccessProofPath } from "./identity.js";
 
 const issuer = "https://team.cloudflareaccess.com";
@@ -13,9 +14,9 @@ const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 20
 const jwk = { ...publicKey.export({ format: "jwk" }), kid: "k1", alg: "RS256", use: "sig" };
 let issued = 0;
 
-function token(claims: Record<string, unknown>) {
+function token(claims: Record<string, unknown>, kid = "k1") {
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const body = `${part({ alg: "RS256", kid: "k1" })}.${part({
+  const body = `${part({ alg: "RS256", kid })}.${part({
     iss: issuer,
     aud: [audience],
     exp: Math.floor(Date.now() / 1000) + 600,
@@ -193,6 +194,47 @@ void test("human identities keep cookie and identity-lookup behavior", async () 
   );
   assert.notEqual(next.sessionId, identity.sessionId);
   assert.equal(verify.proofs.length, 0);
+});
+
+void test("refreshes Access keys before expiry and checks the edge on every request", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+  let keyFetches = 0;
+  let identities = 0;
+  let kid = "k1";
+  let remoteAllowed = true;
+  const verify = createCloudflareAccessVerifier({
+    issuer,
+    audience,
+    isAllowed: () => true,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/certs")) {
+        keyFetches++;
+        return Response.json({ keys: [{ ...jwk, kid }] });
+      }
+      identities++;
+      return remoteAllowed
+        ? Response.json({ user_uuid: human })
+        : new Response(null, { status: 403 });
+    },
+  });
+  const stop = verify.startKeyRefresh();
+  t.after(stop);
+  const call = (key: string) => verify(serviceRequest(token({ sub: human }, key)));
+  await call("k1");
+  assert.equal(keyFetches, 1);
+  t.mock.timers.tick(4 * 60_000);
+  await setImmediate();
+  assert.equal(keyFetches, 2);
+  t.mock.timers.tick(61_000);
+  await call("k1");
+  assert.equal(keyFetches, 2, "the request after the original deadline did not fetch keys");
+  kid = "k2";
+  await call(kid);
+  assert.equal(keyFetches, 3, "a new signing key forces an inline refresh");
+  await assert.rejects(call("k1"), { status: 401 });
+  remoteAllowed = false;
+  await assert.rejects(call(kid), { status: 401 });
+  assert.equal(identities, 4);
 });
 
 void test("human identities reuse successful remote revalidation for five minutes", async () => {

@@ -253,6 +253,94 @@ then restart the listener:
 sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run refresh-storage-limits
 ```
 
+### Maintain one member's automations
+
+The trusted local operator can inspect, create, and patch automations with
+`run automations --json`. Stop the protected listener first. Every operation,
+including inspection, requires the exclusive state-owner lock. The command
+uses the installed service environment and storage key. It does not create
+members, impersonate an HTTP client, or change access policy.
+
+Pass exactly one JSON object on stdin, at most 65,536 bytes. Do not pass an
+input file path or executable code. Keep private definitions and command output
+out of shared logs. For example, inspect a synthetic account with:
+
+```sh
+sudo -n -u groguProtected /Library/PrivilegedHelperTools/ai.grogu.protected-maintain run automations --json <<'JSON'
+{"operation":"inspect","email":"member@example.test"}
+JSON
+```
+
+The email must match exactly one approved admission with a bound human subject
+and an active canonical profile. Matching ignores case and surrounding spaces.
+Missing, removed, unbound, revoked, or ambiguous members are refused.
+Inspection returns `profileId`, `catalog`, and owned `automations`.
+Each automation includes its definition, `id`, `version`, `enabled`, `state`,
+`visibility`, and the latest five lifecycle `runs` with their linked `results`.
+Run and result IDs remain available for reconciliation. Add `automationId` to
+inspect one owned job. Another member's ID is refused.
+
+Create one paused automation with an explicitly chosen lowercase UUID v4:
+
+```json
+{
+  "operation": "create",
+  "email": "member@example.test",
+  "automationId": "11111111-1111-4111-8111-111111111111",
+  "definition": {
+    "name": "Morning digest",
+    "instructions": "Summarize the public sources named in this task.",
+    "whenToNotify": "When a useful update appears.",
+    "agentId": "grogu",
+    "model": { "provider": "sparky", "id": "qwen3.8-flash-next" },
+    "contextAccess": "isolated",
+    "schedule": { "kind": "cron", "expr": "0 8 * * *", "tz": "America/Los_Angeles" }
+  }
+}
+```
+
+Use the returned catalog for supported agents, models, reasoning, and schedules.
+The normal draft validator applies. Omitted reasoning uses the catalog default.
+Declare `contextAccess` explicitly: `isolated` excludes ordinary member chats
+and memory, while `member` permits the normal member context. Omission retains
+the existing legacy member-context behavior.
+Creation returns `status: "created"` and `automation`. Repeating the same ID
+and normalized definition returns `status: "exists"` without changing its
+enabled state or charging storage again. A different definition or foreign ID
+is refused. Creation never enables or publishes a job.
+
+Patch only after inspecting the current version:
+
+```json
+{
+  "operation": "patch",
+  "email": "member@example.test",
+  "automationId": "11111111-1111-4111-8111-111111111111",
+  "expectedVersion": "1",
+  "patch": { "enabled": true }
+}
+```
+
+The patch accepts the existing automation fields, including `schedule`,
+`pacing`, and `enabled`, but not ownership, publication, or context access.
+It returns `status: "updated"` and the new `automation.version`. A stale
+version or active isolated run is refused. Enabling first provisions the
+existing lifecycle metadata through normal quota admission. All storage
+measurements, member overrides, owner exemptions, and encryption stay unchanged.
+
+There is no run or delete operation. Restart the listener to use its real
+scheduler. For a one-time acceptance run, choose a supported daily time, then
+inspect retained evidence offline and patch the intended cadence. Inspection
+cannot observe an active live run without first stopping the listener.
+
+Success writes one JSON object to stdout. Failure exits nonzero and writes
+`error` and `message` to stderr. Runtime diagnostics also use stderr.
+After any uncertain write, inspect before
+retrying. Reuse the creation ID, or compare the saved version and fields before
+sending another patch. Provisioning can remain committed when a later enable
+fails. The inspection result shows the authoritative automation and run state.
+No schema, retention, helper, or network permission changes are required.
+
 ### Remove legacy `web_fetch` spill files
 
 Older runtimes saved truncated `web_fetch` output under each chat's

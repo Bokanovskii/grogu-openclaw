@@ -7640,6 +7640,7 @@ void test("the owner sets member storage limits and is exempt from them", async 
   const stateDir = path.resolve(".artifacts", `storage-limit-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await prepareProtectedSharedState(stateDir, () => {});
   const origin = "https://limits.example";
   const issuer = "https://identity.example";
   const expiresAt = Date.now() + 120_000;

@@ -25,6 +25,7 @@ export const protectedAccessProofPath = "/api/protected/v1/access-proof";
 const testClientIdHeader = "x-grogu-test-client-id";
 const testClientSecretHeader = "x-grogu-test-client-secret";
 const remoteRevalidationWindowMs = 5 * 60_000;
+const keyLifetimeMs = 5 * 60_000;
 
 function denied(): never {
   throw new ProtectedError(401, "unauthorized", "Sign in again to continue.");
@@ -82,6 +83,7 @@ export function createCloudflareAccessVerifier(options: {
 }): ProtectedIdentityVerifier & {
   answerProof: (request: Request) => Promise<Response>;
   invalidateSubject: (subject: string) => void;
+  startKeyRefresh: () => () => void;
 } {
   const issuer = new URL(options.issuer);
   if (
@@ -104,10 +106,7 @@ export function createCloudflareAccessVerifier(options: {
   let keys: Array<JsonWebKey & { kid: string }> = [];
   let keysUntil = 0;
   let pendingKeys: Promise<void> | undefined;
-  const loadKeys = async () => {
-    if (now() < keysUntil) {
-      return;
-    }
+  const refreshKeys = async () => {
     pendingKeys ??= (async () => {
       const payload = await boundedJson(
         await fetchImpl(`${issuer.origin}/cdn-cgi/access/certs`, {
@@ -129,7 +128,7 @@ export function createCloudflareAccessVerifier(options: {
           (key.use === undefined || key.use === "sig") &&
           (key.alg === undefined || key.alg === "RS256"),
       );
-      keysUntil = now() + 5 * 60_000;
+      keysUntil = now() + keyLifetimeMs;
     })().finally(() => {
       pendingKeys = undefined;
     });
@@ -161,8 +160,11 @@ export function createCloudflareAccessVerifier(options: {
     ) {
       return denied();
     }
-    await loadKeys();
-    const key = keys.find((candidate) => candidate.kid === header.kid);
+    let key = keys.find((candidate) => candidate.kid === header.kid);
+    if (!key || now() >= keysUntil) {
+      await refreshKeys();
+      key = keys.find((candidate) => candidate.kid === header.kid);
+    }
     if (
       !key ||
       !verify(
@@ -360,6 +362,18 @@ export function createCloudflareAccessVerifier(options: {
   };
   return Object.assign(verifier, {
     answerProof,
+    startKeyRefresh() {
+      const timer = setInterval(() => {
+        if (keysUntil) {
+          void refreshKeys().catch(() => {
+            // Never include network details. Expired keys cannot authorize the next request.
+            process.stderr.write("Protected Access key refresh failed.\n");
+          });
+        }
+      }, keyLifetimeMs - 60_000);
+      timer.unref();
+      return () => clearInterval(timer);
+    },
     invalidateSubject: (subject: string) => {
       boundEmails.delete(subject);
     },

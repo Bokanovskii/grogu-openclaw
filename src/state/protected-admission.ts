@@ -658,36 +658,32 @@ export function bindProtectedProfile(
   input: { issuer: string; subject: string; profileId: string; now: number },
 ): boolean {
   ensureProtectedAdmissionSchema(database);
-  let changed = false;
-  runOpenClawStateWriteTransaction(
-    ({ db }) => {
-      const row = executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .selectFrom("protected_admissions")
-          .select(["status", "last_active_at"])
-          .where("issuer", "=", input.issuer)
-          .where("subject", "=", input.subject),
-      ).rows[0];
-      if (!row || String(row.status) !== "approved") {
-        return;
-      }
-      executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely(db)
-          .updateTable("protected_admissions")
-          .set({
-            profile_id: input.profileId,
-            updated_at: input.now,
-            last_active_at: Math.max(row.last_active_at ?? 0, input.now),
-          })
-          .where("issuer", "=", input.issuer)
-          .where("subject", "=", input.subject),
-      );
-      changed = true;
-    },
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => bindProtectedProfileInTransaction(db, input),
     { path: database.path },
     { operationLabel: "protected.admission.bind-profile" },
   );
-  return changed;
+}
+
+export function bindProtectedProfileInTransaction(
+  db: DatabaseSync,
+  input: { issuer: string; subject: string; profileId: string; now: number },
+): boolean {
+  const result = executeSqliteQuerySync(
+    db,
+    getNodeSqliteKysely(db)
+      .updateTable("protected_admissions")
+      .set((eb) => ({
+        profile_id: input.profileId,
+        updated_at: input.now,
+        last_active_at: eb.fn<number>("max", [
+          eb.fn.coalesce("last_active_at", eb.val(0)),
+          eb.val(input.now),
+        ]),
+      }))
+      .where("status", "=", "approved")
+      .where("issuer", "=", input.issuer)
+      .where("subject", "=", input.subject),
+  );
+  return Number(result.numAffectedRows) > 0;
 }

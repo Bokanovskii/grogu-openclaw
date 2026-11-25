@@ -4,6 +4,10 @@ import { requestSqliteWorkerOperationAdmission } from "../infra/sqlite-worker-op
 import type { DB } from "./openclaw-state-db.generated.js";
 import { runOpenClawStateWriteTransaction } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
+import {
+  bindProtectedProfileInTransaction,
+  ensureProtectedAdmissionSchema,
+} from "./protected-admission.js";
 import { selectResolvedUserProfileMetadataById } from "./user-profiles-internal.js";
 import type { WorkerOperationContext } from "./worker-operation-registry.js";
 
@@ -19,7 +23,8 @@ export const ensureUserProfileAccessDenialsSchema = createOpenClawStateSchemaEns
 
 export function updateUserProfileAccess(
   input:
-    | ({ action: "admit" | "validate" | "logout" } & Session)
+    | ({ action: "admit"; protectedIdentity?: { issuer: string; subject: string } } & Session)
+    | ({ action: "validate" | "logout" } & Session)
     | { action: "revoke"; profileId: string },
   { open, stateOptions }: WorkerOperationContext,
 ): boolean {
@@ -27,6 +32,9 @@ export function updateUserProfileAccess(
   const options = { ...stateOptions(), database };
   ensureSessions(options);
   ensureUserProfileAccessDenialsSchema(options);
+  if (input.action === "admit" && input.protectedIdentity) {
+    ensureProtectedAdmissionSchema(database);
+  }
   const queries = getNodeSqliteKysely<DB>(database.db);
   const currentProfile = () =>
     selectResolvedUserProfileMetadataById(database.db, input.profileId)?.id === input.profileId;
@@ -103,6 +111,13 @@ export function updateUserProfileAccess(
               .onConflict((conflict) => conflict.doNothing()),
           );
           accepted = isCurrentSession(input);
+          if (accepted && input.action === "admit" && input.protectedIdentity) {
+            bindProtectedProfileInTransaction(db, {
+              ...input.protectedIdentity,
+              profileId: input.profileId,
+              now: Date.now(),
+            });
+          }
         }
       }
       requestSqliteWorkerOperationAdmission({ stage: "commit", facts: input.action });

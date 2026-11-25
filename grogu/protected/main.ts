@@ -21,6 +21,7 @@ import {
   requireProtectedStorageEncryption,
   resolveProtectedStorageKeyFile,
 } from "./storage-key.js";
+import { warmProtectedTurnRuntimes } from "./turn-runtime.js";
 import type { ProtectedModel } from "./turns.js";
 
 const anthropic: ProtectedModel = {
@@ -204,6 +205,13 @@ async function main() {
       );
     }),
   );
+  // Members reach Sparky by default and can connect only Copilot or ChatGPT, so warm those in that
+  // order. The agent id must match the one chats.ts gives every turn, or the warm-up misses.
+  await warmProtectedTurnRuntimes({ config, agentId: "protected", agentDir, workspaceDir }, [
+    sparky,
+    copilot,
+    openai,
+  ]);
   const memberMemory = createProtectedMemberMemory();
   const browser = settings.browser === "fresh" ? createProtectedBrowserBroker() : undefined;
   const app = createProtectedHttp({

@@ -429,22 +429,16 @@ run configured context engines or compaction providers, or refresh memory.
 Only clients that send `automations-context-v1` receive the access field. Those
 clients see `capabilities.automations.contextAccess: true`.
 
-Public automation is disabled until the automation origin and model-request
-isolation boundary is verified. Clients that send
-`x-alcove-capabilities: automations-public-v1` see all three capability flags
-(`publish`, `follow`, and `notifications`) set to `false`; public listing,
-publication, follow, and notification routes return 503. Existing publication,
-follow, and notification rows are retained unchanged, but treated as private.
-The state owner accepts new publications, follows, and notification changes
-only for isolated definitions. Owners can still remove legacy publications.
-Only the owner can read automation definitions, runs, lifecycle history, and
-inbox entries. Missing or legacy origin information never grants follower
-access or delivery.
+Clients that send `x-alcove-capabilities: automations-public-v1` can publish
+isolated definitions and follow published automations. Followers can opt in to
+notifications. Member-context and legacy definitions remain private, including
+when old publication or follow rows exist. Owners can remove legacy
+publications. Only the owner can read the full automation definition, private
+run records, lifecycle history, and owner inbox entries.
 
-The future follower result routes use `/automations/public/:id/runs` and
+The follower result routes use `/automations/public/:id/runs` and
 `/automations/public/:id/runs/:resultId`. They return only the result ID, start
-time, completion time, and text. They remain unavailable until the public
-automation boundary is enabled. A current follow and publication are required
+time, completion time, and text. A current follow and publication are required
 for every read. Member-context and legacy results remain private.
 
 This restriction does not affect owner access to private automations or
@@ -602,8 +596,7 @@ over quota or inactive is skipped without blocking the owner or other followers.
 Unfollowing, unpublishing, or deleting the automation removes the entries at
 once, and a retired run takes every recipient's entry with it. A receipt names
 the run and result only; it never makes private text readable. Followers read
-them while publication, follow, and membership stay current, and the routes that
-create follows stay disabled until public automation is available.
+them while publication, follow, and membership stay current.
 The first release stores no Research Topics reference and does not give
 automation turns the Research Topics tool. Automation IDs are canonical
 lowercase UUID v4 values; the protocol's `ProtectedAutomationIdSchema` defines

@@ -417,6 +417,8 @@ isolation boundary is verified. Clients that send
 (`publish`, `follow`, and `notifications`) set to `false`; public listing,
 publication, follow, and notification routes return 503. Existing publication,
 follow, and notification rows are retained unchanged, but treated as private.
+The state owner accepts new publications, follows, and notification changes
+only for isolated definitions. Owners can still remove legacy publications.
 Only the owner can read automation definitions, runs, lifecycle history, and
 inbox entries. Missing or legacy origin information never grants follower
 access or delivery.

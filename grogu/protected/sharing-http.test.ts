@@ -61,6 +61,26 @@ import {
 } from "./state-worker-context.js";
 import type { StoredDataRetirement } from "./storage-entry-quota.js";
 
+function seedLegacyPublication(databasePath: string, automationId: string, followerId: string) {
+  const db = new DatabaseSync(databasePath);
+  try {
+    db.prepare("UPDATE protected_automations SET visibility = 'shared' WHERE id = ?").run(
+      automationId,
+    );
+    db.prepare(
+      "INSERT INTO protected_automation_publications (automation_id, published_at) VALUES (?, 1000)",
+    ).run(automationId);
+    db.prepare(
+      "INSERT INTO protected_automation_members (automation_id, profile_id, role, added_at) VALUES (?, ?, 'follower', 1001)",
+    ).run(automationId, followerId);
+    db.prepare(
+      "INSERT INTO protected_automation_subscriptions (automation_id, profile_id, subscribed_at) VALUES (?, ?, 1001)",
+    ).run(automationId, followerId);
+  } finally {
+    db.close();
+  }
+}
+
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
 const originalStorageKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
 const keyStateDir = path.resolve(".artifacts", `protected-sharing-key-${randomUUID()}`);
@@ -687,7 +707,7 @@ void test("legacy public automation data remains private at the HTTP boundary", 
     }),
     201,
   );
-  const publication = await runProtectedSharing(
+  await runProtectedSharing(
     stateDir,
     "protectedSharing.publishAutomation",
     {
@@ -698,20 +718,7 @@ void test("legacy public automation data remains private at the HTTP boundary", 
     },
     () => {},
   );
-  assert.ok(publication?.created);
-  const follow = await runProtectedSharing(
-    stateDir,
-    "protectedSharing.followAutomation",
-    {
-      profileId: id("recipient"),
-      automationId: automation.id,
-      now: 1_001,
-      storageOverheadBytes: storageEntryOverheadBytes,
-      subscribed: true,
-    },
-    () => {},
-  );
-  assert.ok(follow?.created);
+  seedLegacyPublication(databasePath, automation.id, id("recipient"));
 
   const runId = randomUUID();
   const run = await commitProtectedAutomationFinishedResult(
@@ -1385,37 +1392,18 @@ void test("deleting a published automation unpublishes it and removes its follow
   );
   const item = `/automations/${automation.id}`;
   const version = automation.version;
-  assert.ok(
-    (
-      await runProtectedSharing(
-        stateDir,
-        "protectedSharing.publishAutomation",
-        {
-          profileId: id("owner"),
-          automationId: automation.id,
-          now: 1_000,
-          storageOverheadBytes: storageEntryOverheadBytes,
-        },
-        () => {},
-      )
-    )?.created,
+  await runProtectedSharing(
+    stateDir,
+    "protectedSharing.publishAutomation",
+    {
+      profileId: id("owner"),
+      automationId: automation.id,
+      now: 1_000,
+      storageOverheadBytes: storageEntryOverheadBytes,
+    },
+    () => {},
   );
-  assert.ok(
-    (
-      await runProtectedSharing(
-        stateDir,
-        "protectedSharing.followAutomation",
-        {
-          profileId: id("recipient"),
-          automationId: automation.id,
-          now: 1_001,
-          storageOverheadBytes: storageEntryOverheadBytes,
-          subscribed: true,
-        },
-        () => {},
-      )
-    )?.created,
-  );
+  seedLegacyPublication(databasePath, automation.id, id("recipient"));
   const member = (name: Member) => ({ profileId: id(name), assertCurrent() {} });
   await app.startAutomations(() => {});
 

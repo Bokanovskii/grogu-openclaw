@@ -1550,33 +1550,63 @@ async function receiptFixture(
     storageOverheadBytes: storageEntryOverheadBytes,
   };
   assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
-  assert.ok(
-    (
-      await runProtectedSharing(
-        f.stateDir,
-        "protectedSharing.publishAutomation",
-        { ...sharing, now: 3 },
-        () => {},
-      )
-    )?.created,
+  const published = await runProtectedSharing(
+    f.stateDir,
+    "protectedSharing.publishAutomation",
+    { ...sharing, now: 3 },
+    () => {},
   );
+  if (contextAccess === "isolated") {
+    assert.ok(published?.created);
+  } else {
+    const db = new DatabaseSync(resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: f.stateDir }));
+    try {
+      db.prepare("UPDATE protected_automations SET visibility = 'shared' WHERE id = ?").run(
+        f.automationId,
+      );
+      db.prepare(
+        "INSERT INTO protected_automation_publications (automation_id, published_at) VALUES (?, 3)",
+      ).run(f.automationId);
+    } finally {
+      db.close();
+    }
+  }
   const newFollower = async () => {
     const member = await f.member();
     const auth = authority(member.id);
     owner.recipients.set(member.id, auth.admission);
     return { id: member.id, auth };
   };
-  const follow = async (who: { id: string }, subscribed: boolean) =>
-    assert.ok(
-      (
-        await runProtectedSharing(
-          f.stateDir,
-          "protectedSharing.followAutomation",
-          { ...sharing, profileId: who.id, subscribed, now: (clock += 1) },
-          () => {},
-        )
-      )?.created,
-    );
+  const follow = async (who: { id: string }, subscribed: boolean) => {
+    if (contextAccess === "isolated") {
+      assert.ok(
+        (
+          await runProtectedSharing(
+            f.stateDir,
+            "protectedSharing.followAutomation",
+            { ...sharing, profileId: who.id, subscribed, now: (clock += 1) },
+            () => {},
+          )
+        )?.created,
+      );
+    } else {
+      const db = new DatabaseSync(
+        resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: f.stateDir }),
+      );
+      try {
+        db.prepare(
+          "INSERT INTO protected_automation_members (automation_id, profile_id, role, added_at) VALUES (?, ?, 'follower', ?)",
+        ).run(f.automationId, who.id, (clock += 1));
+        if (subscribed) {
+          db.prepare(
+            "INSERT INTO protected_automation_subscriptions (automation_id, profile_id, subscribed_at) VALUES (?, ?, ?)",
+          ).run(f.automationId, who.id, clock);
+        }
+      } finally {
+        db.close();
+      }
+    }
+  };
   const unfollow = (who: { id: string }) =>
     runProtectedSharing(
       f.stateDir,
@@ -1724,7 +1754,15 @@ void test("each subscribed follower owns and pays for its own receipt of an isol
   const optedOut = await r.newFollower();
   const full = await r.newFollower();
   await r.follow(subscribed, true);
-  await r.follow(optedOut, false);
+  await r.follow(optedOut, true);
+  const setNotifications = (enabled: boolean) =>
+    runProtectedSharing(
+      r.f.stateDir,
+      "protectedSharing.automationSubscription",
+      { profileId: optedOut.id, automationId: r.f.automationId, subscribed: enabled, now: 500 },
+      () => {},
+    );
+  assert.equal(await setNotifications(false), true);
   await r.follow(full, true);
   full.auth.quota(0);
   const finished = await r.run();
@@ -1745,6 +1783,10 @@ void test("each subscribed follower owns and pays for its own receipt of an isol
   assert.equal(subscribed.auth.pending(), 0);
   assert.deepEqual(await r.deliver(finished), { status: "unchanged" });
   assert.equal(subscribed.auth.ledger.globalBytes, receipt.bytes);
+  assert.equal(await setNotifications(true), true);
+  const next = await r.run();
+  assert.deepEqual(await r.deliver(next), { status: "committed" });
+  assert.deepEqual(await r.inbox(optedOut.id), [next.runId]);
 });
 
 void test("a retried delivery reaches the subscribers present at its successful commit", async (t) => {

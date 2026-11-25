@@ -346,7 +346,8 @@ export function createProtectedAutomationAuthoringBindings(input: {
           return saved;
         }
         if (
-          params.draftRevision !== input.sent.draftRevision ||
+          (params.draftRevision !== undefined &&
+            params.draftRevision !== input.sent.draftRevision) ||
           draftRevision !== BigInt(input.sent.draftRevision)
         ) {
           return refuse("draft_changed");

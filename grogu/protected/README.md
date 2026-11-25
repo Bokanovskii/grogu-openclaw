@@ -606,8 +606,11 @@ to `PUT /chats/:id/authoring-draft`. Creation and checkpoint writes require
 the next turn. A chat from an older client can lack a checkpoint. Use `null` as
 its first base revision, or start the first recovery turn with revision `"1"`.
 A running turn returns `409 busy` for edits. A stale draft returns
-`412 draft_mismatch`; reread before applying edits. An explicit save binds the
-chat to the saved automation. If an interrupted save left a different saved
+`412 draft_mismatch`; reread before applying edits. When the member asks to save
+the unchanged draft, `automation_draft_save` uses the revision sent with the
+turn. No tool call is needed to look it up. An edit in the same turn or a
+mismatched revision still prevents the save. A successful save binds the chat
+to the saved automation. If an interrupted save left a different saved
 definition, the server keeps the newer draft in Chats and reports the conflict.
 Older clients receive no new response fields.
 

@@ -65,7 +65,14 @@ export const AutomationsAuthoringUpdateParametersSchema = node({
   draft: ProtectedAutomationDraftSchema,
 });
 export const AutomationsAuthoringSaveParametersSchema = node({
-  draftRevision: Type.String({ minLength: 1, maxLength: 16, pattern: "^[1-9]\\d*$" }),
+  draftRevision: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 16,
+      pattern: "^[1-9]\\d*$",
+      description: "Only supply this if the member specifies a revision. Otherwise omit it.",
+    }),
+  ),
 });
 
 export type AutomationsChatListParameters = Static<typeof AutomationsChatListParametersSchema>;

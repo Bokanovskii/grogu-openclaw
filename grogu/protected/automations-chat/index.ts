@@ -171,7 +171,7 @@ function createAuthoringTools(
       name: "automation_draft_save",
       label: "Save automation draft",
       description:
-        "Only when the member explicitly asks to save: save exactly the draft revision they sent this turn as a paused automation. It never turns the automation on. Do not call it after updating the draft in the same turn or while any [bracketed] placeholder remains; such a save is refused.",
+        "Only when the member explicitly asks to save: save the unchanged draft they sent this turn as a paused automation. Call directly without reading the revision first. A changed or incomplete draft is refused. This never turns the automation on.",
       parameters: AutomationsAuthoringSaveParametersSchema,
       async execute(_toolCallId: string, params: unknown) {
         return isAutomationsAuthoringSaveParameters(params)

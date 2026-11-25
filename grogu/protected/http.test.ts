@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, symlink, watch, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, watch, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect as connectSocket } from "node:net";
 import path from "node:path";
@@ -44,7 +44,7 @@ import {
   authorizedUserFilesDirectory,
   createAuthorizedUserFiles,
 } from "../../src/infra/authorized-user-files.js";
-import { root } from "../../src/infra/fs-safe.js";
+import { root, walkDirectory } from "../../src/infra/fs-safe.js";
 import { bindGithubCopilotToken } from "../../src/plugin-sdk/github-copilot-domain.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../../src/state/openclaw-agent-db-lease.js";
 import { captureOpenClawStateWorkerContext } from "../../src/state/openclaw-state-worker-context.js";
@@ -106,6 +106,30 @@ const protectedCleanupAgent: ProtectedAgentExtension = {
   instructions: "Create a widget so transient files are cleaned.",
   selectable: true,
 };
+
+async function storedFilePaths(directory: string): Promise<string[]> {
+  const { entries, failedDirs, truncated } = await walkDirectory(directory, {
+    symlinks: "skip",
+    include: (entry) => entry.kind === "file",
+  });
+  assert.deepEqual(failedDirs, [], "could not read all fixture directories");
+  assert.equal(truncated, false, "incomplete fixture scan");
+  return entries.map((entry) => entry.path);
+}
+
+void test("the plaintext scan reads nested fixture files but not linked directories", async (t) => {
+  const fixture = path.join(sqliteEncryptionStateDir, `scan-${randomUUID()}`);
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  const state = path.join(fixture, "state");
+  const nested = path.join(state, "nested", ".note");
+  const external = path.join(fixture, "external");
+  await mkdir(path.dirname(nested), { recursive: true });
+  await mkdir(external);
+  await writeFile(nested, "stored");
+  await writeFile(path.join(external, "outside"), "not stored");
+  await symlink(external, path.join(state, "capture"), "dir");
+  assert.deepEqual(await storedFilePaths(state), [nested]);
+});
 
 void test("Protected turns load skills on request and retain credentials during overflow recovery", async (t) => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
@@ -5794,12 +5818,10 @@ async function exerciseCanonicalTurns(
   assert.ok(exportedChats.chats.some((item: { id: string }) => item.id === chat.id));
   assert.match(JSON.stringify(exportedChats), /Committed synthetic answer\./);
   const profileDirectory = path.join(usersDir, createHash("sha256").update(user.id).digest("hex"));
-  const storedFiles = (
-    await readdir(profileDirectory, { recursive: true, withFileTypes: true })
-  ).filter((entry) => entry.isFile());
+  const storedFiles = await storedFilePaths(profileDirectory);
   assert.ok(storedFiles.length > 0);
-  for (const entry of storedFiles) {
-    const bytes = await readFile(path.join(entry.parentPath, entry.name));
+  for (const filePath of storedFiles) {
+    const bytes = await readFile(filePath);
     assert.ok(!bytes.includes("Scoped widget body"));
     assert.ok(!bytes.includes("Synthetic widget"));
   }
@@ -7314,13 +7336,10 @@ async function exerciseCanonicalTurns(
     "Family source evidence.",
     offlinePrompt,
   ];
-  for (const entry of await readdir(stateDir, { recursive: true, withFileTypes: true })) {
-    if (entry.isFile()) {
-      const filePath = path.join(entry.parentPath, entry.name);
-      const bytes = await readFile(filePath);
-      for (const marker of plaintextMarkers) {
-        assert.ok(!bytes.includes(marker), `plaintext marker persisted in ${filePath}`);
-      }
+  for (const filePath of await storedFilePaths(stateDir)) {
+    const bytes = await readFile(filePath);
+    for (const marker of plaintextMarkers) {
+      assert.ok(!bytes.includes(marker), `plaintext marker persisted in ${filePath}`);
     }
   }
   fixtureCompleted = true;

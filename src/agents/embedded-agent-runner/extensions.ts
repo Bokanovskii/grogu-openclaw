@@ -26,6 +26,7 @@ export function buildEmbeddedExtensionFactories(params: {
   sessionId?: string;
   sessionKey?: string;
   runId?: string;
+  contextIsolation?: "isolated";
 }): ExtensionFactory[] {
   const factories: ExtensionFactory[] = [];
   if (resolveEffectiveCompactionMode(params.cfg) === "safeguard") {
@@ -38,8 +39,9 @@ export function buildEmbeddedExtensionFactories(params: {
       model: params.model,
       recentTurnsPreserve: compactionCfg?.recentTurnsPreserve,
       workspaceDir: params.workspaceDir,
-      postCompactionSections: compactionCfg?.postCompactionSections,
-      provider: compactionCfg?.provider,
+      postCompactionSections:
+        params.contextIsolation === "isolated" ? undefined : compactionCfg?.postCompactionSections,
+      provider: params.contextIsolation === "isolated" ? undefined : compactionCfg?.provider,
     });
     factories.push(compactionSafeguardExtension);
   }

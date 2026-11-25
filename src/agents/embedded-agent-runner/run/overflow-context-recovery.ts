@@ -315,7 +315,7 @@ export async function recoverEmbeddedRunOverflow(
             `while nested tool work was parked; not continuing mid-turn for ${input.modelSelection.provider}/${input.modelSelection.model}`,
         );
       }
-      if (input.contextEngine.maintain) {
+      if (runParams.contextIsolation !== "isolated" && input.contextEngine.maintain) {
         const transcript = await input.prepareRecoverySession(contextTokenBudget);
         await runContextEngineMaintenance({
           ...transcript,

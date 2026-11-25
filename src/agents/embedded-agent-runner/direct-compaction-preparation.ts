@@ -200,6 +200,9 @@ export async function prepareDirectCompactionAttempt(
     providerUsesProfileScopedModelMetadata,
   } = harnessAuth;
   const preparedHarnessRuntime = selectedPreparedHarness.id;
+  if (params.contextIsolation === "isolated" && preparedHarnessRuntime !== "openclaw") {
+    throw new Error("Isolated compaction requires the built-in agent harness.");
+  }
   let resolvedAuthAttempt;
   try {
     resolvedAuthAttempt = await resolvePreparedRuntimeAuthAttempts({

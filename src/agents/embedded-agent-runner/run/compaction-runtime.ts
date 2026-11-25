@@ -6,6 +6,7 @@ import {
   withOwnedSessionTranscriptWrites,
   SessionTranscriptWriterClaimReboundError,
 } from "../../../config/sessions/transcript-write-context.js";
+import { delegateCompactionToRuntime } from "../../../context-engine/delegate.js";
 import type { buildContextEngineRuntimeSettings } from "../../../context-engine/runtime-settings.js";
 import {
   resolveCompactionSuccessorTranscript,
@@ -89,8 +90,9 @@ export async function compactEmbeddedRunForRecovery(
   },
 ) {
   const { runParams } = input;
-  if (runParams.contextIsolation === "isolated") {
-    throw new Error("Isolated run recovery cannot compact without an isolated context engine.");
+  const isolated = runParams.contextIsolation === "isolated";
+  if (isolated && input.harnessRuntime !== "openclaw") {
+    throw new Error("Isolated run recovery requires the built-in agent harness.");
   }
   const owner = input.prepareRecoveryOwner();
   const activeSession = owner.session;
@@ -113,12 +115,15 @@ export async function compactEmbeddedRunForRecovery(
   }
   await runParams.beforeCompaction?.();
   owner.assertActive();
-  await input.runOwnsCompactionBeforeHook(reason);
+  if (!isolated) {
+    await input.runOwnsCompactionBeforeHook(reason);
+  }
   owner.assertActive();
   const runtimeContext = {
     ...buildEmbeddedCompactionRuntimeContext(
       {
         ...runParams,
+        ...(isolated ? { modelSelectionLocked: true, modelFallbacksOverride: [] } : {}),
         authProfileId: input.modelSelection.authProfileId,
         authProfileIdSource: input.modelSelection.authProfileIdSource,
         runtimeAuthPlan: input.runtimeAuthPlan,
@@ -138,16 +143,18 @@ export async function compactEmbeddedRunForRecovery(
       },
       "recovery",
     ),
-    ...resolveContextEngineCapabilities({
-      config: runParams.config,
-      sessionKey: runParams.sessionKey,
-      explicitAgentId: input.contextEngineAgentId,
-      contextEnginePluginId: input.resolveContextEnginePluginId(),
-      purpose:
-        recoveryKind === "budget"
-          ? "context-engine.compaction"
-          : `context-engine.${recoveryKind}-compaction`,
-    }),
+    ...(isolated
+      ? {}
+      : resolveContextEngineCapabilities({
+          config: runParams.config,
+          sessionKey: runParams.sessionKey,
+          explicitAgentId: input.contextEngineAgentId,
+          contextEnginePluginId: input.resolveContextEnginePluginId(),
+          purpose:
+            recoveryKind === "budget"
+              ? "context-engine.compaction"
+              : `context-engine.${recoveryKind}-compaction`,
+        })),
     onCompactionHookMessages: input.onCompactionHookMessages,
     ...(input.attempt.promptCache ? { promptCache: input.attempt.promptCache } : {}),
     runId: runParams.runId,
@@ -189,7 +196,7 @@ export async function compactEmbeddedRunForRecovery(
   try {
     result = await compactContextEngineWithSafetyTimeout(
       {
-        info: input.contextEngine.info,
+        info: isolated ? { id: "legacy", name: "Legacy Context Engine" } : input.contextEngine.info,
         compact: (backendParams) =>
           owner.withTranscriptWrites(backendParams.abortSignal, () => {
             if (backendParams.runtimeContext) {
@@ -216,7 +223,9 @@ export async function compactEmbeddedRunForRecovery(
                 },
               });
             }
-            return input.contextEngine.compact(backendParams);
+            return isolated
+              ? delegateCompactionToRuntime(backendParams)
+              : input.contextEngine.compact(backendParams);
           }),
       },
       compactParams,
@@ -556,6 +565,7 @@ export function createEmbeddedRunCompactionRuntime(input: {
     const hook = compactResult ? "after_compaction" : "before_compaction";
     if (
       contextEngine.info.ownsCompaction !== true ||
+      params.contextIsolation === "isolated" ||
       (compactResult && !compactResult.ok) ||
       !hookRunner?.hasHooks(hook)
     ) {

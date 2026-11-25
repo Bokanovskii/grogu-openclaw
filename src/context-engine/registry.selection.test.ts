@@ -80,6 +80,23 @@ it("uses the default slot while plugins are disabled", async () => {
   expect(factory).not.toHaveBeenCalled();
 });
 
+it("does not construct the configured engine for an isolated logical turn", async () => {
+  const { registry, factory } = fixture();
+  await withPluginRuntimeRegistryScope(registry, async () => {
+    const lease = await createContextEngineLogicalTurnLease({
+      config: { plugins: { slots: { contextEngine: engineId } } },
+      identity: { runId: "isolated-run", sessionId: "isolated-session" },
+      isolated: true,
+    });
+    try {
+      expect(lease.begin().registeredId).toBe("legacy");
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      await lease.dispose();
+    }
+  });
+});
+
 it.each([
   ["standalone", "missing"],
   ["standalone", "factory"],

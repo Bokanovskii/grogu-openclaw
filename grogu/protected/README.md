@@ -425,6 +425,9 @@ automation lifecycle origin. It cannot access ordinary chats, member
 memory, run search, `sessions_send`, `sessions_spawn`, or the message tool.
 Specialist handoffs remain in the isolated child runtime and receive only the
 same list-and-history access.
+Overflow and timeout recovery use the built-in compactor with the run's model
+and credentials. Recovery does not load workspace bootstrap or member memory,
+run configured context engines or compaction providers, or refresh memory.
 Only clients that send `automations-context-v1` receive the access field. Those
 clients see `capabilities.automations.contextAccess: false` until activation.
 

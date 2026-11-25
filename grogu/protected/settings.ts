@@ -171,6 +171,9 @@ export function protectedOpenClawConfig(stateDir: string, serviceRoot: string): 
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
               contextWindow: 128_000,
               maxTokens: 8192,
+              // Sparky sends reasoning on a separate field, so the answer after it can stream live;
+              // without this opt-in the transport withholds the whole answer until the model ends.
+              params: { structuredReasoningStreaming: true },
             },
           ],
         },

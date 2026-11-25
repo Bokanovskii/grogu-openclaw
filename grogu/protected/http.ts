@@ -1885,6 +1885,7 @@ export function createProtectedHttp(options: {
     trigger: "scheduled" | "manual",
     runId: string,
     admission: { definitionRevision: number; contextAccess: "member" | "isolated" },
+    releaseChatCreation: (() => void) | undefined,
   ) => {
     const definition = automation.definition;
     const authority = automationAuthority(member, {
@@ -1932,6 +1933,7 @@ export function createProtectedHttp(options: {
           }
         : {}),
     });
+    releaseChatCreation?.();
     await turn.response.body?.cancel();
     const result = await turn.completion;
     return {
@@ -2341,6 +2343,7 @@ export function createProtectedHttp(options: {
         let completedTurn = false;
         let succeeded = false;
         let committedCheck: ProtectedAutomationCheckDecision | undefined;
+        let chatCreation: StorageAdmission | undefined;
         try {
           const runAuthority = automationAuthority(member, {
             automationId: automation.id,
@@ -2391,10 +2394,9 @@ export function createProtectedHttp(options: {
               throw new ProtectedError(409, "busy", "Another chat is being created.");
             }
             creating.add(member.profileId);
-            let storage;
             try {
               await runAuthority.revalidate();
-              storage = await admitStorage(
+              chatCreation = await admitStorage(
                 member.profileId,
                 runAuthority.assertCurrent,
                 "create",
@@ -2407,12 +2409,11 @@ export function createProtectedHttp(options: {
                 undefined,
                 { chatId, automationId: automation.id },
               );
-              storage.recordCreatedChat(
+              chatCreation.recordCreatedChat(
                 chatId,
                 chats.scope(runAuthority.authority, chatId).sessionKey,
               );
             } finally {
-              storage?.release();
               creating.delete(member.profileId);
             }
             entry = await chats.readEntry(runAuthority.authority, chatId);
@@ -2443,6 +2444,7 @@ export function createProtectedHttp(options: {
             trigger,
             runId,
             admission,
+            chatCreation?.release,
           );
           if (turn.outcome !== "complete" || !turn.responseId) {
             throw new ProtectedError(500, turn.errorCode ?? "turn_failed", "The run failed.");
@@ -2586,6 +2588,7 @@ export function createProtectedHttp(options: {
           }
           return finished.status === "committed" ? finished.check : undefined;
         } finally {
+          chatCreation?.release();
           activeAutomations.delete(automation.id);
           reconcileUncertainAutomationStorage();
         }
@@ -2605,6 +2608,8 @@ export function createProtectedHttp(options: {
     const automationCatalog = catalogFor(request);
     const timing = createProtectedTurnTiming(performance.now());
     const path = new URL(request.url).pathname;
+    let finishMutation: ((profileId?: string) => void) | undefined;
+    let mutationProfile: string | undefined;
     try {
       if (path === "/healthz" && request.method === "GET") {
         return json({ ready: !shutdown.signal.aborted }, shutdown.signal.aborted ? 503 : 200);
@@ -2821,6 +2826,30 @@ export function createProtectedHttp(options: {
       timing.at("accessAdmitted");
       timing.at("accessBound");
       assertCurrent();
+      const connection =
+        /^\/providers\/(github-copilot|openai)\/connect(?:\/([a-f0-9-]{36})(\/poll)?)?$/u.exec(
+          pathname,
+        );
+      if (
+        admitStorage &&
+        assertStorageHostCurrent &&
+        !["GET", "HEAD", "OPTIONS"].includes(method)
+      ) {
+        // These routes either read data or hold a storage reservation through their writes.
+        const meteredOrReadOnly =
+          (connection !== null && (method === "POST" || method === "DELETE")) ||
+          (method === "POST" &&
+            (pathname === "/chats" ||
+              pathname === "/automations" ||
+              pathname === "/automations/drafts/validate" ||
+              pathname === "/providers/github-copilot/models" ||
+              /^\/(?:chats\/[^/]+\/turns|automations\/[^/]+\/run)$/u.test(pathname))) ||
+          (method === "PATCH" && /^\/automations\/[^/]+$/u.test(pathname));
+        if (!meteredOrReadOnly) {
+          finishMutation = admitStorage.beginUntrackedMutation();
+          mutationProfile = profile.id;
+        }
+      }
       const checkGrant = async (assert = assertGrant) => {
         assert();
         await identity.revalidate();
@@ -4943,10 +4972,6 @@ export function createProtectedHttp(options: {
         revokedSessions.delete(identity.sessionId);
         return noContent();
       }
-      const connection =
-        /^\/providers\/(github-copilot|openai)\/connect(?:\/([a-f0-9-]{36})(\/poll)?)?$/u.exec(
-          pathname,
-        );
       const relay = options.providerRelay;
       const relayAuthority = {
         ...session,
@@ -6135,6 +6160,8 @@ export function createProtectedHttp(options: {
       }
       return notFound();
     } catch (error) {
+      // Do not start a host-wide scan for an invalid route. A partial write still invalidated idle.
+      mutationProfile = undefined;
       const issue = publicError(error);
       if (
         /^\/api\/protected\/v1\/(?:chats\/[^/]+\/(?:feedback|responses\/[^/]+\/(?:feedback|reports))|admin\/(?:reports(?:\/[^/]+)?|telemetry))$/u.test(
@@ -6145,31 +6172,13 @@ export function createProtectedHttp(options: {
         return json({ error: issue.code }, issue.status);
       }
       return json({ error: { code: issue.code, message: issue.message } }, issue.status);
+    } finally {
+      finishMutation?.(mutationProfile);
     }
   };
   return {
     fetch(this: void, request: Request) {
-      if (
-        !admitStorage ||
-        !assertStorageHostCurrent ||
-        request.method === "GET" ||
-        request.method === "HEAD" ||
-        request.method === "OPTIONS"
-      ) {
-        return track(handle(request));
-      }
-      // Other mutation routes can commit canonical data without a turn admission (e.g. feedback).
-      const path = new URL(request.url).pathname;
-      const metered =
-        request.method === "POST" &&
-        (path === `${base}/chats` ||
-          path === protectedAccessProofPath ||
-          /^\/api\/protected\/v1\/chats\/[^/]+\/turns$/u.test(path));
-      if (metered) {
-        return track(handle(request));
-      }
-      const finish = admitStorage.beginUntrackedMutation();
-      return track(handle(request).finally(finish));
+      return track(handle(request));
     },
     async startAutomations(assertHostCurrent: () => void) {
       if (automationSchedulerStarted || !admitStorage) {

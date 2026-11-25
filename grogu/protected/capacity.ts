@@ -474,7 +474,7 @@ export function createStorageAdmission(
       if (
         !ledger &&
         prepared &&
-        (operation === "turn" || operation === "create") &&
+        (operation === "turn" || operation === "create" || operation === "automation") &&
         performance.now() - prepared.at < idleMeasurementLifetimeMs
       ) {
         options.idleMeasurement?.assertCurrent();
@@ -865,11 +865,18 @@ export function createStorageAdmission(
     }
   };
   let preparing = false;
-  function scheduleIdleMeasurement(profileId: string) {
+  let requestedMeasurement: string | undefined;
+  function scheduleIdleMeasurement(requestedFor?: string) {
     const owner = options.idleMeasurement;
-    if (!owner || preparing || mutations !== 0) {
+    if (!owner) {
       return;
     }
+    requestedMeasurement = requestedFor ?? requestedMeasurement;
+    const profileId = requestedMeasurement;
+    if (profileId === undefined || preparing || ledger || mutations !== 0) {
+      return;
+    }
+    requestedMeasurement = undefined;
     const epoch = generation;
     preparing = true;
     const work = pending
@@ -898,6 +905,8 @@ export function createStorageAdmission(
       })
       .finally(() => {
         preparing = false;
+        // A mutation can both start and finish while this scan is reading the old generation.
+        scheduleIdleMeasurement();
       });
     pending = work;
     owner.track(work);
@@ -907,8 +916,9 @@ export function createStorageAdmission(
       generation++;
       mutations++;
       idle = undefined;
-      return () => {
+      return (admittedProfileId?: string) => {
         mutations--;
+        scheduleIdleMeasurement(admittedProfileId);
       };
     },
     async reserveStoredData(
@@ -984,6 +994,9 @@ export function createStorageAdmission(
       }
     },
     retiredStoredData(changes: readonly StoredDataRetirement[]) {
+      if (!changes.length) {
+        return;
+      }
       idle = undefined;
       for (const change of changes) {
         storedDataRetirementKey(change);

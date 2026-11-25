@@ -413,7 +413,8 @@ export async function saveProtectedAutomationPatch(
   if (current.version !== input.expectedVersion) {
     return { status: "version_mismatch", currentVersion: current.version };
   }
-  if (input.patch.enabled === true && !deps.schedulerAvailable) {
+  const provision = input.patch.enabled === true ? deps.provision : undefined;
+  if (input.patch.enabled === true && (!deps.schedulerAvailable || !provision)) {
     return { status: "scheduler_required" };
   }
   if (
@@ -450,18 +451,14 @@ export async function saveProtectedAutomationPatch(
   if (!validation.valid) {
     return { status: "invalid", validation };
   }
-  await deps.revalidate();
-  if (input.patch.enabled === true) {
-    if (!deps.provision) {
-      return { status: "scheduler_required" };
-    }
-    await deps.provision();
-  }
   if (!deps.admitStorage) {
     return { status: "storage_unavailable" };
   }
   const storage = await deps.admitStorage();
   try {
+    await deps.revalidate();
+    // Provisioning has its own receipt. Keep this admission active so both writes share one scan.
+    await provision?.();
     const updated = await patchProtectedAutomationRecord(
       stateDir,
       {

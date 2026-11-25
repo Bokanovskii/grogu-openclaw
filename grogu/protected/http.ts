@@ -95,7 +95,6 @@ import {
   listProtectedAccessRequests,
   readProtectedAccessRequest,
   removeProtectedAdmission,
-  readProtectedProfileStorageLimit,
   readProtectedStorageLimit,
   retryProtectedPolicy,
   setProtectedRequestStatus,
@@ -116,7 +115,6 @@ import {
   listProtectedAutomationOwnerInbox,
   readProtectedAutomationLastScheduledAttempt,
   readProtectedAutomationInterruptedRunForOwner,
-  readProtectedAutomationLifecycleStorageUsage,
   readProtectedAutomationRunChat,
   writeProtectedAutomationLifecycle,
   writeProtectedAutomationLifecycleForOwner,
@@ -124,10 +122,7 @@ import {
   type ProtectedAutomationLifecycleOwnerAuthority,
 } from "./automation-lifecycle-store.js";
 import { handleProtectedAutomationResultsRoute } from "./automation-results-http.js";
-import {
-  listProtectedPublicAutomationRunRecords,
-  readProtectedAutomationResultStorageUsage,
-} from "./automation-results-read.js";
+import { listProtectedPublicAutomationRunRecords } from "./automation-results-read.js";
 import { commitProtectedAutomationFinishedResult } from "./automation-results-store.js";
 import {
   createProtectedAutomationScheduler,
@@ -145,7 +140,6 @@ import {
   listProtectedAutomationRecords,
   readOwnedProtectedAutomationStorageRecord,
   readProtectedAutomationRecord,
-  readProtectedAutomationStorageUsage,
   saveProtectedAutomationPatch,
   type StoredAutomationRecord,
 } from "./automations-store.js";
@@ -224,6 +218,7 @@ import {
   parseStorageLimitVersion,
   storageLimitView,
 } from "./storage-limit-route.js";
+import { protectedStorageLimitFor, protectedStorageMeasurement } from "./storage-measurement.js";
 import { createWidgetChain, widgetIdPattern, type Widget } from "./tool-events.js";
 import { createProtectedTurnTiming, type ProtectedTurnTimer } from "./turn-timing.js";
 import type { ProtectedTurn, ProtectedTurns, TurnInput } from "./turns.js";
@@ -519,27 +514,7 @@ export function createProtectedHttp(options: {
     resolve: agentCatalog.getSelectable,
   };
   const chats = createProtectedChats({ ...options, agentCatalog });
-  const storageMeasurement = {
-    ...options,
-    chats,
-    automationUsage: (profileId: string, assertCurrent: () => void) =>
-      readProtectedAutomationStorageUsage(options.stateDir, profileId, assertCurrent),
-    storedDataUsage: async (_profileId: string, assertCurrent: () => void) => [
-      ...(await readProtectedFeedbackStorageUsage(
-        options.stateDir,
-        storageEntryOverheadBytes,
-        assertCurrent,
-      )),
-      ...(await readProtectedAutomationResultStorageUsage(options.stateDir, assertCurrent)),
-      ...(await readProtectedAutomationLifecycleStorageUsage(options.stateDir, assertCurrent)),
-      ...(await runProtectedSharing(
-        options.stateDir,
-        "protectedSharing.storageUsage",
-        storageEntryOverheadBytes,
-        assertCurrent,
-      )),
-    ],
-  };
+  const storageMeasurement = protectedStorageMeasurement({ ...options, chats });
   const assertStorageHostCurrent = options.assertStorageHostCurrent;
   const admitStorage = options.storageLimits
     ? createStorageAdmission({
@@ -560,20 +535,8 @@ export function createProtectedHttp(options: {
     : undefined;
   // The effective admit() member limit: null exempts the owner from member and shared budgets;
   // members use their override or the default.
-  const storageLimitFor = async (
-    profile: { id: string; owner: boolean },
-    assertCurrent: () => void,
-  ) => {
-    if (profile.owner || !options.storageLimits) {
-      return null;
-    }
-    const custom = await readProtectedProfileStorageLimit(options.stateDir, {
-      profileId: profile.id,
-      issuer: options.accessIssuer,
-    });
-    assertCurrent();
-    return custom ?? options.storageLimits.userBytes;
-  };
+  const storageLimitFor = (profile: { id: string; owner: boolean }, assertCurrent: () => void) =>
+    protectedStorageLimitFor(options, profile, assertCurrent);
   const baseAutomationCatalog = createProtectedAutomationCatalog({
     agents: { defaultAgentId: agentCatalog.defaultAgentId, agents: agentCatalog.list() },
     models: options.turns.models,

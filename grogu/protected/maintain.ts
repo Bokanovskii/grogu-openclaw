@@ -79,6 +79,47 @@ async function main() {
   resolveProtectedStorageKeyFile();
   const configDir = path.dirname(configPath);
   const runtimePath = path.join(configDir, "protected.json");
+  if (action === "automations" && arg === "--json" && rest.length === 0) {
+    const { maintainProtectedAutomations } = await import("./maintain-automations.js");
+    const { publicError } = await import("./errors.js");
+    const { withConsoleLogsRoutedToStderr } = await import("../../src/cli/json-output-mode.js");
+    try {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for await (const chunk of process.stdin) {
+        const buffer = Buffer.from(chunk);
+        bytes += buffer.length;
+        if (bytes > 64 * 1024) {
+          throw new MaintenanceRefused("Automation input exceeds 65536 bytes.");
+        }
+        chunks.push(buffer);
+      }
+      let input: unknown;
+      try {
+        input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        throw new MaintenanceRefused("Supply one valid JSON object on stdin.");
+      }
+      const settings = parseRuntimeSettings(await readSettingsJson(runtimePath));
+      if (settings.stateDir !== stateDir) {
+        throw new MaintenanceRefused("Alcove config state directory mismatch.");
+      }
+      const result = await withConsoleLogsRoutedToStderr(() =>
+        maintainProtectedAutomations(settings, input),
+      );
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (error) {
+      const failure = publicError(error);
+      process.stderr.write(
+        `${JSON.stringify({
+          error: error instanceof MaintenanceRefused ? "invalid_input" : failure.code,
+          message: error instanceof MaintenanceRefused ? error.message : failure.message,
+        })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (action === "release-check" && arg === undefined && rest.length === 0) {
     const { configureProtectedRuntimeWorkers } = await import("./runtime-workers.js");
     await configureProtectedRuntimeWorkers(fileURLToPath(new URL("../..", import.meta.url)));
@@ -525,7 +566,7 @@ async function main() {
   }
   if (action !== "revoke-profile" || !arg || !/^[a-zA-Z0-9_-]{1,128}$/u.test(arg) || rest.length) {
     throw new Error(
-      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, enable-fresh-browser, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log, release-check.",
+      "Supported commands: init --deploy-json FILE, provision-storage-key, add-subject UUID, set-owner UUID, enable-fresh-browser, refresh-storage-limits, cleanup-web-fetch-spills [--dry-run], test-client CLIENT_ID|none, revoke-profile PROFILE_ID, retire-bootstrap, archive-residue, turn-timings, startup-log, release-check, automations --json.",
     );
   }
   const { acquireProtectedStateOwner } = await import("./state-owner.js");

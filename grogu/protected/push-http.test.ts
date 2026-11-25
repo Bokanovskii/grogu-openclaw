@@ -7,6 +7,7 @@ import { root } from "../../src/infra/fs-safe.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-db.paths.js";
 import { migrateProtectedSubjects } from "./admission-store.js";
+import { useTestStorageKey } from "./storage-key.test-support.js";
 
 void test("only the owner can subscribe and a new request sends one private notification", async (t) => {
   const sendNotification = mock.fn(async (_subscription: unknown, _payload: string) => ({
@@ -24,6 +25,8 @@ void test("only the owner can subscribe and a new request sends one private noti
   const stateDir = path.resolve(".artifacts", `protected-push-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
+  const scope = await useTestStorageKey(t, stateDir);
+  scope.defer(() => rm(stateDir, { recursive: true, force: true }));
   const issuer = "https://access.example";
   const ownerSubject = "00000000-0000-4000-8000-000000000001";
   const otherSubject = "00000000-0000-4000-8000-000000000002";
@@ -57,12 +60,11 @@ void test("only the owner can subscribe and a new request sends one private noti
       },
     },
   });
-  t.after(async () => {
+  scope.defer(async () => {
     await app.shutdown();
     await closeOpenClawStateDatabaseByPathAsync(
       resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
     );
-    await rm(stateDir, { recursive: true, force: true });
   });
   const call = (pathname: string, method: "GET" | "POST", subject: string, data?: object) =>
     app.fetch(

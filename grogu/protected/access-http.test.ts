@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
@@ -31,6 +31,7 @@ import { ProtectedError } from "./errors.js";
 import { createProtectedHttp } from "./http.js";
 import { createProtectedPolicySync, type ProtectedPolicyResult } from "./policy-sync.js";
 import { createProtectedStaticClient } from "./static-client.js";
+import { useTestStorageKey } from "./storage-key.test-support.js";
 
 void test("startup admits pre-automation state before creating automation storage", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-automation-upgrade-${randomUUID()}`);
@@ -251,27 +252,8 @@ void test("only the current owner can approve and the owner cannot be removed", 
   const stateDir = path.resolve(".artifacts", `protected-access-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
-  const keyFile = `${stateDir}.key`;
-  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-  const previousKeyFile = process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
-  await writeFile(keyFile, randomBytes(32), { flag: "wx", mode: 0o600 });
-  process.env.OPENCLAW_STATE_DIR = stateDir;
-  process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = keyFile;
-  t.after(async () => {
-    result.resolve("unknown");
-    await policySync.stop();
-    await rm(keyFile, { force: true });
-    if (previousStateDir === undefined) {
-      delete process.env.OPENCLAW_STATE_DIR;
-    } else {
-      process.env.OPENCLAW_STATE_DIR = previousStateDir;
-    }
-    if (previousKeyFile === undefined) {
-      delete process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE;
-    } else {
-      process.env.OPENCLAW_PROTECTED_STORAGE_KEY_FILE = previousKeyFile;
-    }
-  });
+  const scope = await useTestStorageKey(t, stateDir);
+  scope.defer(() => rm(stateDir, { recursive: true, force: true }));
   const issuer = "https://access.example";
   const ownerSubject = "00000000-0000-4000-8000-000000000001";
   const otherSubject = "00000000-0000-4000-8000-000000000002";
@@ -321,12 +303,15 @@ void test("only the current owner can approve and the owner cannot be removed", 
       },
     },
   });
-  t.after(async () => {
+  scope.defer(async () => {
     await app.shutdown();
     await closeOpenClawStateDatabaseByPathAsync(
       resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
     );
-    await rm(stateDir, { recursive: true, force: true });
+  });
+  scope.defer(async () => {
+    result.resolve("unknown");
+    await policySync.stop();
   });
   const call = (pathname: string, method: "GET" | "POST", subject: string, data?: object) =>
     app.fetch(
@@ -400,6 +385,8 @@ void test("public requests hide duplicates and require their receipt", async (t)
   const stateDir = path.resolve(".artifacts", `protected-access-test-${randomUUID()}`);
   const usersDir = path.join(stateDir, "users");
   await mkdir(usersDir, { recursive: true, mode: 0o700 });
+  const scope = await useTestStorageKey(t, stateDir);
+  scope.defer(() => rm(stateDir, { recursive: true, force: true }));
   const app = createProtectedHttp({
     origin: "https://alcove.example",
     accessIssuer: "https://access.example",
@@ -422,12 +409,11 @@ void test("public requests hide duplicates and require their receipt", async (t)
     },
   });
 
-  t.after(async () => {
+  scope.defer(async () => {
     await app.shutdown();
     await closeOpenClawStateDatabaseByPathAsync(
       resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
     );
-    await rm(stateDir, { recursive: true, force: true });
   });
   let publicCalls = 0;
   const call = (

@@ -12,6 +12,7 @@ import { resolveOpenClawStateSqlitePath } from "../../src/state/openclaw-state-d
 import { listProtectedAdmissions } from "./admission-store.js";
 import { sparkyRef } from "./settings.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
+import { useTestStorageKey } from "./storage-key.test-support.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -42,7 +43,10 @@ void test("the service owner excludes foreign-process state writes until release
   const stateDir = path.join(home, "state");
   const configDir = path.join(home, "config");
   const runtimePath = path.join(configDir, "protected.json");
-  t.after(async () => {
+  const secretsDir = path.join(home, "secrets");
+  await fs.mkdir(secretsDir, { mode: 0o700 });
+  const scope = await useTestStorageKey(t, stateDir, path.join(secretsDir, "storage-key"));
+  scope.defer(async () => {
     await closeOpenClawStateDatabaseByPathAsync(
       resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }),
     );

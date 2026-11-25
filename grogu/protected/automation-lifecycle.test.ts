@@ -51,8 +51,10 @@ import { createProtectedAutomationStorageRecoveryOwner } from "./automation-stor
 import {
   createProtectedAutomationRecord,
   readOwnedProtectedAutomationStorageRecord,
+  saveProtectedAutomationPatch,
 } from "./automations-store.js";
-import { storageEntryOverheadBytes } from "./capacity.js";
+import { createProtectedAutomationCatalog } from "./automations.js";
+import { createStorageAdmission, storageEntryOverheadBytes } from "./capacity.js";
 import { createProtectedChats } from "./chats.js";
 import {
   readProtectedFeedbackStorageUsage,
@@ -299,6 +301,114 @@ function authority(profileId: string) {
     pending: () => pending,
   };
 }
+
+void test("enabling and starting a provisioned automation reuse prepared storage", async (t) => {
+  const f = await fixture(t);
+  const owner = authority(f.ownerId).admission;
+  let scans = 0;
+  let background = Promise.resolve();
+  const admit = createStorageAdmission({
+    stateDir: f.stateDir,
+    usersRoot: await root(f.stateDir),
+    maxFileBytes: 1024,
+    limits: { userBytes: 32 * 1024 * 1024, globalBytes: 32 * 1024 * 1024, freeFloorBytes: 1 },
+    chats: { capacityEntries: async () => [], transcriptBytes: async () => 0 },
+    storedDataUsage: async () => {
+      scans++;
+      return readProtectedAutomationLifecycleStorageUsage(f.stateDir, owner.assertCurrent);
+    },
+    idleMeasurement: {
+      assertCurrent: owner.assertCurrent,
+      track: (work) => {
+        background = work;
+      },
+    },
+  });
+  const storage = (kind: "automation" | "create" | "turn") =>
+    admit(f.ownerId, owner.assertCurrent, kind);
+  const lifecycle = {
+    ...owner,
+    reserveStorage: (bytes: number) =>
+      admit.reserveStoredData(f.ownerId, owner.assertCurrent, bytes),
+    retireStorage: (entries: Parameters<typeof owner.retireStorage>[0]) =>
+      admit.retiredStoredData(entries.map((removed) => ({ removed }))),
+  };
+  const write = (command: WithoutOwner<ProtectedAutomationLifecycleCommand>) =>
+    writeProtectedAutomationLifecycle(
+      f.stateDir,
+      { ...command, profileId: f.ownerId, automationId: f.automationId },
+      lifecycle,
+    );
+  const catalog = createProtectedAutomationCatalog({
+    agents: { defaultAgentId: f.definition.agentId, agents: [] },
+    models: [
+      { ...f.definition.model, label: "Synthetic", thinking: { levels: ["low"], default: "low" } },
+    ],
+  });
+  assert.ok(catalog);
+  const cold = await storage("automation");
+  cold.release();
+  await background;
+  const readsBeforePatch = scans;
+  const saved = await saveProtectedAutomationPatch(
+    f.stateDir,
+    {
+      automationId: f.automationId,
+      expectedVersion: String(f.revision),
+      patch: { enabled: true },
+      catalog,
+      retainedAgent: (id) => ({ id }),
+    },
+    owner,
+    {
+      revalidate: owner.revalidate,
+      schedulerAvailable: true,
+      admitStorage: () => storage("automation"),
+      provision: async () => {
+        assert.deepEqual(await write({ kind: "provision" }), { status: "committed" });
+        assert.equal(
+          scans,
+          readsBeforePatch,
+          "provision and enable share the prepared measurement",
+        );
+      },
+    },
+  );
+  assert.equal(saved.status, "updated");
+  await background;
+  const readsBeforeRun = scans;
+  const runId = randomUUID();
+  const chatId = randomUUID();
+  const revision = Number(saved.automation.version);
+  assert.deepEqual(
+    await write({
+      kind: "queue",
+      runId,
+      definitionRevision: revision,
+      contextAccess: "member",
+      trigger: "manual",
+      scheduledAtMs: 10,
+      now: 10,
+    }),
+    queuedAdmission(revision, "member"),
+  );
+  assert.deepEqual(await write({ kind: "start", runId, chatId, now: 11 }), { status: "committed" });
+  const create = await storage("create");
+  create.recordCreatedChat(chatId, "synthetic-run");
+  const turn = await storage("turn");
+  create.release();
+  assert.equal(
+    scans,
+    readsBeforeRun,
+    "no foreground or intervening background scan before the run",
+  );
+  assert.equal(turn.scanMs, 0);
+  t.diagnostic(
+    `Automation fixture: cold scan ${cold.scanMs.toFixed(2)} ms; first run turn scan ${turn.scanMs.toFixed(2)} ms, queue ${turn.queueMs.toFixed(2)} ms`,
+  );
+  turn.release();
+  await background;
+});
 
 void test("isolated automation results require a matching active run", async (t) => {
   const f = await fixture(t, { contextAccess: "isolated" });

@@ -324,6 +324,29 @@ void test("idle measurement removes the scan from a later turn but never bypasse
   );
   next.release();
   await background;
+  const authoring = admit.beginUntrackedMutation();
+  const rename = admit.beginUntrackedMutation();
+  const before = reads;
+  authoring("first");
+  await background;
+  assert.equal(reads, before);
+  rename("second");
+  await background;
+  assert.equal(reads, before + entries.length);
+  const authoringTurn = await turn();
+  assert.equal(authoringTurn.scanMs, 0);
+  authoringTurn.release();
+  await background;
+  admit.retiredStoredData([]);
+  const automation = await admit("first", () => {}, "automation");
+  assert.equal(automation.scanMs, 0);
+  automation.release();
+  await background;
+  const nearLimit = await admit("first", () => {}, "automation", 1024);
+  assert.ok(nearLimit.scanMs > 0);
+  assert.throws(() => nearLimit.chargeAutomationCreate(1), { code: "quota_exceeded" });
+  nearLimit.release();
+  await background;
   limits.freeFloorBytes = Number.MAX_SAFE_INTEGER;
   await assert.rejects(turn(), { code: "storage_full" });
   limits.freeFloorBytes = 1;
@@ -354,7 +377,7 @@ void test("a mutation during idle measurement cannot publish the old shared quot
           const finish = admit.beginUntrackedMutation();
           storedBytes = 16 * 1024 * 1024;
           mutated = true;
-          finish();
+          finish("other");
         });
       }
       return Array.from({ length: 2048 }, (_, i) => ({
@@ -375,6 +398,8 @@ void test("a mutation during idle measurement cannot publish the old shared quot
   (await admit("member", () => {}, "turn")).release();
   await background;
   assert.ok(mutated, "idle receipt processing yields to waiting listener work");
+  await background; // Replacement scan requested during the old scan.
+  assert.equal(reads, 3);
   assert.ok(hostChecks < 100, "idle measurement must not open the host lock per receipt");
   await assert.rejects(
     admit("member", () => {}, "create"),

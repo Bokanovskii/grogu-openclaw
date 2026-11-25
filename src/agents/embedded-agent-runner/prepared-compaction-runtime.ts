@@ -49,6 +49,7 @@ import {
 import { detectRuntimeShell } from "../shell-utils.js";
 import { buildConfiguredAgentSystemPrompt } from "../system-prompt-config.js";
 import { resolveRuntimeAgentName } from "../system-prompt-params.js";
+import type { PromptMode } from "../system-prompt.types.js";
 import { toolPolicyRestrictsTools } from "../tool-policy.js";
 import {
   filterProviderNormalizableTools,
@@ -98,6 +99,7 @@ export async function buildPreparedCompactionRuntime(
     effectiveCwd,
     sessionAgentId,
   } = prepared;
+  const isolated = params.contextIsolation === "isolated";
   const mode = params.execOverrides?.mode
     ? SESSION_PERMISSION_BY_EXEC_MODE[params.execOverrides.mode]
     : (params.permissionMode ?? params.sessionEntry?.permissionMode);
@@ -131,27 +133,29 @@ export async function buildPreparedCompactionRuntime(
   onCleanupReady({ disposeToolRuntimes, restoreSkillEnvironment });
 
   try {
-    const preparedSkills = await prepareEmbeddedSkills({
-      assertCurrent: () => params.abortSignal?.throwIfAborted(),
-      attempt: {
-        config: params.config,
-        bootstrapWorkspaceDir: params.bootstrapWorkspaceDir,
-        skillsSnapshot: params.skillsSnapshot,
-      },
-      effectiveWorkspace,
-      sandbox,
-      sessionAgentId,
-      includeCodeModeSkills: false,
-    });
-    restoreSkillEnv = preparedSkills.restoreSkillEnv;
+    const preparedSkills = isolated
+      ? undefined
+      : await prepareEmbeddedSkills({
+          assertCurrent: () => params.abortSignal?.throwIfAborted(),
+          attempt: {
+            config: params.config,
+            bootstrapWorkspaceDir: params.bootstrapWorkspaceDir,
+            skillsSnapshot: params.skillsSnapshot,
+          },
+          effectiveWorkspace,
+          sandbox,
+          sessionAgentId,
+          includeCodeModeSkills: false,
+        });
+    restoreSkillEnv = preparedSkills?.restoreSkillEnv;
     const { skillsSnapshotForRun, skillReadResources, skillUsagePaths, skillsPrompt } =
-      preparedSkills;
+      preparedSkills ?? {};
 
     const sessionLabel = params.sessionKey ?? params.sessionId;
     const resolvedMessageProvider = params.messageChannel ?? params.messageProvider;
     const contextInjectionMode = resolveContextInjectionMode(params.config, sessionAgentId);
     const { bootstrapFiles, contextFiles } =
-      contextInjectionMode === "never"
+      isolated || contextInjectionMode === "never"
         ? { bootstrapFiles: [], contextFiles: [] }
         : await resolveBootstrapContextForRun({
             workspaceDir: effectiveWorkspace,
@@ -283,7 +287,7 @@ export async function buildPreparedCompactionRuntime(
       trustedInternalHandoff: params.trustedInternalHandoff,
       pluginMetadataSnapshot: params.preparedModelRuntime.metadataSnapshot,
     });
-    const toolsEnabled = supportsModelTools(effectiveModel);
+    const toolsEnabled = !isolated && supportsModelTools(effectiveModel);
     const authProfileStoreSource =
       toolsEnabled && (await hasAnyAuthProfileStoreSourceAsync(agentDir));
     params.abortSignal?.throwIfAborted();
@@ -456,9 +460,11 @@ export async function buildPreparedCompactionRuntime(
     const userTimezone = resolveUserTimezone(params.config?.agents?.defaults?.userTimezone);
     const userDate = formatDateStamp(Date.now(), userTimezone);
     const promptSurface = resolveAgentPromptSurfaceForSessionKey(params.sessionKey);
-    const promptMode = promptPolicyRestricted
-      ? "minimal"
-      : resolvePromptModeForSession(params.sessionKey);
+    const promptMode: PromptMode = isolated
+      ? "none"
+      : promptPolicyRestricted
+        ? "minimal"
+        : resolvePromptModeForSession(params.sessionKey);
     const nativeCommandGuidanceLines = listRegisteredPluginAgentPromptGuidance({
       surface: promptSurface,
     });
@@ -479,9 +485,9 @@ export async function buildPreparedCompactionRuntime(
       runtimeCapabilities,
       agentId: sessionAgentId,
     });
-    const promptContribution = runtimePlan.prompt.resolveSystemPromptContribution(
-      buildPromptContributionContext(),
-    );
+    const promptContribution = isolated
+      ? undefined
+      : runtimePlan.prompt.resolveSystemPromptContribution(buildPromptContributionContext());
     const preparedMemoryPrompt = await prepareAgentMemoryPrompt({
       enabled: promptMode === "full",
       toolNames: promptTools.map((tool) => tool.name),
@@ -542,6 +548,9 @@ export async function buildPreparedCompactionRuntime(
         promptContribution,
         nativeCommandGuidanceLines,
       });
+      if (isolated) {
+        return builtSystemPrompt;
+      }
       return transformProviderSystemPrompt({
         provider,
         config: params.config,

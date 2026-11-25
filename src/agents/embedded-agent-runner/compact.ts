@@ -201,6 +201,13 @@ export async function compactEmbeddedAgentSessionDirect(
   );
   assertReadCurrent();
   const lockedHarnessRuntime = resolveSessionPinnedHarnessId(entry);
+  if (
+    paramsBase.contextIsolation === "isolated" &&
+    lockedHarnessRuntime &&
+    lockedHarnessRuntime !== "openclaw"
+  ) {
+    throw new Error("Isolated compaction requires the built-in agent harness.");
+  }
   const transcriptBytePreflightClaim = consumeTranscriptBytePreflightClaim(
     paramsBase,
     runSessionTarget,
@@ -215,9 +222,10 @@ export async function compactEmbeddedAgentSessionDirect(
     ),
     sessionEntry: entry ? projectPublicSessionEntry(entry) : undefined,
     agentHarnessId: lockedHarnessRuntime ?? paramsBase.agentHarnessId,
-    modelSelectionLocked: paramsBase.requestModelCredential
-      ? true
-      : (entry?.modelSelectionLocked ?? paramsBase.modelSelectionLocked),
+    modelSelectionLocked:
+      paramsBase.requestModelCredential || paramsBase.contextIsolation === "isolated"
+        ? true
+        : (entry?.modelSelectionLocked ?? paramsBase.modelSelectionLocked),
     agentId: runSessionTarget.agentId,
     sessionId: runSessionTarget.sessionId,
     sessionKey: runSessionTarget.sessionKey,
@@ -251,6 +259,12 @@ export async function compactEmbeddedAgentSessionDirect(
     boundHarnessRuntime: requestedParams.agentHarnessId,
     preparedRuntimePlan: requestedParams.runtimePlan,
   });
+  if (
+    paramsBase.contextIsolation === "isolated" &&
+    runtimeSelection.attemptNativeHarnessCompaction
+  ) {
+    throw new Error("Isolated compaction requires the built-in agent harness.");
+  }
   // Native control operations reuse the backend's existing authenticated session.
   // Run them before generic model preparation so subscription-only CLI sessions do
   // not incorrectly require an OpenClaw model API credential.
@@ -375,6 +389,7 @@ export async function compactEmbeddedAgentSessionDirect(
         workspaceDir: preparedWorkspaceDir,
         cwd: requestedParams.cwd,
         sessionId: requestedParams.sessionId,
+        contextIsolation: requestedParams.contextIsolation,
       });
       const preparedModelRuntime = Object.freeze({
         ...preparedModelRuntimeOwnerSnapshot,
@@ -411,6 +426,7 @@ export async function compactEmbeddedAgentSessionDirect(
       const compactPrepared = async () => {
         if (
           transcriptBytePreflightAuthority ||
+          params.contextIsolation === "isolated" ||
           params.config?.agents?.defaults?.compaction?.model?.trim() ||
           (
             resolveCompactionFallbacksOverride(params) ??

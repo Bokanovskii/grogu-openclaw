@@ -1,6 +1,8 @@
 import { once } from "node:events";
+import fs from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
@@ -69,8 +71,14 @@ beforeAll(async () => {
         })}\n\n`;
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(
-        chunk({ role: "assistant", content: "## Goal\nModel summary after recovery." }, null) +
-          `${chunk({}, "stop")}data: [DONE]\n\n`,
+        chunk(
+          {
+            role: "assistant",
+            content:
+              "## Decisions\nModel summary after recovery.\n\n## Open TODOs\nNone.\n\n## Constraints/Rules\nNone.\n\n## Pending user asks\nNone.\n\n## Exact identifiers\nNone.",
+          },
+          null,
+        ) + `${chunk({}, "stop")}data: [DONE]\n\n`,
       );
     });
   });
@@ -138,6 +146,7 @@ async function withSession(
   options: {
     modelFallback?: boolean;
     safeguard?: boolean;
+    isolatedWorkspaceSections?: boolean;
   } = {},
 ) {
   const state = await createOpenClawTestState({ prefix: "openclaw-summary-fallback-" });
@@ -163,6 +172,9 @@ async function withSession(
             timeoutSeconds: 60,
             keepRecentTokens: 300,
             ...(options.safeguard ? { mode: "safeguard" as const } : {}),
+            ...(options.isolatedWorkspaceSections
+              ? { postCompactionSections: ["Session Startup"] }
+              : {}),
           },
         },
       },
@@ -195,7 +207,11 @@ async function withSession(
 
 function compactSession(
   fixture: Fixture,
-  options: { trigger?: "budget" | "manual"; abortSignal?: AbortSignal } = {},
+  options: {
+    trigger?: "budget" | "manual";
+    abortSignal?: AbortSignal;
+    contextIsolation?: "isolated";
+  } = {},
 ) {
   return compactEmbeddedAgentSession(
     {
@@ -208,6 +224,8 @@ function compactSession(
       provider: "fixture",
       model: "model",
       trigger: options.trigger ?? "budget",
+      contextIsolation: options.contextIsolation,
+      modelSelectionLocked: options.contextIsolation === "isolated",
       force: true,
       abortSignal: options.abortSignal,
       enqueue: async (task) => await task(),
@@ -221,6 +239,34 @@ function openSession(fixture: Fixture) {
 }
 
 describe("automatic compaction summary failure", () => {
+  it("summarizes isolated history without workspace context or fallback models", async () => {
+    await withSession(
+      async (fixture) => {
+        await fs.writeFile(
+          path.join(fixture.state.workspaceDir, "AGENTS.md"),
+          "## Session Startup\nPRIVATE_BOOTSTRAP",
+        );
+        await fs.writeFile(path.join(fixture.state.workspaceDir, "MEMORY.md"), "PRIVATE_MEMORY");
+        appendToolTurns(fixture, 0, 8);
+        summaryMode = "ok";
+
+        expect(await compactSession(fixture, { contextIsolation: "isolated" })).toMatchObject({
+          ok: true,
+          compacted: true,
+        });
+        const requests = summaryRequests.join("\n");
+        expect(requests).toContain("older context");
+        expect(requests).not.toContain("PRIVATE_BOOTSTRAP");
+        expect(requests).not.toContain("PRIVATE_MEMORY");
+        expect(requests).not.toContain('"model":"fallback-model"');
+        const messages = openSession(fixture).buildSessionContext().messages;
+        expect(messages[0]?.role).toBe("compactionSummary");
+        expect(JSON.stringify(messages)).not.toContain("PRIVATE_BOOTSTRAP");
+      },
+      { modelFallback: true, safeguard: true, isolatedWorkspaceSections: true },
+    );
+  });
+
   it("commits a deterministic reduction after a bodyless 408 summary timeout", async () => {
     await withSession(async (fixture) => {
       const seeded = appendToolTurns(fixture, 0, 8);

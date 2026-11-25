@@ -201,6 +201,38 @@ describe("compactEmbeddedRunForRecovery", () => {
     });
   });
 
+  it("uses the built-in compactor for isolated overflow rather than the configured engine", async () => {
+    const configuredCompact = vi.fn();
+    compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand.mockResolvedValue({
+      ok: true,
+      compacted: true,
+      result: { summary: "isolated summary", tokensBefore: 100, tokensAfter: 20 },
+    });
+    const input = makeRecoveryInput({
+      runParams: { ...baseRunParams, contextIsolation: "isolated" },
+      contextEngine: makeContextEngine(configuredCompact),
+    });
+
+    const result = await compactEmbeddedRunForRecovery(input, {
+      tokenBudget: 200_000,
+      trigger: "overflow",
+      diagId: "isolated-overflow",
+      attempt: 1,
+      maxAttempts: 3,
+    });
+
+    expect(result.result).toMatchObject({ ok: true, compacted: true });
+    expect(configuredCompact).not.toHaveBeenCalled();
+    expect(compactRuntimeMocks.compactEmbeddedAgentSessionOnDemand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextIsolation: "isolated",
+        modelSelectionLocked: true,
+        modelFallbacksOverride: [],
+      }),
+    );
+    expect(input.runOwnsCompactionBeforeHook).not.toHaveBeenCalled();
+  });
+
   it("carries locked model, auth, fallback, cache, and overflow facts into compaction", async () => {
     const compact = vi.fn(async () => ({
       ok: true as const,

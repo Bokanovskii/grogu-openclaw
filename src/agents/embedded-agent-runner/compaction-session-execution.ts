@@ -197,6 +197,7 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
       sessionId: params.sessionId,
       sessionKey: params.sessionKey ?? sandboxSessionKey,
       runId,
+      contextIsolation: params.contextIsolation,
     });
     const resourceLoader = new DefaultResourceLoader({
       cwd: effectiveCwd,
@@ -396,11 +397,13 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
           assertActive,
           onHookMessages: params.onCompactionHookMessages,
         });
-        await runCompactionHooks({
-          ...hookContext(),
-          phase: "before",
-          metrics: beforeHookMetrics,
-        });
+        if (params.contextIsolation !== "isolated") {
+          await runCompactionHooks({
+            ...hookContext(),
+            phase: "before",
+            metrics: beforeHookMetrics,
+          });
+        }
         const { messageCountOriginal, tokenCountBefore: limitedTranscriptTokensBefore } =
           beforeHookMetrics;
         const diagEnabled = log.isEnabled("debug");
@@ -601,6 +604,7 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
             agentId: sessionAgentId,
             memoryAudience: params.memoryAudience,
             sandboxed: sandbox?.enabled === true,
+            contextIsolation: params.contextIsolation,
             sessionFile: activeSessionFile,
             assertActive,
           });
@@ -621,17 +625,19 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
               `delta.estTokens=${typeof preMetrics.estTokens === "number" && typeof postMetrics.estTokens === "number" ? postMetrics.estTokens - preMetrics.estTokens : "unknown"}`,
           );
         }
-        await runCompactionHooks({
-          ...hookContext(),
-          phase: "after",
-          messageCountAfter,
-          tokensAfter,
-          compactedCount,
-          sessionFile: activeSessionFile,
-          summaryLength: clientResult?.summary.length,
-          tokensBefore,
-          firstKeptEntryId: clientResult?.firstKeptEntryId,
-        });
+        if (params.contextIsolation !== "isolated") {
+          await runCompactionHooks({
+            ...hookContext(),
+            phase: "after",
+            messageCountAfter,
+            tokensAfter,
+            compactedCount,
+            sessionFile: activeSessionFile,
+            summaryLength: clientResult?.summary.length,
+            tokensBefore,
+            firstKeptEntryId: clientResult?.firstKeptEntryId,
+          });
+        }
         const resultSessionTarget: ContextEngineSessionTarget = {
           agentId: sessionTarget.agentId,
           sessionId: sessionTarget.sessionId,

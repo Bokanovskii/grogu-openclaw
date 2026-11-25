@@ -431,6 +431,8 @@ export type ResolveContextEngineOptions = {
   agentDir?: string;
   workspaceDir?: string;
   onCleanupFailure?: () => void;
+  /** Select the built-in engine without constructing the configured plugin. */
+  isolated?: boolean;
   /** Publishes built-ins synchronously; persistence settles after source capture. */
   initialize?: () => Promise<void>;
 };
@@ -524,7 +526,9 @@ export async function resolveLogicalTurnContextEngines(
   try {
     return await runContextEngineFactoryResolution(async (abandon) => {
       const defaultEngineId = defaultSlotIdForKey("contextEngine");
-      const configuredEngineId = resolveEffectiveContextEngineId(config, getContextEngines());
+      const configuredEngineId = options?.isolated
+        ? defaultEngineId
+        : resolveEffectiveContextEngineId(config, getContextEngines());
       const factoryCtx: ContextEngineFactoryContext = {
         config,
         agentDir: options?.agentDir,

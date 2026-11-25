@@ -41,6 +41,7 @@ import type {
 } from "../model-fallback.types.js";
 import type { ModelManifestNormalizationContext } from "../model-ref-shared.js";
 import { modelKey } from "../model-ref-shared.js";
+import { getRequestScopedChildExecution } from "../request-scoped-child-execution.js";
 import { settleFailedRequesterRun, settleRequesterRun } from "../requester-run-settlement.js";
 import { resolveAgentRunAbortLifecycleFields } from "../run-termination.js";
 import {
@@ -240,6 +241,8 @@ async function runEmbeddedAgentEntryInternal<T extends EmbeddedAgentRunResult>(
     config: params.selection.cfg,
     agentDir: params.selection.agentDir,
     workspaceDir: params.harness.workspaceDir,
+    isolated:
+      getRequestScopedChildExecution(params.identity.runId)?.contextIsolation === "isolated",
   });
   const assistantErrorTranscript = createAssistantErrorTranscript({
     runId: params.identity.runId,

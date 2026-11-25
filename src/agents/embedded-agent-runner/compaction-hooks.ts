@@ -28,6 +28,7 @@ type PostCompactionSession = {
   agentId?: string;
   memoryAudience?: MemoryAudience;
   sandboxed?: boolean;
+  contextIsolation?: "isolated";
   sessionFile: string;
   assertActive?: () => void | Promise<void>;
 };
@@ -148,7 +149,7 @@ export async function runPostCompactionSideEffects(params: PostCompactionSession
   const mode = params.config?.agents?.defaults?.compaction?.postIndexSync ?? "async";
   const started = createDeferredCore();
   const syncTask =
-    mode !== "off" && params.config
+    mode !== "off" && params.config && params.contextIsolation !== "isolated"
       ? runPostCompactionSessionMemorySync(
           { ...params, config: params.config, sessionFile },
           started.resolve,

@@ -268,7 +268,9 @@ Grogu and Travel chats can save and search the signed-in member's memory. Notes
 are shared across that member's chats, not with other members or personal Grogu.
 The service encrypts notes as member-owned files; the running service and its
 administrator can read them. Search uses a temporary in-memory keyword index,
-not a paid embedding service. Existing chats are not backfilled.
+not a paid embedding service. The service builds that index when a memory tool
+runs, so chats that never use memory do not wait for it. Existing chats are not
+backfilled.
 
 Ordinary chats, itineraries, automation instructions, and run details do not
 need memory notes. Grogu saves short personal context only when it can help

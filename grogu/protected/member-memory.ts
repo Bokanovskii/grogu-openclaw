@@ -4,7 +4,6 @@ import { resolveMemorySearchIndexConfig } from "../../src/agents/memory-search.j
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import { createSubsystemLogger } from "../../src/logging/subsystem.js";
 import {
-  assertMemoryAudienceCurrent,
   assertMemoryAudienceDelegation,
   mintMemberMemoryAudience,
 } from "../../src/plugins/memory-audience.js";
@@ -94,16 +93,8 @@ export function createProtectedMemberMemory() {
         if (!settings) {
           throw new Error("Member memory settings are unavailable.");
         }
-        const memory = await loadMemoryCore();
-        const lease = await memory.openMemberMemory(
-          binding,
-          grant.audience,
-          () => {
-            assertCurrent();
-            assertMemoryAudienceCurrent(grant.audience);
-          },
-          settings.chunking,
-        );
+        // The turn holds only the grant and binding. Each memory tool call opens its own index
+        // lease, so turns that never use memory skip booting the index worker.
         active.set(params.profileId, (active.get(params.profileId) ?? 0) + 1);
         let released = false;
         return {
@@ -116,21 +107,17 @@ export function createProtectedMemberMemory() {
             }
             return { ...binding, audience };
           },
-          async release() {
+          release() {
             if (released) {
               return;
             }
             released = true;
             grant.release();
-            try {
-              await lease.release();
-            } finally {
-              const remaining = (active.get(params.profileId) ?? 1) - 1;
-              if (remaining === 0) {
-                active.delete(params.profileId);
-              } else {
-                active.set(params.profileId, remaining);
-              }
+            const remaining = (active.get(params.profileId) ?? 1) - 1;
+            if (remaining === 0) {
+              active.delete(params.profileId);
+            } else {
+              active.set(params.profileId, remaining);
             }
           },
         };

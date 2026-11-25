@@ -276,6 +276,113 @@ void test("storage admission reports how long it queued and measured", async (t)
   }
 });
 
+void test("idle measurement removes the scan from a later turn but never bypasses disk or dirty data", async (t) => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "protected-idle-capacity-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const profiles = ["first", "second"];
+  const entries = Array.from({ length: 16 }, (_, index) => ({
+    profileId: profiles[index % 2]!,
+    id: randomUUID(),
+    sessionKey: `key-${index}`,
+    updatedAt: index,
+    transient: false,
+  }));
+  const limits = { userBytes: 16 * 1024 * 1024, globalBytes: 32 * 1024 * 1024, freeFloorBytes: 1 };
+  let background = Promise.resolve();
+  let bytes = 1024;
+  let reads = 0;
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot: await root(stateDir),
+    maxFileBytes: 1024,
+    limits,
+    chats: {
+      capacityEntries: async () => entries,
+      transcriptBytes: async () => {
+        reads++;
+        return bytes;
+      },
+    },
+    idleMeasurement: {
+      assertCurrent: () => {},
+      track: (work) => {
+        background = work;
+      },
+    },
+  });
+  const turn = () => admit("first", () => {}, "turn");
+  const first = await turn();
+  assert.ok(first.scanMs > 0);
+  first.release();
+  await background;
+  assert.equal(reads, 2 * entries.length);
+  const next = await turn();
+  assert.equal(next.scanMs, 0);
+  assert.equal(reads, 2 * entries.length);
+  t.diagnostic(
+    `16-chat fixture: cold scan ${first.scanMs.toFixed(2)} ms; prepared scan ${next.scanMs.toFixed(2)} ms; prepared queue ${next.queueMs.toFixed(2)} ms`,
+  );
+  next.release();
+  await background;
+  limits.freeFloorBytes = Number.MAX_SAFE_INTEGER;
+  await assert.rejects(turn(), { code: "storage_full" });
+  limits.freeFloorBytes = 1;
+  const finish = admit.beginUntrackedMutation();
+  bytes = limits.userBytes;
+  finish();
+  await assert.rejects(turn(), { code: "quota_exceeded" });
+  await background;
+});
+
+void test("a mutation during idle measurement cannot publish the old shared quota", async (t) => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "protected-idle-race-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  let background = Promise.resolve();
+  let reads = 0;
+  let storedBytes = 0;
+  let mutated = false;
+  let hostChecks = 0;
+  const admit = createStorageAdmission({
+    stateDir,
+    usersRoot: await root(stateDir),
+    maxFileBytes: 1024,
+    limits: { globalBytes: 16 * 1024 * 1024, userBytes: 16 * 1024 * 1024, freeFloorBytes: 1 },
+    chats: { capacityEntries: async () => [], transcriptBytes: async () => 0 },
+    async storedDataUsage() {
+      if (++reads === 2) {
+        setImmediate(() => {
+          const finish = admit.beginUntrackedMutation();
+          storedBytes = 16 * 1024 * 1024;
+          mutated = true;
+          finish();
+        });
+      }
+      return Array.from({ length: 2048 }, (_, i) => ({
+        profileId: "other",
+        id: `entry-${i}`,
+        bytes: i === 0 ? storedBytes : 0,
+      }));
+    },
+    idleMeasurement: {
+      assertCurrent: () => {
+        hostChecks++;
+      },
+      track: (work) => {
+        background = work;
+      },
+    },
+  });
+  (await admit("member", () => {}, "turn")).release();
+  await background;
+  assert.ok(mutated, "idle receipt processing yields to waiting listener work");
+  assert.ok(hostChecks < 100, "idle measurement must not open the host lock per receipt");
+  await assert.rejects(
+    admit("member", () => {}, "create"),
+    { code: "quota_exceeded" },
+  );
+  await background;
+});
+
 void test("per-member limits override the default and the owner is exempt", async (t) => {
   const stateDir = path.resolve(".artifacts", `protected-capacity-${randomUUID()}`);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });

@@ -495,6 +495,7 @@ export function createProtectedHttp(options: {
   maxChatsPerUser: number;
   maxFileBytes: number;
   storageLimits?: StorageLimits;
+  assertStorageHostCurrent?: () => void;
 }) {
   if (new URL(options.origin).origin !== options.origin) {
     throw new TypeError("Configure the exact protected client origin.");
@@ -534,8 +535,23 @@ export function createProtectedHttp(options: {
       )),
     ],
   };
+  const assertStorageHostCurrent = options.assertStorageHostCurrent;
   const admitStorage = options.storageLimits
-    ? createStorageAdmission({ ...storageMeasurement, limits: options.storageLimits })
+    ? createStorageAdmission({
+        ...storageMeasurement,
+        limits: options.storageLimits,
+        ...(assertStorageHostCurrent && {
+          idleMeasurement: {
+            assertCurrent: () => {
+              shutdown.signal.throwIfAborted();
+              assertStorageHostCurrent();
+            },
+            track: (work: Promise<void>) => {
+              void track(work);
+            },
+          },
+        }),
+      })
     : undefined;
   // The effective admit() member limit: null exempts the owner from member and shared budgets;
   // members use their override or the default.
@@ -6098,7 +6114,27 @@ export function createProtectedHttp(options: {
   };
   return {
     fetch(this: void, request: Request) {
-      return track(handle(request));
+      if (
+        !admitStorage ||
+        !assertStorageHostCurrent ||
+        request.method === "GET" ||
+        request.method === "HEAD" ||
+        request.method === "OPTIONS"
+      ) {
+        return track(handle(request));
+      }
+      // Other mutation routes can commit canonical data without a turn admission (e.g. feedback).
+      const path = new URL(request.url).pathname;
+      const metered =
+        request.method === "POST" &&
+        (path === `${base}/chats` ||
+          path === protectedAccessProofPath ||
+          /^\/api\/protected\/v1\/chats\/[^/]+\/turns$/u.test(path));
+      if (metered) {
+        return track(handle(request));
+      }
+      const finish = admitStorage.beginUntrackedMutation();
+      return track(handle(request).finally(finish));
     },
     async startAutomations(assertHostCurrent: () => void) {
       if (automationSchedulerStarted || !admitStorage) {

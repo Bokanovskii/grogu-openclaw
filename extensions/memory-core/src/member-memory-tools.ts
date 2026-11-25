@@ -48,7 +48,13 @@ export function createMemberMemoryTool(params: {
             required: ["content"],
             additionalProperties: false,
           }
-        : contract.parameters,
+        : {
+            ...contract.parameters,
+            properties: {
+              ...contract.parameters.properties,
+              corpus: { type: "string", enum: ["memory"] },
+            },
+          },
     ...(name === "memory_search"
       ? { prepareArguments: MEMORY_SEARCH_TOOL_CONTRACT.prepareArguments }
       : {}),

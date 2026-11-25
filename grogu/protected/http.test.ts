@@ -4955,6 +4955,10 @@ async function exerciseCanonicalTurns(
     assert.equal(result.text, `${routePreview.content} Take the tram.`);
     assert.equal(result.status, "complete");
     assert.equal(result.widgets[0].id, frames.find((event) => event.type === "child-widget").id);
+    assert.deepEqual(
+      [...new Set(seen.map((request) => request.body.reasoning_effort))],
+      ["medium"],
+    );
     fixtureCompleted = true;
     return;
   }
@@ -5211,13 +5215,13 @@ async function exerciseCanonicalTurns(
   const sparkyModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "sparky",
   );
-  assert.equal(sparkyModel.thinking.default, "ultra");
+  assert.equal(sparkyModel.thinking.default, "medium");
   assert.deepEqual(sparkyModel.thinking.orchestrationLevels, ["ultra"]);
   assert.equal(sparkyModel.thinking.nativeChoices, undefined);
   const claudeModel = fixedModels.find(
     (model: { provider: string }) => model.provider === "anthropic",
   );
-  assert.equal(claudeModel.thinking.default, "adaptive");
+  assert.equal(claudeModel.thinking.default, "medium");
   assert.deepEqual(
     claudeModel.thinking.nativeChoices.find((choice: { level: string }) => choice.level === "low")
       .aliases,

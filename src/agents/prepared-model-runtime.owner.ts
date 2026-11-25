@@ -5,6 +5,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { captureRemoteModelCatalogStartupSnapshot } from "../model-catalog/remote-overlay.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { isReservedSystemAgentId } from "../system-agent/agent-id.js";
+import { OPENCLAW_AGENT_RUNTIME_ID } from "./agent-runtime-id.js";
 import {
   resolveSelectedAgentHarnessRuntime,
   type AgentHarnessPluginSelection,
@@ -219,6 +220,21 @@ export function normalizeOptionalDir(dirname: string | undefined): string | unde
   return dirname ? path.resolve(dirname) : undefined;
 }
 
+/** Forced OpenClaw runs select plugins by provider. Preserve model IDs used to resolve policy. */
+export function scopeForcedOpenClawSelectionsByProvider(
+  input: PreparedModelRuntimeInput,
+): PreparedModelRuntimeInput {
+  if (!input.runtimePluginSelections?.some((s) => s.runtime === OPENCLAW_AGENT_RUNTIME_ID)) {
+    return input;
+  }
+  return {
+    ...input,
+    runtimePluginSelections: input.runtimePluginSelections.map((s) =>
+      s.runtime === OPENCLAW_AGENT_RUNTIME_ID ? { ...s, modelId: "" } : s,
+    ),
+  };
+}
+
 export function normalizePreparedModelRuntimeInput(
   input: PreparedModelRuntimeInput,
 ): PreparedModelRuntimeInput {
@@ -339,14 +355,28 @@ function configuredOwnerCandidates(
 
 export function resolvePublishedOwner(
   owners: Map<string, PreparedModelRuntimeOwner>,
-  input: PreparedModelRuntimeInput,
-  options: { allowConfiguredWorkspaceFallback?: boolean } = {},
+  rawInput: PreparedModelRuntimeInput,
 ): PreparedModelRuntimeOwner | undefined {
+  const input = normalizePreparedModelRuntimeInput(rawInput);
   const exact = owners.get(ownerKey(input));
   if (exact) {
     return exact;
   }
-  if (!options.allowConfiguredWorkspaceFallback) {
+  const providerInput =
+    !input.readOnly && !input.loadRuntimePlugins
+      ? scopeForcedOpenClawSelectionsByProvider(rawInput)
+      : rawInput;
+  if (providerInput !== rawInput) {
+    const run = owners.get(ownerKey(normalizePreparedModelRuntimeInput(providerInput)));
+    if (run?.provenance === "run" && run.catalogMode === "static") {
+      return run;
+    }
+  }
+  if (
+    rawInput.workspaceDir !== undefined &&
+    rawInput.agentId !== undefined &&
+    rawInput.runtimePluginSelections !== undefined
+  ) {
     return undefined;
   }
   // Gateway launch may supply an authoritative workspace outside config. Request readers still
@@ -383,17 +413,11 @@ export function readPublishedModelRuntimeSnapshot(
   owners: Map<string, PreparedModelRuntimeOwner>,
   rawInput: PreparedModelRuntimeInput,
 ): PreparedModelRuntimeSnapshot | undefined {
-  const input = normalizePreparedModelRuntimeInput(rawInput);
-  const owner = resolvePublishedOwner(owners, input, {
-    allowConfiguredWorkspaceFallback:
-      rawInput.workspaceDir === undefined ||
-      rawInput.agentId === undefined ||
-      rawInput.runtimePluginSelections === undefined,
-  });
+  const owner = resolvePublishedOwner(owners, rawInput);
   if (!owner?.snapshot || owner.needsRefresh || owner.pending) {
     return undefined;
   }
-  if (input.readOnly && !preparedModelRuntimeConfigsMatch(owner.input.config, input.config)) {
+  if (rawInput.readOnly && !preparedModelRuntimeConfigsMatch(owner.input.config, rawInput.config)) {
     return undefined;
   }
   return owner.snapshot;

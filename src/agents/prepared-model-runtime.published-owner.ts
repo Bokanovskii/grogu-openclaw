@@ -163,20 +163,14 @@ async function projectPublishedModelRuntimeOwner<T>(
     assertLifetime();
     return await projectPublishedModelRuntimeOwner(rawInput, context, project);
   }
-  const input = normalizePreparedModelRuntimeInput(rawInput);
-  const existing = resolvePublishedOwner(context.owners, input, {
-    allowConfiguredWorkspaceFallback:
-      rawInput.workspaceDir === undefined ||
-      rawInput.agentId === undefined ||
-      rawInput.runtimePluginSelections === undefined,
-  });
+  const existing = resolvePublishedOwner(context.owners, rawInput);
   if (
-    input.readOnly &&
+    rawInput.readOnly &&
     existing &&
-    !preparedModelRuntimeConfigsMatch(existing.input.config, input.config)
+    !preparedModelRuntimeConfigsMatch(existing.input.config, rawInput.config)
   ) {
     throw new PreparedModelRuntimeOwnerNotPublishedError(
-      `prepared read-only model runtime owner was not published for the requested config (${input.agentDir})`,
+      `prepared read-only model runtime owner was not published for the requested config (${rawInput.agentDir})`,
     );
   }
   // Generated catalogs are lifecycle artifacts, not a live-edit surface. Config/plugin reload,
@@ -199,6 +193,6 @@ async function projectPublishedModelRuntimeOwner<T>(
     return project(existing, existing.snapshot);
   }
   throw new PreparedModelRuntimeOwnerNotPublishedError(
-    `prepared model runtime owner was not published for ${input.agentDir}`,
+    `prepared model runtime owner was not published for ${rawInput.agentDir}`,
   );
 }

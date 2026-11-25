@@ -96,6 +96,7 @@ import {
   type Source,
   type Widget,
 } from "./tool-events.js";
+import { protectedTurnRuntimeInput } from "./turn-runtime.js";
 import type { ProtectedTurnMark } from "./turn-timing.js";
 
 export type { ProtectedModel };
@@ -1039,14 +1040,16 @@ export function createCanonicalProtectedTurns(options: {
             const { acquireAgentRunPreparedModelRuntime } =
               await import("../../src/agents/prepared-model-runtime.js");
             await using runtime = await acquireAgentRunPreparedModelRuntime(
-              {
-                config,
-                agentId: turn.target.agentId,
-                agentDir: options.agentDir,
-                workspaceDir: options.workspaceDir,
-                allowGatewaySubagentBinding: false,
-                runtimePluginSelections: [{ provider, modelId: model, runtime: "openclaw" }],
-              },
+              protectedTurnRuntimeInput(
+                {
+                  config,
+                  agentId: turn.target.agentId,
+                  agentDir: options.agentDir,
+                  workspaceDir: options.workspaceDir,
+                },
+                provider,
+                model,
+              ),
               { catalogMode: "static", abortSignal: turn.signal },
             );
             let runtimeActive = true;

@@ -14,6 +14,11 @@ import {
 } from "../../src/config/sessions/session-accessor.js";
 import { appendTranscriptMessages } from "../../src/config/sessions/session-accessor.transcript-turn.js";
 import { readSessionEntryReadOnlyInWorker } from "../../src/config/sessions/session-entry-read-runtime.js";
+import {
+  historyLane,
+  projectionLane,
+  targetDiscoveryLane,
+} from "../../src/config/sessions/session-transcript-worker-resources.js";
 import type { SessionTranscriptAssistantMessage } from "../../src/config/sessions/transcript.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { root } from "../../src/infra/fs-safe.js";
@@ -953,4 +958,21 @@ void test("a widget-only side reply is sent with a line naming its widget", asyn
   });
   assert.equal(sent.message.text, "Shared from a side chat: Chart");
   assert.deepEqual(sent.message.widgets, [{ id: widgetId("c"), title: "Chart" }]);
+});
+
+void test("refusing a missing or foreign chat keeps the session read workers running", async (t) => {
+  const chats = await createChats(t);
+  const authority = { profileId: randomUUID(), assertCurrent() {} };
+  const chat = await chats.create(authority);
+  const lanes = [historyLane, projectionLane, targetDiscoveryLane];
+  const workersStarted = () => lanes.map(({ pool }) => pool.getSnapshot().workersCreated);
+  // The first read starts the workers; a retired worker would start again on the next read.
+  await chats.readEntry(authority, chat.id);
+  const before = workersStarted();
+  await assert.rejects(chats.readEntry(authority, randomUUID()), { status: 404 });
+  await assert.rejects(chats.readEntry({ profileId: randomUUID(), assertCurrent() {} }, chat.id), {
+    status: 404,
+  });
+  assert.equal((await chats.readEntry(authority, chat.id)).sessionId, chat.id);
+  assert.deepEqual(workersStarted(), before);
 });

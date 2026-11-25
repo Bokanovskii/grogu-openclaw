@@ -14,6 +14,10 @@ import {
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { classifyFailoverReason } from "../../src/agents/failover/classify.js";
 import { FailoverError } from "../../src/agents/failover/error.js";
+import {
+  chargeTranscriptWrite,
+  hasTranscriptWriteBudget,
+} from "../../src/agents/sessions/transcript-write-budget.js";
 import { retireTransientSubagentRun } from "../../src/agents/subagents/registry/subagent-registry-transient-recovery.js";
 import { makeZeroUsageSnapshot } from "../../src/agents/usage.js";
 import { formatSqliteSessionFileMarker } from "../../src/config/sessions/legacy-sqlite-marker.js";
@@ -21,6 +25,7 @@ import {
   createSessionEntryWithTranscript,
   deleteSessionEntryLifecycle,
   loadTranscriptEvents,
+  persistSessionTranscriptTurn,
 } from "../../src/config/sessions/session-accessor.js";
 import { applySessionEntryOperation } from "../../src/config/sessions/session-accessor.sqlite-entry.js";
 import {
@@ -49,6 +54,8 @@ import {
 } from "../../src/gateway/session-transcript-derived-readers.js";
 import { createAuthorizedUserFiles } from "../../src/infra/authorized-user-files.js";
 import { runExclusiveSessionLifecycleMutation } from "../../src/sessions/session-lifecycle-admission.js";
+import { buildPersistedUserTurnMessage } from "../../src/sessions/user-turn-transcript.message.js";
+import { buildRunUserTurnIdempotencyKey } from "../../src/sessions/user-turn-transcript.metadata.js";
 import {
   isTranscriptOnlyOpenClawAssistantMessage,
   OPENCLAW_DELIVERY_MIRROR_MODEL,
@@ -868,6 +875,52 @@ export function createProtectedChats(options: {
       authority.assertCurrent();
       if (!saved.ok) {
         throw new ProtectedError(500, "save_failed", "The agent result could not be saved.");
+      }
+    },
+    // A turn that goes straight to the member's named agents has no parent run, so no prompt
+    // pipeline records the member's message. This writes the same keyed user row the parent run does.
+    async saveUserMessage(
+      authority: ProtectedChatAuthority,
+      id: string,
+      input: {
+        runId: string;
+        text: string;
+        timestamp: number;
+        parentLifecycleRevision: string | null;
+      },
+    ) {
+      await readEntry(authority, id);
+      const chargeWrite = hasTranscriptWriteBudget();
+      const turn = await persistSessionTranscriptTurn(scope(authority, id), {
+        assertCurrent: authority.assertCurrent,
+        expectedSessionId: id,
+        expectedLifecycleRevision: input.parentLifecycleRevision,
+        updateMode: "inline",
+        touchSessionEntry: true,
+        messages: [
+          {
+            message: buildPersistedUserTurnMessage({
+              text: input.text,
+              timestamp: input.timestamp,
+              idempotencyKey: buildRunUserTurnIdempotencyKey(input.runId),
+            }),
+            idempotencyLookup: "scan",
+            ...(chargeWrite
+              ? {
+                  workerPreparation: {
+                    prepareMessageAfterIdempotencyCheck: (candidate: unknown) => {
+                      chargeTranscriptWrite(candidate);
+                      return candidate;
+                    },
+                  },
+                }
+              : {}),
+          },
+        ],
+      });
+      authority.assertCurrent();
+      if (turn.rejectedReason || !turn.messages[0]) {
+        throw new ProtectedError(500, "save_failed", "The message could not be saved.");
       }
     },
     inspectTransient(

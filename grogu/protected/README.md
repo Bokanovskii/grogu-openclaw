@@ -1030,8 +1030,11 @@ and the original parent session generation.
 `POST /api/protected/v1/chats/:id/turns` accepts an optional `mentions` array of
 up to four distinct, selectable agent IDs other than the selected agent. Each
 mention runs as a native child of that turn, using the same profile, admitted
-provider credential, file boundary, and deadline. A Copilot specialist uses the
-model and endpoint from the member's account, not the service's default model.
+provider credential, file boundary, and deadline. The member has already chosen
+who answers, so the selected agent does not run: the turn saves the member's
+message once, runs only the named agents, and has no parent reply to steer
+(`steering_unavailable`). A Copilot specialist uses the model and endpoint from
+the member's account, not the service's default model.
 Child work is not detached:
 child transcript and file bytes count against the initiating profile while
 present. These temporary children do not count as retained chats or change

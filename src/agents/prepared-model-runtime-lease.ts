@@ -20,6 +20,7 @@ import {
   rebindInputToCommittedConfiguredOwner,
   resolveConfiguredOwner,
   resolveConfiguredOwnerPublication,
+  scopeForcedOpenClawSelectionsByProvider,
   type PreparedModelRuntimeInput,
   type PreparedModelRuntimeLease,
   type PreparedModelRuntimeOwner,
@@ -109,8 +110,21 @@ export async function acquirePreparedModelRuntimeLeaseFromOwners(
   const requestedSelections = deriveSelections
     ? structuredClone(rawInput.runtimePluginSelections ?? [])
     : [];
+  // A forced OpenClaw run selects plugins by provider alone. The runner keeps the concrete model
+  // and its request credential. Probes, native harnesses and policy-derived routes need exact refs.
+  const scopeForcedOpenClawByProvider =
+    provenance === "run" &&
+    context.getGatewayLifecycleActive() &&
+    options.catalogMode === "static" &&
+    !rawInput.readOnly &&
+    !rawInput.loadRuntimePlugins &&
+    !deriveSelections &&
+    !admittedGeneration &&
+    !options.pluginMetadataSnapshot;
   let input = normalizePreparedModelRuntimeInput({
-    ...rawInput,
+    ...(scopeForcedOpenClawByProvider
+      ? scopeForcedOpenClawSelectionsByProvider(rawInput)
+      : rawInput),
     preserveWorkspaceDirOnRefresh:
       rawInput.preserveWorkspaceDirOnRefresh ?? rawInput.workspaceDir !== undefined,
   });

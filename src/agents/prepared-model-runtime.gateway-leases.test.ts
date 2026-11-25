@@ -39,7 +39,7 @@ async function publishGateway() {
 }
 
 describe("prepared model runtime Gateway leases", () => {
-  it("borrows a configured generation for another model but builds for an uncovered provider", async () => {
+  it("borrows a configured generation and warms an uncovered provider once for forced OpenClaw runs", async () => {
     const config = {
       agents: { defaults: { model: "configured-provider/primary" } },
       plugins: {
@@ -118,16 +118,29 @@ describe("prepared model runtime Gateway leases", () => {
     expect(covered.pluginGeneration).toBe(published.pluginGeneration);
     expect(mocks.loadAgentRuntimePluginRegistryHandle).toHaveBeenCalledTimes(loadsBeforeRun);
 
-    await using uncovered = await acquireAgentRunPreparedModelRuntime({
-      ...input,
-      runtimePluginSelections: [
-        { provider: "additional-provider", modelId: "utility", runtime: "openclaw" },
-      ],
-    });
-    expect(uncovered.snapshot).not.toBe(configured);
-    expect(uncovered.pluginGeneration).not.toBe(published.pluginGeneration);
-    expect(uncovered.snapshot.pluginRegistry).toBe(additionalRegistry);
+    const runAdditionalModel = async (modelId: string) => {
+      const request = {
+        ...input,
+        runtimePluginSelections: [
+          { provider: "additional-provider", modelId, runtime: "openclaw" },
+        ],
+      };
+      await using lease = await acquireAgentRunPreparedModelRuntime(request);
+      expect(lease.snapshot).not.toBe(configured);
+      expect(lease.snapshot.pluginRegistry).toBe(additionalRegistry);
+      expect(getPreparedModelRuntimeSnapshot(request)?.pluginRegistry).toBe(additionalRegistry);
+      return lease.pluginGeneration;
+    };
+    const warmed = await runAdditionalModel("utility");
+    expect(warmed).not.toBe(published.pluginGeneration);
+    const next = await runAdditionalModel("account-model");
     expect(mocks.loadAgentRuntimePluginRegistryHandle).toHaveBeenCalledTimes(loadsBeforeRun + 1);
+    expect(next).toBe(warmed);
+    await using inferred = await acquireAgentRunPreparedModelRuntime({
+      ...input,
+      runtimePluginSelections: [{ provider: "additional-provider", modelId: "account-model" }],
+    });
+    expect(inferred.pluginGeneration).not.toBe(warmed);
     expect(getPreparedModelRuntimeSnapshot(input)).toBe(configured);
     expect(await loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" })).toBe(published);
   });

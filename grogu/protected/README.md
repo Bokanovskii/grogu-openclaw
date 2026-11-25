@@ -812,12 +812,12 @@ write its own line, such as module load failures.
 Before the listener opens, the runtime builds the prepared model runtime for Sparky, Copilot,
 and ChatGPT, in that order, so the first request after a start does not freeze the server
 while core compiles it. Each build takes about three seconds on a quiet development machine
-and longer on the host. A 60 second budget is checked between builds, and a failed build
-only means that model's first request builds it. The log line
+and longer on the host. The runtime checks a 60 second budget between builds. If a build fails,
+the first request for that provider retries it. The log line
 `[protected-runtime-warmup] {"warmed":3,"failed":0,"skipped":0,"ms":…}` reports the result.
 `GET /healthz` answers only after the warm-up ends, so a restart takes that much longer to
-become ready. A member's Copilot account model other than the default is a separate runtime
-and still builds on its first use.
+become ready. Copilot account models share the provider's prepared plugins. Each turn still uses
+the member's selected model, account credential, context window, and thinking level.
 
 `GET /api/protected/v1/chats/:id` includes `activeRun: { id }` while a turn runs,
 but only for the profile and Access session that started it. Clients can read

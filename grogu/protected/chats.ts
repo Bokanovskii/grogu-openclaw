@@ -267,7 +267,7 @@ export function createProtectedChats(options: {
     if (!validId(id)) {
       return missing();
     }
-    return withSessionEntryReadOnlyInWorker(
+    const entry = await withSessionEntryReadOnlyInWorker(
       scope(authority, id),
       authority.assertCurrent,
       async (result, owner) => {
@@ -275,9 +275,11 @@ export function createProtectedChats(options: {
           throw result.error;
         }
         owner.assertCurrent();
-        return check(authority, id, result.value);
+        return result.value;
       },
     );
+    // A refusal thrown inside the worker scope retires the read worker; the next read pays its boot.
+    return check(authority, id, entry);
   };
   const updateMetadata = async (
     authority: ProtectedChatAuthority,

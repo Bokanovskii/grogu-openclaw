@@ -72,6 +72,7 @@ void test("protected automation records are private, bound to revisions, and sur
     agentId: "research",
     model: { provider: "sparky", id: "00000000-0000-4000-8000-000000000001" },
     thinking: "low",
+    contextAccess: "isolated",
     schedule: { kind: "every", everyMs: 60_000 },
   };
 
@@ -331,7 +332,8 @@ void test("protected automation records are private, bound to revisions, and sur
   assert.ok(Number.isSafeInteger(storedBinding?.updatedAt));
 
   const usage = await readProtectedAutomationStorageUsage(stateDir, ownerProfileId, () => {});
-  const createBytes = Buffer.byteLength(JSON.stringify(definition), "utf8") + 4096;
+  const retryDefinition = { ...definition, contextAccess: "member" as const };
+  const createBytes = Buffer.byteLength(JSON.stringify(retryDefinition), "utf8") + 4096;
   const encryption = createStorageValueEncryption(randomBytes(32));
   t.after(() => encryption.dispose());
   const admission = createStorageAdmission({
@@ -362,7 +364,7 @@ void test("protected automation records are private, bound to revisions, and sur
       assert.equal(
         await createProtectedAutomationRecord(
           stateDir,
-          { profileId: "inactive-member", definition, now: Date.now() },
+          { profileId: "inactive-member", definition: retryDefinition, now: Date.now() },
           authority("inactive-member"),
           failedCreate,
         ),
@@ -375,7 +377,7 @@ void test("protected automation records are private, bound to revisions, and sur
     try {
       const retried = await createProtectedAutomationRecord(
         stateDir,
-        { profileId: ownerProfileId, definition, now: Date.now() },
+        { profileId: ownerProfileId, definition: retryDefinition, now: Date.now() },
         authority(ownerProfileId),
         retryCreate,
       );

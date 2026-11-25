@@ -7,7 +7,10 @@ import {
   type OpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { createOpenClawStateSchemaEnsurer } from "./openclaw-state-feature-schema.js";
-import type { ProtectedAutomationDatabase } from "./protected-automations.js";
+import {
+  parseProtectedAutomationDefinition,
+  type ProtectedAutomationDatabase,
+} from "./protected-automations.js";
 import type { ProtectedStoredDataEntry } from "./protected-feedback.js";
 import { isActiveMember, readDisplayName } from "./protected-sharing.js";
 
@@ -89,6 +92,19 @@ function activeOwner(db: DatabaseSync, automationId: string): string | undefined
       .where("automation.id", "=", automationId),
   ).rows[0]?.central_owner_profile_id;
   return owner && isActiveMember(db, owner) ? owner : undefined;
+}
+
+function isIsolatedAutomation(db: DatabaseSync, automationId: string): boolean {
+  const row = executeSqliteQuerySync(
+    db,
+    queries(db)
+      .selectFrom("protected_automations")
+      .select(["id", "definition_json", "pacing_min_ms", "pacing_max_ms"])
+      .where("id", "=", automationId),
+  ).rows[0];
+  return (
+    row !== undefined && parseProtectedAutomationDefinition(db, row).contextAccess === "isolated"
+  );
 }
 
 function publishedAt(db: DatabaseSync, automationId: string): number | undefined {
@@ -280,7 +296,10 @@ export function publishProtectedAutomation(
   input: { profileId: string; automationId: string; now: number; storageOverheadBytes: number },
 ): { created: boolean; entries: ProtectedStoredDataEntry[] } | undefined {
   return write(database, "protected.automationSharing.publish", (db) => {
-    if (activeOwner(db, input.automationId) !== input.profileId) {
+    if (
+      activeOwner(db, input.automationId) !== input.profileId ||
+      !isIsolatedAutomation(db, input.automationId)
+    ) {
       return undefined;
     }
     if (publishedAt(db, input.automationId) !== undefined) {
@@ -342,7 +361,8 @@ export function followProtectedAutomation(
       !owner ||
       owner === input.profileId ||
       !isActiveMember(db, input.profileId) ||
-      publishedAt(db, input.automationId) === undefined
+      publishedAt(db, input.automationId) === undefined ||
+      !isIsolatedAutomation(db, input.automationId)
     ) {
       return undefined;
     }
@@ -406,12 +426,18 @@ export function unfollowProtectedAutomation(
   });
 }
 
-/** Public automation subscriptions are disabled; retained rows are not changed. */
+/** Updates notifications only for a current follower of an isolated publication. */
 export function setProtectedAutomationSubscription(
-  _database: OpenClawStateDatabase,
-  _input: FollowRef & { subscribed: boolean; now: number },
+  database: OpenClawStateDatabase,
+  input: FollowRef & { subscribed: boolean; now: number },
 ): boolean {
-  return false;
+  return write(database, "protected.automationSharing.subscription", (db) => {
+    if (!followerGrant(db, input) || !isIsolatedAutomation(db, input.automationId)) {
+      return false;
+    }
+    setSubscription(db, input, input.subscribed ? input.now : undefined);
+    return true;
+  });
 }
 
 /** Facts for one published automation with an active owner; `subscribed` is the caller's opt-in. */
@@ -524,7 +550,10 @@ export function readProtectedAutomationFollowerGrant(
   database: OpenClawStateDatabase,
   input: FollowRef,
 ): { ownerProfileId: string } | undefined {
-  const db = database.db;
+  return followerGrant(database.db, input);
+}
+
+function followerGrant(db: DatabaseSync, input: FollowRef): { ownerProfileId: string } | undefined {
   const ownerProfileId = activeOwner(db, input.automationId);
   return ownerProfileId &&
     ownerProfileId !== input.profileId &&

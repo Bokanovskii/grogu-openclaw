@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { ProtectedAutomationDraft } from "../../packages/gateway-protocol/src/protected.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../../src/state/openclaw-state-db-cache.js";
@@ -85,9 +86,7 @@ void test("public catalog projects only current isolated publications for active
     now: 200,
     storageOverheadBytes: 0,
   });
-  for (const automationId of [isolated, legacy, memberContext]) {
-    assert.ok(await sharing("protectedSharing.publishAutomation", publication(automationId)));
-  }
+  assert.ok(await sharing("protectedSharing.publishAutomation", publication(isolated)));
   const catalog = (profileId: string, automationId?: string) =>
     sharing("protectedSharing.publicAutomations", { profileId, automationId });
   const expected = {
@@ -108,12 +107,83 @@ void test("public catalog projects only current isolated publications for active
   assert.deepEqual(await catalog(owner.profileId, legacy), []);
   assert.deepEqual(await catalog("inactive"), []);
   const follow = { profileId: follower.profileId, automationId: isolated, storageOverheadBytes: 0 };
+  const subscribe = (profileId: string, subscribed: boolean) =>
+    sharing("protectedSharing.automationSubscription", {
+      profileId,
+      automationId: isolated,
+      subscribed,
+      now: 310,
+    });
+  assert.equal(await subscribe(follower.profileId, true), false);
   assert.ok(
     await sharing("protectedSharing.followAutomation", { ...follow, now: 300, subscribed: true }),
   );
   assert.deepEqual(await catalog(follower.profileId), [
     { ...expected, followers: 1, following: true, subscribed: true },
   ]);
+  assert.equal(await subscribe(viewer.profileId, true), false);
+  assert.equal(await subscribe(owner.profileId, true), false);
+  assert.equal(await subscribe(follower.profileId, false), true);
+  assert.deepEqual(await catalog(follower.profileId), [
+    { ...expected, followers: 1, following: true, subscribed: false },
+  ]);
+  assert.equal(await subscribe(follower.profileId, true), true);
+  for (const automationId of [legacy, memberContext]) {
+    assert.equal(
+      await sharing("protectedSharing.publishAutomation", publication(automationId)),
+      undefined,
+    );
+    // Simulate a publication left by an older version.
+    const db = new DatabaseSync(resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir }));
+    try {
+      db.prepare("UPDATE protected_automations SET visibility = 'shared' WHERE id = ?").run(
+        automationId,
+      );
+      db.prepare(
+        "INSERT INTO protected_automation_publications (automation_id, published_at) VALUES (?, ?)",
+      ).run(automationId, 200);
+      db.prepare(
+        "INSERT INTO protected_automation_members (automation_id, profile_id, role, added_at) VALUES (?, ?, 'follower', 300)",
+      ).run(automationId, follower.profileId);
+    } finally {
+      db.close();
+    }
+    assert.equal(
+      await sharing("protectedSharing.followAutomation", {
+        profileId: follower.profileId,
+        automationId,
+        storageOverheadBytes: 0,
+        now: 300,
+      }),
+      undefined,
+    );
+    assert.equal(
+      await sharing("protectedSharing.followAutomation", {
+        profileId: viewer.profileId,
+        automationId,
+        storageOverheadBytes: 0,
+        now: 300,
+      }),
+      undefined,
+    );
+    assert.equal(
+      await sharing("protectedSharing.automationSubscription", {
+        profileId: follower.profileId,
+        automationId,
+        subscribed: true,
+        now: 310,
+      }),
+      false,
+    );
+    assert.equal(
+      await sharing("protectedSharing.publishAutomation", publication(automationId)),
+      undefined,
+    );
+  }
+  assert.deepEqual(await catalog(follower.profileId), [
+    { ...expected, followers: 1, following: true, subscribed: true },
+  ]);
+  assert.deepEqual(await catalog(owner.profileId, legacy), []);
   assert.equal(
     await executeOpenClawStateWorker(context(), {
       type: "protectedAutomations.read",
@@ -122,10 +192,20 @@ void test("public catalog projects only current isolated publications for active
     undefined,
   );
   await sharing("protectedSharing.unfollowAutomation", follow);
+  assert.equal(await subscribe(follower.profileId, true), false);
   assert.deepEqual(await catalog(follower.profileId), [expected]);
   assert.ok(await sharing("protectedSharing.followAutomation", { ...follow, now: 400 }));
   await sharing("protectedSharing.unpublishAutomation", publication(isolated));
+  assert.equal(await subscribe(follower.profileId, true), false);
   assert.deepEqual(await catalog(follower.profileId), []);
+  for (const automationId of [legacy, memberContext]) {
+    const retired = await sharing(
+      "protectedSharing.unpublishAutomation",
+      publication(automationId),
+    );
+    assert.equal(retired?.length, 2);
+  }
+  assert.deepEqual(await sharing("protectedSharing.storageUsage", 0), []);
   assert.ok(
     await sharing("protectedSharing.publishAutomation", { ...publication(isolated), now: 500 }),
   );
@@ -154,6 +234,7 @@ void test("public catalog projects only current isolated publications for active
     () => {},
     () => {},
   );
+  assert.equal(await subscribe(follower.profileId, true), false);
   assert.deepEqual(await catalog(follower.profileId), []);
   assert.deepEqual(await catalog(viewer.profileId), [{ ...expected, publishedAt: 500 }]);
   assert.equal(

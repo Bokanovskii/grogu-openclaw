@@ -28,6 +28,7 @@ import { createProtectedChats } from "./chats.js";
 import { ProtectedError } from "./errors.js";
 import { sideReturnTextLimit, sideReturnTruncationMarker } from "./side-return.js";
 import { acquireProtectedStateOwner } from "./state-owner.js";
+import { projectActivity } from "./tool-events.js";
 
 async function createChats(t: TestContext) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "protected-chat-"));
@@ -485,6 +486,48 @@ async function seedSideParent(t: TestContext) {
     loadTranscriptEvents({ ...chats.scope(authority, chatId), sessionId: chatId });
   return { chats, authority, parent, append, user, assistant, rawEvents };
 }
+
+void test("Copilot tool calls without reasoning keep distinct live and saved activities", async (t) => {
+  const { chats, authority, parent, append, user, assistant } = await seedSideParent(t);
+  // Responses pairs the call ID with an opaque item ID, including on the tool result.
+  const prefix = `call_lookup|${"A".repeat(256)}`;
+  const ids = [`${prefix}1`, `${prefix}2`];
+  const live = ids.map((id) => {
+    const item = projectActivity("web_fetch", id, "running");
+    assert.ok(item, "the client receives a start even without a reasoning event");
+    assert.ok(item.id.length <= 256);
+    return item;
+  });
+  assert.notEqual(live[0]?.id, live[1]?.id);
+
+  const reply = { ...assistant("Finished."), provider: "github-copilot", api: "openai-responses" };
+  await append(parent.id, [
+    user("Fetch both sources."),
+    {
+      ...reply,
+      stopReason: "toolUse",
+      content: ids.map((id) => ({ type: "toolCall", id, name: "web_fetch", arguments: {} })),
+    },
+    ...ids.map((toolCallId, i) => ({
+      role: "toolResult",
+      toolCallId,
+      toolName: "web_fetch",
+      content: [{ type: "text", text: "Result" }],
+      isError: i === 1,
+      timestamp: Date.now(),
+    })),
+    reply,
+  ]);
+  const saved = (await chats.read(authority, parent.id)).messages.at(-1);
+  assert.deepEqual(
+    saved?.activity?.map(({ id, status }) => [id, status]),
+    [
+      [live[0]?.id, "done"],
+      [live[1]?.id, "failed"],
+    ],
+  );
+  assert.equal(saved?.reasoning, undefined);
+});
 
 void test("a side chat forks the parent's completed prefix and projects only its own messages", async (t) => {
   const { chats, authority, parent, append, user, assistant, rawEvents } = await seedSideParent(t);

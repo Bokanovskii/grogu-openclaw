@@ -91,6 +91,7 @@ import { protectedTurnTimeoutMs } from "./settings.js";
 import {
   createToolTimer,
   projectActivity,
+  projectToolCallId,
   projectToolResult,
   type Source,
   type Widget,
@@ -227,20 +228,15 @@ function turnAgentPrompt(turn: ProtectedTurn, agent: ProtectedAgentDefinition) {
 }
 
 function widgetDraftEvent(data: Record<string, unknown>, draftBytes: Map<string, number>) {
-  if (
-    data.phase !== "input_delta" ||
-    data.name !== "show_widget" ||
-    typeof data.toolCallId !== "string" ||
-    !isRecord(data.widgetDraft)
-  ) {
+  if (data.phase !== "input_delta" || data.name !== "show_widget" || !isRecord(data.widgetDraft)) {
     return undefined;
   }
+  const id = projectToolCallId(data.toolCallId);
   const draft = readWidgetDraftMetadata(data.widgetDraft);
-  if (!draft) {
+  if (!id || !draft) {
     return undefined;
   }
   const { html, offset } = data.widgetDraft;
-  const id = data.toolCallId;
   const previous = draftBytes.get(id) ?? 0;
   if (previous > WIDGET_DRAFT_MAX_CHARS || (!draftBytes.has(id) && draftBytes.size >= 32)) {
     return undefined;

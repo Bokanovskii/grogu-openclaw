@@ -673,9 +673,10 @@ omitted, as in native run usage. Admin usage totals do not change.
 
 Reasoning is streamed as append-only `reasoning` text events when the provider
 exposes it. Tool activity uses `activity` events with a safe label and a running,
-done, or failed status. Saved replies include available reasoning, tool activity,
-and duration. Chat summaries include `activeRun` only for the Access session
-that started the active turn.
+done, or failed status, even when the provider sends no reasoning. Each call
+keeps the same activity ID in the stream and in the saved reply. Saved replies
+include available reasoning, tool activity, and duration. Chat summaries include
+`activeRun` only for the Access session that started the active turn.
 
 A turn can run for up to 15 minutes, because Sparky with Ultra reasoning can
 take several minutes to write a widget. While a turn runs, the turn stream sends

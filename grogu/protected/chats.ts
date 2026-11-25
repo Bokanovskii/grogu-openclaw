@@ -64,6 +64,7 @@ import { composeSideReturnText } from "./side-return.js";
 import {
   createWidgetChain,
   projectActivity,
+  projectToolCallId,
   projectToolResult,
   widgetIdPattern,
   type Widget,
@@ -491,7 +492,8 @@ export function createProtectedChats(options: {
         ? { ...replyMessage, stopReason: "stop" }
         : event.message;
       if (message.role === "toolResult") {
-        const prior = typeof message.toolCallId === "string" && activity.get(message.toolCallId);
+        const callId = projectToolCallId(message.toolCallId);
+        const prior = callId && activity.get(callId);
         if (prior) {
           activity.set(prior.id, { ...prior, status: message.isError ? "failed" : "done" });
         }
